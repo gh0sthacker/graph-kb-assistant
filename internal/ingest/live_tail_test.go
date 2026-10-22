@@ -39,11 +39,14 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	}
 	source := &liveTailSourceFixture{
 		project: selected,
-		metadata: caido.RequestMetadataPage{Requests: []caido.RequestMetadata{{
+		pages: []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{{
 			RequestID: requestID, Method: "GET",
 			URL: "https://api.fixture.invalid/api/items?query=fixture-query-marker", StatusCode: &status,
-		}}},
-		exchange: exchange,
+		}}}, {Requests: []caido.RequestMetadata{{
+			RequestID: requestID, Method: "GET",
+			URL: "https://api.fixture.invalid/api/items?query=fixture-query-marker", StatusCode: &status,
+		}}}},
+		exchanges: map[string]caido.HttpExchange{requestID: exchange},
 	}
 	options := LiveTailOptions{PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
 
@@ -128,12 +131,91 @@ func TestRunLiveTailMarksCheckpointPartialWhenCaidoReadFails(t *testing.T) {
 	}
 }
 
+func TestRunLiveTailResumesFromCommittedCursor(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, writer := newLiveTailFixture(t)
+
+	firstRequestRaw := []byte("GET /api/first HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\nfirst-page-marker")
+	secondRequestRaw := []byte("GET /api/second HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\nsecond-page-marker")
+	firstID, secondID := "fixture-request-first", "fixture-request-second"
+	firstExchange := caido.HttpExchange{
+		Ref: caido.ExchangeRef{Project: selected, RequestID: firstID}, RequestRaw: firstRequestRaw,
+		Method: "GET", Scheme: "https", Host: "api.fixture.invalid", Port: 443,
+		Target: "https://api.fixture.invalid/api/first", RequestWireFidelity: "source_bytes", ResponseWireFidelity: "unknown",
+	}
+	secondExchange := caido.HttpExchange{
+		Ref: caido.ExchangeRef{Project: selected, RequestID: secondID}, RequestRaw: secondRequestRaw,
+		Method: "GET", Scheme: "https", Host: "api.fixture.invalid", Port: 443,
+		Target: "https://api.fixture.invalid/api/second", RequestWireFidelity: "source_bytes", ResponseWireFidelity: "unknown",
+	}
+	nextCursor := "fixture-cursor-next-page"
+	firstPage := caido.RequestMetadataPage{
+		Requests:   []caido.RequestMetadata{{RequestID: firstID, Method: "GET", URL: firstExchange.Target}},
+		NextCursor: &nextCursor, HasMore: true,
+	}
+	secondPage := caido.RequestMetadataPage{
+		Requests: []caido.RequestMetadata{{RequestID: secondID, Method: "GET", URL: secondExchange.Target}},
+	}
+	source := &liveTailSourceFixture{
+		project: selected, pages: []caido.RequestMetadataPage{firstPage, secondPage},
+		exchanges: map[string]caido.HttpExchange{firstID: firstExchange, secondID: secondExchange},
+	}
+	options := LiveTailOptions{PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
+
+	firstRun, err := RunLiveTail(ctx, source, writer, selected, options)
+	if err != nil {
+		t.Fatalf("first RunLiveTail() error = %v", err)
+	}
+	if firstRun.State != "partial" || firstRun.RequestsAdded != 1 || firstRun.PagesCompleted != 1 || !firstRun.CursorPending || !firstRun.LimitReached {
+		t.Fatalf("first RunLiveTail() result = %+v, want a committed partial page with a pending cursor", firstRun)
+	}
+
+	secondRun, err := RunLiveTail(ctx, source, writer, selected, options)
+	if err != nil {
+		t.Fatalf("resumed RunLiveTail() error = %v", err)
+	}
+	if secondRun.State != "idle" || secondRun.RequestsSeen != 1 || secondRun.RequestsAdded != 1 || secondRun.PagesCompleted != 1 || secondRun.CursorPending {
+		t.Fatalf("resumed RunLiveTail() result = %+v, want one final page and an idle checkpoint", secondRun)
+	}
+	if len(source.cursors) != 2 || source.cursors[0] != "" || source.cursors[1] != nextCursor {
+		t.Fatalf("metadata cursors = %v, want [empty %q]", source.cursors, nextCursor)
+	}
+	if len(source.httpqlFilters) != 2 || source.httpqlFilters[0] != source.httpqlFilters[1] {
+		t.Fatalf("resumed live-tail time filter changed: %v", source.httpqlFilters)
+	}
+	if !allBytesZero(firstRequestRaw) || !allBytesZero(secondRequestRaw) {
+		t.Fatal("resumed RunLiveTail() retained raw request bytes after processing")
+	}
+	var count int
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM live_capture_index").Scan(&count); err != nil {
+		t.Fatalf("count live captures: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("live capture count after cursor resume = %d, want 2", count)
+	}
+	var checkpointState string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT state FROM live_sync_state WHERE source_key=?", liveTailSourceKey,
+	).Scan(&checkpointState); err != nil {
+		t.Fatalf("read live-tail checkpoint: %v", err)
+	}
+	if checkpointState != "idle" {
+		t.Fatalf("checkpoint state after cursor resume = %q, want idle", checkpointState)
+	}
+	for _, marker := range []string{"first-page-marker", "second-page-marker"} {
+		assertAbsentFromProjectFiles(t, projectStore.Directory, marker)
+	}
+}
+
 type liveTailSourceFixture struct {
 	project       project.CaidoProjectRef
-	metadata      caido.RequestMetadataPage
-	exchange      caido.HttpExchange
+	pages         []caido.RequestMetadataPage
+	exchanges     map[string]caido.HttpExchange
 	pageErr       error
+	pageCalls     int
 	fetchCalls    int
+	cursors       []string
+	httpqlFilters []string
 	skippedCounts []int
 }
 
@@ -141,14 +223,25 @@ func (s *liveTailSourceFixture) ListProjects() ([]caido.ProjectRef, error) {
 	return []caido.ProjectRef{s.project}, nil
 }
 
-func (s *liveTailSourceFixture) ListRequestPage(selected project.CaidoProjectRef, _ *string, _ int, httpql *string) (caido.RequestMetadataPage, error) {
+func (s *liveTailSourceFixture) ListRequestPage(selected project.CaidoProjectRef, cursor *string, _ int, httpql *string) (caido.RequestMetadataPage, error) {
 	if !selected.SameProject(s.project) || httpql == nil || !strings.Contains(*httpql, "req.created_at.gt:") {
 		return caido.RequestMetadataPage{}, errors.New("fixture received an invalid project or live-tail time filter")
 	}
 	if s.pageErr != nil {
 		return caido.RequestMetadataPage{}, s.pageErr
 	}
-	return s.metadata, nil
+	cursorValue := ""
+	if cursor != nil {
+		cursorValue = *cursor
+	}
+	s.cursors = append(s.cursors, cursorValue)
+	s.httpqlFilters = append(s.httpqlFilters, *httpql)
+	if s.pageCalls >= len(s.pages) {
+		return caido.RequestMetadataPage{}, errors.New("fixture has no metadata page for the requested cursor")
+	}
+	page := s.pages[s.pageCalls]
+	s.pageCalls++
+	return page, nil
 }
 
 func (s *liveTailSourceFixture) FetchHistoryPage(selected project.CaidoProjectRef, page caido.RequestMetadataPage, skipIDs map[string]struct{}, _ int) (caido.HistoryPage, error) {
@@ -162,10 +255,11 @@ func (s *liveTailSourceFixture) FetchHistoryPage(selected project.CaidoProjectRe
 		if _, skip := skipIDs[request.RequestID]; skip {
 			continue
 		}
-		if request.RequestID != s.exchange.Ref.RequestID {
-			return caido.HistoryPage{}, errors.New("fixture metadata identity does not match exchange")
+		exchange, ok := s.exchanges[request.RequestID]
+		if !ok {
+			return caido.HistoryPage{}, errors.New("fixture metadata identity has no exchange")
 		}
-		exchanges = append(exchanges, s.exchange)
+		exchanges = append(exchanges, exchange)
 	}
 	return caido.HistoryPage{Exchanges: exchanges, NextCursor: page.NextCursor, HasMore: page.HasMore}, nil
 }
