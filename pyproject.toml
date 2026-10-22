@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bb-graph-assistant"
+version = "0.1.0"
+description = "Local, project-scoped bug bounty assistant core for Caido history and a sourced KB"
+requires-python = ">=3.12"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["bug-bounty", "caido", "behavior-graph", "mcp"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+kb = ["PyYAML>=6"]
+mcp = ["mcp>=2,<3"]
+test = ["pytest>=8"]
+
+[project.scripts]
+bb-assistant-kb = "bb_assistant.kb.cli:main"
+bb-assistant-mcp = "bb_assistant.mcp_server:main"
+bb-assistant-tools = "bb_assistant.tools:main"
+bb-assistant-caido-import = "bb_assistant.caido_import_cli:main"
+bb-assistant-caido-tail = "bb_assistant.caido_tail_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bb_assistant = ["kb/*.yaml"]

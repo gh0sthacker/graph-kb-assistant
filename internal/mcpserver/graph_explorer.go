@@ -1,0 +1,79 @@
+package mcpserver
+
+import (
+	"context"
+	"errors"
+
+	capturesearch "bb-graph-assistant/internal/search"
+)
+
+// GraphExplorerProjects returns one page of project identities from the local
+// registry. It does not open project databases before the user selects one.
+func (t *Tools) GraphExplorerProjects(ctx context.Context, afterProjectKey string, limit int) (map[string]any, error) {
+	if limit < 1 || limit > maxProjectPageSize {
+		return nil, errors.New("project page limit must be between 1 and 200")
+	}
+	start := 0
+	if afterProjectKey != "" {
+		if !projectKeyPattern.MatchString(afterProjectKey) {
+			return nil, errors.New("project cursor has an invalid format")
+		}
+		found := false
+		for index, ref := range t.projects {
+			key, _ := ref.StorageKey()
+			if key == afterProjectKey {
+				start, found = index+1, true
+				break
+			}
+		}
+		if !found {
+			return nil, errors.New("project cursor is not in the local catalog")
+		}
+	}
+	end := min(start+limit, len(t.projects))
+	rows := make([]map[string]any, 0, end-start)
+	for _, ref := range t.projects[start:end] {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key, err := ref.StorageKey()
+		if err != nil {
+			return nil, errors.New("local project identity is invalid")
+		}
+		rows = append(rows, map[string]any{
+			"project_key": key, "instance_id": ref.InstanceID,
+			"project_id": ref.ProjectID, "display_name": ref.DisplayName,
+		})
+	}
+	var next any
+	if end < len(t.projects) && end > start {
+		next, _ = t.projects[end-1].StorageKey()
+	}
+	return map[string]any{
+		"projects": rows, "project_count": len(rows), "total_project_count": len(t.projects),
+		"next_after_project_key": next, "scope": "registered local project identities; project data is read after selection",
+	}, nil
+}
+
+// GraphExplorerSurface reads one bounded page from exactly one selected
+// project's local structural index.
+func (t *Tools) GraphExplorerSurface(ctx context.Context, projectKey string, after *capturesearch.SurfaceCursor, limit int) (map[string]any, error) {
+	if limit < 1 || limit > capturesearch.MaximumSurfaceScanSize {
+		return nil, errors.New("surface limit is outside the supported range")
+	}
+	return t.surfaceMap(ctx, surfaceMapArgs{ProjectKey: projectKey, After: after, Limit: intPointer(limit)})
+}
+
+// GraphExplorerSlice returns a bounded, source-redacted graph neighborhood
+// from exactly one selected project.
+func (t *Tools) GraphExplorerSlice(ctx context.Context, projectKey string, seeds []string) (map[string]any, error) {
+	return t.graphSlice(ctx, graphSliceArgs{
+		ProjectKey: projectKey,
+		SeedIDs:    seeds,
+		MaxNodes:   intPointer(80),
+		MaxEdges:   intPointer(160),
+		MaxDepth:   intPointer(3),
+	})
+}
+
+func intPointer(value int) *int { return &value }

@@ -1,0 +1,72 @@
+# Mirrors RedAmon's full KB source families. Pins/filters are recorded as the
+# locally audited values; re-check them before fetching. ToolDocs content is
+# pinned in references/redamon/agentic-skills. Each license status is a gate, not a general claim
+# that all files in a repository can be copied.
+schema_version: 1
+upstream_project: https://github.com/samugit83/redamon
+upstream_pin_date: "2026-07-10"
+profile: full
+sources:
+  - id: tool_docs
+    kind: local_markdown
+    local_root: references/redamon/agentic-skills
+    include_categories: [tooling, vulnerabilities, frameworks, protocols, technologies, scan_modes, active_directory, api_security, cloud, coordination, mobile, network, reporting, social_engineering, wireless]
+    exclude: [root_agent.md]
+    revision: cf1b9e926a2af4420f5a894e7c8ddd225968c9d2
+    revision_date: "2026-10-20"
+    repository_license_id: MIT
+    license_evidence: https://github.com/samugit83/redamon/blob/cf1b9e926a2af4420f5a894e7c8ddd225968c9d2/LICENSE
+    license_status: confirmed_at_pinned_revision
+  - id: gtfobins
+    kind: github_archive
+    url: https://github.com/GTFOBins/GTFOBins.github.io
+    revision: acd524623f9c406acedd2754ebd9c2431f3675ad
+    license_id: GPL-3.0-only
+    license_evidence: https://github.com/GTFOBins/GTFOBins.github.io/blob/acd524623f9c406acedd2754ebd9c2431f3675ad/LICENSE
+    license_status: confirmed_at_pinned_revision
+  - id: lolbas
+    kind: github_archive
+    url: https://github.com/LOLBAS-Project/LOLBAS
+    revision: a2784c79091cb282fefb68f0056a853cfafd7e3c
+    license_id: GPL-3.0-only
+    license_evidence: https://raw.githubusercontent.com/LOLBAS-Project/LOLBAS/a2784c79091cb282fefb68f0056a853cfafd7e3c/NOTICE.md
+    license_status: confirmed_at_pinned_revision
+    attribution: "LOLBAS Project; retain the embedded MITRE ATT&CK notice from the pinned NOTICE.md."
+  - id: owasp
+    kind: github_archive
+    url: https://github.com/OWASP/wstg
+    revision: 78e6b6733ee071eb160fdddbacc1bc97f83a13e3
+    license_id: CC-BY-SA-4.0
+    license_evidence: https://raw.githubusercontent.com/OWASP/wstg/78e6b6733ee071eb160fdddbacc1bc97f83a13e3/LICENSE
+    license_status: confirmed_at_pinned_revision
+  - id: exploitdb
+    kind: gitlab_raw_feed
+    url: https://gitlab.com/exploit-database/exploitdb
+    revision: 6a57361db10b709c4b4f339c09ee250acc2d8aac
+    content_scope: descriptions_and_metadata_only
+    repository_license_id: GPL-2.0-or-later
+    license_evidence: https://gitlab.com/exploit-database/exploitdb
+    dataset_terms: review_required
+    license_status: review_required
+  - id: nvd
+    kind: paginated_api
+    url: https://services.nvd.nist.gov/rest/json/cves/2.0
+    filter: {profile: full, nvd_min_cvss: 0.0, nvd_lookback_days: 730}
+    revision_source: fetch_timestamp_and_response_hashes
+    license_id: NIST-public-data-plus-CVE-Program-Terms-of-Use
+    attribution: NIST National Vulnerability Database; preserve the CVE Program copyright designation and terms notice for embedded CVE List records.
+    nvd_citation: National Vulnerability Database, NIST Public Data Repository, DOI 10.18434/M3436.
+    cve_terms_evidence: https://www.cve.org/legal/termsofuse
+    cve_terms_reviewed_at: "2026-10-21"
+    cve_copyright_designation: "Copyright © 1999-2026, The MITRE Corporation. CVE is a trademark and the CVE logo is a registered trademark of The MITRE Corporation."
+    embedded_content_review: complete
+    embedded_content_policy: Preserve NVD API CVE JSON with its source revision and hashes; include NIST attribution and CVE Program terms notices; preserve CNA/CISA-ADP source metadata; do not fetch linked third-party reference pages.
+    license_evidence: https://www.nist.gov/open/copyright-fair-use-and-licensing-statements-srd-data-software-and-technical-series-publications
+    license_status: terms_confirmed_with_required_notices
+  - id: nuclei
+    kind: github_archive
+    url: https://github.com/projectdiscovery/nuclei-templates
+    revision: 17315de39ed36ee2329e02d958b51fd315ad55fe
+    license_id: MIT
+    license_evidence: https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/17315de39ed36ee2329e02d958b51fd315ad55fe/LICENSE.md
+    license_status: confirmed_at_pinned_revision

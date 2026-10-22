@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/hermes-env.sh
+source "$script_dir/hermes-env.sh"
+
+"$script_dir/setup-hermes"
+mkdir -p "$bb_hermes_bootstrap_home"
+chmod 700 "$bb_hermes_bootstrap_home"
+installer="$(mktemp "$bb_hermes_data_root/.hermes-installer.XXXXXX.sh")"
+trap 'rm -f "$installer"' EXIT
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://hermes-agent.nousresearch.com/install.sh -o "$installer"
+
+HOME="$bb_hermes_bootstrap_home" \
+HERMES_HOME="$bb_hermes_profile_home" \
+HERMES_INSTALL_DIR="$bb_hermes_install_dir" \
+  bash "$installer" \
+    --dir "$bb_hermes_install_dir" \
+    --hermes-home "$bb_hermes_profile_home" \
+    --channel stable \
+    --non-interactive \
+    --skip-browser \
+    --skip-computer-use

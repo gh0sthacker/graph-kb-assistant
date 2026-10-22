@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Graph Explorer — BB Graph Assistant</title>
+    <link rel="stylesheet" href="/assets/style.css">
+    <script defer src="/assets/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="BB Graph Assistant, home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32"><path d="M7 16 16 7l9 9-9 9-9-9Z"/><path d="M7 16h18M16 7v18"/><circle cx="7" cy="16" r="2"/><circle cx="16" cy="7" r="2"/><circle cx="25" cy="16" r="2"/><circle cx="16" cy="25" r="2"/></svg>
+          </span>
+          <span class="brand-copy"><strong>BB GRAPH</strong><span>ASSISTANT</span></span>
+        </a>
+        <div class="topbar-title"><span class="eyebrow">LOCAL DATA</span><h1>Request Graph</h1></div>
+        <div class="topbar-controls">
+          <label class="project-control" for="project-select"><span>Project</span><select id="project-select" aria-label="Select a local project"><option value="">Loading…</option></select></label>
+          <span class="local-badge"><i></i>Read only</span>
+          <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh data" title="Refresh data">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 9a6.2 6.2 0 0 0-10.7-3L4 7.4M4 4v3.5h3.5M4 11a6.2 6.2 0 0 0 10.7 3l1.3-1.4M16 16v-3.5h-3.5"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="surface-panel" aria-label="Endpoint catalog">
+          <div class="panel-heading">
+            <div><span class="eyebrow">SURFACE</span><h2>Endpoints</h2></div>
+            <span class="count-pill" id="endpoint-count">—</span>
+          </div>
+          <label class="searchbox" for="endpoint-filter">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
+            <input id="endpoint-filter" type="search" aria-label="Filter endpoints by host or route" placeholder="Host or route" autocomplete="off">
+            <kbd>/</kbd>
+          </label>
+          <div class="surface-caption"><span>Method</span><span>Host · route</span></div>
+          <div class="endpoint-list" id="endpoint-list" aria-live="polite"></div>
+          <button class="load-more" id="load-more" type="button" hidden>Load more <span>↓</span></button>
+          <div class="surface-foot"><span class="coverage-dot"></span><span id="surface-foot-text">Local index</span></div>
+        </aside>
+
+        <section class="graph-panel" aria-label="Relationship graph">
+          <div class="graph-heading">
+            <div class="graph-title"><span class="eyebrow" id="graph-project-label">SELECT A PROJECT</span><h2 id="graph-title">Observed behavior relationships</h2><p id="graph-subtitle">Select an endpoint to open its graph neighborhood.</p></div>
+            <div class="graph-counts" id="graph-counts"><span>0 <small>nodes</small></span><b></b><span>0 <small>edges</small></span></div>
+          </div>
+          <div class="graph-toolbar">
+            <div class="graph-state" id="graph-state"><span class="state-dot"></span><span>Waiting for selection</span></div>
+            <div class="canvas-controls">
+              <button class="tool-button" id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button>
+              <span class="zoom-readout" id="zoom-readout">100%</span>
+              <button class="tool-button" id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+              <span class="toolbar-divider"></span>
+              <button class="tool-button fit-button labels-button" id="toggle-edge-labels" type="button" aria-label="Hide edge labels" aria-pressed="true" title="Hide edge labels">Labels</button>
+              <button class="tool-button fit-button" id="fit-graph" type="button" aria-label="Fit graph" title="Fit graph"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4M7 7l-4-4m10 4 4-4M7 13l-4 4m10-4 4 4"/></svg><span>Fit</span></button>
+              <button class="tool-button fit-button focus-button" id="focus-graph" type="button" aria-label="Expand graph to full screen" aria-pressed="false" title="Expand graph to full screen"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4m10-4h4v4M17 13v4h-4M3 13v4h4"/></svg><span>Expand</span></button>
+            </div>
+          </div>
+          <div class="graph-viewport" id="graph-viewport">
+            <svg id="graph-canvas" role="group" aria-label="Interactive request and entity graph" tabindex="0">
+              <defs><marker id="edge-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="#53616a"/></marker></defs>
+              <g id="graph-scene"></g>
+            </svg>
+            <div class="canvas-empty" id="canvas-empty" aria-live="polite"><span class="empty-orbit"><i></i><i></i><i></i></span><strong id="canvas-empty-title">Your graph will appear here</strong><span id="canvas-empty-copy">Data stays on this device.</span></div>
+          </div>
+          <div class="graph-filterbar" aria-label="Node type filters">
+            <div class="graph-view-modes" role="group" aria-label="Graph view mode">
+              <button class="view-mode-button" id="graph-overview" type="button" aria-pressed="true" title="Hide individual captures and request/response shapes">Overview</button>
+              <button class="view-mode-button" id="graph-show-all" type="button" aria-pressed="false" title="Show all nodes and edges">All nodes</button>
+            </div>
+            <span class="filterbar-divider" aria-hidden="true"></span>
+            <div class="graph-filters" id="graph-filters" role="group" aria-label="Show or hide node types"></div>
+            <span class="graph-filter-summary" id="graph-filter-summary">Node types and counts will appear here.</span>
+          </div>
+        </section>
+
+        <aside class="inspector-panel" aria-label="Selected node details">
+          <div class="panel-heading inspector-heading"><div><span class="eyebrow">INSPECTOR</span><h2>Selected node</h2></div><span class="inspect-index" id="inspect-index">—</span></div>
+          <div class="inspector-content" id="inspector-content"><div class="inspector-empty"><span class="inspect-target" aria-hidden="true">⌖</span><strong>Nothing selected</strong><span>Select a graph node to view its properties and sources.</span></div></div>
+          <div class="inspector-foot"><span class="read-lock" aria-hidden="true">▣</span><span>HTTP content is not loaded</span></div>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <div class="status-left"><span class="status-led"></span><span id="status-text">Waiting for data</span><span class="status-separator">/</span><span>127.0.0.1</span></div>
+        <div class="status-right"><span id="coverage-status">Coverage: unknown</span><span class="status-separator">·</span><span id="last-updated">—</span></div>
+      </footer>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+  </body>
+</html>

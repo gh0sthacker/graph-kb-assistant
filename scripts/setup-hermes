@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/hermes-env.sh
+source "$script_dir/hermes-env.sh"
+
+python3 - "$bb_hermes_repo_root" "$bb_hermes_profile_home" "$bb_hermes_install_dir" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1]).resolve()
+home = Path(sys.argv[2]).expanduser().resolve()
+install = Path(sys.argv[3]).expanduser().resolve()
+for name, path in (("Hermes profile", home), ("Hermes installation", install)):
+    try:
+        path.relative_to(repo)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(f"{name} must be outside the source checkout: {path}")
+    try:
+        repo.relative_to(path)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit(f"{name} must not contain the source checkout: {path}")
+
+for path in (home, home / "skills", home / "pending" / "skills"):
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path, 0o700)
+
+config_path = home / "config.yaml"
+marker = "# Managed by bb-graph-assistant setup-hermes. Do not replace automatically."
+if config_path.exists():
+    existing = config_path.read_text(encoding="utf-8")
+    if marker in existing:
+        print(f"Hermes profile already configured: {config_path}")
+        raise SystemExit(0)
+    raise SystemExit(f"Refusing to overwrite an existing Hermes config: {config_path}")
+
+quote = lambda value: json.dumps(str(value), ensure_ascii=False)
+tools = (
+    "bb_list_projects",
+    "bb_search_captures",
+    "bb_surface_map",
+    "bb_graph_slice",
+    "bb_kb_stats",
+    "bb_kb_search",
+    "bb_kb_get_source",
+    "bb_get_capture",
+)
+lines = [
+    marker,
+    "toolsets:",
+    "  - mcp-bb_assistant",
+    "  - skills",
+    "  - clarify",
+    "",
+    "mcp_servers:",
+    "  bb_assistant:",
+    f"    command: {quote(repo / 'scripts' / 'bb-assistant-mcp')}",
+    "    args: []",
+    "    env: {}",
+    "    supports_parallel_tool_calls: false",
+    "    trust: untrusted",
+    "    tools:",
+    "      include:",
+    *[f"        - {name}" for name in tools],
+    "      resources: false",
+    "      prompts: false",
+    "",
+    "skills:",
+    "  external_dirs:",
+    f"    - {quote(repo / '.claude' / 'skills')}",
+    f"  create_dir: {quote(home / 'skills')}",
+    "  write_approval: true",
+    "  guard_agent_created: true",
+    "",
+]
+config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+with config_path.open("x", encoding="utf-8") as stream:
+    stream.write("\n".join(lines))
+os.chmod(config_path, 0o600)
+print(f"Created isolated Hermes profile: {config_path}")
+print(f"Hermes source checkout: {install}")
+PY

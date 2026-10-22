@@ -1,0 +1,327 @@
+"""Offline source-provider fixtures; these tests never access upstream feeds."""
+from __future__ import annotations
+
+from io import BytesIO
+import hashlib
+import json
+from pathlib import Path
+import tarfile
+import tempfile
+import unittest
+
+import yaml
+
+from bb_assistant.kb.exploitdb import RedAmonExploitDBProvider
+from bb_assistant.kb.gtfobins import RedAmonGTFOBinsProvider
+from bb_assistant.kb.lolbas import RedAmonLOLBASProvider
+from bb_assistant.kb.nuclei import RedAmonNucleiProvider
+from bb_assistant.kb.owasp import RedAmonOWASPProvider
+from bb_assistant.kb.pinned_github_archive import read_pinned_archive
+from bb_assistant.kb.index import KBIndex
+from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider
+from bb_assistant.kb.rebuild import export_redamon_snapshot, import_snapshot
+from bb_assistant.kb.redamon_sources import (
+    RedAmonSourceAdapter,
+    SourceBatch,
+    SourceRecord,
+    SourceRequest,
+)
+
+
+REVISION = "a" * 40
+GTFO_URL = "https://github.com/GTFOBins/GTFOBins.github.io"
+LOLBAS_URL = "https://github.com/LOLBAS-Project/LOLBAS"
+OWASP_URL = "https://github.com/OWASP/wstg"
+NUCLEI_URL = "https://github.com/projectdiscovery/nuclei-templates"
+EXPLOITDB_URL = "https://gitlab.com/exploit-database/exploitdb"
+
+
+def _archive(repository: str, files: dict[str, bytes], *, revision: str = REVISION) -> bytes:
+    """Build a tiny GitHub-style archive in memory."""
+    output = BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        root = f"{repository}-{revision}"
+        for relative, raw in files.items():
+            info = tarfile.TarInfo(f"{root}/{relative}")
+            info.size = len(raw)
+            info.mtime = 0
+            archive.addfile(info, BytesIO(raw))
+    return output.getvalue()
+
+
+def _request(name: str, url: str, filters: dict[str, object]) -> SourceRequest:
+    return SourceRequest(
+        name,
+        "full",
+        {"id": name, "url": url},
+        REVISION,
+        filters,
+    )
+
+
+class ArchiveProviderFixtureTests(unittest.TestCase):
+    def test_gtfobins_and_lolbas_pass_canonical_adapter_with_required_notices(self) -> None:
+        gtfo_archive = _archive(GTFO_URL.rsplit("/", 1)[-1], {
+            "_gtfobins/curl.md": b"# curl\nFixture GTFOBins content.\n",
+            "LICENSE": b"GPL-3.0 fixture license\n",
+        })
+        lolbas_archive = _archive("LOLBAS", {
+            "yml/OSBinaries/Fixture.yml": b"Name: Fixture\nDescription: fixture content\n",
+            "LICENSE": b"GPL-3.0 fixture license\n",
+            "NOTICE.md": b"MITRE ATT&CK notice fixture\n",
+        })
+        manifest = {"profile": "full", "sources": [
+            {
+                "id": "gtfobins", "kind": "github_archive", "url": GTFO_URL,
+                "revision": REVISION, "license_id": "GPL-3.0-only",
+                "license_evidence": "fixture", "license_status": "confirmed_at_pinned_revision",
+            },
+            {
+                "id": "lolbas", "kind": "github_archive", "url": LOLBAS_URL,
+                "revision": REVISION, "license_id": "GPL-3.0-only",
+                "license_evidence": "fixture", "license_status": "confirmed_at_pinned_revision",
+            },
+        ]}
+        snapshot = RedAmonSourceAdapter(
+            manifest,
+            {
+                "gtfobins": RedAmonGTFOBinsProvider(fetcher=lambda _url: gtfo_archive),
+                "lolbas": RedAmonLOLBASProvider(fetcher=lambda _url: lolbas_archive),
+            },
+            source_manifest_sha256="b" * 64,
+        ).build()
+
+        coverage = {row["source_name"]: row for row in snapshot.source_coverage}
+        self.assertEqual(coverage["gtfobins"]["state"], "done")
+        self.assertEqual(coverage["lolbas"]["state"], "done")
+        self.assertEqual(snapshot.coverage_state, "PARTIAL")  # Five families are intentionally absent.
+        self.assertEqual(coverage["gtfobins"]["license_notice_count"], 1)
+        self.assertEqual(coverage["lolbas"]["license_notice_count"], 2)
+        self.assertEqual(
+            {doc.source_id for doc in snapshot.documents if doc.source_name == "lolbas" and doc.source_id.startswith("NOTICE:")},
+            {"NOTICE:license", "NOTICE:notice.md"},
+        )
+        self.assertTrue(any("MITRE ATT&CK" in doc.text for doc in snapshot.documents if doc.source_id == "NOTICE:notice.md"))
+
+    def test_wstg_fixture_selects_test_cases_and_excludes_readmes(self) -> None:
+        archive = _archive("wstg", {
+            "LICENSE": b"CC-BY-SA fixture notice\n",
+            "document/4-Web_Application_Security_Testing/01-Example.md": b"# Selected test\n",
+            "document/4-Web_Application_Security_Testing/README.md": b"Do not index this README.\n",
+            "document/3-The_OWASP_Testing_Framework/other.md": b"Outside selected test directory.\n",
+        })
+        request = _request("owasp", OWASP_URL, {
+            "test_directory": "document/4-Web_Application_Security_Testing",
+            "exclude_readme": True,
+        })
+
+        batch = RedAmonOWASPProvider(fetcher=lambda _url: archive)(request)
+        content = [record for record in batch.records if record.document_role == "content"]
+        self.assertEqual([record.source_id for record in content], [
+            "document/4-Web_Application_Security_Testing/01-Example.md",
+        ])
+        self.assertTrue(batch.notices_complete)
+        self.assertEqual(batch.expected_count, 1)
+        self.assertEqual(batch.source_revision, REVISION)
+        self.assertTrue(any(record.document_role == "license_notice" and "CC-BY-SA" in record.original_text for record in batch.records))
+
+    def test_nuclei_fixture_preserves_yaml_and_applies_exclusions(self) -> None:
+        archive = _archive("nuclei-templates", {
+            "LICENSE.md": b"MIT fixture notice\n",
+            "http/fixture.yaml": b"id: fixture-template\ninfo:\n  name: Fixture\n",
+            ".github/workflows/fixture.yaml": b"excluded workflow\n",
+            ".pre-commit-config.yaml": b"excluded config\n",
+            ".pre-commit-config.yml": b"excluded config\n",
+        })
+        request = _request("nuclei", NUCLEI_URL, {
+            "extensions": (".yaml", ".yml"),
+            "exclude_prefixes": (".github/",),
+            "exclude_paths": (".pre-commit-config.yaml", ".pre-commit-config.yml"),
+        })
+
+        batch = RedAmonNucleiProvider(fetcher=lambda _url: archive)(request)
+        content = [record for record in batch.records if record.document_role == "content"]
+        self.assertEqual([record.source_id for record in content], ["http/fixture.yaml"])
+        self.assertEqual(content[0].original_text, "id: fixture-template\ninfo:\n  name: Fixture\n")
+        self.assertTrue(batch.notices_complete)
+        self.assertTrue(any(record.source_id == "NOTICE:license.md" for record in batch.records))
+
+    def test_archive_reader_rejects_mismatched_root_traversal_and_symlinks(self) -> None:
+        wrong_root = _archive("wrong-repository", {"_gtfobins/a.md": b"x"})
+        with self.assertRaisesRegex(ValueError, "root does not match"):
+            read_pinned_archive(
+                wrong_root, repository_slug="GTFOBins.github.io", revision=REVISION,
+                content_roots=("_gtfobins",), allowed_extensions=(".md",),
+            )
+
+        traversal = _archive("GTFOBins.github.io", {"../escape.md": b"x"})
+        with self.assertRaisesRegex(ValueError, "unsafe path"):
+            read_pinned_archive(
+                traversal, repository_slug="GTFOBins.github.io", revision=REVISION,
+                content_roots=("_gtfobins",), allowed_extensions=(".md",),
+            )
+
+        symlink_output = BytesIO()
+        with tarfile.open(fileobj=symlink_output, mode="w:gz") as archive:
+            info = tarfile.TarInfo(f"GTFOBins.github.io-{REVISION}/_gtfobins/link.md")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            archive.addfile(info)
+        with self.assertRaisesRegex(ValueError, "non-regular entry"):
+            read_pinned_archive(
+                symlink_output.getvalue(), repository_slug="GTFOBins.github.io", revision=REVISION,
+                content_roots=("_gtfobins",), allowed_extensions=(".md",),
+            )
+
+
+class ExploitDBProviderFixtureTests(unittest.TestCase):
+    def test_csv_provider_keeps_allowlist_and_reports_duplicates_and_bad_rows(self) -> None:
+        csv_data = (
+            "id,description,date_published,platform,type,port,codes,file\n"
+            "123,old description,2020-01-01,Linux,local,0,CVE-2020-1,OLD_SYNTHETIC_POC\n"
+            "123,new description,2021-01-01,Linux,remote,443,CVE-2021-2,SECRET_SYNTHETIC_POC\n"
+            "124,,2022-01-01,Linux,remote,80,,BAD_SYNTHETIC_POC\n"
+        ).encode()
+        license_data = b"GPL-2.0-or-later fixture license\n"
+
+        def fetcher(url: str, _max_bytes: int) -> bytes:
+            if url.endswith("/files_exploits.csv"):
+                return csv_data
+            if url.endswith("/LICENSE.md"):
+                return license_data
+            raise AssertionError(f"unexpected fixture URL: {url}")
+
+        request = _request("exploitdb", EXPLOITDB_URL, {
+            "content_scope": "descriptions_and_metadata_only",
+        })
+        batch = RedAmonExploitDBProvider(fetcher=fetcher)(request)
+        content = [record for record in batch.records if record.document_role == "content"]
+        self.assertEqual(len(content), 1)
+        self.assertEqual(content[0].source_id, "123")
+        self.assertEqual(content[0].metadata["description"], "new description")
+        self.assertEqual(content[0].metadata["row_number"], 2)
+        self.assertNotIn("file", content[0].metadata)
+        self.assertNotIn("SECRET_SYNTHETIC_POC", content[0].original_text)
+        self.assertNotIn("OLD_SYNTHETIC_POC", content[0].original_text)
+        self.assertEqual(batch.expected_count, 1)
+        self.assertEqual(batch.fetched_count, 1)
+        self.assertEqual(batch.rejected_count, 1)
+        self.assertFalse(batch.complete)
+        self.assertTrue(batch.notices_complete)
+        self.assertTrue(any(record.source_id == "NOTICE:license.md" for record in batch.records))
+
+
+class SourceRightsAndCoverageGateTests(unittest.TestCase):
+    def test_unresolved_wstg_nuclei_and_exploitdb_terms_block_before_fetch(self) -> None:
+        cases = (
+            {
+                "id": "owasp", "kind": "github_archive", "url": OWASP_URL,
+                "revision": REVISION, "license_id": "CC-BY-SA-4.0", "license_evidence": "current repo only",
+                "license_status": "current_repo_confirmed_pinned_revision_pending",
+            },
+            {
+                "id": "nuclei", "kind": "github_archive", "url": NUCLEI_URL,
+                "revision": REVISION, "license_id": "MIT", "license_evidence": "maintainer discussion only",
+                "license_status": "current_repo_confirmed_pinned_revision_pending",
+            },
+            {
+                "id": "exploitdb", "kind": "gitlab_raw_feed", "url": EXPLOITDB_URL,
+                "revision": REVISION, "repository_license_id": "GPL-2.0-or-later",
+                "license_evidence": "repository license only", "license_status": "review_required",
+                "dataset_terms": "review_required", "content_scope": "descriptions_and_metadata_only",
+            },
+        )
+        for spec in cases:
+            with self.subTest(source=spec["id"]):
+                calls: list[str] = []
+
+                def provider(request: SourceRequest) -> SourceBatch:
+                    calls.append(request.source_name)
+                    raise AssertionError("blocked provider must not be called")
+
+                snapshot = RedAmonSourceAdapter(
+                    {"profile": "full", "sources": [spec]},
+                    {str(spec["id"]): provider},
+                    source_manifest_sha256="c" * 64,
+                ).build()
+                row = next(item for item in snapshot.source_coverage if item["source_name"] == spec["id"])
+                self.assertEqual(row["state"], "blocked")
+                self.assertEqual(calls, [])
+
+    def test_mismatched_counts_keep_an_otherwise_eligible_family_partial(self) -> None:
+        spec = {
+            "id": "gtfobins", "kind": "github_archive", "url": GTFO_URL,
+            "revision": REVISION, "license_id": "GPL-3.0-only", "license_evidence": "fixture",
+            "license_status": "confirmed_at_pinned_revision",
+        }
+
+        def provider(request: SourceRequest) -> SourceBatch:
+            record = SourceRecord(
+                source_id="_gtfobins/example.md", title="example", original_text="Fixture content",
+                source_locator="_gtfobins/example.md", source_revision=REVISION,
+            )
+            notice = SourceRecord(
+                source_id="NOTICE:license", title="License", original_text="GPL fixture",
+                source_locator="LICENSE", source_revision=REVISION, document_role="license_notice",
+            )
+            return SourceBatch(
+                source_revision=REVISION, records=(record, notice), expected_count=1,
+                fetched_count=2, parsed_count=1, rejected_count=0, complete=True,
+                artifact_sha256="d" * 64, applied_filters=dict(request.filters), notices_complete=True,
+            )
+
+        snapshot = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [spec]}, {"gtfobins": provider},
+            source_manifest_sha256="e" * 64,
+        ).build()
+        row = next(item for item in snapshot.source_coverage if item["source_name"] == "gtfobins")
+        self.assertEqual(row["state"], "partial")
+        self.assertIn("fetched_count_does_not_match_exact_expected_count", row["blockers"])
+
+
+class VendoredToolDocsSnapshotTests(unittest.TestCase):
+    def test_pinned_tooldocs_export_import_search_and_partial_coverage(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        bundle = project_root / "references/redamon/agentic-skills"
+        bundle_manifest = json.loads((bundle / "SOURCE-MANIFEST.json").read_text("utf-8"))
+        raw_manifest = (project_root / "src/bb_assistant/kb/sources.yaml").read_bytes()
+        manifest = yaml.safe_load(raw_manifest)
+        spec = next(item for item in manifest["sources"] if item["id"] == "tool_docs")
+        self.assertEqual(spec["revision"], bundle_manifest["source_commit"])
+        snapshot = RedAmonSourceAdapter(
+            {"profile": manifest["profile"], "sources": [spec]},
+            {"tool_docs": RedAmonLocalToolDocsProvider(project_root=project_root)},
+            source_manifest_sha256=hashlib.sha256(raw_manifest).hexdigest(),
+        ).build(max_chars=1200, overlap_chars=100)
+        coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "tool_docs")
+        self.assertEqual(coverage["state"], "done")
+        self.assertEqual(coverage["fetched_count"], 43)
+        self.assertEqual(len(snapshot.documents), 44)  # 43 documents plus the MIT notice.
+        self.assertEqual(snapshot.coverage_state, "PARTIAL")  # Other six source families are not in this fixture.
+
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-test-") as temporary:
+            temp_root = Path(temporary)
+            exported = export_redamon_snapshot(
+                snapshot, temp_root / "snapshots", max_chars=1200, overlap_chars=100,
+            )
+            index = KBIndex(temp_root / "index.sqlite3")
+            stats = import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
+            self.assertEqual(stats["coverage_state"], "PARTIAL")
+            self.assertEqual(stats["source_documents"], 44)
+            hits = index.search("PKINIT", top_k=10, source_names=("tool_docs",))
+            hit = next(item for item in hits if item.source_id == "active_directory/ad_cs_esc.md")
+            self.assertEqual(hit.source_revision, bundle_manifest["source_commit"])
+            self.assertRegex(hit.source_sha256, r"^[a-f0-9]{64}$")
+            self.assertRegex(hit.chunk_sha256, r"^[a-f0-9]{64}$")
+            self.assertGreater(hit.end_char, hit.start_char)
+
+            chunks_path = temp_root / "snapshots" / exported["snapshot_id"] / "chunks.jsonl"
+            original_chunks = chunks_path.read_bytes()
+            chunks_path.write_bytes(original_chunks[:-1] + bytes([original_chunks[-1] ^ 1]))
+            with self.assertRaisesRegex(ValueError, "JSONL hash mismatch"):
+                import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
+            self.assertEqual(index.stats()["snapshot_id"], exported["snapshot_id"])
+
+
+if __name__ == "__main__":
+    unittest.main()

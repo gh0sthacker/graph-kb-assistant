@@ -1,0 +1,854 @@
+"use strict";
+
+const $ = (selector, root = document) => root.querySelector(selector);
+const MAX_GRAPH_ZOOM = 10;
+const MIN_GRAPH_ZOOM = 0.35;
+const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant"];
+const state = {
+  projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
+  graph: null, selectedEndpoint: null, selectedNode: null, graphFocus: false, loadingSurface: false,
+  loadingGraph: false, hiddenKinds: new Set(OVERVIEW_HIDDEN_KINDS), routeScope: true, edgeLabelsVisible: true,
+  renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
+};
+
+const elements = {
+  project: $("#project-select"), endpointList: $("#endpoint-list"), endpointCount: $("#endpoint-count"),
+  filter: $("#endpoint-filter"), loadMore: $("#load-more"), surfaceFoot: $("#surface-foot-text"),
+  graphCanvas: $("#graph-canvas"), graphScene: $("#graph-scene"), canvasEmpty: $("#canvas-empty"),
+  emptyTitle: $("#canvas-empty-title"), emptyCopy: $("#canvas-empty-copy"), graphState: $("#graph-state"),
+  graphTitle: $("#graph-title"), graphSubtitle: $("#graph-subtitle"), graphProject: $("#graph-project-label"),
+  graphCounts: $("#graph-counts"), inspector: $("#inspector-content"), inspectIndex: $("#inspect-index"),
+  graphFilters: $("#graph-filters"), graphFilterSummary: $("#graph-filter-summary"),
+  graphOverview: $("#graph-overview"), graphShowAll: $("#graph-show-all"), edgeLabels: $("#toggle-edge-labels"),
+  status: $("#status-text"), coverage: $("#coverage-status"), updated: $("#last-updated"),
+  zoom: $("#zoom-readout"), zoomIn: $("#zoom-in"), zoomOut: $("#zoom-out"),
+  focusGraph: $("#focus-graph"), workspace: $(".workspace"),
+  toast: $("#toast"), viewport: $("#graph-viewport"),
+};
+
+const nodeLabels = {
+  observation: "HTTP REQUEST", endpoint: "ENDPOINT", parameter: "PARAMETER",
+  asset: "HOST", actor: "ACTOR", object: "OBJECT", session_context: "SESSION CONTEXT",
+  condition: "CONDITION", flow: "FLOW", classifier_signal: "SIGNAL",
+  hypothesis: "HYPOTHESIS", request_variant: "REQUEST SHAPE", response_variant: "RESPONSE SHAPE",
+};
+const filterLabels = {
+  observation: "Requests", endpoint: "Endpoints", parameter: "Parameters", asset: "Hosts",
+  actor: "Actors", object: "Objects", session_context: "Contexts",
+  condition: "Conditions", flow: "Flows", classifier_signal: "Signals",
+  hypothesis: "Hypotheses", request_variant: "Request shapes", response_variant: "Response shapes",
+};
+const relationLabels = {
+  exposes: "serves endpoint",
+  invokes: "calls endpoint",
+  has_parameter: "has parameter",
+  returns: "returns parameter",
+  uses_request_variant: "uses request shape",
+  received_response: "received response shape",
+  supports: "supports hypothesis",
+  contradicts: "contradicts hypothesis",
+  contains: "contains",
+  precedes: "precedes",
+};
+const MASKED_PATH_HELP = "Dynamic path segments are masked because they can contain identifiers or secrets. Raw HTTP values remain in Caido.";
+const kindColors = { observation: "#83c8cf", endpoint: "#e0b56b", parameter: "#b8a3da", asset: "#b2d88a" };
+
+function el(tag, className, text) {
+  const result = document.createElement(tag);
+  if (className) result.className = className;
+  if (text !== undefined) result.textContent = String(text);
+  return result;
+}
+
+function svgEl(tag, attrs = {}) {
+  const result = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [name, value] of Object.entries(attrs)) result.setAttribute(name, String(value));
+  return result;
+}
+
+function setStatus(message, kind = "") {
+  elements.status.textContent = message;
+  elements.graphState.className = `graph-state ${kind}`.trim();
+  const statusLabel = elements.graphState.querySelector("span:last-child");
+  if (statusLabel) statusLabel.textContent = message;
+}
+
+function showToast(message) {
+  elements.toast.textContent = message;
+  elements.toast.classList.add("show");
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => elements.toast.classList.remove("show"), 2600);
+}
+
+async function getJSON(path) {
+  const response = await fetch(path, { headers: { Accept: "application/json" }, credentials: "same-origin", cache: "no-store" });
+  let payload;
+  try { payload = await response.json(); } catch { throw new Error("The server returned an invalid response."); }
+  if (!response.ok) throw new Error(payload.error || `Read failed (${response.status}).`);
+  return payload;
+}
+
+async function loadProjects(append = false) {
+  elements.project.disabled = true;
+  if (!append) {
+    setStatus("Loading local projects", "loading");
+    renderEmpty("Loading the local catalog", "Checking projects registered on this device.");
+    elements.endpointList.replaceChildren(emptyList("Loading…", "Reading the local project registry."));
+  }
+  const selectedKey = state.projectKey;
+  try {
+    const query = new URLSearchParams({ limit: "200" });
+    if (append && state.projectCursor) query.set("after_project_key", state.projectCursor);
+    const data = await getJSON(`/api/projects?${query}`);
+    const page = Array.isArray(data.projects) ? data.projects : [];
+    state.projects = append ? [...state.projects, ...page] : page;
+    state.projectCursor = data.next_after_project_key || null;
+    elements.project.replaceChildren();
+    if (!state.projects.length) {
+      state.projectCursor = null;
+      elements.project.append(new Option("No local projects", ""));
+      elements.project.disabled = true;
+      clearProjectView();
+      elements.endpointCount.textContent = "0";
+      elements.surfaceFoot.textContent = "Local index is empty";
+      elements.endpointList.replaceChildren(emptyList("No data", "The local project registry is empty."));
+      elements.coverage.textContent = "Coverage: no project";
+      setStatus("No registered projects");
+      return;
+    }
+    for (const item of state.projects) {
+      const name = item.display_name || `Caido · ${short(item.project_id || item.project_key, 18)}`;
+      elements.project.append(new Option(name, item.project_key));
+    }
+    if (state.projectCursor) elements.project.append(new Option("Load more projects…", "__load_more__"));
+    elements.project.disabled = false;
+    if (append) {
+      elements.project.value = selectedKey;
+      return;
+    }
+    await selectProject(state.projects[0].project_key);
+  } catch (error) {
+    if (append) {
+      elements.project.disabled = false;
+      elements.project.value = selectedKey;
+      showToast(`Could not load more projects: ${error.message}`);
+      return;
+    }
+    elements.project.replaceChildren(new Option("Loading error", ""));
+    elements.project.disabled = true;
+    clearProjectView();
+    renderEmpty("Could not open the local catalog", "Check project database compatibility and refresh the page.");
+    elements.endpointList.replaceChildren(emptyList("Read error", error.message));
+    elements.coverage.textContent = "Coverage: unavailable";
+    setStatus("Project read error", "error");
+  }
+}
+
+function clearProjectView() {
+  state.projectKey = "";
+  state.projectCursor = null;
+  state.endpoints = [];
+  state.endpointCursor = null;
+  state.graph = null;
+  state.selectedEndpoint = null;
+  state.selectedNode = null;
+  elements.graphProject.textContent = "SELECT A PROJECT";
+  elements.graphTitle.textContent = "Observed behavior relationships";
+  elements.graphSubtitle.textContent = "Select an endpoint to open its graph neighborhood.";
+  elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
+  elements.endpointCount.textContent = "0";
+  elements.loadMore.hidden = true;
+  renderInspectorEmpty();
+  renderEmpty("No registered projects", "Add a local project and import its Caido history first.");
+}
+
+async function selectProject(projectKey) {
+  state.projectKey = projectKey;
+  state.endpoints = [];
+  state.endpointCursor = null;
+  state.surfaceGaps = [];
+  state.graph = null;
+  state.selectedEndpoint = null;
+  state.selectedNode = null;
+  elements.project.value = projectKey;
+  const project = state.projects.find(item => item.project_key === projectKey);
+  elements.graphProject.textContent = project ? (project.display_name || `CAIDO · ${short(project.project_id || projectKey, 18)}`).toUpperCase() : "LOCAL PROJECT";
+  elements.graphTitle.textContent = "Observed behavior relationships";
+  elements.graphSubtitle.textContent = "Select an endpoint to open its graph neighborhood.";
+  elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
+  elements.inspectIndex.textContent = "—";
+  renderInspectorEmpty();
+  renderEmpty("Loading the project surface", "Reading a bounded page from the local structural index.");
+  renderEndpointList();
+  setStatus("Loading local index", "loading");
+  await loadSurface(false);
+}
+
+function countText(value, label) {
+  const span = el("span");
+  span.append(document.createTextNode(String(value) + " "));
+  span.append(el("small", "", label));
+  return span;
+}
+
+async function loadSurface(append) {
+  if (!state.projectKey || state.loadingSurface) return;
+  state.loadingSurface = true;
+  elements.loadMore.disabled = true;
+  elements.loadMore.textContent = "Loading…";
+  const query = new URLSearchParams({ project_key: state.projectKey, limit: "40" });
+  if (append && state.endpointCursor) {
+    query.set("after_history", String(state.endpointCursor.historical_row_id));
+    query.set("after_live", String(state.endpointCursor.live_row_id));
+  }
+  try {
+    const data = await getJSON(`/api/surface?${query}`);
+    const rows = Array.isArray(data.endpoints) ? data.endpoints : [];
+    const combined = append ? [...state.endpoints, ...rows] : rows;
+    state.endpoints = mergeEndpoints(combined);
+    state.endpointCursor = data.next_after || null;
+    state.surfaceGaps = Array.isArray(data.coverage_gaps) ? data.coverage_gaps : [];
+    state.coverageState = data.coverage_state || "partial";
+    renderEndpointList();
+    elements.endpointCount.textContent = state.endpoints.length;
+    elements.surfaceFoot.textContent = data.truncated ? "Page limit reached · more available" : "Local sample · coverage is partial";
+    elements.coverage.textContent = `Coverage: ${String(state.coverageState).toUpperCase()}`;
+    elements.updated.textContent = `Updated ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
+    if (!state.endpoints.length) {
+      renderEmpty("No endpoints in the local index", "Import HTTP history for the selected project, then refresh.");
+      elements.endpointList.replaceChildren(emptyList("Index is empty", "The project opened, but it has no local structural records yet."));
+      setStatus("No indexed requests");
+    } else if (!append || !state.selectedEndpoint) {
+      renderEmpty("Select an endpoint", "Choose a route on the left. The graph uses linked observations and available sources.");
+      if (!append && !state.selectedEndpoint) setStatus("Select an endpoint");
+    }
+  } catch (error) {
+    if (!append) {
+      elements.endpointList.replaceChildren(emptyList("Could not read the index", error.message));
+      renderEmpty("Project data is unavailable", "Check the schema version, local database integrity, and BehaviorGraph availability.");
+    }
+    setStatus("Local index read error", "error");
+  } finally {
+    state.loadingSurface = false;
+    elements.loadMore.disabled = false;
+    elements.loadMore.replaceChildren(document.createTextNode("Load more "), el("span", "", "↓"));
+    elements.loadMore.hidden = !state.endpointCursor;
+  }
+}
+
+function mergeEndpoints(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = [row.host, row.port, row.method, row.route].join("\u0000");
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, { ...row, field_names: [...(row.field_names || [])], header_names: [...(row.header_names || [])], sampled_graph_seed_ids: [...(row.sampled_graph_seed_ids || [])] });
+      continue;
+    }
+    existing.observation_count += Number(row.observation_count || 0);
+    existing.complete_parse_count += Number(row.complete_parse_count || 0);
+    existing.partial_parse_count += Number(row.partial_parse_count || 0);
+    existing.unparsed_count += Number(row.unparsed_count || 0);
+    existing.graph_mapped_observation_count += Number(row.graph_mapped_observation_count || 0);
+    existing.field_names = unique([...existing.field_names, ...(row.field_names || [])]);
+    existing.header_names = unique([...existing.header_names, ...(row.header_names || [])]);
+    existing.sampled_graph_seed_ids = unique([...existing.sampled_graph_seed_ids, ...(row.sampled_graph_seed_ids || [])]).slice(0, 20);
+  }
+  return [...map.values()].sort((a, b) => `${a.host}${a.route}${a.method}`.localeCompare(`${b.host}${b.route}${b.method}`));
+}
+
+function unique(items) { return [...new Set(items)]; }
+
+function renderEndpointList() {
+  const filter = elements.filter.value.trim().toLowerCase();
+  const rows = state.endpoints.filter(item => `${item.host} ${item.route} ${displayPath(item.route)} ${item.method}`.toLowerCase().includes(filter));
+  elements.endpointList.replaceChildren();
+  if (!rows.length) {
+    elements.endpointList.append(emptyList(state.endpoints.length ? "No matches" : "Surface not loaded", state.endpoints.length ? "Adjust the filter." : "Discovered routes will appear here."));
+  }
+  for (const endpoint of rows) {
+    const key = endpointKey(endpoint);
+    const button = el("button", `endpoint-item${state.selectedEndpoint && endpointKey(state.selectedEndpoint) === key ? " active" : ""}`);
+    button.type = "button";
+    button.setAttribute("aria-pressed", state.selectedEndpoint && endpointKey(state.selectedEndpoint) === key ? "true" : "false");
+    button.setAttribute("aria-label", `${endpoint.method} ${endpoint.host}${displayPath(endpoint.route)}, ${endpoint.observation_count} matching requests`);
+    button.title = MASKED_PATH_HELP;
+    const method = el("span", `method-chip method-${String(endpoint.method || "get").toLowerCase()}`, endpoint.method || "?");
+    const copy = el("span", "endpoint-copy");
+    copy.append(el("span", "endpoint-host", endpoint.host || "unknown host"));
+    copy.append(el("span", "endpoint-route", displayPath(endpoint.route || "/")));
+    const meta = el("span", "endpoint-meta");
+    meta.append(document.createTextNode(`${endpoint.observation_count || 0} observations`));
+    const dot = el("i"); meta.append(dot);
+    meta.append(document.createTextNode(`${endpoint.graph_mapped_observation_count || 0} in graph`));
+    copy.append(meta);
+    button.append(method, copy);
+    button.addEventListener("click", () => openEndpoint(endpoint));
+    elements.endpointList.append(button);
+  }
+  elements.endpointCount.textContent = state.endpoints.length || "0";
+  elements.loadMore.hidden = !state.endpointCursor;
+}
+
+function emptyList(title, copy) {
+  const item = el("div", "empty-list");
+  item.append(el("strong", "", title), document.createTextNode(copy));
+  return item;
+}
+
+function endpointKey(endpoint) { return [endpoint.host, endpoint.port, endpoint.route, endpoint.method].join("\u0000"); }
+
+async function openEndpoint(endpoint) {
+  state.selectedEndpoint = endpoint;
+  state.routeScope = true;
+  state.hiddenKinds = new Set(OVERVIEW_HIDDEN_KINDS);
+  state.selectedNode = null;
+  state.graph = null;
+  renderEndpointList();
+  renderInspectorEmpty();
+  const seeds = (endpoint.sampled_graph_seed_ids || []).slice(0, 20);
+  elements.graphTitle.textContent = displayPath(endpoint.route || "/");
+  elements.graphTitle.title = MASKED_PATH_HELP;
+  elements.graphSubtitle.textContent = `${endpoint.method}  ·  ${endpoint.host}${endpoint.port ? `:${endpoint.port}` : ""}  ·  ${endpoint.observation_count || 0} matching requests`;
+  elements.graphCounts.title = "Node and edge counts for the current graph slice of this route; these are not project-wide request totals.";
+  if (!seeds.length) {
+    elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
+    renderEmpty("No graph mapping for this endpoint", "The index contains this route, but its observations are not linked to BehaviorGraph yet.");
+    elements.inspector.replaceChildren(emptyList("No node to inspect", "No graph observations were found for this endpoint."));
+    setStatus("Observations are not linked to the graph");
+    return;
+  }
+  await loadGraph(seeds);
+}
+
+async function loadGraph(seeds) {
+  if (!state.projectKey || !Array.isArray(seeds) || !seeds.length) return;
+  state.loadingGraph = true;
+  renderEmpty("Loading graph relationships", "Reading a bounded, read-only neighborhood of the selected nodes.");
+  setStatus("Loading graph neighborhood", "loading");
+  const query = new URLSearchParams({ project_key: state.projectKey });
+  for (const seed of seeds.slice(0, 20)) query.append("seed", seed);
+  try {
+    state.graph = await getJSON(`/api/graph?${query}`);
+    state.selectedNode = null;
+    renderGraph();
+    const first = state.renderedEntities.find(isSelectedEndpointNode) || state.renderedEntities.find(item => seeds.includes(item.id)) || state.renderedEntities[0];
+    if (first) selectNode(first.id);
+    else renderInspectorEmpty();
+    const partial = Boolean(state.graph.incomplete || state.graph.truncated);
+    setStatus(partial ? "Graph loaded · coverage is partial" : "Graph loaded", "ready");
+    if (partial) elements.coverage.textContent = "Graph coverage: partial";
+  } catch (error) {
+    state.graph = null;
+    renderEmpty("Could not build the graph", error.message || "Check compatibility with the local BehaviorGraph database.");
+    elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
+    elements.inspector.replaceChildren(emptyList("Graph unavailable", "Select another endpoint or check graph database integrity."));
+    setStatus("Graph read error", "error");
+  } finally { state.loadingGraph = false; }
+}
+
+function renderEmpty(title, copy) {
+  elements.canvasEmpty.hidden = false;
+  elements.emptyTitle.textContent = title;
+  elements.emptyCopy.textContent = copy;
+  elements.graphScene.replaceChildren();
+  state.renderedEntities = [];
+  state.renderedAssertions = [];
+}
+
+function renderGraph(resetView = true) {
+  const graph = state.graph || {};
+  const allEntities = Array.isArray(graph.entities) ? graph.entities : [];
+  const allAssertions = Array.isArray(graph.assertions) ? graph.assertions : [];
+  const scoped = state.routeScope ? selectedEndpointNeighborhood(allEntities, allAssertions) : null;
+  const entities = scoped?.entities || allEntities;
+  const assertions = scoped?.assertions || allAssertions;
+  renderGraphFilters(entities);
+  if (!allEntities.length) {
+    state.renderedEntities = [];
+    state.renderedAssertions = [];
+    renderEmpty("Graph neighborhood is empty", "No related entities were found for the selected seed IDs.");
+    elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
+    return;
+  }
+  const visible = entities.filter(node => !state.hiddenKinds.has(node.kind));
+  const visibleIds = new Set(visible.map(node => node.id));
+  const visibleAssertions = assertions.filter(edge => visibleIds.has(edge.subject) && visibleIds.has(edge.object));
+  const connectedIds = new Set();
+  for (const edge of visibleAssertions) { connectedIds.add(edge.subject); connectedIds.add(edge.object); }
+  const seedIds = new Set(state.graph?.seed_ids || []);
+  const renderedEntities = visible.filter(node => connectedIds.has(node.id) || seedIds.has(node.id) || isSelectedEndpointNode(node));
+  const renderedIds = new Set(renderedEntities.map(node => node.id));
+  const renderedAssertions = visibleAssertions.filter(edge => renderedIds.has(edge.subject) && renderedIds.has(edge.object));
+  state.renderedEntities = renderedEntities;
+  state.renderedAssertions = renderedAssertions;
+  renderGraphFilters(entities, renderedEntities);
+  if (!renderedEntities.length) {
+    state.selectedNode = null;
+    elements.graphCanvas.setAttribute("viewBox", "0 0 960 560");
+    elements.graphScene.replaceChildren();
+    elements.canvasEmpty.hidden = false;
+    elements.emptyTitle.textContent = "Nodes are hidden by filters";
+    elements.emptyCopy.textContent = "Enable a node type or choose “All nodes” to see relationships.";
+    elements.graphCounts.replaceChildren(countText(0, "shown"), el("b"), countText(entities.length, "in overview"));
+    elements.graphCounts.title = `The selected view contains ${entities.length} nodes and ${assertions.length} edges; the full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`;
+    renderInspectorEmpty();
+    return;
+  }
+  elements.canvasEmpty.hidden = true;
+  elements.graphCounts.replaceChildren(countText(renderedEntities.length, "shown"), el("b"), countText(renderedAssertions.length, "edges"), el("b"), countText(entities.length, "in overview"));
+  elements.graphCounts.title = state.routeScope
+    ? `Selected route overview: ${renderedEntities.length} of ${entities.length} nodes. The full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`
+    : `Showing ${renderedEntities.length} of ${entities.length} nodes and ${renderedAssertions.length} of ${assertions.length} edges in this graph slice.`;
+  elements.graphScene.replaceChildren();
+  const layout = layoutGraph(renderedEntities, renderedAssertions);
+  const edgeLayer = svgEl("g", { class: "edge-layer" });
+  for (const edge of renderedAssertions) {
+    const from = layout.positions.get(edge.subject);
+    const to = layout.positions.get(edge.object);
+    if (!from || !to) continue;
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    const offset = Math.min(80, length * 0.17);
+    const sx = from.x + dx / length * offset, sy = from.y + dy / length * offset;
+    const ex = to.x - dx / length * offset, ey = to.y - dy / length * offset;
+    const bend = Math.min(56, Math.abs(dy) * .18 + 10);
+    const curve = svgEl("path", { d: `M${sx},${sy} Q${(sx + ex) / 2 - bend},${(sy + ey) / 2} ${ex},${ey}`, class: `edge-path${edge.evidence_state === "contested" ? " edge-contested" : ""}` });
+    edgeLayer.append(curve);
+    if (state.edgeLabelsVisible) {
+      const label = svgEl("text", { x: (sx + ex) / 2, y: (sy + ey) / 2 - 7, class: "edge-label", "text-anchor": "middle" });
+      label.textContent = relationLabels[edge.predicate] || String(edge.predicate || "relationship").replaceAll("_", " ");
+      edgeLayer.append(label);
+    }
+  }
+  elements.graphScene.append(edgeLayer);
+  for (const node of renderedEntities) {
+    const point = layout.positions.get(node.id);
+    if (point) elements.graphScene.append(renderNode(node, point));
+  }
+  elements.graphCanvas.setAttribute("viewBox", `0 0 ${layout.width} ${layout.height}`);
+  if (resetView) { state.zoom = 1; state.panX = 0; state.panY = 0; }
+  applyTransform();
+  if (!state.selectedNode || !renderedEntities.some(node => node.id === state.selectedNode.id)) {
+    state.selectedNode = null;
+    const replacement = renderedEntities.find(isSelectedEndpointNode) || renderedEntities.find(node => seedIds.has(node.id)) || renderedEntities[0];
+    if (replacement) selectNode(replacement.id);
+    else renderInspectorEmpty();
+  }
+}
+
+function renderGraphFilters(entities, renderedEntities = state.renderedEntities) {
+  if (!elements.graphFilters) return;
+  const counts = new Map();
+  for (const node of entities) counts.set(node.kind || "entity", (counts.get(node.kind || "entity") || 0) + 1);
+  const renderedCounts = new Map();
+  for (const node of renderedEntities || []) renderedCounts.set(node.kind || "entity", (renderedCounts.get(node.kind || "entity") || 0) + 1);
+  const kinds = [...counts.keys()].sort((a, b) => (filterLabels[a] || a).localeCompare(filterLabels[b] || b, "en"));
+  elements.graphFilters.replaceChildren();
+  const overview = elements.graphOverview;
+  const showAll = elements.graphShowAll;
+  if (overview) {
+    overview.disabled = kinds.length === 0;
+    overview.setAttribute("aria-pressed", String(kinds.length > 0 && isOverviewView(kinds)));
+  }
+  if (showAll) {
+    showAll.disabled = kinds.length === 0;
+    showAll.setAttribute("aria-pressed", String(kinds.length > 0 && kinds.every(kind => !state.hiddenKinds.has(kind))));
+  }
+  for (const kind of kinds) {
+    const count = counts.get(kind) || 0;
+    const visible = !state.hiddenKinds.has(kind);
+    const chip = el("button", `graph-filter${visible ? " active" : ""}`);
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(visible));
+    const actuallyShown = renderedCounts.get(kind) || 0;
+    chip.title = visible
+      ? `${filterLabels[kind] || nodeLabels[kind] || kind}: ${count} in slice, ${actuallyShown} shown`
+      : `${filterLabels[kind] || nodeLabels[kind] || kind}: hidden, ${count} in slice`;
+    chip.append(document.createTextNode(`${filterLabels[kind] || nodeLabels[kind] || kind} `), el("b", "", count));
+    chip.addEventListener("click", () => {
+      if (state.hiddenKinds.has(kind)) state.hiddenKinds.delete(kind);
+      else state.hiddenKinds.add(kind);
+      renderGraph(false);
+    });
+    elements.graphFilters.append(chip);
+  }
+  const hidden = kinds.filter(kind => state.hiddenKinds.has(kind));
+  if (elements.graphFilterSummary) {
+    elements.graphFilterSummary.textContent = hidden.length
+      ? `Hidden types: ${hidden.map(kind => filterLabels[kind] || nodeLabels[kind] || kind).join(", ")}`
+      : "All types are shown";
+  }
+}
+
+function isOverviewView(kinds = []) {
+  return OVERVIEW_HIDDEN_KINDS.every(kind => !kinds.includes(kind) || state.hiddenKinds.has(kind)) &&
+    kinds.every(kind => OVERVIEW_HIDDEN_KINDS.includes(kind) || !state.hiddenKinds.has(kind));
+}
+
+function isSelectedEndpointNode(node) {
+  if (node.kind !== "endpoint" || !state.selectedEndpoint) return false;
+  const endpointIds = selectedEndpointIds();
+  if (endpointIds.size) return endpointIds.has(node.id);
+  const data = node.data || {};
+  const routeMatches = normalizedRoute(data.path) === normalizedRoute(state.selectedEndpoint.route);
+  const origin = String(data.origin || "").toLowerCase();
+  const hostMatches = !origin || origin.includes(String(state.selectedEndpoint.host || "").toLowerCase());
+  const portMatches = !origin || !state.selectedEndpoint.port || origin.endsWith(`:${state.selectedEndpoint.port}`);
+  return routeMatches && hostMatches && portMatches && String(data.method || "").toUpperCase() === String(state.selectedEndpoint.method || "").toUpperCase();
+}
+
+function selectedEndpointIds() {
+  const seedIds = new Set(state.selectedEndpoint?.sampled_graph_seed_ids || []);
+  if (!seedIds.size) return new Set();
+  return new Set((state.graph?.entities || [])
+    .filter(node => node.kind === "observation" && seedIds.has(node.id))
+    .map(node => node.data?.endpoint_id)
+    .filter(Boolean));
+}
+
+function normalizedRoute(value) {
+  return displayPath(value).replace(/\/{2,}/g, "/").toLowerCase();
+}
+
+function selectGraphView(view) {
+  state.routeScope = view === "overview";
+  state.hiddenKinds = new Set(view === "overview" ? OVERVIEW_HIDDEN_KINDS : []);
+  renderGraph(true);
+  const node = state.renderedEntities.find(isSelectedEndpointNode) || state.renderedEntities.find(item => (state.graph?.seed_ids || []).includes(item.id)) || state.renderedEntities[0];
+  if (node) selectNode(node.id);
+}
+
+function selectedEndpointNeighborhood(entities, assertions) {
+  const endpointIds = selectedEndpointIds();
+  const endpoints = entities.filter(node => node.kind === "endpoint" && (endpointIds.size ? endpointIds.has(node.id) : isSelectedEndpointNode(node)));
+  if (!endpoints.length) return null;
+  const byId = new Map(entities.map(node => [node.id, node]));
+  const included = new Set(endpoints.map(node => node.id));
+  const addNonEndpointNeighbors = nodeId => {
+    for (const edge of assertions) {
+      const otherId = edge.subject === nodeId ? edge.object : edge.object === nodeId ? edge.subject : null;
+      const other = otherId ? byId.get(otherId) : null;
+      if (other && other.kind !== "endpoint") included.add(other.id);
+    }
+  };
+  for (const endpoint of endpoints) addNonEndpointNeighbors(endpoint.id);
+  for (const node of entities) {
+    if (node.kind === "observation" && endpoints.some(endpoint => node.data?.endpoint_id === endpoint.id)) {
+      included.add(node.id);
+      addNonEndpointNeighbors(node.id);
+    }
+  }
+  const scopedEntities = entities.filter(node => included.has(node.id));
+  const scopedIds = new Set(scopedEntities.map(node => node.id));
+  const scopedAssertions = assertions.filter(edge => scopedIds.has(edge.subject) && scopedIds.has(edge.object));
+  return { entities: scopedEntities, assertions: scopedAssertions };
+}
+
+function layoutGraph(entities, assertions) {
+  const ids = new Set(entities.map(node => node.id));
+  const neighbors = new Map(entities.map(node => [node.id, []]));
+  for (const edge of assertions) {
+    if (ids.has(edge.subject) && ids.has(edge.object)) {
+      neighbors.get(edge.subject).push(edge.object);
+      neighbors.get(edge.object).push(edge.subject);
+    }
+  }
+  const seedIds = (state.graph?.seed_ids || []).filter(id => ids.has(id));
+  const selectedEndpoint = entities.find(isSelectedEndpointNode);
+  const root = seedIds[0] || selectedEndpoint?.id || entities[0]?.id;
+  const distances = new Map([[root, 0]]), queue = [root];
+  for (let i = 0; i < queue.length; i++) {
+    for (const neighbor of neighbors.get(queue[i]) || []) {
+      if (distances.has(neighbor)) continue;
+      distances.set(neighbor, distances.get(queue[i]) + 1); queue.push(neighbor);
+    }
+  }
+  const byDepth = new Map();
+  for (const item of entities) {
+    const depth = distances.get(item.id) ?? 0;
+    if (!byDepth.has(depth)) byDepth.set(depth, []);
+    byDepth.get(depth).push(item);
+  }
+  for (const group of byDepth.values()) group.sort((a, b) => displayTitle(a).localeCompare(displayTitle(b)));
+  const maxDepth = Math.max(...byDepth.keys(), 1);
+  const maxRows = Math.max(...[...byDepth.values()].map(group => group.length), 1);
+  const width = Math.max(960, 240 + maxDepth * 225);
+  const height = Math.max(560, 140 + maxRows * 128);
+  const positions = new Map();
+  for (const [depth, group] of byDepth) {
+    const span = group.length * 128;
+    const startY = (height - span) / 2 + 64;
+    group.forEach((item, index) => positions.set(item.id, { x: 120 + depth * ((width - 240) / Math.max(1, maxDepth)), y: startY + index * 128 }));
+  }
+  return { positions, width, height };
+}
+
+function renderNode(node, point) {
+  const kind = String(node.kind || "entity");
+  const group = svgEl("g", { class: `node-group type-${safeClass(kind)}${state.selectedNode?.id === node.id ? " selected" : ""}`, transform: `translate(${point.x - 88} ${point.y - 34})`, tabindex: "0", role: "button", "data-node-id": node.id, "aria-label": `${nodeLabels[kind] || kind}, ${displayTitle(node)}` });
+  group.append(svgEl("rect", { class: "node-card", x: 0, y: 0, width: 176, height: 68, rx: 8 }));
+  group.append(svgEl("rect", { class: "node-accent", x: 0, y: 12, width: 3, height: 44 }));
+  const label = svgEl("text", { class: "node-kind", x: 13, y: 17 }); label.textContent = nodeLabels[kind] || kind.toUpperCase(); group.append(label);
+  const title = svgEl("text", { class: "node-title", x: 13, y: 37 }); title.textContent = truncate(displayTitle(node), 22); group.append(title);
+  const subtitle = svgEl("text", { class: "node-subtitle", x: 13, y: 54 }); subtitle.textContent = truncate(displaySubtitle(node), 25); group.append(subtitle);
+  group.addEventListener("click", event => { event.stopPropagation(); selectNode(node.id); });
+  group.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectNode(node.id); } });
+  return group;
+}
+
+function displayTitle(node) {
+  const data = node.data || {};
+  if (node.kind === "endpoint") return `${data.method || "?"} ${displayPath(data.path || "/")}`;
+  if (node.kind === "observation") return `${data.observation_kind === "live_capture" ? "Live capture" : "Capture"}${data.http_status ? ` · HTTP ${data.http_status}` : ""}`;
+  if (node.kind === "parameter") return displayPath(data.path || data.name || "Parameter");
+  if (node.kind === "request_variant") return "Request shape";
+  if (node.kind === "response_variant") return "Response shape";
+  if (node.kind === "asset") return data.origin || "Host";
+  return data.label || data.name || node.kind || "Entity";
+}
+
+function displaySubtitle(node) {
+  const data = node.data || {};
+  if (node.kind === "observation") return data.observed_at && data.observed_at !== "unknown" ? data.observed_at : "Capture time unavailable";
+  if (node.kind === "endpoint") return (data.query_names || []).slice(0, 4).join(" · ") || "Route template · values masked";
+  if (node.kind === "parameter") return [data.type, data.location].filter(Boolean).join(" · ") || "Structural field";
+  if (node.kind === "request_variant" || node.kind === "response_variant") {
+    const headers = Array.isArray(data.header_metadata) ? data.header_metadata.length : 0;
+    const fields = Array.isArray(data.fields) ? data.fields.length : 0;
+    const parts = [node.kind === "request_variant" ? data.method : (data.status ? `HTTP ${data.status}` : "HTTP response")];
+    if (data.content_type) parts.push(data.content_type === "unknown" ? "type unavailable" : data.content_type);
+    parts.push(`${headers} headers`, `${fields} fields`);
+    if (data.body_bytes !== null && data.body_bytes !== undefined) parts.push(`body ${formatBytes(data.body_bytes)}`);
+    if (data.parse_state !== "complete") parts.push("parse incomplete");
+    return parts.filter(Boolean).join(" · ");
+  }
+  if (node.kind === "asset") return data.program ? `Project ${short(data.program, 12)}` : "Observed host";
+  return node.id || "";
+}
+
+function selectNode(nodeId) {
+  const node = (state.graph?.entities || []).find(item => item.id === nodeId);
+  if (!node) return;
+  state.selectedNode = node;
+  for (const group of elements.graphScene.querySelectorAll(".node-group")) group.classList.toggle("selected", group.getAttribute("data-node-id") === nodeId);
+  renderInspector(node);
+}
+
+function renderInspector(node) {
+  elements.inspector.replaceChildren();
+  elements.inspectIndex.textContent = String((state.graph?.entities || []).findIndex(item => item.id === node.id) + 1).padStart(2, "0");
+  const kind = String(node.kind || "entity");
+  const badge = el("span", "detail-kind");
+  badge.classList.add(`kind-${safeClass(kind)}`);
+  const dot = el("i");
+  badge.append(dot, document.createTextNode(nodeLabels[kind] || kind.toUpperCase()));
+    elements.inspector.append(badge, el("h3", "detail-title", displayTitle(node)), el("div", "detail-id", node.id || "ID unavailable"));
+  const rows = safeDetails(node);
+  if (node.kind === "observation") {
+    const note = el("div", "detail-explainer");
+    note.append(el("strong", "", "What this means"));
+    note.append(el("span", "", "This record represents one saved request from Caido. HTTP 200 is only the response status; it does not indicate an error or a complete parse."));
+    elements.inspector.append(note);
+  }
+  if (rows.length) {
+    const section = el("section", "detail-section");
+    section.append(el("div", "detail-section-title", "Observed properties"));
+    const dl = el("dl");
+    for (const [label, value] of rows) {
+      const row = el("div", "detail-row"); row.append(el("dt", "", label), el("dd", "", value)); dl.append(row);
+    }
+    section.append(dl); elements.inspector.append(section);
+  }
+  if (node.kind === "endpoint" && Array.isArray(node.data?.query_names) && node.data.query_names.length) {
+    const section = el("section", "detail-section");
+    section.append(el("div", "detail-section-title", "Field names"));
+    const tags = el("div", "tag-list");
+    for (const name of node.data.query_names.slice(0, 40)) tags.append(el("span", "field-tag", name));
+    section.append(tags); elements.inspector.append(section);
+  }
+  if (node.kind === "endpoint") {
+    elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Dynamic values are not stored in the graph; find the exact request in Caido using the linked capture's request ID."));
+  }
+  if (node.kind === "observation") renderProvenance(node);
+  const action = el("button", "detail-action", "Open relationships from this node →");
+  action.type = "button";
+  action.disabled = !/^[a-z][a-z0-9_]*-[a-f0-9]{64}$/.test(node.id || "");
+  action.addEventListener("click", () => { state.routeScope = false; void loadGraph([node.id]); });
+  elements.inspector.append(action);
+}
+
+function safeDetails(node) {
+  const data = node.data || {};
+  const candidates = [
+    ["Method", data.method], ["Source", data.origin], ["Path", data.path ? displayPath(data.path) : undefined],
+    ["HTTP status", data.http_status ?? data.status], ["Record source", data.observation_kind ? readableObservationKind(data.observation_kind) : undefined],
+    ["Time", data.observed_at],
+    ["Content-Type", data.content_type], ["Headers", data.header_metadata], ["Field names", data.fields],
+    ["Body size", data.body_bytes === null || data.body_bytes === undefined ? undefined : formatBytes(data.body_bytes)],
+    ["Parse state", readableParseState(data.parse_state || data.analysis_state)],
+    ["Field type", data.type], ["Location", data.location],
+    ["Context", data.context?.scenario],
+  ];
+  return candidates.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => [label, value === "unknown" ? (label === "Time" ? "not specified" : "unknown") : formatValue(value)]);
+}
+
+function readableParseState(value) {
+  return ({ complete: "complete", incomplete: "incomplete", partial_prefix: "truncated", unknown_extent: "unknown length", unknown: "unknown" })[value] || value;
+}
+
+function readableObservationKind(value) {
+  return ({ historical_capture: "Historical capture from Caido", live_capture: "Live capture" })[value] || value;
+}
+
+function renderProvenance(node) {
+  const items = (state.graph?.capture_provenance || []).filter(item => item.graph_observation_id === node.id);
+  const section = el("section", "detail-section");
+  section.append(el("div", "detail-section-title", `Caido references · ${items.length}`));
+  section.append(el("p", "detail-help", "Use the request ID to find the original record in Caido. HTTP content is not shown in this panel."));
+  if (!items.length) {
+    section.append(el("div", "provenance-item", "No local link to the source capture is attached."));
+  } else {
+    for (const item of items.slice(0, 12)) {
+      const line = el("div", "provenance-item");
+      line.append(el("b", "", `Request ID · ${item.request_id || "—"}`));
+      line.append(el("span", "", `${readableRecordSource(item.record_source)} · ${formatBytes(item.request_size)}${item.first_seen_at ? ` · ${item.first_seen_at}` : ""}`));
+      section.append(line);
+    }
+  }
+  elements.inspector.append(section);
+}
+
+function readableRecordSource(value) {
+  return ({ encrypted_local_capture: "encrypted local capture", caido_history: "Caido history", local: "local record" })[value] || value || "local record";
+}
+
+function formatValue(value) {
+  if (value === "unknown") return "unknown";
+  if (typeof value === "string") return truncate(value, 180);
+  if (Array.isArray(value)) return value.map(item => item === "unknown" ? "unknown" : String(item)).slice(0, 12).join(", ");
+  if (typeof value === "object") return "structural context";
+  return String(value);
+}
+
+function displayPath(value) {
+  return String(value || "/")
+    .replaceAll("{value}", "{parameter}")
+    .replace(/(^|\/)segment_[a-f0-9]{16}(?=\/|$)/gi, "$1{parameter}");
+}
+
+function formatBytes(value) {
+  const number = Number(value || 0);
+  return number < 1024 ? `${number} B` : `${(number / 1024).toFixed(1)} KiB`;
+}
+
+function renderInspectorEmpty() {
+  elements.inspector.replaceChildren();
+  elements.inspectIndex.textContent = "—";
+  const empty = el("div", "inspector-empty");
+  empty.append(el("span", "inspect-target", "⌖"), el("strong", "", "Nothing selected"), el("span", "", "Select a graph node to view its properties and sources."));
+  elements.inspector.append(empty);
+}
+
+function applyTransform() {
+  const scene = elements.graphScene;
+  const view = elements.graphCanvas.viewBox.baseVal;
+  scene.setAttribute("transform", `translate(${state.panX} ${state.panY}) translate(${view.width / 2} ${view.height / 2}) scale(${state.zoom}) translate(${-view.width / 2} ${-view.height / 2})`);
+  elements.zoom.textContent = `${Math.round(state.zoom * 100)}%`;
+  elements.zoomIn.disabled = state.zoom >= MAX_GRAPH_ZOOM;
+  elements.zoomOut.disabled = state.zoom <= MIN_GRAPH_ZOOM;
+}
+
+function setZoom(nextZoom, clientX, clientY) {
+  const previousZoom = state.zoom;
+  const zoom = Math.max(MIN_GRAPH_ZOOM, Math.min(MAX_GRAPH_ZOOM, nextZoom));
+  if (zoom === previousZoom) return;
+  if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+    const svg = elements.graphCanvas;
+    const ctm = svg.getScreenCTM();
+    if (ctm) {
+      const point = svg.createSVGPoint();
+      point.x = clientX;
+      point.y = clientY;
+      const anchor = point.matrixTransform(ctm.inverse());
+      const view = svg.viewBox.baseVal;
+      state.panX += (previousZoom - zoom) * (anchor.x - view.width / 2);
+      state.panY += (previousZoom - zoom) * (anchor.y - view.height / 2);
+    }
+  }
+  state.zoom = zoom;
+  applyTransform();
+}
+
+function stepZoom(direction) {
+  const step = state.zoom < 2 ? 0.25 : state.zoom < 5 ? 0.5 : 1;
+  setZoom(state.zoom + direction * step);
+}
+
+function setGraphFocus(enabled) {
+  state.graphFocus = Boolean(enabled);
+  elements.workspace.classList.toggle("graph-focus", state.graphFocus);
+  elements.focusGraph.setAttribute("aria-pressed", String(state.graphFocus));
+  elements.focusGraph.querySelector("span").textContent = state.graphFocus ? "Panels" : "Expand";
+  elements.focusGraph.title = state.graphFocus ? "Show catalog and inspector" : "Expand graph to full screen";
+  requestAnimationFrame(applyTransform);
+}
+
+function short(value, max) { const text = String(value || ""); return text.length > max ? `${text.slice(0, max - 1)}…` : text; }
+function truncate(value, max) { return short(value, max); }
+function safeClass(value) { return String(value).replace(/[^a-z0-9_-]/gi, "-"); }
+
+elements.project.addEventListener("change", () => {
+  if (elements.project.value === "__load_more__") {
+    void loadProjects(true);
+    return;
+  }
+  void selectProject(elements.project.value);
+});
+elements.filter.addEventListener("input", renderEndpointList);
+elements.loadMore.addEventListener("click", () => loadSurface(true));
+$("#refresh-button").addEventListener("click", () => loadProjects());
+elements.zoomIn.addEventListener("click", () => stepZoom(1));
+elements.zoomOut.addEventListener("click", () => stepZoom(-1));
+$("#fit-graph").addEventListener("click", () => { state.zoom = 1; state.panX = 0; state.panY = 0; applyTransform(); });
+elements.focusGraph.addEventListener("click", () => setGraphFocus(!state.graphFocus));
+elements.graphOverview?.addEventListener("click", () => selectGraphView("overview"));
+elements.graphShowAll?.addEventListener("click", () => selectGraphView("all"));
+elements.edgeLabels?.addEventListener("click", () => {
+  state.edgeLabelsVisible = !state.edgeLabelsVisible;
+  elements.edgeLabels.setAttribute("aria-pressed", String(state.edgeLabelsVisible));
+  elements.edgeLabels.setAttribute("aria-label", state.edgeLabelsVisible ? "Hide edge labels" : "Show edge labels");
+  elements.edgeLabels.title = state.edgeLabelsVisible ? "Hide edge labels" : "Show edge labels";
+  renderGraph(false);
+});
+elements.graphCanvas.addEventListener("pointerdown", event => {
+  if (event.target.closest?.(".node-group")) return;
+  event.preventDefault();
+  const view = elements.graphCanvas.viewBox.baseVal;
+  const rect = elements.graphCanvas.getBoundingClientRect();
+  state.drag = { x: event.clientX, y: event.clientY, scaleX: view.width / rect.width, scaleY: view.height / rect.height, panX: state.panX, panY: state.panY, pointer: event.pointerId };
+  elements.graphCanvas.setPointerCapture(event.pointerId);
+});
+elements.graphCanvas.addEventListener("pointermove", event => {
+  if (!state.drag || state.drag.pointer !== event.pointerId) return;
+  state.panX = state.drag.panX + (event.clientX - state.drag.x) * state.drag.scaleX;
+  state.panY = state.drag.panY + (event.clientY - state.drag.y) * state.drag.scaleY;
+  applyTransform();
+});
+elements.graphCanvas.addEventListener("pointerup", event => {
+  if (state.drag?.pointer === event.pointerId) state.drag = null;
+});
+elements.graphCanvas.addEventListener("wheel", event => {
+  if (!state.graph) return;
+  event.preventDefault();
+  setZoom(state.zoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), event.clientX, event.clientY);
+}, { passive: false });
+document.addEventListener("keydown", event => {
+  if (event.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) { event.preventDefault(); elements.filter.focus(); }
+  if (["+", "="].includes(event.key) && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) { stepZoom(1); }
+  if (event.key === "-" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) { stepZoom(-1); }
+  if (event.key === "0" && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) { state.zoom = 1; state.panX = 0; state.panY = 0; applyTransform(); }
+  if (event.key === "Escape" && state.graphFocus) setGraphFocus(false);
+});
+
+loadProjects();

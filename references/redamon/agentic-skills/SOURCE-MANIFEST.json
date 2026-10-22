@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "source_repository": "https://github.com/samugit83/redamon",
+  "source_path": "agentic/skills/",
+  "source_commit": "cf1b9e926a2af4420f5a894e7c8ddd225968c9d2",
+  "source_commit_date": "2026-10-20T00:05:41+02:00",
+  "license": "MIT",
+  "license_source_path": "LICENSE",
+  "license_sha256": "6282db0e4a6b629dff7d1a722b8b8e9a770f6c0ba71f2e283d0c47a7f46632bb",
+  "excluded_paths": [
+    "root_agent.md"
+  ],
+  "documents": [
+    {
+      "path": "active_directory/ad_cs_esc.md",
+      "sha256": "17963983448a5b91394b263466b3f8b278cea972a6999079d2016d2bd79ed157",
+      "bytes": 15960
+    },
+    {
+      "path": "active_directory/ad_kill_chain.md",
+      "sha256": "0920bae9541e3e6d4fca86e55f6f052a1f29d69ec097abd30c53b2d046a6ede6",
+      "bytes": 15609
+    },
+    {
+      "path": "active_directory/bloodhound_path_to_da.md",
+      "sha256": "74d5e47158a9cdcb5b6e71311c3002cda2c67cc01e36adb1608773d91e3ad6be",
+      "bytes": 13120
+    },
+    {
+      "path": "active_directory/kerberoasting.md",
+      "sha256": "d345ca7dcf70f74c5a261fa25eb655adf67190c1a3ac1074737a066dd0b57be5",
+      "bytes": 12734
+    },
+    {
+      "path": "api_security/openapi_swagger_exposure.md",
+      "sha256": "5b8d29c34b2a7109b35357d88176153899068d47c9eb2964341b56d4f71c7d87",
+      "bytes": 11686
+    },
+    {
+      "path": "cloud/aws.md",
+      "sha256": "e938663f6c3572d32a843b1ead6f5964c11da0cefa51b371e816afc015b85080",
+      "bytes": 15812
+    },
+    {
+      "path": "cloud/azure.md",
+      "sha256": "34d7fc351c2507680a6cbb1127a7f7984309fc7ff9d15d7ae72439f2c8623775",
+      "bytes": 15798
+    },
+    {
+      "path": "cloud/gcp.md",
+      "sha256": "1f1936a525f8d1010a7d187fa14e4acda3f6c3f184ed34138013b569529bbdb3",
+      "bytes": 15026
+    },
+    {
+      "path": "frameworks/fastapi.md",
+      "sha256": "20f19615c9fb13e388c6893880211528b47c1e5246ad9a3dded293565c7c5f2d",
+      "bytes": 11431
+    },
+    {
+      "path": "frameworks/nestjs.md",
+      "sha256": "66eeabceaee09901c0d0629c9b60705dd56948ff1d5fad916863473b46f130cc",
+      "bytes": 12552
+    },
+    {
+      "path": "frameworks/nextjs.md",
+      "sha256": "8eeae9015476a0f01b913462d1ca7bdb6f3d947aa67866774e89d2e14c438ffb",
+      "bytes": 11841
+    },
+    {
+      "path": "post_exploitation/docker_escape.md",
+      "sha256": "fdc3ad906374c85604cca1a1362af1faef54bbcc656a23ced84956a145cdf5dd",
+      "bytes": 13093
+    },
+    {
+      "path": "post_exploitation/linux_privesc.md",
+      "sha256": "27d5b59a2725e6dae3c54b93b8731b666ac0b1b3d704bc8b8e3470b078463e03",
+      "bytes": 15226
+    },
+    {
+      "path": "post_exploitation/windows_privesc.md",
+      "sha256": "22599b66e4d9cfd7d2541aab3e56bd93a6a6145293e2dfefd2da222f49bb81b9",
+      "bytes": 17337
+    },
+    {
+      "path": "protocols/graphql.md",
+      "sha256": "1952af47b70931128246f0904a9e97ccfd7863c301b38b52f6531cf0a94bd0de",
+      "bytes": 12707
+    },
+    {
+      "path": "protocols/saml_attacks.md",
+      "sha256": "ea28bc6c803b7bb8fc55995cf2c711e67250a24665af9aa600f02801e8748758",
+      "bytes": 17242
+    },
+    {
+      "path": "protocols/soap_ws_security.md",
+      "sha256": "0a427ceee5cc04ca694a65ca42b01a3467d2cc7f0f2fee6a3cbd2422b174475f",
+      "bytes": 13803
+    },
+    {
+      "path": "protocols/websocket_security.md",
+      "sha256": "faff3f7ef25831d3b15ba165b951730a7b97f8c8cfca16dd79b11a9deac06775",
+      "bytes": 11632
+    },
+    {
+      "path": "technologies/firebase_firestore.md",
+      "sha256": "ee12df703d2273cdbfaf562a392209fe0b85b913b4cd05bd98535b4e79f63b4d",
+      "bytes": 12029
+    },
+    {
+      "path": "technologies/supabase.md",
+      "sha256": "d90c57f5628fb4cb421a0a46c45a90af9ec8207e3c401540474aedca3e1dfe04",
+      "bytes": 12333
+    },
+    {
+      "path": "tooling/ffuf.md",
+      "sha256": "0096e975371e73283e8ebd787ba85c3819879c030c3331853e5d461ee0f88319",
+      "bytes": 6545
+    },
+    {
+      "path": "tooling/httpx.md",
+      "sha256": "72c4d0a5871364c52b98d9e17e16444376d7137b53e0ef640e12815f8393ee35",
+      "bytes": 6290
+    },
+    {
+      "path": "tooling/katana.md",
+      "sha256": "20210e8bea1335c5f0f14d0547bb37c599dcaf91161e529edd747033dbf70bb0",
+      "bytes": 6602
+    },
+    {
+      "path": "tooling/naabu.md",
+      "sha256": "810f8ec06c82ae41ed01fff0937f934f9eff0b92cb0fd4c64c2a3f5025850e66",
+      "bytes": 4842
+    },
+    {
+      "path": "tooling/nmap.md",
+      "sha256": "793169a4de4c3ec24525c5fac73ab660523337ea95ac1664f08a5f6fd0e53fef",
+      "bytes": 6519
+    },
+    {
+      "path": "tooling/nuclei.md",
+      "sha256": "9a8f2baf3ecb6c639bb2320294212a1a09dd0e3af7e0c18c0d0760106395c7c0",
+      "bytes": 5835
+    },
+    {
+      "path": "tooling/semgrep.md",
+      "sha256": "c5a3d9077117eab9c532ad0dc9250d3fe08de8f074b784c3ae6731cac33baa2e",
+      "bytes": 9264
+    },
+    {
+      "path": "tooling/sqlmap.md",
+      "sha256": "d83e282de1f6fc3b5888e445bd46975a377e6ca080d07f4f68afa3cb0fb52ff0",
+      "bytes": 8450
+    },
+    {
+      "path": "tooling/subfinder.md",
+      "sha256": "30d6edbfae47201bce25ad28df053aa3c039d0d7e51eb6ec75669b9777db9501",
+      "bytes": 5823
+    },
+    {
+      "path": "vulnerabilities/business_logic.md",
+      "sha256": "48652a000b95b32945ef6b205ebd38a74cb922d786527738747b50d8beca7be6",
+      "bytes": 11716
+    },
+    {
+      "path": "vulnerabilities/clickjacking.md",
+      "sha256": "c83680b07b99c87207eb9bd4dea5ae3dcf468858ead5aa0767dd89d1b727ed8b",
+      "bytes": 9931
+    },
+    {
+      "path": "vulnerabilities/cors_misconfig.md",
+      "sha256": "163198ec7905923d0402ab40a2183d378d1fdd8c4d65364a2c29a3bd056a90d3",
+      "bytes": 11487
+    },
+    {
+      "path": "vulnerabilities/crlf_injection.md",
+      "sha256": "fc371ee9a040209930154dfc6bbd345c539fc5566a3bbdab5c454b2b54c85bac",
+      "bytes": 9550
+    },
+    {
+      "path": "vulnerabilities/csrf.md",
+      "sha256": "5cd9e424a24d1ea6f49f66890f165b4c2f8804f2dd3fde4cc618ceefb37c13f4",
+      "bytes": 11565
+    },
+    {
+      "path": "vulnerabilities/host_header_injection.md",
+      "sha256": "bb24daad38c389e9449b5e118d60a573ddc0b8405b5bc11ed8c4f0d5e93fb91e",
+      "bytes": 10896
+    },
+    {
+      "path": "vulnerabilities/information_disclosure.md",
+      "sha256": "9df7d069dfaaf5db4f807c373e78c0f0f5efe205f5a383d13c013db5d679ad81",
+      "bytes": 12206
+    },
+    {
+      "path": "vulnerabilities/jwt_attacks.md",
+      "sha256": "9937b45d8e5337cc13a85ac6e5eaf5b58818bcf78862a9319618ede1d4d07951",
+      "bytes": 14597
+    },
+    {
+      "path": "vulnerabilities/ldap_injection.md",
+      "sha256": "e502c22b600f0017d3918b4e0fa95f55ecc3feed1ce6cfbd908d0b2585951501",
+      "bytes": 10030
+    },
+    {
+      "path": "vulnerabilities/oauth_oidc.md",
+      "sha256": "17a150b158aa01068c3a9f275722c616f2029b80995cfef5f4a6188fbfab64d1",
+      "bytes": 15330
+    },
+    {
+      "path": "vulnerabilities/open_redirect.md",
+      "sha256": "ed483db9433c9f4209d51641341f39965d6869230f39e55b2785d5a982c62857",
+      "bytes": 10240
+    },
+    {
+      "path": "vulnerabilities/prototype_pollution.md",
+      "sha256": "b01f1eb0b2566de8507fcc4066aecd1d46af787737598e999eb237574da7e826",
+      "bytes": 10451
+    },
+    {
+      "path": "vulnerabilities/race_conditions.md",
+      "sha256": "0321dd9ce38b1a806d0fe44b3ff39288133efce2fd3ac2a419ecf16f9bedae01",
+      "bytes": 10665
+    },
+    {
+      "path": "vulnerabilities/redos.md",
+      "sha256": "199fe93d048780a331cb21c409a66a1168caaa57c6cf604554b77ab74a499936",
+      "bytes": 9694
+    },
+    {
+      "path": "vulnerabilities/two_fa_otp_bypass.md",
+      "sha256": "e84273082efabbc59e9415be793a251b04339f5e9fad32fbb8acd12dbceb8ca9",
+      "bytes": 15466
+    },
+    {
+      "path": "vulnerabilities/web_cache_poisoning.md",
+      "sha256": "43fd8ba6bd1ab22e94ae4a60552f731102ad5d2c39c335754fe6d3344a97e5de",
+      "bytes": 12511
+    },
+    {
+      "path": "vulnerabilities/xpath_injection.md",
+      "sha256": "2f009373311dd07c29f37f4b6b433a89a190a52ad8bedefe8fa1d9f3ee3a5565",
+      "bytes": 9184
+    }
+  ]
+}

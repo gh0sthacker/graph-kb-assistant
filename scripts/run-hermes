@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/hermes-env.sh
+source "$script_dir/hermes-env.sh"
+"$script_dir/setup-hermes"
+
+hermes_bin="$bb_hermes_install_dir/.hermes/bin/hermes"
+if [ ! -x "$hermes_bin" ]; then
+  printf 'Hermes is not installed. Run %s/scripts/install-hermes first.\n' \
+    "$bb_hermes_repo_root" >&2
+  exit 1
+fi
+
+cd "$bb_hermes_repo_root"
+if [ "$#" -eq 0 ]; then
+  set -- chat
+fi
+exec "$hermes_bin" --in "$bb_hermes_repo_root" "$@"
