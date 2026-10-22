@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+data_home="${XDG_DATA_HOME:-${HOME:?HOME must be set}/.local/share}"
+env_file="${BB_ASSISTANT_NEO4J_ENV_FILE:-$data_home/bb-graph-assistant/neo4j.env}"
+requested_backend="${BB_ASSISTANT_GRAPH_BACKEND:-}"
+requested_data_home="${BB_ASSISTANT_DATA_HOME:-}"
+
+if [[ ! -f "$env_file" ]]; then
+  printf 'Neo4j runtime environment file not found: %s\n' "$env_file" >&2
+  printf 'Set BB_ASSISTANT_NEO4J_ENV_FILE or create the private runtime file described in deploy/neo4j/README.md.\n' >&2
+  exit 1
+fi
+
+set -a
+# This private, user-owned file contains local Neo4j connection settings.
+. "$env_file"
+set +a
+
+if [[ -n "$requested_backend" ]]; then
+  export BB_ASSISTANT_GRAPH_BACKEND="$requested_backend"
+fi
+if [[ -n "$requested_data_home" ]]; then
+  export BB_ASSISTANT_DATA_HOME="$requested_data_home"
+fi
+export BB_ASSISTANT_GRAPH_BACKEND="${BB_ASSISTANT_GRAPH_BACKEND:-neo4j}"
+cd "$repo_root"
+exec go run ./cmd/bb-assistant "$@"

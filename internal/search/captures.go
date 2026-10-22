@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
+	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/store"
 )
 
@@ -262,13 +263,15 @@ func searchHistorical(ctx context.Context, projectStore *store.ProjectStore, fil
 		hits, truncated, err := queryHistoricalBatch(ctx, projectStore, filters, matchQuery, limit, nil, false)
 		return hits, truncated, err
 	}
-	if _, err := os.Lstat(projectStore.BehaviorGraphPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []Hit{}, false, nil
+	if graphaccess.ConfiguredBackend() == "sqlite" {
+		if _, err := os.Lstat(projectStore.BehaviorGraphPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return []Hit{}, false, nil
+			}
+			return nil, false, errors.New("historical graph signature index is unavailable")
 		}
-		return nil, false, errors.New("historical graph signature index is unavailable")
 	}
-	reader, err := behaviorgraph.OpenReader(ctx, projectStore.BehaviorGraphPath, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
+	reader, err := graphaccess.OpenReader(ctx, projectStore)
 	if err != nil {
 		return nil, false, errors.New("historical graph signature index could not be opened")
 	}

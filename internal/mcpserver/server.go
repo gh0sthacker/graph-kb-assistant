@@ -35,7 +35,7 @@ const (
 	defaultCapturePageSize = 50
 	maxGraphSeedIDs        = 80
 	maxGraphSeedIDBytes    = 512
-	maxMCPRequestDuration  = 30 * time.Second
+	maxMCPRequestDuration  = 3 * time.Minute
 )
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)

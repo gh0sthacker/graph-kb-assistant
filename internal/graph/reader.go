@@ -125,6 +125,123 @@ func OpenReader(ctx context.Context, path, program, receiptRoot string) (*Reader
 	return reader, nil
 }
 
+// OpenReaderFromSnapshot applies the same schema, provenance, privacy, receipt,
+// and record validation used for SQLite data to a backend snapshot. The
+// temporary in-memory database is never persisted and contains sanitized graph
+// metadata only.
+func OpenReaderFromSnapshot(ctx context.Context, snapshot Record, program, receiptRoot string) (*Reader, error) {
+	if !graphDigestPattern.MatchString(program) || snapshot["program"] != program || !jsonIntegerEquals(snapshot["schema_version"], 2) {
+		return nil, errors.New("selected graph snapshot identity is invalid")
+	}
+	root, err := filepath.Abs(receiptRoot)
+	if err != nil {
+		return nil, errors.New("graph receipt directory is invalid")
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil || rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return nil, errors.New("graph receipt directory is unavailable")
+	}
+	rootResolved, err := filepath.EvalSymlinks(root)
+	if err != nil || rootResolved != root {
+		return nil, errors.New("graph receipt directory is unavailable")
+	}
+	if err := validatePublic(snapshot); err != nil {
+		return nil, errors.New("graph snapshot contains unsafe metadata")
+	}
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, errors.New("graph snapshot validation store could not be opened")
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	failed := true
+	defer func() {
+		if failed {
+			_ = db.Close()
+		}
+	}()
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+		return nil, fmt.Errorf("graph snapshot validation store could not enable references: %w", err)
+	}
+	if err := createV2Schema(ctx, db, program); err != nil {
+		return nil, err
+	}
+	for _, table := range []string{"sources", "entities", "assertions", "cards"} {
+		records, ok := snapshotRecordList(snapshot[table])
+		if !ok || len(records) > maxGraphRows {
+			return nil, errors.New("graph snapshot record list is invalid")
+		}
+		for _, record := range records {
+			if table == "entities" {
+				refs, ok := snapshotRecordList(record["source_refs"])
+				if !ok || len(refs) == 0 {
+					return nil, errors.New("graph snapshot entity provenance is invalid")
+				}
+				base := cloneRecord(record)
+				delete(base, "source_refs")
+				id, _ := base["id"].(string)
+				payload, encodeErr := canonicalJSON(base)
+				if encodeErr != nil || id == "" {
+					return nil, errors.New("graph snapshot entity is malformed")
+				}
+				if _, insertErr := db.ExecContext(ctx, "INSERT INTO entities(id,payload) VALUES(?,?)", id, string(payload)); insertErr != nil {
+					return nil, fmt.Errorf("graph snapshot entity could not be loaded: %w", insertErr)
+				}
+				for _, ref := range refs {
+					added := 0
+					if err := insertEntityRef(ctx, db, id, ref, &added); err != nil {
+						return nil, err
+					}
+				}
+				continue
+			}
+			id := ""
+			switch table {
+			case "sources":
+				id = sourceRefDigest(record)
+			case "assertions", "cards":
+				id, _ = record["id"].(string)
+			}
+			inserted := 0
+			if id == "" || insertImmutable(ctx, db, table, id, record, &inserted) != nil {
+				return nil, errors.New("graph snapshot record could not be loaded")
+			}
+		}
+	}
+	reader := &Reader{
+		db: db, program: program, receiptRoot: root,
+		entities: make(map[string]Record), assertions: make(map[string]Record),
+		sourceByPair: make(map[string]Record),
+	}
+	if err := reader.load(ctx); err != nil {
+		return nil, err
+	}
+	failed = false
+	return reader, nil
+}
+
+func snapshotRecordList(value any) ([]Record, bool) {
+	switch records := value.(type) {
+	case []Record:
+		return records, true
+	case []any:
+		result := make([]Record, 0, len(records))
+		for _, item := range records {
+			switch record := item.(type) {
+			case map[string]any:
+				result = append(result, Record(record))
+			case Record:
+				result = append(result, record)
+			default:
+				return nil, false
+			}
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
 // Close releases the read-only graph connection.
 func (r *Reader) Close() error {
 	if r == nil || r.db == nil {
@@ -135,6 +252,88 @@ func (r *Reader) Close() error {
 
 // Program returns the namespace validated from BehaviorGraph metadata.
 func (r *Reader) Program() string { return r.program }
+
+// ValidatePublicData applies the graph's private-data and secret-like value
+// checks before a validated graph snapshot crosses a storage boundary.
+func ValidatePublicData(value any) error { return validatePublic(value) }
+
+// Snapshot returns a bounded, validated representation of the complete graph
+// projection. It includes entity provenance joined from schema-v2's normalized
+// reference table so another backend can be rebuilt without reading captures.
+func (r *Reader) Snapshot() (Record, error) {
+	if r == nil || r.db == nil || r.program == "" {
+		return nil, errors.New("BehaviorGraph reader is unavailable")
+	}
+	entities := make([]Record, 0, len(r.entities))
+	for _, record := range r.entities {
+		entities = append(entities, cloneRecord(record))
+	}
+	assertions := make([]Record, 0, len(r.assertions))
+	for _, record := range r.assertions {
+		assertions = append(assertions, cloneRecord(record))
+	}
+	sort.Slice(entities, func(i, j int) bool { return entities[i]["id"].(string) < entities[j]["id"].(string) })
+	sort.Slice(assertions, func(i, j int) bool { return assertions[i]["id"].(string) < assertions[j]["id"].(string) })
+	cards := make([]Record, len(r.cards))
+	for i, record := range r.cards {
+		cards[i] = cloneRecord(record)
+	}
+	sources := make([]Record, len(r.sources))
+	for i, record := range r.sources {
+		sources[i] = cloneRecord(record)
+	}
+	snapshot := Record{
+		"schema_version": json.Number("2"),
+		"program":        r.program,
+		"sources":        sources,
+		"entities":       entities,
+		"assertions":     assertions,
+		"cards":          cards,
+	}
+	encoded, err := canonicalJSON(snapshot)
+	if err != nil || len(encoded) > maxGraphBytes {
+		return nil, errors.New("BehaviorGraph snapshot exceeds its safe size limit")
+	}
+	return snapshot, nil
+}
+
+// SnapshotDigest returns a stable digest for a complete snapshot independent
+// of map iteration or backend query order.
+func SnapshotDigest(snapshot Record) (string, error) {
+	copySnapshot := cloneRecord(snapshot)
+	for _, key := range []string{"sources", "entities", "assertions", "cards"} {
+		originals, ok := copySnapshot[key].([]Record)
+		if !ok {
+			return "", errors.New("graph snapshot records are malformed")
+		}
+		records := make([]Record, len(originals))
+		for i, original := range originals {
+			records[i] = cloneRecord(original)
+		}
+		for _, record := range records {
+			if refs, exists := record["source_refs"]; exists {
+				refRecords, ok := refs.([]Record)
+				if !ok {
+					return "", errors.New("graph snapshot provenance is malformed")
+				}
+				record["source_refs"] = sortedUniqueRefs(refRecords)
+			}
+		}
+		sort.Slice(records, func(i, j int) bool {
+			if key == "sources" {
+				return sourceRefDigest(records[i]) < sourceRefDigest(records[j])
+			}
+			return fmt.Sprint(records[i]["id"]) < fmt.Sprint(records[j]["id"])
+		})
+		copySnapshot[key] = records
+	}
+	encoded, err := canonicalJSON(copySnapshot)
+	if err != nil {
+		return "", errors.New("graph snapshot digest could not be computed")
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // ObservationIDsByVariantSignatures finds observations connected to exact
 // project-local request and/or response variant signatures. The result is
@@ -1122,6 +1321,19 @@ func validatePublic(value any) error {
 
 func walkPublic(value any, parent string) error {
 	switch node := value.(type) {
+	case Record:
+		for key, child := range node {
+			normalized := strings.ReplaceAll(strings.ToLower(key), "-", "_")
+			if _, private := privateGraphKeys[normalized]; private && child != nil && child != "" && child != "[REDACTED]" && child != "<REDACTED>" {
+				return errors.New("private graph field")
+			}
+			if (parent == "fields" || parent == "header_metadata") && (normalized == "value" || normalized == "values") && child != nil && child != "" {
+				return errors.New("private graph value")
+			}
+			if err := walkPublic(child, key); err != nil {
+				return err
+			}
+		}
 	case map[string]any:
 		for key, child := range node {
 			normalized := strings.ReplaceAll(strings.ToLower(key), "-", "_")
@@ -1136,6 +1348,12 @@ func walkPublic(value any, parent string) error {
 			}
 		}
 	case []any:
+		for _, child := range node {
+			if err := walkPublic(child, parent); err != nil {
+				return err
+			}
+		}
+	case []Record:
 		for _, child := range node {
 			if err := walkPublic(child, parent); err != nil {
 				return err

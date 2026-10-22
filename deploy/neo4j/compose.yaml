@@ -1,0 +1,14 @@
+services:
+  neo4j:
+    image: neo4j:2026.10.0
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH:?set NEO4J_AUTH in the private runtime env file}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - ${BB_ASSISTANT_NEO4J_DATA_DIR:?set the private Neo4j data directory}:/data

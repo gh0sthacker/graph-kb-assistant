@@ -24,9 +24,13 @@ Query the graph progressively: begin with an endpoint or behavior family, then e
 
 The [Positive Technologies article on graph-guided code auditing](https://habr.com/ru/companies/pt/articles/1084780/) discusses code property graphs (CPGs). Its code-specific AST/CFG/data-flow structures do not directly apply to HTTP history. The transferable idea is to use a formal graph to locate a small, relevant subgraph before asking a language model to interpret it; graph structure supplies navigation and evidence, while the model supplies a reviewable explanation.
 
-## Graph storage decision
+## Graph storage
 
-The current BehaviorGraph implementation uses project-local SQLite. Keep the graph query API independent of the storage engine. Neo4j is a candidate for the analytical graph projection because multi-hop relationship queries are central to this product; it is not yet approved as a migration target. First define representative query cards and verify evidence parity, project isolation, restart/rebuild behavior, and local operating cost. If adopted, keep capture catalog/sync checkpoints in SQLite, use a durable outbox to rebuild the Neo4j projection, and keep raw exchanges in the encrypted vault rather than in graph properties.
+Neo4j is the primary analytical graph backend. Every graph node and relationship carries the selected `project_key`; queries and writes stay within that namespace. The application reads Neo4j through the shared graph Reader, which applies the same bounded-slice and evidence validation used by the SQLite implementation.
+
+SQLite remains the durable capture catalog, Caido sync/checkpoint store, normalized BehaviorGraph recovery copy, and transactional outbox. A graph import first commits normalized records and an outbox event together in SQLite, then applies the event idempotently to Neo4j. If Neo4j is unavailable, the event remains retryable and graph sync reports `partial`. The `neo4j-backfill` command replaces one project's graph snapshot atomically and verifies a read-back digest before cutover. The encrypted vault remains the only store for historical raw exchanges; Neo4j stores sanitized structural properties and provenance links, never request or response bodies.
+
+Use `scripts/bb-assistant` to run the CLI, web UI, or MCP server with the private Neo4j runtime configuration. `scripts/bb-assistant-mcp` is the MCP-specific entry point. SQLite is still available as a migration/recovery backend by setting `BB_ASSISTANT_GRAPH_BACKEND=sqlite` for a process. A successful graph backfill or Neo4j read does not imply complete Caido history coverage: Caido reconciliation and source coverage continue to report their measured state independently.
 
 ## Boundaries
 

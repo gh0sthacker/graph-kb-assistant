@@ -11,7 +11,7 @@
 From the repository root:
 
 ```sh
-go run ./cmd/bb-assistant web-ui
+./scripts/bb-assistant web-ui
 ```
 
 Open `http://127.0.0.1:8765/`. The interface starts with an empty project list until local project data is registered. Use `--addr` only with a loopback host. Set `BB_ASSISTANT_DATA_HOME` to choose the private runtime-data directory; by default the application uses a user data directory outside the checkout.
@@ -25,6 +25,8 @@ The project exposes a stdio MCP server. The included launcher is:
 ```
 
 Configure your MCP client to run that executable from the repository checkout. Keep the data directory and any environment variables private. The default server exposes read-only local project, search, graph, and knowledge-base tools. An opt-in raw-capture tool can return sensitive request or response bytes; keep it disabled unless you need it and understand the data exposure.
+
+The launcher reads the private Neo4j settings from `$XDG_DATA_HOME/bb-graph-assistant/neo4j.env` (or `~/.local/share/bb-graph-assistant/neo4j.env`) and selects Neo4j for graph reads. Set `BB_ASSISTANT_NEO4J_ENV_FILE` to use another private file. The same launcher runs other commands, for example `./scripts/bb-assistant neo4j-check` or `./scripts/bb-assistant web-ui`.
 
 ## Use Hermes Agent
 

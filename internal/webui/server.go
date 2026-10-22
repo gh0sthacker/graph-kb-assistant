@@ -23,6 +23,7 @@ const (
 	maxGraphSeeds    = 20
 	maxGraphResponse = 8 << 20
 	requestTimeout   = 30 * time.Second
+	graphTimeout     = 3 * time.Minute
 )
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -159,7 +160,7 @@ func graphHandler(api readAPI) http.HandlerFunc {
 			}
 			seen[seed] = struct{}{}
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), graphTimeout)
 		defer cancel()
 		result, err := api.GraphExplorerSlice(ctx, projectKey, seeds)
 		writeResult(w, result, err)

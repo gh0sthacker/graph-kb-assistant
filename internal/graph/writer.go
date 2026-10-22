@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"bb-graph-assistant/internal/project"
@@ -595,11 +596,17 @@ func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID st
 	if err := validateV2Schema(ctx, db, w.program); err != nil {
 		return ImportResult{}, err
 	}
+	if err := ensureNeo4jOutboxSchema(ctx, db); err != nil {
+		return ImportResult{}, err
+	}
 	if err := validateBatchReferences(ctx, db, bundle); err != nil {
 		return ImportResult{}, err
 	}
 	result, err := insertNormalized(ctx, db, bundle, bundleID, w.program)
 	if err != nil {
+		return ImportResult{}, err
+	}
+	if err := enqueueNeo4jOutbox(ctx, db, bundle, bundleID); err != nil {
 		return ImportResult{}, err
 	}
 	if err := w.verifyReceipts(bundle["sources"].([]Record)); err != nil {
@@ -611,6 +618,199 @@ func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID st
 	transactionOpen = false
 	committed = true
 	return result, nil
+}
+
+func ensureNeo4jOutboxSchema(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS neo4j_outbox (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		bundle_id TEXT NOT NULL UNIQUE,
+		payload_sha256 TEXT NOT NULL,
+		bundle_json TEXT NOT NULL,
+		state TEXT NOT NULL CHECK(state IN ('pending','applied')) DEFAULT 'pending',
+		attempts INTEGER NOT NULL DEFAULT 0,
+		last_error_code TEXT,
+		created_at TEXT NOT NULL,
+		applied_at TEXT,
+		applied_sha256 TEXT
+	)`)
+	if err != nil {
+		return errors.New("Neo4j outbox table could not be initialized")
+	}
+	return nil
+}
+
+func enqueueNeo4jOutbox(ctx context.Context, db *sql.DB, bundle Record, bundleID string) error {
+	encoded, err := canonicalJSON(bundle)
+	if err != nil || len(encoded) == 0 || len(encoded) > MaxBundleJSONBytes {
+		return errors.New("Neo4j outbox bundle could not be encoded")
+	}
+	digest := sha256.Sum256(encoded)
+	digestText := hex.EncodeToString(digest[:])
+	if bundleID != "bundle-"+digestText {
+		return errors.New("Neo4j outbox bundle identity does not match its payload")
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT OR IGNORE INTO neo4j_outbox(bundle_id,payload_sha256,bundle_json,state,created_at) VALUES(?,?,?,'pending',?)",
+		bundleID, digestText, string(encoded), time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return errors.New("Neo4j outbox event could not be recorded")
+	}
+	var storedDigest string
+	if err := db.QueryRowContext(ctx, "SELECT payload_sha256 FROM neo4j_outbox WHERE bundle_id=?", bundleID).Scan(&storedDigest); err != nil || storedDigest != digestText {
+		return errors.New("Neo4j outbox event identity conflicts with its payload")
+	}
+	return nil
+}
+
+// OutboxItem is one checksummed sanitized graph bundle waiting for Neo4j.
+type OutboxItem struct {
+	ID         int64
+	BundleID   string
+	PayloadSHA string
+	BundleJSON []byte
+	Attempts   int64
+}
+
+// PendingOutbox returns a bounded ordered page of locally committed graph
+// events. It opens BehaviorGraph read-only and never reads capture bytes.
+func (w *Writer) PendingOutbox(ctx context.Context, limit int) ([]OutboxItem, error) {
+	if w == nil || w.graphPath == "" || limit < 1 || limit > 1000 {
+		return nil, errors.New("Neo4j outbox query is invalid")
+	}
+	info, err := os.Lstat(w.graphPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return []OutboxItem{}, nil
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("BehaviorGraph outbox database is unavailable")
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: w.graphPath}).String()+"?mode=ro")
+	if err != nil {
+		return nil, errors.New("BehaviorGraph outbox database could not be opened")
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var tableCount int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='neo4j_outbox'").Scan(&tableCount); err != nil {
+		return nil, errors.New("BehaviorGraph outbox could not be inspected")
+	}
+	if tableCount == 0 {
+		return []OutboxItem{}, nil
+	}
+	rows, err := db.QueryContext(ctx,
+		"SELECT id,bundle_id,payload_sha256,bundle_json,attempts FROM neo4j_outbox WHERE state='pending' ORDER BY id LIMIT ?", limit,
+	)
+	if err != nil {
+		return nil, errors.New("Neo4j outbox events could not be read")
+	}
+	defer rows.Close()
+	items := make([]OutboxItem, 0)
+	for rows.Next() {
+		var item OutboxItem
+		var encoded string
+		if err := rows.Scan(&item.ID, &item.BundleID, &item.PayloadSHA, &encoded, &item.Attempts); err != nil || len(encoded) == 0 || len(encoded) > MaxBundleJSONBytes {
+			return nil, errors.New("Neo4j outbox event is malformed")
+		}
+		item.BundleJSON = []byte(encoded)
+		digest := sha256.Sum256(item.BundleJSON)
+		if item.PayloadSHA != hex.EncodeToString(digest[:]) || item.BundleID != "bundle-"+item.PayloadSHA {
+			return nil, errors.New("Neo4j outbox event checksum is invalid")
+		}
+		bundle, decodeErr := DecodeBundleJSON(item.BundleJSON)
+		if decodeErr != nil || bundle["program"] != w.program || ValidatePublicData(bundle) != nil {
+			return nil, errors.New("Neo4j outbox event contains invalid graph data")
+		}
+		items = append(items, item)
+		if len(items) > limit {
+			return nil, errors.New("Neo4j outbox query exceeded its row limit")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("Neo4j outbox events could not be read")
+	}
+	return items, nil
+}
+
+// MarkOutboxApplied acknowledges one item only after its Neo4j transaction
+// committed. The payload hash remains available for local audit.
+func (w *Writer) MarkOutboxApplied(ctx context.Context, item OutboxItem) error {
+	if w == nil || w.graphPath == "" || item.ID < 1 || !graphDigestPattern.MatchString(item.PayloadSHA) || item.BundleID != "bundle-"+item.PayloadSHA {
+		return errors.New("Neo4j outbox acknowledgement is invalid")
+	}
+	digest := sha256.Sum256(item.BundleJSON)
+	if hex.EncodeToString(digest[:]) != item.PayloadSHA {
+		return errors.New("Neo4j outbox acknowledgement checksum is invalid")
+	}
+	db, created, err := w.openGraphDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if created {
+		_ = os.Remove(w.graphPath)
+		return errors.New("BehaviorGraph outbox database unexpectedly disappeared")
+	}
+	if _, err := db.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return errors.New("Neo4j outbox acknowledgement transaction could not begin")
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = db.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	result, err := db.ExecContext(ctx,
+		"UPDATE neo4j_outbox SET state='applied',applied_at=?,applied_sha256=?,last_error_code=NULL WHERE id=? AND bundle_id=? AND payload_sha256=? AND state='pending'",
+		time.Now().UTC().Format(time.RFC3339Nano), item.PayloadSHA, item.ID, item.BundleID, item.PayloadSHA,
+	)
+	if err != nil {
+		return errors.New("Neo4j outbox acknowledgement could not be recorded")
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return errors.New("Neo4j outbox acknowledgement could not be recorded")
+	}
+	if updated == 0 {
+		var state string
+		var appliedSHA sql.NullString
+		if err := db.QueryRowContext(ctx,
+			"SELECT state,applied_sha256 FROM neo4j_outbox WHERE id=? AND bundle_id=? AND payload_sha256=?",
+			item.ID, item.BundleID, item.PayloadSHA,
+		).Scan(&state, &appliedSHA); err != nil || state != "applied" || !appliedSHA.Valid || appliedSHA.String != item.PayloadSHA {
+			return errors.New("Neo4j outbox event is no longer pending")
+		}
+	} else if updated != 1 {
+		return errors.New("Neo4j outbox event is no longer pending")
+	}
+	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
+		return errors.New("Neo4j outbox acknowledgement could not be committed")
+	}
+	committed = true
+	return nil
+}
+
+// MarkOutboxFailed records a fixed error category and increments its bounded
+// retry counter without storing the underlying message or any graph payload.
+func (w *Writer) MarkOutboxFailed(ctx context.Context, item OutboxItem) error {
+	if w == nil || w.graphPath == "" || item.ID < 1 || !graphDigestPattern.MatchString(item.PayloadSHA) {
+		return errors.New("Neo4j outbox failure record is invalid")
+	}
+	db, created, err := w.openGraphDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if created {
+		_ = os.Remove(w.graphPath)
+		return errors.New("BehaviorGraph outbox database unexpectedly disappeared")
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE neo4j_outbox SET attempts=attempts+1,last_error_code='materialization_failed' WHERE id=? AND bundle_id=? AND payload_sha256=? AND state='pending'",
+		item.ID, item.BundleID, item.PayloadSHA,
+	); err != nil {
+		return errors.New("Neo4j outbox failure state could not be recorded")
+	}
+	return nil
 }
 
 func (w *Writer) openGraphDatabase(ctx context.Context) (*sql.DB, bool, error) {
@@ -1181,7 +1381,7 @@ func insertEntityRef(ctx context.Context, db *sql.DB, entityID string, ref Recor
 	if _, err := db.ExecContext(ctx,
 		"INSERT INTO entity_source_refs(entity_id,source_ref_sha256,payload) VALUES(?,?,?)", entityID, digest, string(payload),
 	); err != nil {
-		return errors.New("BehaviorGraph provenance could not be inserted")
+		return fmt.Errorf("BehaviorGraph provenance could not be inserted: %w", err)
 	}
 	*added++
 	return nil

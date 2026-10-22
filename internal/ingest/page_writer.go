@@ -18,6 +18,7 @@ import (
 
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
+	"bb-graph-assistant/internal/graphsync"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/store"
 )
@@ -576,9 +577,16 @@ func importGraphBundles(ctx context.Context, selected *store.ProjectStore, bundl
 		return errors.New("selected project graph writer could not be opened")
 	}
 	_, importErr := graphWriter.ImportBundles(ctx, bundles)
+	var syncErr error
+	if importErr == nil {
+		_, syncErr = graphsync.Drain(ctx, readOnly)
+	}
 	closeErr := readOnly.Close()
 	if importErr != nil {
 		return importErr
+	}
+	if syncErr != nil {
+		return syncErr
 	}
 	if closeErr != nil {
 		return errors.New("read-only selected project could not be closed")

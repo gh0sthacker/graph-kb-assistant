@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
+	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/store"
 )
 
@@ -52,7 +53,7 @@ func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs [
 	if err != nil || selectedReceipts != expectedReceipts {
 		return nil, errors.New("graph receipt directory is outside the selected project")
 	}
-	reader, err := behaviorgraph.OpenReader(ctx, projectStore.BehaviorGraphPath, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
+	reader, err := graphaccess.OpenReader(ctx, projectStore)
 	if err != nil {
 		return nil, err
 	}

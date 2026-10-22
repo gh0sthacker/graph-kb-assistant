@@ -23,7 +23,10 @@ data/
 /GO-MIGRATION.md
 /PROJECT-HANDOFF.md
 /PROJECT-OVERVIEW*.md
-/deploy/
+/deploy/*
+!/deploy/neo4j/
+!/deploy/neo4j/compose.yaml
+!/deploy/neo4j/README.md
 /gan-harness/
 /docs/ASSISTANT-TOOLS.md
 /docs/CAIDO-DB-AUDIT.md

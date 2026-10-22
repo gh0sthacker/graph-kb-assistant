@@ -17,10 +17,12 @@ import (
 
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
+	"bb-graph-assistant/internal/graphsync"
 	"bb-graph-assistant/internal/historyreconcile"
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/kb"
 	"bb-graph-assistant/internal/mcpserver"
+	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
 	projectaudit "bb-graph-assistant/internal/projectaudit"
 	capturesearch "bb-graph-assistant/internal/search"
@@ -39,7 +41,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|db-check|project-audit|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
+		return errors.New("usage: bb-assistant <version|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
 	}
 	switch args[0] {
 	case "version":
@@ -49,6 +51,12 @@ func run(args []string) error {
 		return dbCheck(args[1:])
 	case "project-audit":
 		return auditProject(args[1:])
+	case "neo4j-check":
+		return checkNeo4j(args[1:])
+	case "neo4j-backfill":
+		return backfillNeo4j(args[1:])
+	case "neo4j-sync":
+		return syncNeo4j(args[1:])
 	case "caido-reconcile":
 		return reconcileCaidoHistory(args[1:])
 	case "kb-validate":
@@ -78,6 +86,181 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func syncNeo4j(args []string) error {
+	flags := flag.NewFlagSet("neo4j-sync", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
+		return errors.New("usage: bb-assistant neo4j-sync --project-key <sha256> [--data-root path]")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	refs, err := project.LoadProjectRefsReadOnly(*root)
+	if err != nil {
+		return err
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if key == selectedKeys[0] {
+			copyRef := ref
+			selected = &copyRef
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("selected project is not in the local project registry")
+	}
+	projectStore, err := store.OpenProjectReadOnly(ctx, *selected, *root)
+	if err != nil {
+		return err
+	}
+	defer projectStore.Close()
+	result, syncErr := graphsync.Drain(ctx, projectStore)
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return errors.New("Neo4j sync result could not be written")
+	}
+	return syncErr
+}
+
+func checkNeo4j(args []string) error {
+	flags := flag.NewFlagSet("neo4j-check", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("usage: bb-assistant neo4j-check")
+	}
+	cfg, err := neo4jstore.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	graphStore, err := neo4jstore.New(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer graphStore.Close(context.Background())
+	if err := graphStore.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{
+		"state": "ready", "backend": "neo4j", "database": cfg.Database,
+	})
+}
+
+func backfillNeo4j(args []string) error {
+	flags := flag.NewFlagSet("neo4j-backfill", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	verifyOnly := flags.Bool("verify-only", false, "verify read-back parity without replacing the Neo4j snapshot")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
+		return errors.New("usage: bb-assistant neo4j-backfill --project-key <sha256> [--data-root path]")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	refs, err := project.LoadProjectRefsReadOnly(*root)
+	if err != nil {
+		return err
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if key == selectedKeys[0] {
+			copyRef := ref
+			selected = &copyRef
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("selected project is not in the local project registry")
+	}
+	projectStore, err := store.OpenProjectReadOnly(ctx, *selected, *root)
+	if err != nil {
+		return err
+	}
+	defer projectStore.Close()
+	reader, err := behaviorgraph.OpenReader(ctx, projectStore.BehaviorGraphPath, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
+	if err != nil {
+		return err
+	}
+	localSnapshot, err := reader.Snapshot()
+	readerCloseErr := reader.Close()
+	if err != nil {
+		return err
+	}
+	if readerCloseErr != nil {
+		return errors.New("local BehaviorGraph could not be closed after snapshot validation")
+	}
+	localDigest, err := behaviorgraph.SnapshotDigest(localSnapshot)
+	if err != nil {
+		return err
+	}
+	cfg, err := neo4jstore.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	graphStore, err := neo4jstore.New(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer graphStore.Close(context.Background())
+	counts := map[string]int{}
+	if !*verifyOnly {
+		counts, err = graphStore.ReplaceProjectSnapshot(ctx, projectStore.ProjectKey, localSnapshot)
+		if err != nil {
+			return err
+		}
+	}
+	neo4jSnapshot, err := graphStore.ReadProjectSnapshot(ctx, projectStore.ProjectKey)
+	if err != nil {
+		return err
+	}
+	neo4jDigest, err := behaviorgraph.SnapshotDigest(neo4jSnapshot)
+	if err != nil {
+		return err
+	}
+	state := "verified"
+	if neo4jDigest != localDigest {
+		state = "partial"
+	}
+	result := map[string]any{
+		"state": state, "project_key": projectStore.ProjectKey, "backend": "neo4j",
+		"snapshot_sha256": localDigest, "neo4j_snapshot_sha256": neo4jDigest,
+		"counts": counts, "coverage": "source_sync_not_assessed", "verify_only": *verifyOnly, "record_counts": map[string]int{
+			"sources":    len(localSnapshot["sources"].([]behaviorgraph.Record)),
+			"entities":   len(localSnapshot["entities"].([]behaviorgraph.Record)),
+			"assertions": len(localSnapshot["assertions"].([]behaviorgraph.Record)),
+			"cards":      len(localSnapshot["cards"].([]behaviorgraph.Record)),
+		},
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return errors.New("Neo4j backfill result could not be written")
+	}
+	if state != "verified" {
+		return errors.New("Neo4j backfill completed without snapshot parity")
+	}
+	return nil
 }
 
 func auditProject(args []string) error {
@@ -453,7 +636,11 @@ func importGraphBundle(args []string) error {
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(os.Stdout).Encode(result)
+	syncResult, syncErr := graphsync.Drain(ctx, projectStore)
+	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"import": result, "neo4j_sync": syncResult}); err != nil {
+		return errors.New("graph import result could not be written")
+	}
+	return syncErr
 }
 
 func readGraphSlice(args []string) error {
@@ -518,7 +705,7 @@ func readGraphSlice(args []string) error {
 	if selected == nil {
 		return errors.New("selected project is not in the local project registry")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	projectStore, err := store.OpenProjectReadOnly(ctx, *selected, *root)
 	if err != nil {
