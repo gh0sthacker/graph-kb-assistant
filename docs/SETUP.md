@@ -26,6 +26,20 @@ The project exposes a stdio MCP server. The included launcher is:
 
 Configure your MCP client to run that executable from the repository checkout. Keep the data directory and any environment variables private. The default server exposes read-only local project, search, graph, and knowledge-base tools. An opt-in raw-capture tool can return sensitive request or response bytes; keep it disabled unless you need it and understand the data exposure.
 
+## Use Hermes Agent
+
+Hermes is the supported runtime harness for the local assistant. Install it and check the configured MCP server with the project launchers:
+
+```sh
+./scripts/install-hermes
+./scripts/run-hermes mcp test bb_assistant
+./scripts/run-hermes
+```
+
+The generated profile is stored outside the checkout with private file permissions. It enables only the local MCP server, skills, and clarification tools, and allowlists the eight read-only `bb_*` tools. MCP resources and prompts are disabled; terminal, file, browser, web, computer-use, and code-execution toolsets are not enabled for this profile. `mcp test` should discover exactly eight tools, including no raw-capture body tool.
+
+The harness and model provider are separate choices. Hermes can verify MCP connectivity before a provider is selected; configure one with `./scripts/run-hermes model` when ready. Review that provider's data handling before sending real capture content. The current workflow has not verified model-backed hypothesis generation or validation.
+
 ## Connect Caido
 
 Caido operations use the Caido MCP interface. Select one Caido project and pass its identity explicitly to the CLI. For history import and reconciliation, provide the verified Caido MCP executable, its expected SHA-256, and the private token file using the command flags shown by the relevant CLI subcommand. Never store the token file or its contents in this repository.
