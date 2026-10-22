@@ -6,7 +6,6 @@
 
 
 
-
 ```sh
 cd graph-kb-assistant
 go test ./...
