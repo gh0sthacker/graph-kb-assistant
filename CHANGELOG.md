@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Update GitHub Actions to Node 24 compatible releases.
 - Update `golang.org/x/net` to v0.61.0, including the upstream HTML parser denial-of-service fix.
 
 ## 0.1.0-alpha — 2026-10-22
