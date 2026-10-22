@@ -38,8 +38,10 @@ class HermesSetupTests(unittest.TestCase):
         env = os.environ.copy()
         env.update({
             "BB_ASSISTANT_DATA_HOME": str(self.data),
+            "BB_ASSISTANT_KB_INDEX": str(self.data / "kb" / "index.sqlite3"),
             "BB_ASSISTANT_HERMES_HOME": str(self.profile),
             "BB_ASSISTANT_HERMES_INSTALL_DIR": str(self.install),
+            "CAIDO_ACCESS_TOKEN": "synthetic-should-not-be-forwarded",
         })
         return env
 
@@ -72,6 +74,20 @@ class HermesSetupTests(unittest.TestCase):
         self.assertIn("prompts: false", mcp_block)
         self.assertIn("supports_parallel_tool_calls: false", mcp_block)
         self.assertIn("trust: untrusted", mcp_block)
+        env_block = (
+            mcp_block.split("\n    env:\n", 1)[1]
+            .split("\n    supports_parallel_tool_calls:", 1)[0]
+        )
+        self.assertIn(f'BB_ASSISTANT_DATA_HOME: "{self.data}"', env_block)
+        self.assertIn(
+            f'BB_ASSISTANT_KB_INDEX: "{self.data / "kb" / "index.sqlite3"}"',
+            env_block,
+        )
+        self.assertEqual(
+            re.findall(r"^      ([A-Z_]+):", env_block, flags=re.MULTILINE),
+            ["BB_ASSISTANT_DATA_HOME", "BB_ASSISTANT_KB_INDEX"],
+        )
+        self.assertNotIn("synthetic-should-not-be-forwarded", config)
         command_line = next(line.strip() for line in mcp_block.splitlines() if line.strip().startswith("command:"))
         command = json.loads(command_line.split(":", 1)[1].strip())
         self.assertEqual(Path(command), ROOT / "scripts" / "bb-assistant-mcp")

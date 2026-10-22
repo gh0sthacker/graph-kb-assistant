@@ -4,7 +4,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/hermes-env.sh
 source "$script_dir/hermes-env.sh"
 
-python3 - "$bb_hermes_repo_root" "$bb_hermes_profile_home" "$bb_hermes_install_dir" <<'PY'
+python3 - "$bb_hermes_repo_root" "$bb_hermes_profile_home" "$bb_hermes_install_dir" \
+    "$bb_hermes_data_root" "${BB_ASSISTANT_KB_INDEX:-}" <<'PY'
 import json
 import os
 import sys
@@ -13,6 +14,13 @@ from pathlib import Path
 repo = Path(sys.argv[1]).resolve()
 home = Path(sys.argv[2]).expanduser().resolve()
 install = Path(sys.argv[3]).expanduser().resolve()
+data_root = Path(sys.argv[4]).expanduser().resolve()
+kb_index = sys.argv[5].strip()
+if kb_index:
+    kb_index = Path(kb_index).expanduser()
+    if not kb_index.is_absolute():
+        kb_index = repo / kb_index
+    kb_index = Path(os.path.abspath(kb_index))
 for name, path in (("Hermes profile", home), ("Hermes installation", install)):
     try:
         path.relative_to(repo)
@@ -62,7 +70,9 @@ lines = [
     "  bb_assistant:",
     f"    command: {quote(repo / 'scripts' / 'bb-assistant-mcp')}",
     "    args: []",
-    "    env: {}",
+    "    env:",
+    f"      BB_ASSISTANT_DATA_HOME: {quote(data_root)}",
+    *([f"      BB_ASSISTANT_KB_INDEX: {quote(kb_index)}"] if kb_index else []),
     "    supports_parallel_tool_calls: false",
     "    trust: untrusted",
     "    tools:",
