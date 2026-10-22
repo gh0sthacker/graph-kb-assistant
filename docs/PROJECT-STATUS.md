@@ -12,7 +12,9 @@ This repository is an early public alpha. The following boundaries are deliberat
 
 ## Latest local integration checks (2026-10-22)
 
-- The Go runtime opened the working capture and graph stores read-only and reported both schemas compatible. Caido enumeration reached its terminal cursor with the current local IDs matched; coverage remains `PARTIAL` because the source provides no stable snapshot token or expected total.
+- The Go runtime opened the working capture and graph stores read-only and reported capture schema v5 and BehaviorGraph schema v2 compatible. The project audit counted 377 captures, all 377 search-indexed and graph-mapped; parsing is complete for 143, partial for 234, and unparsed for 0.
+- A bounded read-only Caido reconciliation enumerated 377 IDs in 8 pages. All 377 matched the local history, with no Caido-only, local-only, or duplicate IDs. Coverage remains `PARTIAL`: Caido provides no stable snapshot token or expected total, so a terminal cursor cannot prove a point-in-time complete history.
+- One bounded live-tail cycle completed one page with `idle` and 0 new requests. The live index remains empty. This verifies the no-new-data path only; ingestion of new traffic and a persistent background worker are not verified by this check.
 - The imported KB snapshot passed validation and SQLite integrity checks. Go search returned provenance hashes and spans from the Python-built FTS5 index; the local MCP `bb_kb_stats` tool reported the same `PARTIAL` coverage.
 - Hermes discovered the eight configured read-only tools. Its model provider is not configured, so the model-backed analysis and hypothesis cycle has not been verified.
 
