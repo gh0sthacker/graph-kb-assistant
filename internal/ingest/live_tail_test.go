@@ -85,6 +85,19 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("live full-text row count = %d, want 1 after replay", count)
 	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM captures").Scan(&count); err != nil {
+		t.Fatalf("count historical captures: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("historical capture count = %d, want 0 for live-tail ingestion", count)
+	}
+	vaultEntries, err := os.ReadDir(projectStore.VaultDirectory)
+	if err != nil {
+		t.Fatalf("list project vault: %v", err)
+	}
+	if len(vaultEntries) != 0 {
+		t.Fatalf("live-tail created %d vault files; want none", len(vaultEntries))
+	}
 	var checkpointState string
 	if err := projectStore.Database.DB().QueryRowContext(ctx,
 		"SELECT state FROM live_sync_state WHERE source_key=?", liveTailSourceKey,
