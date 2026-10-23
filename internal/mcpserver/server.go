@@ -664,39 +664,27 @@ func (t *Tools) searchCaptures(ctx context.Context, args searchCapturesArgs) (ma
 }
 
 type surfaceMapArgs struct {
-	ProjectKey string                       `json:"project_key"`
-	After      *capturesearch.SurfaceCursor `json:"after,omitempty"`
-	Limit      *int                         `json:"limit,omitempty"`
+	ProjectKey string `json:"project_key"`
+	Filter     string `json:"filter,omitempty"`
+	Cursor     string `json:"cursor,omitempty"`
+	Limit      *int   `json:"limit,omitempty"`
 }
 
 func (t *Tools) surfaceMap(ctx context.Context, args surfaceMapArgs) (map[string]any, error) {
 	if !projectKeyPattern.MatchString(args.ProjectKey) {
 		return nil, errors.New("project key has an invalid format")
 	}
-	ref, ok := t.projectsByKey[args.ProjectKey]
-	if !ok {
-		return nil, errors.New("selected project is not in the local project catalog")
-	}
-	limit := capturesearch.DefaultSurfaceScanSize
+	limit := capturesearch.DefaultSurfaceCatalogLimit
 	if args.Limit != nil {
 		limit = *args.Limit
 	}
-	projectStore, err := store.OpenProjectReadOnly(ctx, ref, t.root)
+	result, err := t.GraphExplorerSurface(ctx, appquery.SurfaceRequest{
+		ProjectKey: args.ProjectKey, Filter: args.Filter, Cursor: args.Cursor, Limit: limit,
+	})
 	if err != nil {
-		return nil, errors.New("selected project is not available for surface mapping")
+		return nil, err
 	}
-	defer projectStore.Close()
-	result, err := capturesearch.ReadSurfaceMap(ctx, projectStore, args.After, limit)
-	if err != nil {
-		return nil, errors.New("surface map arguments are invalid or the local index is unavailable")
-	}
-	output := map[string]any{
-		"project_key": result.ProjectKey, "endpoints": result.Endpoints,
-		"truncated": result.Truncated, "next_after": result.NextAfter,
-		"coverage_state": result.Coverage, "coverage_gaps": result.CoverageGaps,
-		"surface_map_version": "structural-capture-index-v1",
-		"coverage_note":       "Counts and field names describe only this bounded row scan; endpoint entries can recur on later pages. This is not a complete application, browser, JavaScript, or Caido-history inventory.",
-	}
+	output := result.WireMap()
 	encoded, err := json.Marshal(output)
 	if err != nil || len(encoded) > maxToolResultBytes {
 		return nil, errors.New("surface map exceeds the output limit")
@@ -917,15 +905,13 @@ func toolCatalog(includeRaw bool) []toolSpec {
 			}, "project_keys"), Annotations: readOnly(),
 		},
 		{
-			Name: "bb_surface_map", Title: "Map endpoints in one local project",
-			Description: "Scan a bounded row window from one explicitly selected local project's historical and live structural indexes. Returns endpoint groups with page-scoped observation/parse counts, sampled field/header names, and current graph seed IDs; an endpoint may recur on later pages. Continue with next_after while truncated is true. Caido history, browser, and JavaScript coverage remain partial; no request/response values are returned.",
+			Name: "bb_surface_map", Title: "Search local operations in one project",
+			Description: "Search and page exact host:port, method, and route operations from one explicitly selected local project. Counts cover deduplicated records in the local structural indexes, not total Caido history. The signed cursor is bound to the project, filter, and index fingerprint; reload the first page if it is stale. Field/header names and graph seed IDs are bounded samples. Browser and JavaScript coverage remain partial; request/response values are not returned.",
 			InputSchema: objectSchema(map[string]any{
 				"project_key": projectString,
-				"after": objectSchema(map[string]any{
-					"historical_row_id": map[string]any{"type": "integer", "minimum": 0},
-					"live_row_id":       map[string]any{"type": "integer", "minimum": 0},
-				}, "historical_row_id", "live_row_id"),
-				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": capturesearch.MaximumSurfaceScanSize},
+				"filter":      stringSchema(capturesearch.MaximumSurfaceFilterBytes, nil),
+				"cursor":      stringSchema(appquery.MaximumSurfaceCursorBytes, map[string]any{"minLength": 1}),
+				"limit":       map[string]any{"type": "integer", "minimum": 1, "maximum": capturesearch.MaximumSurfaceCatalogLimit},
 			}, "project_key"), Annotations: readOnly(),
 		},
 		{

@@ -6,6 +6,7 @@ const MIN_GRAPH_ZOOM = 0.35;
 const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant"];
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
+  surfaceFilter: "", surfaceDebounce: null, totalOperations: 0,
   graph: null, selectedEndpoint: null, selectedNode: null, focusedNodeId: null, graphFocus: false, loadingSurface: false,
   surfaceRequestId: 0, surfaceAbort: null,
   graphSeeds: [], graphView: "direct", graphHistory: [], graphRequestId: 0, graphAbort: null,
@@ -158,6 +159,8 @@ function clearProjectView() {
   state.projectCursor = null;
   state.endpoints = [];
   state.endpointCursor = null;
+  state.surfaceFilter = elements.filter.value.trim();
+  state.totalOperations = 0;
   state.surfaceGaps = [];
   state.graph = null;
   state.selectedEndpoint = null;
@@ -184,6 +187,8 @@ async function selectProject(projectKey) {
   state.projectKey = projectKey;
   state.endpoints = [];
   state.endpointCursor = null;
+  state.surfaceFilter = elements.filter.value.trim();
+  state.totalOperations = 0;
   state.surfaceGaps = [];
   state.graph = null;
   state.selectedEndpoint = null;
@@ -215,6 +220,8 @@ function resetSurfaceRequest() {
   state.surfaceRequestId++;
   state.surfaceAbort?.abort();
   state.surfaceAbort = null;
+  clearTimeout(state.surfaceDebounce);
+  state.surfaceDebounce = null;
   state.loadingSurface = false;
   elements.loadMore.disabled = false;
   elements.loadMore.replaceChildren(document.createTextNode("Load more "), el("span", "", "↓"));
@@ -223,48 +230,70 @@ function resetSurfaceRequest() {
 async function loadSurface(append) {
   if (!state.projectKey || state.loadingSurface) return;
   const projectKey = state.projectKey;
+  const filter = state.surfaceFilter;
   const requestId = ++state.surfaceRequestId;
   const controller = new AbortController();
   state.surfaceAbort = controller;
   state.loadingSurface = true;
   elements.loadMore.disabled = true;
   elements.loadMore.textContent = "Loading…";
-  const query = new URLSearchParams({ project_key: projectKey, limit: "40" });
-  if (append && state.endpointCursor) {
-    query.set("after_history", String(state.endpointCursor.historical_row_id));
-    query.set("after_live", String(state.endpointCursor.live_row_id));
-  }
+  const query = new URLSearchParams({ project_key: projectKey, filter, limit: "40" });
+  if (append && state.endpointCursor) query.set("cursor", state.endpointCursor);
   try {
     const data = await getJSON(`/api/surface?${query}`, controller.signal);
-    if (requestId !== state.surfaceRequestId || state.projectKey !== projectKey || controller.signal.aborted) return;
-    const rows = Array.isArray(data.endpoints) ? data.endpoints : [];
-    const combined = append ? [...state.endpoints, ...rows] : rows;
-    state.endpoints = mergeEndpoints(combined);
-    state.endpointCursor = data.next_after || null;
+    if (requestId !== state.surfaceRequestId || state.projectKey !== projectKey || state.surfaceFilter !== filter || controller.signal.aborted) return;
+    const rows = Array.isArray(data.operations) ? data.operations : [];
+    state.endpoints = append ? [...state.endpoints, ...rows] : rows;
+    state.endpointCursor = data.next_cursor || null;
+    state.totalOperations = Number(data.total_operations || 0);
     state.surfaceGaps = Array.isArray(data.coverage_gaps) ? data.coverage_gaps : [];
     state.coverageState = data.coverage_state || "partial";
     renderEndpointList();
-    elements.endpointCount.textContent = state.endpoints.length;
-    elements.surfaceFoot.textContent = data.truncated ? "Page limit reached · more available" : "Local sample · coverage is partial";
+    elements.endpointCount.textContent = state.totalOperations;
+    elements.surfaceFoot.textContent = data.truncated ? `${state.totalOperations} matching operations · more available` : `${state.totalOperations} local operations · Caido coverage is partial`;
     elements.coverage.textContent = `Coverage: ${String(state.coverageState).toUpperCase()}`;
     elements.updated.textContent = `Updated ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
     if (!state.endpoints.length) {
-      renderEmpty("No endpoints in the local index", "Import HTTP history for the selected project, then refresh.");
-      elements.endpointList.replaceChildren(emptyList("Index is empty", "The project opened, but it has no local structural records yet."));
+      renderEmpty(filter ? "No matching operations" : "No operations in the local index", filter ? "Change the search text to see other host, method, and route combinations." : "Import HTTP history for the selected project, then refresh.");
+      elements.endpointList.replaceChildren(emptyList(filter ? "No matches" : "Index is empty", filter ? "No indexed operation matches this filter." : "The project opened, but it has no local structural records yet."));
       setStatus("No indexed requests");
     } else if (!append || !state.selectedEndpoint) {
       renderEmpty("Select an endpoint", "Choose a route on the left. The graph uses linked observations and available sources.");
       if (!append && !state.selectedEndpoint) setStatus("Select an endpoint");
     }
   } catch (error) {
-    if (requestId !== state.surfaceRequestId || state.projectKey !== projectKey || error.name === "AbortError") return;
+    if (requestId !== state.surfaceRequestId || state.projectKey !== projectKey || state.surfaceFilter !== filter || error.name === "AbortError") return;
+    if (append && error.status === 409) {
+      state.endpointCursor = null;
+      state.endpoints = [];
+      state.totalOperations = 0;
+      state.selectedEndpoint = null;
+      state.graph = null;
+      state.selectedNode = null;
+      state.focusedNodeId = null;
+      state.routeScope = false;
+      resetGraphNavigation();
+      state.loadingSurface = false;
+      state.surfaceRequestId++;
+      elements.endpointCount.textContent = "0";
+      elements.graphTitle.textContent = "Observed behavior relationships";
+      elements.graphSubtitle.textContent = "Select an operation to open its graph neighborhood.";
+      elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
+      elements.captureSelect.replaceChildren();
+      renderInspectorEmpty();
+      renderEndpointList();
+      renderEmpty("Local index changed", "Reloading the first page for the current operation filter.");
+      setStatus("Refreshing operation catalog", "loading");
+      void loadSurface(false);
+      return;
+    }
     if (!append) {
       elements.endpointList.replaceChildren(emptyList("Could not read the index", error.message));
       renderEmpty("Project data is unavailable", "Check the schema version, local database integrity, and BehaviorGraph availability.");
     }
     setStatus("Local index read error", "error");
   } finally {
-    if (requestId === state.surfaceRequestId && state.projectKey === projectKey) {
+    if (requestId === state.surfaceRequestId && state.projectKey === projectKey && state.surfaceFilter === filter) {
       state.surfaceAbort = null;
       state.loadingSurface = false;
       elements.loadMore.disabled = false;
@@ -274,35 +303,11 @@ async function loadSurface(append) {
   }
 }
 
-function mergeEndpoints(rows) {
-  const map = new Map();
-  for (const row of rows) {
-    const key = [row.host, row.port, row.method, row.route].join("\u0000");
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, { ...row, field_names: [...(row.field_names || [])], header_names: [...(row.header_names || [])], sampled_graph_seed_ids: [...(row.sampled_graph_seed_ids || [])] });
-      continue;
-    }
-    existing.observation_count += Number(row.observation_count || 0);
-    existing.complete_parse_count += Number(row.complete_parse_count || 0);
-    existing.partial_parse_count += Number(row.partial_parse_count || 0);
-    existing.unparsed_count += Number(row.unparsed_count || 0);
-    existing.graph_mapped_observation_count += Number(row.graph_mapped_observation_count || 0);
-    existing.field_names = unique([...existing.field_names, ...(row.field_names || [])]);
-    existing.header_names = unique([...existing.header_names, ...(row.header_names || [])]);
-    existing.sampled_graph_seed_ids = unique([...existing.sampled_graph_seed_ids, ...(row.sampled_graph_seed_ids || [])]).slice(0, 20);
-  }
-  return [...map.values()].sort((a, b) => `${a.host}${a.route}${a.method}`.localeCompare(`${b.host}${b.route}${b.method}`));
-}
-
-function unique(items) { return [...new Set(items)]; }
-
 function renderEndpointList() {
-  const filter = elements.filter.value.trim().toLowerCase();
-  const rows = state.endpoints.filter(item => `${item.host} ${item.route} ${displayPath(item.route)} ${item.method}`.toLowerCase().includes(filter));
+  const rows = state.endpoints;
   elements.endpointList.replaceChildren();
   if (!rows.length) {
-    elements.endpointList.append(emptyList(state.endpoints.length ? "No matches" : "Surface not loaded", state.endpoints.length ? "Adjust the filter." : "Discovered routes will appear here."));
+    elements.endpointList.append(emptyList(state.surfaceFilter ? "No matches" : "Surface not loaded", state.surfaceFilter ? "Adjust the filter." : "Discovered routes will appear here."));
   }
   for (const endpoint of rows) {
     const key = endpointKey(endpoint);
@@ -324,7 +329,7 @@ function renderEndpointList() {
     button.addEventListener("click", () => openEndpoint(endpoint));
     elements.endpointList.append(button);
   }
-  elements.endpointCount.textContent = state.endpoints.length || "0";
+  elements.endpointCount.textContent = state.totalOperations || "0";
   elements.loadMore.hidden = !state.endpointCursor;
 }
 
@@ -1020,7 +1025,34 @@ elements.project.addEventListener("change", () => {
   }
   void selectProject(elements.project.value);
 });
-elements.filter.addEventListener("input", renderEndpointList);
+elements.filter.addEventListener("input", () => {
+  const filter = elements.filter.value.trim();
+  if (filter === state.surfaceFilter) return;
+  state.surfaceFilter = filter;
+  resetSurfaceRequest();
+  state.endpoints = [];
+  state.endpointCursor = null;
+  state.totalOperations = 0;
+  state.selectedEndpoint = null;
+  state.graph = null;
+  state.selectedNode = null;
+  state.focusedNodeId = null;
+  resetGraphNavigation();
+  elements.graphTitle.textContent = "Observed behavior relationships";
+  elements.graphSubtitle.textContent = "Select an operation to open its graph neighborhood.";
+  elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
+  renderInspectorEmpty();
+  renderEmpty("Searching local operations", "Results are filtered by host, method, and route.");
+  elements.surfaceFoot.textContent = "Updating local operation filter…";
+  elements.endpointCount.textContent = "0";
+  renderEndpointList();
+  if (!state.projectKey) return;
+  setStatus("Searching local operations", "loading");
+  state.surfaceDebounce = setTimeout(() => {
+    state.surfaceDebounce = null;
+    void loadSurface(false);
+  }, 250);
+});
 elements.loadMore.addEventListener("click", () => loadSurface(true));
 elements.captureSelect.addEventListener("change", () => { void loadGraph([elements.captureSelect.value], { focusNodeId: elements.captureSelect.value, remember: true }); });
 elements.graphBack.addEventListener("click", () => {

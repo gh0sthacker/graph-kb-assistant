@@ -97,6 +97,7 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 	gotNames := make([]string, 0, len(listedTools))
 	neighborhoodAdvertised := false
 	sliceContinuationAdvertised := false
+	surfaceCatalogAdvertised := false
 	for _, value := range listedTools {
 		spec, ok := value.(map[string]any)
 		if !ok {
@@ -147,13 +148,32 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 				t.Errorf("full graph continuation cursor is not an exact bounded token: %#v", cursor)
 			}
 		}
+		if name == "bb_surface_map" {
+			surfaceCatalogAdvertised = true
+			properties, _ := schema["properties"].(map[string]any)
+			cursor, _ := properties["cursor"].(map[string]any)
+			filter, _ := properties["filter"].(map[string]any)
+			limit, _ := properties["limit"].(map[string]any)
+			if cursor["type"] != "string" || cursor["maxLength"] != float64(16<<10) || cursor["minLength"] != float64(1) {
+				t.Errorf("surface cursor is not bounded: %#v", cursor)
+			}
+			if filter["type"] != "string" || filter["maxLength"] != float64(256) {
+				t.Errorf("surface filter is not bounded: %#v", filter)
+			}
+			if limit["maximum"] != float64(100) {
+				t.Errorf("surface page limit is not 100: %#v", limit)
+			}
+			if _, legacy := properties["after"]; legacy {
+				t.Errorf("surface tool still exposes row-based cursors: %#v", properties["after"])
+			}
+		}
 	}
 	sort.Strings(gotNames)
 	if len(listedTools) != len(wantNames) || len(gotNames) != len(wantNames) {
 		t.Fatalf("advertised %d tools %v; want exactly %d %v", len(listedTools), gotNames, len(wantNames), wantNames)
 	}
-	if !sliceContinuationAdvertised {
-		t.Fatal("bounded full graph continuation cursor was not advertised")
+	if !sliceContinuationAdvertised || !surfaceCatalogAdvertised {
+		t.Fatal("bounded full graph or surface catalog continuation was not advertised")
 	}
 	for i := range wantNames {
 		if gotNames[i] != wantNames[i] {

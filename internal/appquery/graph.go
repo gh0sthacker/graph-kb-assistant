@@ -5,6 +5,7 @@ package appquery
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -77,6 +78,7 @@ const (
 	ErrorProjectNotRegistered ErrorCode = "project_not_registered"
 	ErrorProjectUnavailable   ErrorCode = "project_unavailable"
 	ErrorGraphUnavailable     ErrorCode = "graph_unavailable"
+	ErrorSurfaceUnavailable   ErrorCode = "surface_unavailable"
 	ErrorOutputTooLarge       ErrorCode = "output_too_large"
 	ErrorStaleCursor          ErrorCode = "stale_cursor"
 	ErrorCursorUnsupported    ErrorCode = "cursor_unsupported"
@@ -102,6 +104,8 @@ func (e *QueryError) Error() string {
 		return "selected project is not registered"
 	case ErrorProjectUnavailable:
 		return "selected project is unavailable"
+	case ErrorSurfaceUnavailable:
+		return "local surface catalog is unavailable"
 	case ErrorOutputTooLarge:
 		return "graph result exceeds the output limit"
 	case ErrorStaleCursor:
@@ -120,6 +124,7 @@ type Service struct {
 	projects    map[string]project.CaidoProjectRef
 	graph       *graphaccess.Service
 	fullCursors *fullCursorStore
+	surfaceKey  []byte
 }
 
 var (
@@ -146,7 +151,11 @@ func NewGraphQueryService(dataRoot string, refs []project.CaidoProjectRef, graph
 		}
 		projects[key] = ref
 	}
-	return &Service{dataRoot: dataRoot, projects: projects, graph: graph, fullCursors: newFullCursorStore()}, nil
+	surfaceKey := make([]byte, 32)
+	if _, err := rand.Read(surfaceKey); err != nil {
+		return nil, errors.New("surface cursor signing key could not be initialized")
+	}
+	return &Service{dataRoot: dataRoot, projects: projects, graph: graph, fullCursors: newFullCursorStore(), surfaceKey: surfaceKey}, nil
 }
 
 func (s *Service) Close(ctx context.Context) error {

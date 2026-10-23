@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	"bb-graph-assistant/internal/appquery"
-	capturesearch "bb-graph-assistant/internal/search"
 )
 
 // GraphExplorerProjects returns one page of project identities from the local
@@ -57,13 +56,12 @@ func (t *Tools) GraphExplorerProjects(ctx context.Context, afterProjectKey strin
 	}, nil
 }
 
-// GraphExplorerSurface reads one bounded page from exactly one selected
-// project's local structural index.
-func (t *Tools) GraphExplorerSurface(ctx context.Context, projectKey string, after *capturesearch.SurfaceCursor, limit int) (map[string]any, error) {
-	if limit < 1 || limit > capturesearch.MaximumSurfaceScanSize {
-		return nil, errors.New("surface limit is outside the supported range")
+// GraphExplorerSurface reads a page from the shared, typed local operation catalog.
+func (t *Tools) GraphExplorerSurface(ctx context.Context, request appquery.SurfaceRequest) (appquery.SurfaceResult, error) {
+	if t.graphQueries == nil {
+		return appquery.SurfaceResult{}, &appquery.QueryError{Code: appquery.ErrorGraphUnavailable, Message: "surface query service is unavailable"}
 	}
-	return t.surfaceMap(ctx, surfaceMapArgs{ProjectKey: projectKey, After: after, Limit: intPointer(limit)})
+	return t.graphQueries.Surface(ctx, request)
 }
 
 // GraphExplorerSlice returns a bounded, source-redacted graph neighborhood

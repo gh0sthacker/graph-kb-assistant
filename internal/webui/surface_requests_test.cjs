@@ -60,7 +60,7 @@ function endpoint(host, route = "/route", count = 1) {
 }
 
 function page(host, extra = {}) {
-  return { endpoints: [endpoint(host)], coverage_state: "partial", coverage_gaps: [`${host}-gap`], ...extra };
+  return { operations: [endpoint(host)], total_operations: 1, coverage_state: "partial", coverage_gaps: [`${host}-gap`], ...extra };
 }
 
 function snapshot(value) { return JSON.parse(JSON.stringify(value)); }
@@ -209,7 +209,7 @@ test("project switch aborts A, starts B immediately, and keeps B loading when A 
   assert.equal(app.requests.length, 2, "the pending A request must not suppress B");
   assert.equal(app.requests[0].signal.aborted, true);
   assert.equal(app.requests[1].url.searchParams.get("project_key"), "B");
-  app.requests[0].resolve(page("a.test", { next_after: { historical_row_id: 10, live_row_id: 1 } }));
+  app.requests[0].resolve(page("a.test", { next_cursor: "cursor-a" }));
   await pendingA;
 
   assert.deepEqual(snapshot(app.state.endpoints), []);
@@ -230,8 +230,8 @@ test("late A success cannot overwrite an already loaded B page or its coverage",
   const pendingA = app.selectProject("A");
   const pendingB = app.selectProject("B");
   assert.equal(app.requests.length, 2);
-  const cursorB = { historical_row_id: 22, live_row_id: 3 };
-  app.requests[1].resolve(page("b.test", { next_after: cursorB, coverage_state: "complete", truncated: true }));
+  const cursorB = "cursor-b";
+  app.requests[1].resolve(page("b.test", { next_cursor: cursorB, total_operations: 4, coverage_state: "complete", truncated: true }));
   await pendingB;
   const statusB = app.elements.status.textContent;
   const updatedB = app.elements.updated.textContent;
@@ -239,11 +239,11 @@ test("late A success cannot overwrite an already loaded B page or its coverage",
   await pendingA;
 
   assert.equal(app.state.endpoints[0].host, "b.test");
-  assert.deepEqual(snapshot(app.state.endpointCursor), cursorB);
+  assert.equal(app.state.endpointCursor, cursorB);
   assert.deepEqual(snapshot(app.state.surfaceGaps), ["b.test-gap"]);
   assert.equal(app.state.coverageState, "complete");
   assert.equal(app.elements.coverage.textContent, "Coverage: COMPLETE");
-  assert.equal(app.elements.surfaceFoot.textContent, "Page limit reached · more available");
+  assert.equal(app.elements.surfaceFoot.textContent, "4 matching operations · more available");
   assert.equal(app.elements.status.textContent, statusB);
   assert.equal(app.elements.updated.textContent, updatedB);
   assert.equal(app.elements.loadMore.hidden, false);
@@ -274,7 +274,7 @@ test("clearing a project aborts and invalidates its pending surface request", as
   assert.equal(app.state.loadingSurface, false);
   assert.equal(app.elements.loadMore.disabled, false);
   const clearedTitle = app.elements.emptyTitle.textContent;
-  app.requests[0].resolve(page("a.test", { next_after: { historical_row_id: 1, live_row_id: 1 } }));
+  app.requests[0].resolve(page("a.test", { next_cursor: "cursor-a" }));
   await pending;
   assert.equal(app.state.projectKey, "");
   assert.deepEqual(snapshot(app.state.endpoints), []);
@@ -298,41 +298,92 @@ test("stale request rejection cannot report an error or clear the current loadin
   await pendingB;
 });
 
-test("pagination keeps the current cursor, prevents duplicate loads, and merges endpoint counts", async () => {
+test("server-side filter resets pagination and late responses from the old filter are ignored", async () => {
+  const app = createApp();
+  const initial = app.selectProject("A");
+  app.requests[0].resolve(page("old.test", { next_cursor: "old-filter-cursor", truncated: true }));
+  await initial;
+  const oldFilterPage = app.loadSurface(true);
+  assert.equal(app.requests.length, 2);
+
+  app.elements.filter.value = "needle";
+  app.elements.filter.listeners.input();
+  assert.equal(app.requests[1].signal.aborted, true);
+  assert.deepEqual(snapshot(app.state.endpoints), []);
+  assert.equal(app.state.endpointCursor, null);
+  await new Promise(resolve => setTimeout(resolve, 275));
+  assert.equal(app.requests.length, 3);
+  assert.equal(app.requests[2].url.searchParams.get("filter"), "needle");
+  assert.equal(app.requests[2].url.searchParams.has("cursor"), false);
+  app.requests[2].resolve({ operations: [endpoint("needle.test")], total_operations: 1, coverage_state: "partial" });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  app.requests[1].resolve(page("late-old-filter.test", { total_operations: 99 }));
+  await oldFilterPage;
+  assert.deepEqual(snapshot(app.state.endpoints.map(row => row.host)), ["needle.test"]);
+  assert.equal(app.state.totalOperations, 1);
+});
+
+test("pagination sends the opaque cursor and appends complete operation groups", async () => {
   const app = createApp();
   const first = app.selectProject("A");
-  const cursor = { historical_row_id: 18, live_row_id: 7 };
-  app.requests[0].resolve(page("a.test", { next_after: cursor }));
+  const cursor = "signed-page-cursor";
+  app.requests[0].resolve(page("a.test", { next_cursor: cursor, truncated: true, total_operations: 3 }));
   await first;
   const selectedEndpoint = app.state.endpoints[0];
   app.state.selectedEndpoint = selectedEndpoint;
   const append = app.loadSurface(true);
   await app.loadSurface(true);
   assert.equal(app.requests.length, 2);
-  assert.equal(app.requests[1].url.searchParams.get("after_history"), "18");
-  assert.equal(app.requests[1].url.searchParams.get("after_live"), "7");
-  app.requests[1].resolve({ endpoints: [endpoint("a.test", "/route", 2), endpoint("a.test", "/second")], coverage_state: "partial" });
+  assert.equal(app.requests[1].url.searchParams.get("cursor"), cursor);
+  assert.equal(app.requests[1].url.searchParams.get("filter"), "");
+  app.requests[1].resolve({ operations: [endpoint("b.test", "/second"), endpoint("c.test", "/third")], total_operations: 3, coverage_state: "partial" });
   await append;
 
-  assert.equal(app.state.endpoints.length, 2);
-  assert.equal(app.state.endpoints.find(row => row.route === "/route").observation_count, 3);
+  assert.equal(app.state.endpoints.length, 3);
+  assert.equal(app.state.endpoints.find(row => row.route === "/route").observation_count, 1);
   assert.equal(app.state.selectedEndpoint, selectedEndpoint);
   assert.equal(app.state.endpointCursor, null);
   assert.equal(app.elements.loadMore.hidden, true);
   assert.equal(app.state.loadingSurface, false);
 });
 
+test("stale operation cursor clears mixed pages and reloads the first filtered page", async () => {
+  const app = createApp();
+  const first = app.selectProject("A");
+  app.requests[0].resolve(page("a.test", { next_cursor: "stale-cursor", truncated: true }));
+  await first;
+  app.state.selectedEndpoint = app.state.endpoints[0];
+  app.state.graph = { entities: [{ id: "old-node" }], assertions: [] };
+  app.state.selectedNode = { id: "old-node" };
+  app.elements.inspector.replaceChildren({ textContent: "old details" });
+  const append = app.loadSurface(true);
+  app.requests[1].fail(409, "local structural index changed; reload the first page");
+  await append;
+  assert.equal(app.requests.length, 3);
+  assert.equal(app.requests[2].url.searchParams.has("cursor"), false);
+  assert.deepEqual(snapshot(app.state.endpoints), []);
+  assert.equal(app.state.selectedEndpoint, null);
+  assert.equal(app.state.graph, null);
+  assert.equal(app.state.selectedNode, null);
+  assert.equal(app.elements.inspector.children[0].children[1].textContent, "Nothing selected");
+  assert.equal(app.state.loadingSurface, true);
+  app.requests[2].resolve(page("fresh.test"));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(snapshot(app.state.endpoints.map(row => row.host)), ["fresh.test"]);
+  assert.equal(app.state.loadingSurface, false);
+});
+
 test("an append failure keeps the current page and cursor available for retry", async () => {
   const app = createApp();
   const first = app.selectProject("A");
-  const cursor = { historical_row_id: 18, live_row_id: 7 };
-  app.requests[0].resolve(page("a.test", { next_after: cursor }));
+  const cursor = "retry-cursor";
+  app.requests[0].resolve(page("a.test", { next_cursor: cursor }));
   await first;
   const append = app.loadSurface(true);
   app.requests[1].reject(new Error("synthetic read failure"));
   await append;
   assert.equal(app.state.endpoints[0].host, "a.test");
-  assert.deepEqual(snapshot(app.state.endpointCursor), cursor);
+  assert.equal(app.state.endpointCursor, cursor);
   assert.equal(app.elements.loadMore.hidden, false);
   assert.equal(app.elements.loadMore.disabled, false);
   assert.equal(app.elements.status.textContent, "Local index read error");
@@ -341,14 +392,13 @@ test("an append failure keeps the current page and cursor available for retry", 
 test("switching projects during append rejects old rows and starts B without A's cursor", async () => {
   const app = createApp();
   const first = app.selectProject("A");
-  app.requests[0].resolve(page("a.test", { next_after: { historical_row_id: 18, live_row_id: 7 } }));
+  app.requests[0].resolve(page("a.test", { next_cursor: "cursor-a" }));
   await first;
   const appendA = app.loadSurface(true);
   const pendingB = app.selectProject("B");
   assert.equal(app.requests.length, 3);
   assert.equal(app.requests[1].signal.aborted, true);
-  assert.equal(app.requests[2].url.searchParams.has("after_history"), false);
-  assert.equal(app.requests[2].url.searchParams.has("after_live"), false);
+  assert.equal(app.requests[2].url.searchParams.has("cursor"), false);
   app.requests[1].resolve(page("a-second-page.test"));
   await appendA;
   assert.deepEqual(snapshot(app.state.endpoints), []);
@@ -362,7 +412,7 @@ test("switching projects during append rejects old rows and starts B without A's
 test("clearing a loaded project removes its rendered endpoints and invalidates append", async () => {
   const app = createApp();
   const first = app.selectProject("A");
-  app.requests[0].resolve(page("a.test", { next_after: { historical_row_id: 18, live_row_id: 7 } }));
+  app.requests[0].resolve(page("a.test", { next_cursor: "cursor-a" }));
   await first;
   assert.equal(app.elements.endpointList.children.some(child => child.className?.startsWith("endpoint-item")), true);
   const appendA = app.loadSurface(true);

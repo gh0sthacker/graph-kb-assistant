@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"bb-graph-assistant/internal/appquery"
-	capturesearch "bb-graph-assistant/internal/search"
 )
 
 const (
@@ -34,7 +33,7 @@ var assets embed.FS
 
 type readAPI interface {
 	GraphExplorerProjects(context.Context, string, int) (map[string]any, error)
-	GraphExplorerSurface(context.Context, string, *capturesearch.SurfaceCursor, int) (map[string]any, error)
+	GraphExplorerSurface(context.Context, appquery.SurfaceRequest) (appquery.SurfaceResult, error)
 	Graph(context.Context, appquery.GraphRequest) (appquery.GraphResult, error)
 }
 
@@ -106,38 +105,59 @@ func projectsHandler(api readAPI) http.HandlerFunc {
 func surfaceHandler(api readAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
-		projectKey := query.Get("project_key")
+		projectValues, projectPresent := query["project_key"]
+		if !projectPresent || len(projectValues) != 1 {
+			writeError(w, http.StatusBadRequest, "project_key must identify one registered project")
+			return
+		}
+		projectKey := projectValues[0]
 		if !projectKeyPattern.MatchString(projectKey) {
 			writeError(w, http.StatusBadRequest, "project_key must identify one registered project")
 			return
 		}
+		filterValues, hasFilter := query["filter"]
+		if hasFilter && len(filterValues) != 1 {
+			writeError(w, http.StatusBadRequest, "surface filter is malformed")
+			return
+		}
+		filter := ""
+		if hasFilter {
+			filter = filterValues[0]
+		}
+		if len(filter) > 256 {
+			writeError(w, http.StatusBadRequest, "surface filter exceeds 256 bytes")
+			return
+		}
+		cursorValues, hasCursor := query["cursor"]
+		if hasCursor && (len(cursorValues) != 1 || len(cursorValues[0]) > appquery.MaximumSurfaceCursorBytes) {
+			writeError(w, http.StatusBadRequest, "surface cursor is malformed")
+			return
+		}
+		cursor := ""
+		if hasCursor {
+			cursor = cursorValues[0]
+		}
 		limit := 40
-		if value := query.Get("limit"); value != "" {
+		limitValues, hasLimit := query["limit"]
+		if hasLimit && len(limitValues) != 1 {
+			writeError(w, http.StatusBadRequest, "surface limit is malformed")
+			return
+		}
+		if hasLimit {
+			value := limitValues[0]
 			parsed, err := strconv.Atoi(value)
-			if err != nil || parsed < 1 || parsed > 40 {
-				writeError(w, http.StatusBadRequest, "limit must be between 1 and 40")
+			if err != nil || parsed < 1 || parsed > 100 {
+				writeError(w, http.StatusBadRequest, "limit must be between 1 and 100")
 				return
 			}
 			limit = parsed
 		}
-		afterHistory, hasHistory, err := optionalNonnegativeInt64(query.Get("after_history"))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "surface cursor is invalid")
-			return
-		}
-		afterLive, hasLive, err := optionalNonnegativeInt64(query.Get("after_live"))
-		if err != nil || hasHistory != hasLive {
-			writeError(w, http.StatusBadRequest, "surface cursor is invalid")
-			return
-		}
-		var after *capturesearch.SurfaceCursor
-		if hasHistory {
-			after = &capturesearch.SurfaceCursor{HistoricalRowID: afterHistory, LiveRowID: afterLive}
-		}
 		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 		defer cancel()
-		result, callErr := api.GraphExplorerSurface(ctx, projectKey, after, limit)
-		writeResult(w, result, callErr)
+		result, callErr := api.GraphExplorerSurface(ctx, appquery.SurfaceRequest{
+			ProjectKey: projectKey, Filter: filter, Cursor: cursor, Limit: limit,
+		})
+		writeGraphResult(w, result.WireMap(), callErr)
 	}
 }
 
@@ -244,8 +264,10 @@ func writeGraphResult(w http.ResponseWriter, result map[string]any, err error) {
 				writeError(w, http.StatusNotFound, "selected project is not registered")
 			case appquery.ErrorProjectUnavailable:
 				writeError(w, http.StatusServiceUnavailable, "selected project is unavailable for graph reads")
+			case appquery.ErrorSurfaceUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "selected project's local surface catalog is unavailable")
 			case appquery.ErrorStaleCursor:
-				writeError(w, http.StatusConflict, "graph changed; reload the first page before continuing")
+				writeError(w, http.StatusConflict, "local data or continuation cursor changed; reload the first page before continuing")
 			case appquery.ErrorCursorUnsupported:
 				writeError(w, http.StatusNotImplemented, "configured graph backend does not support continuation")
 			case appquery.ErrorOutputTooLarge:
