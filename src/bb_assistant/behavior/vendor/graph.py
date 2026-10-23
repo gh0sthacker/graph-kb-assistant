@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlsplit, parse_qsl
 from .common import BehaviorError, entity_id
 from .control import ArtifactSafetyError, assert_public, canonical_json, digest_json, file_sha256
 from ...paths import data_root
+from ...project_lock import project_maintenance_read_lock
 
 
 KINDS = frozenset({"asset", "endpoint", "actor", "session_context", "object",
@@ -330,19 +331,54 @@ def _bind(candidate: dict, selected: dict) -> None:
 class BehaviorGraph:
     """Transactional, idempotent local projection for one explicitly named program."""
 
-    def __init__(self, db_path: str | Path | None, program: str):
+    def __init__(self, db_path: str | Path | None, program: str, *, read_only: bool = False):
         if not isinstance(program, str) or not _PROGRAM.fullmatch(program) or program in {".", ".."}:
             raise BehaviorError("Invalid program namespace")
         selected = (Path(db_path) if db_path is not None else
                     data_root() / "behavior" / program / "graph.sqlite3")
+        if read_only and (
+            Path(os.path.abspath(selected)) != selected.resolve()
+            or selected.is_symlink()
+            or not selected.is_file()
+        ):
+            raise BehaviorError("Read-only graph access requires an existing regular database file")
         self.db_path = selected.resolve()
         source_root = Path(__file__).resolve().parents[4]
         if (self.db_path == source_root or source_root in self.db_path.parents
                 or str(selected).startswith("file:") or selected.is_dir()):
             raise BehaviorError("Behavior SQLite must be outside the source checkout")
         self.program = program
+        self.read_only = bool(read_only)
+        self._db: sqlite3.Connection | None = None
+        self._read_lease = None
+        if self.read_only:
+            self._read_lease = project_maintenance_read_lock(self.db_path.parent)
+            self._read_lease.__enter__()
+            try:
+                for suffix, label in (("-wal", "WAL"), ("-journal", "rollback journal")):
+                    sidecar = Path(str(self.db_path) + suffix)
+                    if sidecar.is_symlink():
+                        raise BehaviorError(f"Graph {label} must not be a symbolic link")
+                    if sidecar.exists() and sidecar.stat().st_size:
+                        raise BehaviorError(
+                            f"Graph {label} requires writable maintenance before read-only access"
+                        )
+                self._db = sqlite3.connect(
+                    self.db_path.as_uri() + "?mode=ro&immutable=1", timeout=30, uri=True
+                )
+                self._db.execute("PRAGMA query_only=ON")
+                self._db.execute("PRAGMA foreign_keys=ON")
+                existing = dict(self._db.execute("SELECT key, value FROM metadata"))
+                if (set(existing) != {"schema_version", "program"}
+                        or existing.get("program") != program
+                        or existing.get("schema_version") != "2"):
+                    raise BehaviorError("Read-only graph schema needs maintenance before querying")
+            except BaseException:
+                self.close()
+                raise
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._db: sqlite3.Connection | None = sqlite3.connect(self.db_path, timeout=30)
+        self._db = sqlite3.connect(self.db_path, timeout=30)
         try:
             os.chmod(self.db_path, 0o600)
             self._db.execute("PRAGMA foreign_keys=ON")
@@ -391,6 +427,9 @@ class BehaviorGraph:
         if self._db is not None:
             self._db.close()
             self._db = None
+        if self._read_lease is not None:
+            self._read_lease.__exit__(None, None, None)
+            self._read_lease = None
 
     def _connection(self) -> sqlite3.Connection:
         if self._db is None:

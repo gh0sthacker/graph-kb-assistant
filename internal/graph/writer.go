@@ -55,12 +55,12 @@ type ImportResult struct {
 	UpdatedEntities int            `json:"updated_entities"`
 }
 
-// OpenWriter binds a writer to an explicitly selected ProjectStore. The
-// capture/search store must be open read-only; only BehaviorGraph may be
-// written by ImportBundles.
+// OpenWriter binds a writer to an explicitly selected, schema-validated
+// ProjectStore. The caller must hold the project's exclusive maintenance
+// lease; only BehaviorGraph and its receipts are written by ImportBundles.
 func OpenWriter(ctx context.Context, selected *store.ProjectStore) (*Writer, error) {
-	if selected == nil || selected.Database == nil || selected.Database.DB() == nil || !selected.Database.ReadOnly() {
-		return nil, errors.New("graph writer requires a read-only selected project store")
+	if selected == nil || selected.Database == nil || selected.Database.DB() == nil {
+		return nil, errors.New("graph writer requires a schema-validated selected project store")
 	}
 	projectKey, err := selected.Project.StorageKey()
 	if err != nil || projectKey != selected.ProjectKey || !graphDigestPattern.MatchString(projectKey) {
@@ -96,23 +96,10 @@ func OpenWriter(ctx context.Context, selected *store.ProjectStore) (*Writer, err
 	if selected.Database.Path() != filepath.Join(projectDir, "graph.sqlite3") {
 		return nil, errors.New("selected capture store does not match the project")
 	}
-	projectRoot := filepath.Dir(filepath.Dir(projectDir))
-	validated, err := store.OpenProjectReadOnly(ctx, selected.Project, projectRoot)
-	if err != nil {
-		return nil, errors.New("selected project failed store validation")
-	}
-	validatedMatches := validated.ProjectKey == projectKey &&
-		filepath.Clean(validated.Directory) == projectDir &&
-		validated.Database != nil && validated.Database.Path() == selected.Database.Path() &&
-		filepath.Clean(validated.VaultDirectory) == filepath.Join(projectDir, "vault") &&
-		filepath.Clean(selected.VaultDirectory) == filepath.Join(projectDir, "vault") &&
-		filepath.Clean(validated.BehaviorGraphPath) == filepath.Join(projectDir, "behavior.sqlite3") &&
-		filepath.Clean(selected.BehaviorGraphPath) == filepath.Join(projectDir, "behavior.sqlite3") &&
-		filepath.Clean(validated.BehaviorReceiptPath) == filepath.Join(projectDir, "behavior-receipts") &&
-		filepath.Clean(selected.BehaviorReceiptPath) == filepath.Join(projectDir, "behavior-receipts")
-	closeErr := validated.Close()
-	if !validatedMatches || closeErr != nil {
-		return nil, errors.New("selected project store paths are inconsistent")
+	if filepath.Clean(selected.VaultDirectory) != filepath.Join(projectDir, "vault") ||
+		filepath.Clean(selected.BehaviorGraphPath) != filepath.Join(projectDir, "behavior.sqlite3") ||
+		filepath.Clean(selected.BehaviorReceiptPath) != filepath.Join(projectDir, "behavior-receipts") {
+		return nil, errors.New("selected project storage paths are inconsistent")
 	}
 
 	expectedGraph := filepath.Join(projectDir, "behavior.sqlite3")

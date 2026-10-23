@@ -22,36 +22,8 @@ const maxCaptureProvenanceRows = 1_000
 // GraphSlice reads one project's existing BehaviorGraph and joins selected
 // observations to exact historical/live Caido request IDs.
 func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any) (map[string]any, error) {
-	if projectStore == nil || projectStore.Database == nil || projectStore.Database.DB() == nil || !projectStore.Database.ReadOnly() {
-		return nil, errors.New("graph slice requires a read-only selected project store")
-	}
-	projectKey, err := projectStore.Project.StorageKey()
-	if err != nil || projectKey != projectStore.ProjectKey {
-		return nil, errors.New("selected project identity is inconsistent")
-	}
-	projectDirectory, err := filepath.Abs(projectStore.Directory)
-	if err != nil {
-		return nil, errors.New("selected project data directory is invalid")
-	}
-	directoryInfo, err := os.Lstat(projectDirectory)
-	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
-		return nil, errors.New("selected project data directory is unavailable")
-	}
-	expectedGraph, err := filepath.Abs(filepath.Join(projectDirectory, "behavior.sqlite3"))
-	if err != nil {
-		return nil, errors.New("BehaviorGraph path is invalid")
-	}
-	selectedGraph, err := filepath.Abs(projectStore.BehaviorGraphPath)
-	if err != nil || selectedGraph != expectedGraph {
-		return nil, errors.New("BehaviorGraph path is outside the selected project")
-	}
-	expectedReceipts, err := filepath.Abs(filepath.Join(projectDirectory, "behavior-receipts"))
-	if err != nil {
-		return nil, errors.New("graph receipt directory is invalid")
-	}
-	selectedReceipts, err := filepath.Abs(projectStore.BehaviorReceiptPath)
-	if err != nil || selectedReceipts != expectedReceipts {
-		return nil, errors.New("graph receipt directory is outside the selected project")
+	if err := validateGraphProjectStore(projectStore); err != nil {
+		return nil, err
 	}
 	reader, err := graphaccess.OpenReader(ctx, projectStore)
 	if err != nil {
@@ -64,6 +36,58 @@ func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs [
 	if err != nil {
 		return nil, err
 	}
+	return attachGraphProvenance(ctx, projectStore, slice)
+}
+
+// GraphNeighborhood serves the interactive one-hop view without loading the
+// entire Neo4j project. Full analysis slices continue through GraphSlice.
+func GraphNeighborhood(ctx context.Context, projectStore *store.ProjectStore, seedIDs []string) (map[string]any, error) {
+	if err := validateGraphProjectStore(projectStore); err != nil {
+		return nil, err
+	}
+	slice, err := graphaccess.ReadNeighborhood(ctx, projectStore, seedIDs)
+	if err != nil {
+		return nil, err
+	}
+	return attachGraphProvenance(ctx, projectStore, slice)
+}
+
+func validateGraphProjectStore(projectStore *store.ProjectStore) error {
+	if projectStore == nil || projectStore.Database == nil || projectStore.Database.DB() == nil || !projectStore.Database.ReadOnly() {
+		return errors.New("graph slice requires a read-only selected project store")
+	}
+	projectKey, err := projectStore.Project.StorageKey()
+	if err != nil || projectKey != projectStore.ProjectKey {
+		return errors.New("selected project identity is inconsistent")
+	}
+	projectDirectory, err := filepath.Abs(projectStore.Directory)
+	if err != nil {
+		return errors.New("selected project data directory is invalid")
+	}
+	directoryInfo, err := os.Lstat(projectDirectory)
+	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() {
+		return errors.New("selected project data directory is unavailable")
+	}
+	expectedGraph, err := filepath.Abs(filepath.Join(projectDirectory, "behavior.sqlite3"))
+	if err != nil {
+		return errors.New("BehaviorGraph path is invalid")
+	}
+	selectedGraph, err := filepath.Abs(projectStore.BehaviorGraphPath)
+	if err != nil || selectedGraph != expectedGraph {
+		return errors.New("BehaviorGraph path is outside the selected project")
+	}
+	expectedReceipts, err := filepath.Abs(filepath.Join(projectDirectory, "behavior-receipts"))
+	if err != nil {
+		return errors.New("graph receipt directory is invalid")
+	}
+	selectedReceipts, err := filepath.Abs(projectStore.BehaviorReceiptPath)
+	if err != nil || selectedReceipts != expectedReceipts {
+		return errors.New("graph receipt directory is outside the selected project")
+	}
+	return nil
+}
+
+func attachGraphProvenance(ctx context.Context, projectStore *store.ProjectStore, slice map[string]any) (map[string]any, error) {
 	observationIDs := make([]string, 0)
 	entities, _ := slice["entities"].([]behaviorgraph.Record)
 	for _, entity := range entities {

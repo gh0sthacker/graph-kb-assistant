@@ -109,7 +109,7 @@ type LiveTailWriter struct {
 }
 
 func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*LiveTailWriter, error) {
-	if err := validateSelectedProject(ctx, selected); err != nil {
+	if err := validateSelectedProject(selected); err != nil {
 		return nil, err
 	}
 	rootKey, err := readVaultKey()
@@ -149,7 +149,7 @@ func (w *LiveTailWriter) BeginCycle(ctx context.Context, now time.Time, overlapS
 	if overlapSeconds < 1 || overlapSeconds > 3600 {
 		return LiveTailCheckpoint{}, errors.New("live-tail overlap is outside the allowed range")
 	}
-	if err := validateSelectedProject(ctx, w.selected); err != nil {
+	if err := validateSelectedProject(w.selected); err != nil {
 		return LiveTailCheckpoint{}, err
 	}
 	conn, err := beginSelectedImmediate(ctx, w.selected)
@@ -276,7 +276,7 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 	if err := w.validateOpen(); err != nil {
 		return LivePageResult{}, err
 	}
-	if err := validateSelectedProject(ctx, w.selected); err != nil {
+	if err := validateSelectedProject(w.selected); err != nil {
 		return LivePageResult{}, err
 	}
 	if err := validateLiveCheckpoint(checkpoint); err != nil {

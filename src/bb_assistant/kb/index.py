@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
 from typing import Iterable, Iterator, Mapping
 
 from ..paths import data_root, ensure_private_directory
+from ..project_lock import project_maintenance_lock, project_maintenance_read_lock
 from .canonical import CanonicalChunk, SourceDocument
 
 
@@ -83,34 +85,89 @@ class KBHit:
 class KBIndex:
     """Lexical retrieval only; vector ranking can be added behind this API."""
 
-    def __init__(self, path: Path | None = None) -> None:
-        self.path = (path if path is not None else data_root() / "kb" / "index.sqlite3").expanduser().resolve()
+    def __init__(self, path: Path | None = None, *, read_only: bool = False) -> None:
+        requested_path = (path if path is not None else data_root() / "kb" / "index.sqlite3").expanduser()
+        if read_only and Path(os.path.abspath(requested_path)) != requested_path.resolve():
+            raise ValueError("Read-only KB index path must not contain symbolic links")
+        self.path = requested_path.resolve()
+        self.read_only = bool(read_only)
         source_root = Path(__file__).resolve().parents[3]
         if self.path == source_root or source_root in self.path.parents:
             raise ValueError("KB indexes must be stored outside the source checkout")
-        ensure_private_directory(self.path.parent)
-        self._initialize()
-        try:
-            self.path.chmod(0o600)
-        except OSError:
-            pass
+        if self.read_only:
+            if self.path.is_symlink() or not self.path.is_file():
+                raise ValueError("KB index must already exist as a regular file for read-only access")
+        else:
+            ensure_private_directory(self.path.parent)
+            with project_maintenance_lock(self.path.parent):
+                self._initialize()
+            try:
+                self.path.chmod(0o600)
+            except OSError:
+                pass
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=30)
-        try:
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA busy_timeout = 30000")
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+    def connect(self, *, _maintenance_lock_held: bool = False) -> Iterator[sqlite3.Connection]:
+        if self.read_only:
+            lease = project_maintenance_read_lock(self.path.parent)
+        elif _maintenance_lock_held:
+            lease = nullcontext()
+        else:
+            lease = project_maintenance_lock(self.path.parent)
+        with lease:
+            if self.read_only:
+                for suffix, label in (("-wal", "WAL"), ("-journal", "rollback journal")):
+                    sidecar = Path(str(self.path) + suffix)
+                    if sidecar.is_symlink():
+                        raise ValueError(f"Read-only KB index {label} must not be a symbolic link")
+                    if sidecar.exists() and sidecar.stat().st_size:
+                        if suffix == "-wal":
+                            raise ValueError("KB index WAL requires a writable checkpoint before read-only access")
+                        raise ValueError(
+                            "KB index rollback journal requires writable recovery before read-only access"
+                        )
+                connection = sqlite3.connect(
+                    self.path.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=30
+                )
+            else:
+                connection = sqlite3.connect(self.path, timeout=30)
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout = 30000")
+                if self.read_only:
+                    connection.execute("PRAGMA query_only = ON")
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
 
     def _initialize(self) -> None:
-        with self.connect() as connection:
+        with self.connect(_maintenance_lock_held=True) as connection:
             connection.executescript(_SCHEMA)
 
     def replace_snapshot(
+        self,
+        chunks: Iterable[CanonicalChunk],
+        snapshot_id: str,
+        *,
+        sources: Iterable[SourceDocument] = (),
+        source_coverage_state: str = "unverified",
+        source_coverage_report_sha256: str | None = None,
+        source_coverage_report: Mapping[str, object] | None = None,
+    ) -> int:
+        if self.read_only:
+            raise ValueError("KB index is read-only")
+        with project_maintenance_lock(self.path.parent):
+            return self._replace_snapshot(
+                chunks,
+                snapshot_id,
+                sources=sources,
+                source_coverage_state=source_coverage_state,
+                source_coverage_report_sha256=source_coverage_report_sha256,
+                source_coverage_report=source_coverage_report,
+            )
+
+    def _replace_snapshot(
         self,
         chunks: Iterable[CanonicalChunk],
         snapshot_id: str,
@@ -190,7 +247,7 @@ class KBIndex:
                     raise ValueError("KB chunk does not match its source document span")
 
         count = 0
-        with self.connect() as connection:
+        with self.connect(_maintenance_lock_held=True) as connection:
             connection.execute("DELETE FROM chunk_search")
             connection.execute("DELETE FROM chunks")
             connection.execute("DELETE FROM source_documents")

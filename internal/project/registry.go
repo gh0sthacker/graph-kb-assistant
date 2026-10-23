@@ -2,12 +2,15 @@ package project
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"bb-graph-assistant/internal/projectlock"
 )
 
 const registryVersion = 1
@@ -120,6 +123,15 @@ func RegisterProject(ref CaidoProjectRef, root string) error {
 	if err != nil {
 		return err
 	}
+	path, err := RegistryPath(root)
+	if err != nil {
+		return err
+	}
+	catalogLease, err := projectlock.Acquire(context.Background(), filepath.Dir(path))
+	if err != nil {
+		return errors.New("project catalog maintenance lease could not be acquired")
+	}
+	defer catalogLease.Close()
 	refs, err := LoadProjectRefs(root)
 	if err != nil {
 		return err

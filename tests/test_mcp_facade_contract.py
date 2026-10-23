@@ -146,7 +146,11 @@ class ReadOnlyMCPFacadeContractTests(unittest.TestCase):
             source_coverage_report_sha256=report_hash,
             source_coverage_report=report,
         )
-        self.tools = ReadOnlyAssistantTools(self.stores, self.kb)
+        readonly_stores = {
+            project.storage_key: ProjectStore(project, root=self.root, read_only=True)
+            for project in self.projects
+        }
+        self.tools = ReadOnlyAssistantTools(readonly_stores, KBIndex(self.kb.path, read_only=True))
 
     def test_import_graph_search_and_kb_citations_stay_project_scoped_and_redacted(self) -> None:
         self.assertEqual([receipt.state for receipt in self.sync_receipts], ["done", "done"])

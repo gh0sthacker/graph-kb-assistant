@@ -25,8 +25,8 @@ type Result struct {
 // Drain applies pending events in order. It is a no-op while SQLite is the
 // selected read backend; the durable outbox remains available for cutover.
 func Drain(ctx context.Context, selected *store.ProjectStore) (Result, error) {
-	if selected == nil || selected.ProjectKey == "" || selected.Database == nil || !selected.Database.ReadOnly() {
-		return Result{}, errors.New("graph outbox sync requires one read-only selected project")
+	if selected == nil || selected.ProjectKey == "" || selected.Database == nil || selected.Database.DB() == nil {
+		return Result{}, errors.New("graph outbox sync requires one schema-validated selected project")
 	}
 	result := Result{State: "disabled", ProjectKey: selected.ProjectKey, Backend: graphaccess.ConfiguredBackend()}
 	if result.Backend != "neo4j" {

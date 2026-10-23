@@ -35,6 +35,7 @@ type readAPI interface {
 	GraphExplorerProjects(context.Context, string, int) (map[string]any, error)
 	GraphExplorerSurface(context.Context, string, *capturesearch.SurfaceCursor, int) (map[string]any, error)
 	GraphExplorerSlice(context.Context, string, []string) (map[string]any, error)
+	GraphExplorerNeighborhood(context.Context, string, []string) (map[string]any, error)
 }
 
 // NewHandler constructs the local UI and its narrowly scoped read-only API.
@@ -145,6 +146,11 @@ func graphHandler(api readAPI) http.HandlerFunc {
 		query := r.URL.Query()
 		projectKey := query.Get("project_key")
 		seeds := query["seed"]
+		view := query.Get("view")
+		if view != "" && view != "direct" && view != "full" {
+			writeError(w, http.StatusBadRequest, "graph view must be direct or full")
+			return
+		}
 		if !projectKeyPattern.MatchString(projectKey) || len(seeds) == 0 || len(seeds) > maxGraphSeeds {
 			writeError(w, http.StatusBadRequest, "select one project and between 1 and 20 graph seeds")
 			return
@@ -161,9 +167,19 @@ func graphHandler(api readAPI) http.HandlerFunc {
 			}
 			seen[seed] = struct{}{}
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), graphTimeout)
+		timeout := requestTimeout
+		if view == "full" {
+			timeout = graphTimeout
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
-		result, err := api.GraphExplorerSlice(ctx, projectKey, seeds)
+		var result map[string]any
+		var err error
+		if view == "full" {
+			result, err = api.GraphExplorerSlice(ctx, projectKey, seeds)
+		} else {
+			result, err = api.GraphExplorerNeighborhood(ctx, projectKey, seeds)
+		}
 		writeResult(w, result, err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
 )
 
 type ProjectStore struct {
@@ -26,13 +27,55 @@ type ProjectStore struct {
 // OpenProjectReadOnly opens an existing v5 project store without creating
 // directories, registering a project, or changing SQLite state.
 func OpenProjectReadOnly(ctx context.Context, ref project.CaidoProjectRef, dataRoot string) (*ProjectStore, error) {
-	return openProject(ctx, ref, dataRoot, true)
+	return openProject(ctx, ref, dataRoot, true, nil)
+}
+
+// OpenProjectReadOnlyUnderMaintenance opens a read-only snapshot while the
+// caller already holds the matching exclusive project lease. Keep the lease
+// until ProjectStore.Close. It is intended for read/modify workflows that
+// must prevent concurrent intake while they operate on a consistent snapshot.
+func OpenProjectReadOnlyUnderMaintenance(
+	ctx context.Context,
+	ref project.CaidoProjectRef,
+	dataRoot string,
+	maintenance *projectlock.Lock,
+) (*ProjectStore, error) {
+	if maintenance == nil {
+		return nil, errors.New("project maintenance lease is required for this read-only open")
+	}
+	return openProject(ctx, ref, dataRoot, true, maintenance)
 }
 
 // OpenProjectForWrite opens an existing v5 database. It does not migrate or
 // initialize the database; use a shadow copy until parity has been established.
 func OpenProjectForWrite(ctx context.Context, ref project.CaidoProjectRef, dataRoot string) (*ProjectStore, error) {
-	return openProject(ctx, ref, dataRoot, false)
+	return openProject(ctx, ref, dataRoot, false, nil)
+}
+
+// ProjectDirectory resolves an existing private directory for a validated
+// project identity. Callers use it to acquire the maintenance lease before
+// opening a read-only snapshot for a maintenance operation.
+func ProjectDirectory(ref project.CaidoProjectRef, dataRoot string) (string, error) {
+	if err := ref.Validate(); err != nil {
+		return "", errors.New("project identity is invalid")
+	}
+	root, err := resolveDataRoot(dataRoot)
+	if err != nil {
+		return "", err
+	}
+	if err := rejectSourceCheckoutPath(root); err != nil {
+		return "", err
+	}
+	projectKey, err := ref.StorageKey()
+	if err != nil {
+		return "", errors.New("project identity is invalid")
+	}
+	directory := filepath.Join(root, "projects", projectKey)
+	info, err := os.Lstat(directory)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("project data directory is unavailable")
+	}
+	return directory, nil
 }
 
 // CreateProject creates a new project namespace and version-5 SQLite database.
@@ -98,7 +141,13 @@ func CreateProject(ctx context.Context, ref project.CaidoProjectRef, dataRoot st
 	}, nil
 }
 
-func openProject(ctx context.Context, ref project.CaidoProjectRef, dataRoot string, readonly bool) (*ProjectStore, error) {
+func openProject(
+	ctx context.Context,
+	ref project.CaidoProjectRef,
+	dataRoot string,
+	readonly bool,
+	maintenance *projectlock.Lock,
+) (*ProjectStore, error) {
 	if err := ref.Validate(); err != nil {
 		return nil, errors.New("project identity is invalid")
 	}
@@ -128,7 +177,11 @@ func openProject(ctx context.Context, ref project.CaidoProjectRef, dataRoot stri
 	databasePath := filepath.Join(directory, "graph.sqlite3")
 	var database *Store
 	if readonly {
-		database, err = OpenReadOnly(ctx, databasePath)
+		if maintenance != nil {
+			database, err = OpenReadOnlyUnderMaintenance(ctx, databasePath, maintenance)
+		} else {
+			database, err = OpenReadOnly(ctx, databasePath)
+		}
 	} else {
 		database, err = OpenForWrite(ctx, databasePath)
 	}
@@ -137,10 +190,10 @@ func openProject(ctx context.Context, ref project.CaidoProjectRef, dataRoot stri
 	}
 	return &ProjectStore{
 		Project: ref, ProjectKey: projectKey, Directory: directory,
-		VaultDirectory: filepath.Join(directory, "vault"),
-		BehaviorGraphPath: filepath.Join(directory, "behavior.sqlite3"),
+		VaultDirectory:      filepath.Join(directory, "vault"),
+		BehaviorGraphPath:   filepath.Join(directory, "behavior.sqlite3"),
 		BehaviorReceiptPath: filepath.Join(directory, "behavior-receipts"),
-		Database: database,
+		Database:            database,
 	}, nil
 }
 

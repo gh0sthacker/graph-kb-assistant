@@ -25,12 +25,17 @@ import (
 	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
 	projectaudit "bb-graph-assistant/internal/projectaudit"
+	"bb-graph-assistant/internal/projectlock"
 	capturesearch "bb-graph-assistant/internal/search"
 	"bb-graph-assistant/internal/store"
 	"bb-graph-assistant/internal/webui"
 )
 
 const version = "0.1.0-go-dev"
+
+func isWatchLeaseContention(watch bool, parent context.Context, err error) bool {
+	return watch && parent != nil && parent.Err() == nil && errors.Is(err, context.DeadlineExceeded)
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -121,7 +126,16 @@ func syncNeo4j(args []string) error {
 	if selected == nil {
 		return errors.New("selected project is not in the local project registry")
 	}
-	projectStore, err := store.OpenProjectReadOnly(ctx, *selected, *root)
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	projectStore, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, *selected, *root, maintenance)
 	if err != nil {
 		return err
 	}
@@ -195,7 +209,19 @@ func backfillNeo4j(args []string) error {
 	if selected == nil {
 		return errors.New("selected project is not in the local project registry")
 	}
-	projectStore, err := store.OpenProjectReadOnly(ctx, *selected, *root)
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	// Hold the same cross-process lock as intake and outbox draining from
+	// before the local snapshot through replacement and read-back. Otherwise
+	// a newer applied event can be erased by an older snapshot.
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	projectStore, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, *selected, *root, maintenance)
 	if err != nil {
 		return err
 	}
@@ -408,18 +434,10 @@ func tailCaidoHistory(args []string) error {
 		return errors.New("selected project is not in the local project registry")
 	}
 
-	localCtx, localCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer localCancel()
-	selectedStore, err := store.OpenProjectForWrite(localCtx, *selected, *root)
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
 	if err != nil {
 		return err
 	}
-	defer selectedStore.Close()
-	tailWriter, err := ingest.OpenLiveTailWriter(localCtx, selectedStore)
-	if err != nil {
-		return err
-	}
-	defer tailWriter.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -436,9 +454,46 @@ func tailCaidoHistory(args []string) error {
 		return err
 	}
 	for {
-		result, runErr := ingest.RunLiveTail(ctx, source, tailWriter, *selected, ingest.LiveTailOptions{
-			PageSize: *pageSize, MaxPages: *maxPages, OverlapSeconds: *overlap, MaxBodyBytes: *bodyLimit,
-		})
+		maintenanceContended := false
+		result, runErr := func() (ingest.LiveTailResult, error) {
+			localCtx, localCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer localCancel()
+			maintenance, lockErr := projectlock.Acquire(localCtx, projectDirectory)
+			if lockErr != nil {
+				maintenanceContended = isWatchLeaseContention(*watch, ctx, lockErr)
+				return ingest.LiveTailResult{}, lockErr
+			}
+			defer maintenance.Close()
+			selectedStore, openErr := store.OpenProjectForWrite(localCtx, *selected, *root)
+			if openErr != nil {
+				return ingest.LiveTailResult{}, openErr
+			}
+			defer selectedStore.Close()
+			tailWriter, writerErr := ingest.OpenLiveTailWriter(localCtx, selectedStore)
+			if writerErr != nil {
+				return ingest.LiveTailResult{}, writerErr
+			}
+			defer tailWriter.Close()
+			return ingest.RunLiveTail(ctx, source, tailWriter, *selected, ingest.LiveTailOptions{
+				PageSize: *pageSize, MaxPages: *maxPages, OverlapSeconds: *overlap, MaxBodyBytes: *bodyLimit,
+			})
+		}()
+		if maintenanceContended {
+			fmt.Fprintln(os.Stderr, "project is busy; caido-tail --watch will retry after the poll interval")
+			timer := time.NewTimer(*pollInterval)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return nil
+			case <-timer.C:
+			}
+			continue
+		}
+		if runErr != nil && ctx.Err() != nil {
+			return nil
+		}
 		if result.ProjectKey != "" {
 			if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 				return errors.New("Caido live-tail result could not be written")
@@ -509,7 +564,18 @@ func importCaidoHistory(args []string) error {
 		return errors.New("selected project is not in the local project registry")
 	}
 
-	localCtx, localCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	localCtx, localCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer localCancel()
 	selectedStore, err := store.OpenProjectForWrite(localCtx, *selected, *root)
 	if err != nil {
@@ -521,8 +587,6 @@ func importCaidoHistory(args []string) error {
 		return err
 	}
 	defer pageWriter.Close()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	client, err := caido.StartMCPProcess(caido.MCPProcessConfig{
 		Context: ctx, Command: *mcpCommand, ExpectedSHA256: *mcpSHA256, TokenFile: *tokenFile,
@@ -623,7 +687,16 @@ func importGraphBundle(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	projectStore, err := store.OpenProjectReadOnly(ctx, *selected, *root)
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	projectStore, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, *selected, *root, maintenance)
 	if err != nil {
 		return err
 	}

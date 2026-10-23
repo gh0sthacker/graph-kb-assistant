@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import tempfile
 from typing import Iterator
 import uuid
@@ -17,6 +18,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .domain import CaidoProjectRef, HttpExchange
 from .paths import data_root, ensure_private_directory
+from .project_lock import project_maintenance_lock, project_maintenance_read_lock
 from .registry import register_project
 
 
@@ -200,17 +202,63 @@ def decode_vault_key(value: str | None = None) -> bytes:
 class ProjectStore:
     """One project's database and encrypted byte vault."""
 
-    def __init__(self, project: CaidoProjectRef, root: Path | None = None) -> None:
-        self.project = project
-        self.project_key = project.storage_key
+    @staticmethod
+    def _runtime_base(root: Path | None) -> Path:
         base = data_root() if root is None else root.expanduser().resolve()
         source_root = Path(__file__).resolve().parents[2]
         if base == source_root or source_root in base.parents:
             raise ValueError("Runtime data must be outside the source checkout")
-        self.directory = ensure_private_directory(base / "projects" / self.project_key)
-        if base not in self.directory.parents:
-            raise ValueError("Project data directory resolved outside the configured data root")
-        self.vault_directory = ensure_private_directory(self.directory / "vault")
+        return base
+
+    @classmethod
+    def maintenance_directory(cls, project: CaidoProjectRef, root: Path | None = None) -> Path:
+        """Prepare only the empty directory needed to acquire a write lease."""
+        base = cls._runtime_base(root)
+        projects_directory = ensure_private_directory(base / "projects")
+        if projects_directory.parent != base:
+            raise ValueError("Project catalog resolved outside the configured data root")
+        directory = ensure_private_directory(projects_directory / project.storage_key)
+        if directory.parent != projects_directory:
+            raise ValueError("Project data directory resolved outside its project catalog")
+        return directory
+
+    @staticmethod
+    def _require_existing_private_directory(path: Path, label: str) -> Path:
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError(f"{label} must be an existing real directory")
+        resolved = path.resolve()
+        info = resolved.stat()
+        if (
+            resolved != path
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.geteuid()
+        ):
+            raise ValueError(f"{label} must be an owner-only canonical directory")
+        return resolved
+
+    def __init__(
+        self,
+        project: CaidoProjectRef,
+        root: Path | None = None,
+        *,
+        read_only: bool = False,
+        _maintenance_lock_held: bool = False,
+    ) -> None:
+        self.project = project
+        self.project_key = project.storage_key
+        self.read_only = bool(read_only)
+        base = self._runtime_base(root)
+        if self.read_only:
+            projects_directory = self._require_existing_private_directory(base / "projects", "Project catalog")
+            self.directory = self._require_existing_private_directory(
+                projects_directory / self.project_key, "Project data directory"
+            )
+            self.vault_directory = self._require_existing_private_directory(
+                self.directory / "vault", "Project vault directory"
+            )
+        else:
+            self.directory = self.maintenance_directory(project, root)
+            self.vault_directory = ensure_private_directory(self.directory / "vault")
         if self.vault_directory.parent != self.directory:
             raise ValueError("Vault directory resolved outside the project namespace")
         self.db_path = self.directory / "graph.sqlite3"
@@ -220,25 +268,53 @@ class ProjectStore:
         if self.behavior_graph_path.is_symlink():
             raise ValueError("Behavior graph path must not be a symbolic link")
         self.behavior_receipt_directory = self.directory / "behavior-receipts"
-        self._initialize()
-        register_project(self.project, base)
-        try:
-            self.db_path.chmod(0o600)
-        except OSError:
-            pass
+        if self.read_only:
+            if not self.db_path.is_file():
+                raise ValueError("Project database must already exist for read-only access")
+        else:
+            lease = nullcontext() if _maintenance_lock_held else project_maintenance_lock(self.directory)
+            with lease:
+                self._initialize()
+                register_project(self.project, base)
+                try:
+                    self.db_path.chmod(0o600)
+                except OSError:
+                    pass
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.db_path, timeout=30)
-        try:
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA busy_timeout = 30000")
-            connection.execute("PRAGMA synchronous = FULL")
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        lease = project_maintenance_read_lock(self.directory) if self.read_only else nullcontext()
+        with lease:
+            if self.read_only:
+                for suffix in ("-wal", "-journal"):
+                    sidecar = Path(str(self.db_path) + suffix)
+                    if sidecar.is_symlink():
+                        raise ValueError(f"Read-only project database {suffix} must not be a symbolic link")
+                    if sidecar.exists() and sidecar.stat().st_size:
+                        if suffix == "-wal":
+                            raise ValueError(
+                                "Project database WAL requires a writable checkpoint before read-only access"
+                            )
+                        raise ValueError(
+                            "Project database rollback journal requires writable recovery before read-only access"
+                        )
+                connection = sqlite3.connect(
+                    self.db_path.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=30
+                )
+            else:
+                connection = sqlite3.connect(self.db_path, timeout=30)
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA busy_timeout = 30000")
+                if self.read_only:
+                    connection.execute("PRAGMA query_only = ON")
+                else:
+                    connection.execute("PRAGMA synchronous = FULL")
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
 
     def _initialize(self) -> None:
         with self.connect() as connection:

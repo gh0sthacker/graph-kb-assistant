@@ -53,6 +53,10 @@
           <div class="graph-toolbar">
             <div class="graph-state" id="graph-state"><span class="state-dot"></span><span>Waiting for selection</span></div>
             <div class="canvas-controls">
+              <select id="capture-select" class="capture-select" aria-label="Select a sampled capture" hidden></select>
+              <button class="tool-button fit-button" id="graph-back" type="button" disabled title="Return to the previous graph">← Back</button>
+              <button class="tool-button fit-button" id="graph-deeper" type="button" disabled title="Load a deeper bounded slice, including analysis cards. This can take longer.">Deeper slice</button>
+              <span class="toolbar-divider"></span>
               <button class="tool-button" id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button>
               <span class="zoom-readout" id="zoom-readout">100%</span>
               <button class="tool-button" id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button>

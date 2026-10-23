@@ -223,11 +223,15 @@ class ReadOnlyAssistantTools:
                 raise ValueError("Project map keys must be assistant project hashes")
             if not isinstance(store, ProjectStore) or store.project_key != key:
                 raise ValueError("Project map identity does not match its local store")
+            if not store.read_only:
+                raise ValueError("Read-only assistant tools require read-only project stores")
             if key in normalized:
                 raise ValueError("Project map contains a duplicate project")
             normalized[key] = store
         if not isinstance(kb_index, KBIndex):
             raise TypeError("kb_index must be a KBIndex")
+        if not kb_index.read_only:
+            raise ValueError("Read-only assistant tools require a read-only KB index")
         self._stores = normalized
         self._kb = kb_index
         self._allow_raw_capture_reads = bool(allow_raw_capture_reads)
@@ -236,12 +240,12 @@ class ReadOnlyAssistantTools:
     def from_data_root(cls, root: Path | None = None) -> "ReadOnlyAssistantTools":
         base = data_root() if root is None else root.expanduser().resolve()
         stores = {
-            ref.storage_key: ProjectStore(ref, root=base)
+            ref.storage_key: ProjectStore(ref, root=base, read_only=True)
             for ref in load_project_refs(base)
         }
         configured_index = os.environ.get("BB_ASSISTANT_KB_INDEX")
         kb_path = Path(configured_index).expanduser().resolve() if configured_index else base / "kb" / "index.sqlite3"
-        kb = KBIndex(kb_path)
+        kb = KBIndex(kb_path, read_only=True)
         allow_raw = os.environ.get("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1"
         return cls(stores, kb, allow_raw_capture_reads=allow_raw)
 

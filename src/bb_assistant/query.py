@@ -224,7 +224,7 @@ def graph_slice(
         raise ValueError("Provide between one and max_nodes seed IDs")
     if not (1 <= max_nodes <= 500 and 0 <= max_edges <= 2000 and 0 <= max_depth <= 12):
         raise ValueError("Invalid graph slice budget")
-    with BehaviorGraph(store.behavior_graph_path, store.project_key) as graph:
+    with BehaviorGraph(store.behavior_graph_path, store.project_key, read_only=store.read_only) as graph:
         result = graph.get_slice(
             list(seed_ids),
             max_nodes=max_nodes,

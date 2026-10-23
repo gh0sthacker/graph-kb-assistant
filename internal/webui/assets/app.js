@@ -7,6 +7,8 @@ const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_varia
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
   graph: null, selectedEndpoint: null, selectedNode: null, focusedNodeId: null, graphFocus: false, loadingSurface: false,
+  surfaceRequestId: 0, surfaceAbort: null,
+  graphSeeds: [], graphView: "direct", graphHistory: [], graphRequestId: 0, graphAbort: null,
   loadingGraph: false, hiddenKinds: new Set(OVERVIEW_HIDDEN_KINDS), routeScope: true, edgeLabelsVisible: true,
   renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
 };
@@ -23,6 +25,7 @@ const elements = {
   status: $("#status-text"), coverage: $("#coverage-status"), updated: $("#last-updated"),
   zoom: $("#zoom-readout"), zoomIn: $("#zoom-in"), zoomOut: $("#zoom-out"),
   focusGraph: $("#focus-graph"), workspace: $(".workspace"),
+  captureSelect: $("#capture-select"), graphBack: $("#graph-back"), graphDeeper: $("#graph-deeper"),
   toast: $("#toast"), viewport: $("#graph-viewport"),
 };
 
@@ -80,8 +83,8 @@ function showToast(message) {
   state.toastTimer = setTimeout(() => elements.toast.classList.remove("show"), 2600);
 }
 
-async function getJSON(path) {
-  const response = await fetch(path, { headers: { Accept: "application/json" }, credentials: "same-origin", cache: "no-store" });
+async function getJSON(path, signal) {
+  const response = await fetch(path, { headers: { Accept: "application/json" }, credentials: "same-origin", cache: "no-store", signal });
   let payload;
   try { payload = await response.json(); } catch { throw new Error("The server returned an invalid response."); }
   if (!response.ok) throw new Error(payload.error || `Read failed (${response.status}).`);
@@ -145,10 +148,13 @@ async function loadProjects(append = false) {
 }
 
 function clearProjectView() {
+  resetSurfaceRequest();
+  resetGraphNavigation();
   state.projectKey = "";
   state.projectCursor = null;
   state.endpoints = [];
   state.endpointCursor = null;
+  state.surfaceGaps = [];
   state.graph = null;
   state.selectedEndpoint = null;
   state.selectedNode = null;
@@ -159,11 +165,18 @@ function clearProjectView() {
   elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
   elements.endpointCount.textContent = "0";
   elements.loadMore.hidden = true;
+  renderEndpointList();
   renderInspectorEmpty();
   renderEmpty("No registered projects", "Add a local project and import its Caido history first.");
 }
 
 async function selectProject(projectKey) {
+  if (!projectKey) {
+    clearProjectView();
+    return;
+  }
+  resetSurfaceRequest();
+  resetGraphNavigation();
   state.projectKey = projectKey;
   state.endpoints = [];
   state.endpointCursor = null;
@@ -193,18 +206,33 @@ function countText(value, label) {
   return span;
 }
 
+function resetSurfaceRequest() {
+  // Invalidate before aborting: a transport can finish despite cancellation.
+  state.surfaceRequestId++;
+  state.surfaceAbort?.abort();
+  state.surfaceAbort = null;
+  state.loadingSurface = false;
+  elements.loadMore.disabled = false;
+  elements.loadMore.replaceChildren(document.createTextNode("Load more "), el("span", "", "↓"));
+}
+
 async function loadSurface(append) {
   if (!state.projectKey || state.loadingSurface) return;
+  const projectKey = state.projectKey;
+  const requestId = ++state.surfaceRequestId;
+  const controller = new AbortController();
+  state.surfaceAbort = controller;
   state.loadingSurface = true;
   elements.loadMore.disabled = true;
   elements.loadMore.textContent = "Loading…";
-  const query = new URLSearchParams({ project_key: state.projectKey, limit: "40" });
+  const query = new URLSearchParams({ project_key: projectKey, limit: "40" });
   if (append && state.endpointCursor) {
     query.set("after_history", String(state.endpointCursor.historical_row_id));
     query.set("after_live", String(state.endpointCursor.live_row_id));
   }
   try {
-    const data = await getJSON(`/api/surface?${query}`);
+    const data = await getJSON(`/api/surface?${query}`, controller.signal);
+    if (requestId !== state.surfaceRequestId || state.projectKey !== projectKey || controller.signal.aborted) return;
     const rows = Array.isArray(data.endpoints) ? data.endpoints : [];
     const combined = append ? [...state.endpoints, ...rows] : rows;
     state.endpoints = mergeEndpoints(combined);
@@ -225,16 +253,20 @@ async function loadSurface(append) {
       if (!append && !state.selectedEndpoint) setStatus("Select an endpoint");
     }
   } catch (error) {
+    if (requestId !== state.surfaceRequestId || state.projectKey !== projectKey || error.name === "AbortError") return;
     if (!append) {
       elements.endpointList.replaceChildren(emptyList("Could not read the index", error.message));
       renderEmpty("Project data is unavailable", "Check the schema version, local database integrity, and BehaviorGraph availability.");
     }
     setStatus("Local index read error", "error");
   } finally {
-    state.loadingSurface = false;
-    elements.loadMore.disabled = false;
-    elements.loadMore.replaceChildren(document.createTextNode("Load more "), el("span", "", "↓"));
-    elements.loadMore.hidden = !state.endpointCursor;
+    if (requestId === state.surfaceRequestId && state.projectKey === projectKey) {
+      state.surfaceAbort = null;
+      state.loadingSurface = false;
+      elements.loadMore.disabled = false;
+      elements.loadMore.replaceChildren(document.createTextNode("Load more "), el("span", "", "↓"));
+      elements.loadMore.hidden = !state.endpointCursor;
+    }
   }
 }
 
@@ -301,18 +333,22 @@ function emptyList(title, copy) {
 function endpointKey(endpoint) { return [endpoint.host, endpoint.port, endpoint.route, endpoint.method].join("\u0000"); }
 
 async function openEndpoint(endpoint) {
+  resetGraphNavigation();
   state.selectedEndpoint = endpoint;
-  state.routeScope = true;
+  state.routeScope = false;
   state.focusedNodeId = null;
-  state.hiddenKinds = new Set(OVERVIEW_HIDDEN_KINDS);
+  state.hiddenKinds = new Set();
   state.selectedNode = null;
   state.graph = null;
   renderEndpointList();
   renderInspectorEmpty();
   const seeds = (endpoint.sampled_graph_seed_ids || []).slice(0, 20);
+  elements.captureSelect.replaceChildren();
+  seeds.forEach((id, index) => elements.captureSelect.append(new Option(`Capture ${index + 1} of ${seeds.length} sampled`, id)));
+  elements.captureSelect.hidden = seeds.length < 2;
   elements.graphTitle.textContent = displayPath(endpoint.route || "/");
   elements.graphTitle.title = MASKED_PATH_HELP;
-  elements.graphSubtitle.textContent = `${endpoint.method}  ·  ${endpoint.host}${endpoint.port ? `:${endpoint.port}` : ""}  ·  ${endpoint.observation_count || 0} matching requests`;
+  elements.graphSubtitle.textContent = `${endpoint.method}  ·  ${endpoint.host}${endpoint.port ? `:${endpoint.port}` : ""}  ·  ${endpoint.observation_count || 0} requests in loaded surface  ·  ${seeds.length} sampled captures`;
   elements.graphCounts.title = "Node and edge counts for the current graph slice of this route; these are not project-wide request totals.";
   if (!seeds.length) {
     elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
@@ -321,34 +357,105 @@ async function openEndpoint(endpoint) {
     setStatus("Observations are not linked to the graph");
     return;
   }
-  await loadGraph(seeds);
+  await loadGraph([seeds[0]], { focusNodeId: seeds[0] });
 }
 
-async function loadGraph(seeds) {
+function resetGraphNavigation() {
+  state.graphAbort?.abort();
+  state.graphRequestId++;
+  state.graphHistory = [];
+  state.graphSeeds = [];
+  state.loadingGraph = false;
+  elements.graphBack.disabled = true;
+  elements.graphDeeper.disabled = true;
+  elements.captureSelect.hidden = true;
+}
+
+function graphNavigationSnapshot() {
+  return { graph: state.graph, seeds: [...state.graphSeeds], view: state.graphView,
+    focus: state.focusedNodeId, routeScope: state.routeScope, hiddenKinds: new Set(state.hiddenKinds), selectedNodeId: state.selectedNode?.id };
+}
+
+function restoreGraphNavigation(previous) {
+  state.graph = previous.graph;
+  state.graphSeeds = previous.seeds;
+  state.graphView = previous.view;
+  state.focusedNodeId = previous.focus;
+  state.routeScope = previous.routeScope;
+  state.hiddenKinds = previous.hiddenKinds;
+  if ([...elements.captureSelect.options].some(option => option.value === previous.seeds[0])) elements.captureSelect.value = previous.seeds[0];
+  renderGraph();
+  if (previous.selectedNodeId) selectNode(previous.selectedNodeId);
+  elements.graphBack.disabled = state.graphHistory.length === 0;
+  elements.graphDeeper.disabled = state.loadingGraph || state.graphView === "full";
+  setStatus(`Returned to ${state.graphView === "direct" ? "direct relationships" : "deeper slice"} · coverage is partial`, "ready");
+}
+
+async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember = false } = {}) {
   if (!state.projectKey || !Array.isArray(seeds) || !seeds.length) return;
-  state.focusedNodeId = null;
+  const previous = graphNavigationSnapshot();
+  const projectKey = state.projectKey;
+  const requestId = ++state.graphRequestId;
+  state.graphAbort?.abort();
+  const controller = new AbortController();
+  state.graphAbort = controller;
   state.loadingGraph = true;
-  renderEmpty("Loading graph relationships", "Reading a bounded, read-only neighborhood of the selected nodes.");
-  setStatus("Loading graph neighborhood", "loading");
-  const query = new URLSearchParams({ project_key: state.projectKey });
+  elements.graphDeeper.disabled = true;
+  renderEmpty(view === "full" ? "Loading a deeper graph slice" : "Loading direct relationships", view === "full" ? "Reading and validating the project snapshot. Large projects can take longer." : "Reading the selected node and its immediate connections.");
+  setStatus(view === "full" ? "Loading deeper slice" : "Loading direct relationships", "loading");
+  const query = new URLSearchParams({ project_key: projectKey, view });
   for (const seed of seeds.slice(0, 20)) query.append("seed", seed);
   try {
-    state.graph = await getJSON(`/api/graph?${query}`);
+    const graph = await getJSON(`/api/graph?${query}`, controller.signal);
+    if (requestId !== state.graphRequestId || state.projectKey !== projectKey) return;
+    if (remember && previous.graph) {
+      state.graphHistory.push(previous);
+      if (state.graphHistory.length > 8) state.graphHistory.shift();
+    }
+    state.graph = graph;
+    state.graphSeeds = [...seeds];
+    state.graphView = view;
+    state.focusedNodeId = focusNodeId;
+    state.routeScope = false;
+    state.hiddenKinds = new Set();
     state.selectedNode = null;
     renderGraph();
-    const first = state.renderedEntities.find(isSelectedEndpointNode) || state.renderedEntities.find(item => seeds.includes(item.id)) || state.renderedEntities[0];
+    const first = state.renderedEntities.find(item => item.id === focusNodeId) || state.renderedEntities.find(item => seeds.includes(item.id)) || state.renderedEntities[0];
     if (first) selectNode(first.id);
     else renderInspectorEmpty();
     const partial = Boolean(state.graph.incomplete || state.graph.truncated);
-    setStatus(partial ? "Graph loaded · coverage is partial" : "Graph loaded", "ready");
-    if (partial) elements.coverage.textContent = "Graph coverage: partial";
+    const label = view === "direct" ? "Direct relationships" : "Deeper graph slice";
+    setStatus(partial ? `${label} · coverage is partial` : label, "ready");
+    if (partial) {
+      const sampledEntities = Array.isArray(graph.provenance_truncated_entity_ids)
+        ? graph.provenance_truncated_entity_ids.length
+        : 0;
+      elements.coverage.textContent = graph.provenance_truncated
+        ? `Graph coverage: partial · source references sampled on ${sampledEntities} entities`
+        : "Graph coverage: partial";
+    }
+    const provenance = graph.capture_provenance?.find(item => item.graph_observation_id === seeds[0]);
+    const option = [...elements.captureSelect.options].find(item => item.value === seeds[0]);
+    if (option && provenance?.request_id) option.textContent = `Caido #${provenance.request_id}`;
   } catch (error) {
+    if (requestId !== state.graphRequestId || error.name === "AbortError") return;
+    if (previous.graph) {
+      restoreGraphNavigation(previous);
+      showToast(`Could not load relationships: ${error.message}`);
+      return;
+    }
     state.graph = null;
     renderEmpty("Could not build the graph", error.message || "Check compatibility with the local BehaviorGraph database.");
     elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
     elements.inspector.replaceChildren(emptyList("Graph unavailable", "Select another endpoint or check graph database integrity."));
     setStatus("Graph read error", "error");
-  } finally { state.loadingGraph = false; }
+  } finally {
+    if (requestId === state.graphRequestId) {
+      state.loadingGraph = false;
+      elements.graphBack.disabled = state.graphHistory.length === 0;
+      elements.graphDeeper.disabled = !state.graph || state.graphView === "full";
+    }
+  }
 }
 
 function renderEmpty(title, copy) {
@@ -397,7 +504,7 @@ function renderGraph(resetView = true) {
     elements.emptyTitle.textContent = "Nodes are hidden by filters";
     elements.emptyCopy.textContent = "Enable a node type or choose “All nodes” to see relationships.";
     const scopeLabel = state.focusedNodeId ? "near focus" : state.routeScope ? "in overview" : "in slice";
-    elements.graphCounts.replaceChildren(countText(0, "shown"), el("b"), countText(entities.length, scopeLabel));
+    renderGraphCounts(0, 0, allEntities.length);
     elements.graphCounts.title = state.focusedNodeId
       ? `Direct relationships of the selected node: ${entities.length} nodes and ${assertions.length} edges. The full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`
       : `The selected view contains ${entities.length} nodes and ${assertions.length} edges; the full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`;
@@ -406,7 +513,7 @@ function renderGraph(resetView = true) {
   }
   elements.canvasEmpty.hidden = true;
   const scopeLabel = state.focusedNodeId ? "near focus" : state.routeScope ? "in overview" : "in slice";
-  elements.graphCounts.replaceChildren(countText(renderedEntities.length, "shown"), el("b"), countText(renderedAssertions.length, "edges"), el("b"), countText(entities.length, scopeLabel));
+  renderGraphCounts(renderedEntities.length, renderedAssertions.length, allEntities.length);
   elements.graphCounts.title = state.focusedNodeId
     ? `Direct relationships of the selected node: ${renderedEntities.length} of ${entities.length} nodes. The full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`
     : state.routeScope
@@ -446,6 +553,26 @@ function renderGraph(resetView = true) {
     const replacement = renderedEntities.find(isSelectedEndpointNode) || renderedEntities.find(node => seedIds.has(node.id)) || renderedEntities[0];
     if (replacement) selectNode(replacement.id);
     else renderInspectorEmpty();
+  }
+}
+
+function renderGraphCounts(shown, edges, loaded) {
+  const omitted = state.graph?.missing_branches?.length || 0;
+  elements.graphCounts.replaceChildren(countText(shown, "shown"), el("b"), countText(edges, "edges"), el("b"), countText(loaded, "loaded"));
+  if (omitted) elements.graphCounts.append(el("b"), countText(omitted, "omitted"));
+  if (state.graph?.neighborhood_candidate_limit_reached || state.graph?.missing_branches_truncated) {
+    elements.graphCounts.append(el("b"), el("span", "graph-more", "more available"));
+  }
+  if (state.graph?.provenance_truncated) {
+    const ids = Array.isArray(state.graph.provenance_truncated_entity_ids)
+      ? state.graph.provenance_truncated_entity_ids
+      : [];
+    const sample = el("span", "graph-more", `${ids.length} entities sampled`);
+    const limit = Number.isInteger(state.graph.entity_source_ref_limit)
+      ? `${state.graph.entity_source_ref_limit}`
+      : "a bounded number of";
+    sample.title = `Source references are sampled to at most ${limit} per entity. Use the deeper graph slice to request full provenance, subject to its limits.`;
+    elements.graphCounts.append(el("b"), sample);
   }
 }
 
@@ -538,15 +665,9 @@ function selectGraphView(view) {
   setStatus(partial ? `${label} · coverage is partial` : label, "ready");
 }
 
-function focusOnNode(node) {
+async function focusOnNode(node) {
   if (!state.graph || !state.graph.entities?.some(item => item.id === node.id)) return;
-  state.routeScope = false;
-  state.focusedNodeId = node.id;
-  state.hiddenKinds = new Set();
-  renderGraph(true);
-  selectNode(node.id);
-  const focused = BBGraphFocus.focusedNeighborhood(state.graph.entities || [], state.graph.assertions || [], node.id);
-  setStatus(`Focused on direct relationships · ${focused.entities.length} nodes`, "ready");
+  await loadGraph([node.id], { focusNodeId: node.id, remember: true });
 }
 
 function selectedEndpointNeighborhood(entities, assertions) {
@@ -701,11 +822,12 @@ function renderInspector(node) {
     elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Dynamic values are not stored in the graph; find the exact request in Caido using the linked capture's request ID."));
   }
   if (node.kind === "observation") renderProvenance(node);
-  const action = el("button", "detail-action", "Focus on direct relationships →");
+  const action = el("button", "detail-action", "Load direct relationships →");
   action.type = "button";
   action.disabled = !/^[a-z][a-z0-9_]*-[a-f0-9]{64}$/.test(node.id || "");
-  action.addEventListener("click", () => focusOnNode(node));
+  action.addEventListener("click", () => { void focusOnNode(node); });
   elements.inspector.append(action);
+  elements.inspector.append(el("p", "detail-help", "Loads this node and its immediate connections. Use Back to return to the previous graph."));
 }
 
 function safeDetails(node) {
@@ -837,6 +959,14 @@ elements.project.addEventListener("change", () => {
 });
 elements.filter.addEventListener("input", renderEndpointList);
 elements.loadMore.addEventListener("click", () => loadSurface(true));
+elements.captureSelect.addEventListener("change", () => { void loadGraph([elements.captureSelect.value], { focusNodeId: elements.captureSelect.value, remember: true }); });
+elements.graphBack.addEventListener("click", () => {
+  const previous = state.graphHistory.pop();
+  if (!previous) return;
+  state.graphAbort?.abort(); state.graphRequestId++; state.loadingGraph = false;
+  restoreGraphNavigation(previous);
+});
+elements.graphDeeper.addEventListener("click", () => { void loadGraph(state.graphSeeds, { view: "full", remember: true }); });
 $("#refresh-button").addEventListener("click", () => loadProjects());
 elements.zoomIn.addEventListener("click", () => stepZoom(1));
 elements.zoomOut.addEventListener("click", () => stepZoom(-1));

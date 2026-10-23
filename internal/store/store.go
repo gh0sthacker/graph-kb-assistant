@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"bb-graph-assistant/internal/projectlock"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -20,31 +22,58 @@ const CurrentSchemaVersion = 5
 var ErrUnsupportedSchema = errors.New("unsupported graph database schema")
 
 type Store struct {
-	db       *sql.DB
-	path     string
-	readonly bool
+	db        *sql.DB
+	path      string
+	readonly  bool
+	readLease *projectlock.Lock
 }
 
 // OpenReadOnly inspects an existing database without running migrations,
 // creating tables, or changing SQLite pragmas. Use it first on production data.
 func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
-	return open(ctx, path, true)
+	return open(ctx, path, true, true)
+}
+
+// OpenReadOnlyUnderMaintenance opens a project database read-only when the
+// caller already holds that project's exclusive maintenance lease. The caller
+// must keep the lease until the returned Store is closed.
+func OpenReadOnlyUnderMaintenance(ctx context.Context, path string, maintenance *projectlock.Lock) (*Store, error) {
+	if maintenance == nil {
+		return nil, errors.New("project maintenance lease is required for this read-only open")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil || !maintenance.CoversDirectory(filepath.Dir(absolute)) {
+		return nil, errors.New("project maintenance lease does not match the database directory")
+	}
+	return open(ctx, path, true, false)
 }
 
 // OpenForWrite opens an existing, already compatible database. It never
 // initializes or upgrades the schema; callers should use a copied database
 // until Go write parity has been checked.
 func OpenForWrite(ctx context.Context, path string) (*Store, error) {
-	return open(ctx, path, false)
+	return open(ctx, path, false, false)
 }
 
-func open(ctx context.Context, path string, readonly bool) (*Store, error) {
+func open(ctx context.Context, path string, readonly bool, acquireReadLease bool) (_ *Store, retErr error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("database path is required")
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, errors.New("database path is invalid")
+	}
+	var readLease *projectlock.Lock
+	if readonly && acquireReadLease {
+		readLease, err = projectlock.AcquireRead(ctx, filepath.Dir(absolute))
+		if err != nil {
+			return nil, errors.New("project read lease could not be acquired")
+		}
+		defer func() {
+			if readLease != nil {
+				retErr = errors.Join(retErr, readLease.Close())
+			}
+		}()
 	}
 	info, err := os.Lstat(absolute)
 	if err != nil {
@@ -56,10 +85,15 @@ func open(ctx context.Context, path string, readonly bool) (*Store, error) {
 	if !readonly && info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("writable database permissions must be owner-only")
 	}
+	if readonly {
+		if err := rejectSQLiteSidecars(absolute); err != nil {
+			return nil, err
+		}
+	}
 
 	fileURL := (&url.URL{Scheme: "file", Path: absolute}).String()
 	if readonly {
-		fileURL += "?mode=ro"
+		fileURL += "?mode=ro&immutable=1"
 	}
 	db, err := sql.Open("sqlite", fileURL)
 	if err != nil {
@@ -70,10 +104,24 @@ func open(ctx context.Context, path string, readonly bool) (*Store, error) {
 	db.SetConnMaxLifetime(0)
 	store := &Store{db: db, path: absolute, readonly: readonly}
 	if err := store.validate(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
+		return nil, errors.Join(err, db.Close())
 	}
+	store.readLease = readLease
+	readLease = nil
 	return store, nil
+}
+
+func rejectSQLiteSidecars(databasePath string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		_, err := os.Lstat(databasePath + suffix)
+		if err == nil {
+			return errors.New("database has a SQLite sidecar; read-only open refused")
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("SQLite sidecar state could not be checked; read-only open refused")
+		}
+	}
+	return nil
 }
 
 func (s *Store) validate(ctx context.Context) error {
@@ -113,4 +161,16 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) ReadOnly() bool { return s.readonly }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	var databaseErr, leaseErr error
+	if s.db != nil {
+		databaseErr = s.db.Close()
+	}
+	if s.readLease != nil {
+		leaseErr = s.readLease.Close()
+	}
+	return errors.Join(databaseErr, leaseErr)
+}

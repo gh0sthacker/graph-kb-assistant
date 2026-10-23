@@ -2,9 +2,13 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 
 	capturesearch "bb-graph-assistant/internal/search"
+	"bb-graph-assistant/internal/store"
 )
 
 // GraphExplorerProjects returns one page of project identities from the local
@@ -74,6 +78,47 @@ func (t *Tools) GraphExplorerSlice(ctx context.Context, projectKey string, seeds
 		MaxEdges:   intPointer(160),
 		MaxDepth:   intPointer(3),
 	})
+}
+
+// GraphExplorerNeighborhood is the interactive web-only view. The MCP
+// graph_slice tool retains the full validated reader and evidence semantics.
+func (t *Tools) GraphExplorerNeighborhood(ctx context.Context, projectKey string, seeds []string) (map[string]any, error) {
+	if !projectKeyPattern.MatchString(projectKey) || len(seeds) < 1 || len(seeds) > 20 {
+		return nil, errors.New("select one project and 1-20 graph seeds")
+	}
+	ref, ok := t.projectsByKey[projectKey]
+	if !ok {
+		return nil, errors.New("selected project is not in the local catalog")
+	}
+	selected, err := store.OpenProjectReadOnly(ctx, ref, t.root)
+	if err != nil {
+		return nil, errors.New("selected project is unavailable for graph reads")
+	}
+	defer selected.Close()
+	result, err := capturesearch.GraphNeighborhood(ctx, selected, seeds)
+	if err != nil {
+		return nil, errors.New("selected graph neighborhood is unavailable or exceeds its limits")
+	}
+	result["graph_version"] = "behavior-graph-direct-v1"
+	result["coverage_note"] = "Direct structural neighborhood; coverage and full-project evidence integrity remain partial."
+	result, redactedPaths, redactedLocators, err := redactGraphSourcePaths(result)
+	if err != nil {
+		return nil, errors.New("graph neighborhood could not be prepared")
+	}
+	result["local_source_paths_redacted"] = redactedPaths
+	result["unsafe_source_locators_redacted"] = redactedLocators
+	delete(result, "result_id")
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, errors.New("graph neighborhood could not be fingerprinted")
+	}
+	digest := sha256.Sum256(encoded)
+	result["result_id"] = "result-" + hex.EncodeToString(digest[:])
+	encoded, err = json.Marshal(result)
+	if err != nil || len(encoded) > maxToolResultBytes {
+		return nil, errors.New("graph neighborhood exceeds the output limit")
+	}
+	return result, nil
 }
 
 func intPointer(value int) *int { return &value }

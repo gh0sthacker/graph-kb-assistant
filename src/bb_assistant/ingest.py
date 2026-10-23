@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import replace
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
@@ -16,6 +17,7 @@ from .caido import CaidoReadSource, validate_page
 from .caido_mcp import CaidoMCPError
 from .domain import CaidoProjectRef
 from .graph import _route_template, project_exchange, store_projection
+from .project_lock import ProjectLockError, project_maintenance_lock
 from .storage import ProjectStore, decode_vault_key
 
 
@@ -48,6 +50,19 @@ def _cursor_digest(cursor: str | None) -> str:
 
 def _request_id_digest(request_id: str) -> str:
     return hashlib.sha256(b"caido-history-request-id\x00" + request_id.encode("utf-8", errors="strict")).hexdigest()
+
+
+@contextmanager
+def _locked_project_store(
+    project: CaidoProjectRef,
+    store: ProjectStore | None = None,
+):
+    """Acquire the per-project lease before opening any writable SQLite store."""
+    if store is not None and not store.project.same_project(project):
+        raise ValueError("ProjectStore namespace does not match the selected Caido project")
+    directory = store.directory if store is not None else ProjectStore.maintenance_directory(project)
+    with project_maintenance_lock(directory):
+        yield store if store is not None else ProjectStore(project, _maintenance_lock_held=True)
 
 
 def _project_index_keys(project: CaidoProjectRef, root_key: bytes) -> tuple[bytes, bytes]:
@@ -83,9 +98,25 @@ def sync_project(
         raise ValueError("page_delay_seconds must be a finite non-negative number")
     if max_pages_per_run is not None and max_pages_per_run < 1:
         raise ValueError("max_pages_per_run must be positive")
-    target_store = store or ProjectStore(project)
-    if not target_store.project.same_project(project):
+    if store is not None and not store.project.same_project(project):
         raise ValueError("ProjectStore namespace does not match the selected Caido project")
+    with _locked_project_store(project, store) as target_store:
+        return _sync_project_locked(
+            source, project, page_size=page_size,
+            page_delay_seconds=page_delay_seconds,
+            max_pages_per_run=max_pages_per_run, target_store=target_store,
+        )
+
+
+def _sync_project_locked(
+    source: CaidoReadSource,
+    project: CaidoProjectRef,
+    *,
+    page_size: int,
+    page_delay_seconds: float,
+    max_pages_per_run: int | None,
+    target_store: ProjectStore,
+) -> SyncReceipt:
     vault_key = decode_vault_key()
     _index_key, response_key = _project_index_keys(project, vault_key)
     run = target_store.begin_sync_run(_SOURCE_KEY)
@@ -232,22 +263,31 @@ def backfill_all_projects(
                 )
             )
         except Exception as exc:
-            store = ProjectStore(project)
+            if isinstance(exc, ProjectLockError):
+                receipts.append(SyncReceipt(project.storage_key, "partial", 0, 0, None, type(exc).__name__))
+                continue
             # The MCP adapter's messages are fixed, sanitized diagnostics. Keep
             # them so resumable imports distinguish a stale cursor, a Caido
             # tool error, and a local normalization failure without exposing
             # request/response contents or credentials.
             problem = str(exc) if isinstance(exc, CaidoMCPError) else type(exc).__name__
-            progress = store.sync_progress(_SOURCE_KEY)
-            if progress is None:
-                with store.connect() as connection:
-                    connection.execute(
-                        "INSERT INTO sync_state(source_key,cursor,last_request_id,state,updated_at) "
-                        "VALUES(?,NULL,NULL,'partial',?) ON CONFLICT(source_key) DO UPDATE SET "
-                        "state='partial',updated_at=excluded.updated_at",
-                        (_SOURCE_KEY, datetime.now(timezone.utc).isoformat()),
-                    )
-                progress = store.sync_progress(_SOURCE_KEY)
+            try:
+                with _locked_project_store(project) as store:
+                    progress = store.sync_progress(_SOURCE_KEY)
+                    if progress is None:
+                        with store.connect() as connection:
+                            connection.execute(
+                                "INSERT INTO sync_state(source_key,cursor,last_request_id,state,updated_at) "
+                                "VALUES(?,NULL,NULL,'partial',?) ON CONFLICT(source_key) DO UPDATE SET "
+                                "state='partial',updated_at=excluded.updated_at",
+                                (_SOURCE_KEY, datetime.now(timezone.utc).isoformat()),
+                            )
+                        progress = store.sync_progress(_SOURCE_KEY)
+            except ProjectLockError as lock_error:
+                # Report the project gap without writing outside its lease or
+                # preventing later projects from being attempted.
+                progress = None
+                problem = type(lock_error).__name__
             receipts.append(
                 SyncReceipt(
                     project.storage_key,
@@ -270,7 +310,8 @@ def backfill_all_projects(
             project = projects_by_key.get(receipt.project_key)
             if project is not None and receipt.run_id is not None:
                 try:
-                    ProjectStore(project).mark_sync_partial(_SOURCE_KEY, receipt.run_id)
+                    with _locked_project_store(project) as store:
+                        store.mark_sync_partial(_SOURCE_KEY, receipt.run_id)
                 except Exception:
                     pass
             updated_receipts.append(replace(receipt, state="partial", problem=problem))
@@ -437,9 +478,28 @@ def sync_live_project(
         raise ValueError("overlap_seconds must be between 1 and 3600")
     if not (64 * 1024 <= max_body_bytes <= 16 * 1024 * 1024):
         raise ValueError("max_body_bytes must be between 65536 and 16777216")
-    target_store = store or ProjectStore(project)
-    if not target_store.project.same_project(project):
+    if store is not None and not store.project.same_project(project):
         raise ValueError("ProjectStore namespace does not match the selected Caido project")
+    with _locked_project_store(project, store) as target_store:
+        return _sync_live_project_locked(
+            source, project, page_size=page_size,
+            max_pages_per_cycle=max_pages_per_cycle,
+            overlap_seconds=overlap_seconds, max_body_bytes=max_body_bytes,
+            target_store=target_store, now=now,
+        )
+
+
+def _sync_live_project_locked(
+    source: CaidoReadSource,
+    project: CaidoProjectRef,
+    *,
+    page_size: int,
+    max_pages_per_cycle: int,
+    overlap_seconds: int,
+    max_body_bytes: int,
+    target_store: ProjectStore,
+    now: datetime | None,
+) -> LiveTailReceipt:
     fingerprint_root_key = decode_vault_key()
     index_key, response_key = _project_index_keys(project, fingerprint_root_key)
 
@@ -660,10 +720,17 @@ def tail_all_projects(
         projects = tuple(project for project in projects if project.storage_key in selected_project_keys)
     receipts = []
     for project in projects:
-        receipts.append(sync_live_project(
-            source, project, page_size=page_size,
-            max_pages_per_cycle=max_pages_per_cycle,
-            overlap_seconds=overlap_seconds,
-            max_body_bytes=max_body_bytes,
-        ))
+        try:
+            receipts.append(sync_live_project(
+                source, project, page_size=page_size,
+                max_pages_per_cycle=max_pages_per_cycle,
+                overlap_seconds=overlap_seconds,
+                max_body_bytes=max_body_bytes,
+            ))
+        except ProjectLockError as exc:
+            # A busy project is a retryable gap for the next polling cycle;
+            # do not skip later projects or write progress without its lease.
+            receipts.append(LiveTailReceipt(
+                project.storage_key, "partial", 0, 0, 0, None, None, type(exc).__name__,
+            ))
     return tuple(receipts)

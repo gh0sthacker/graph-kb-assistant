@@ -9,6 +9,7 @@ from typing import Any
 
 from .domain import CaidoProjectRef
 from .paths import data_root, ensure_private_directory
+from .project_lock import project_maintenance_lock
 
 
 _REGISTRY_VERSION = 1
@@ -16,7 +17,7 @@ _REGISTRY_VERSION = 1
 
 def _projects_root(root: Path | None = None) -> Path:
     base = data_root() if root is None else root.expanduser().resolve()
-    return ensure_private_directory(base / "projects")
+    return base / "projects"
 
 
 def registry_path(root: Path | None = None) -> Path:
@@ -26,6 +27,12 @@ def registry_path(root: Path | None = None) -> Path:
 def load_project_refs(root: Path | None = None) -> tuple[CaidoProjectRef, ...]:
     """Load validated project identities; registry values never become paths."""
     path = registry_path(root)
+    if path.parent.is_symlink():
+        raise ValueError("Project registry directory must not be a symbolic link")
+    if not path.parent.exists():
+        return ()
+    if not path.parent.is_dir():
+        raise ValueError("Project registry directory is not a directory")
     if path.is_symlink():
         raise ValueError("Project registry must not be a symbolic link")
     if not path.exists():
@@ -68,41 +75,46 @@ def load_project_refs(root: Path | None = None) -> tuple[CaidoProjectRef, ...]:
 def register_project(ref: CaidoProjectRef, root: Path | None = None) -> None:
     """Atomically add/update one project identity in the local catalog."""
     path = registry_path(root)
-    rows: dict[str, dict[str, Any]] = {
-        item.storage_key: {
-            "project_key": item.storage_key,
-            "instance_id": item.instance_id,
-            "project_id": item.project_id,
-            "display_name": item.display_name,
+    ensure_private_directory(path.parent)
+    # Projects have independent maintenance directories, but share this
+    # registry file. Serialize the complete read/modify/replace transaction at
+    # the catalog directory so concurrent initializations cannot lose rows.
+    with project_maintenance_lock(path.parent):
+        rows: dict[str, dict[str, Any]] = {
+            item.storage_key: {
+                "project_key": item.storage_key,
+                "instance_id": item.instance_id,
+                "project_id": item.project_id,
+                "display_name": item.display_name,
+            }
+            for item in load_project_refs(root)
         }
-        for item in load_project_refs(root)
-    }
-    rows[ref.storage_key] = {
-        "project_key": ref.storage_key,
-        "instance_id": ref.instance_id,
-        "project_id": ref.project_id,
-        "display_name": ref.display_name,
-    }
-    payload = {
-        "schema_version": _REGISTRY_VERSION,
-        "projects": sorted(rows.values(), key=lambda row: (row["display_name"] or "", row["project_key"])),
-    }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    fd, temporary_name = tempfile.mkstemp(prefix=".registry-", suffix=".tmp", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        rows[ref.storage_key] = {
+            "project_key": ref.storage_key,
+            "instance_id": ref.instance_id,
+            "project_id": ref.project_id,
+            "display_name": ref.display_name,
+        }
+        payload = {
+            "schema_version": _REGISTRY_VERSION,
+            "projects": sorted(rows.values(), key=lambda row: (row["display_name"] or "", row["project_key"])),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        fd, temporary_name = tempfile.mkstemp(prefix=".registry-", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
         try:
-            path.chmod(0o600)
-        except OSError:
-            pass
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass

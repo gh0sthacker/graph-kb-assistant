@@ -90,7 +90,10 @@ type preparedExchange struct {
 // OpenPageWriter validates the selected registered project and reads the
 // vault key from BB_ASSISTANT_VAULT_KEY at this API boundary.
 func OpenPageWriter(ctx context.Context, selected *store.ProjectStore) (*PageWriter, error) {
-	if err := validateSelectedProject(ctx, selected); err != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateSelectedProject(selected); err != nil {
 		return nil, err
 	}
 	key, err := readVaultKey()
@@ -187,7 +190,7 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 	if err := w.validateOpen(); err != nil {
 		return PageResult{}, err
 	}
-	if err := validateSelectedProject(ctx, w.selected); err != nil {
+	if err := validateSelectedProject(w.selected); err != nil {
 		return PageResult{}, err
 	}
 	if !validRunID(input.RunID) || len(input.Page.Exchanges) < 1 || len(input.Page.Exchanges) > maxPageExchanges {
@@ -444,7 +447,7 @@ func (w *PageWriter) CompleteEmpty(ctx context.Context, runID string, cursor *st
 	if err := w.validateOpen(); err != nil {
 		return RunCheckpoint{}, err
 	}
-	if err := validateSelectedProject(ctx, w.selected); err != nil {
+	if err := validateSelectedProject(w.selected); err != nil {
 		return RunCheckpoint{}, err
 	}
 	if !validRunID(runID) || (cursor != nil && (len(*cursor) == 0 || len(*cursor) > maxCursorBytes || !utf8.ValidString(*cursor))) {
@@ -551,45 +554,23 @@ func importGraphBundles(ctx context.Context, selected *store.ProjectStore, bundl
 	if selected == nil || len(bundles) == 0 || len(bundles) > maxPageExchanges {
 		return errors.New("historical graph batch is unavailable")
 	}
-	if err := validateSelectedProject(ctx, selected); err != nil {
+	if err := validateSelectedProject(selected); err != nil {
 		return err
 	}
-	directory, err := filepath.Abs(selected.Directory)
+	graphWriter, err := behaviorgraph.OpenWriter(ctx, selected)
 	if err != nil {
-		return errors.New("selected project path is invalid")
-	}
-	root := filepath.Dir(filepath.Dir(directory))
-	readOnly, err := store.OpenProjectReadOnly(ctx, selected.Project, root)
-	if err != nil {
-		return errors.New("selected project could not be reopened read-only for graph import")
-	}
-	matches := readOnly.ProjectKey == selected.ProjectKey && filepath.Clean(readOnly.Directory) == directory &&
-		readOnly.Database != nil && selected.Database != nil && readOnly.Database.Path() == selected.Database.Path() &&
-		filepath.Clean(readOnly.BehaviorGraphPath) == filepath.Clean(selected.BehaviorGraphPath) &&
-		filepath.Clean(readOnly.BehaviorReceiptPath) == filepath.Clean(selected.BehaviorReceiptPath)
-	if !matches {
-		_ = readOnly.Close()
-		return errors.New("read-only project paths do not match the selected project")
-	}
-	graphWriter, err := behaviorgraph.OpenWriter(ctx, readOnly)
-	if err != nil {
-		_ = readOnly.Close()
 		return errors.New("selected project graph writer could not be opened")
 	}
 	_, importErr := graphWriter.ImportBundles(ctx, bundles)
 	var syncErr error
 	if importErr == nil {
-		_, syncErr = graphsync.Drain(ctx, readOnly)
+		_, syncErr = graphsync.Drain(ctx, selected)
 	}
-	closeErr := readOnly.Close()
 	if importErr != nil {
 		return importErr
 	}
 	if syncErr != nil {
 		return syncErr
-	}
-	if closeErr != nil {
-		return errors.New("read-only selected project could not be closed")
 	}
 	return nil
 }
@@ -664,7 +645,7 @@ func (w *PageWriter) MarkPartial(ctx context.Context, runID string) error {
 	return nil
 }
 
-func validateSelectedProject(ctx context.Context, selected *store.ProjectStore) error {
+func validateSelectedProject(selected *store.ProjectStore) error {
 	if selected == nil || selected.Database == nil || selected.Database.DB() == nil || selected.Database.ReadOnly() {
 		return errors.New("historical writer requires a writable selected project store")
 	}
@@ -706,19 +687,9 @@ func validateSelectedProject(ctx context.Context, selected *store.ProjectStore) 
 	if err != nil || resolved != directory {
 		return errors.New("selected project directory is unavailable")
 	}
-	validated, err := store.OpenProjectReadOnly(ctx, selected.Project, root)
-	if err != nil {
-		return errors.New("selected project failed read-only store validation")
-	}
-	matches := validated.ProjectKey == key && validated.Directory == directory &&
-		validated.Database != nil && validated.Database.Path() == selected.Database.Path() &&
-		validated.VaultDirectory == filepath.Join(directory, "vault") &&
-		validated.BehaviorReceiptPath == filepath.Join(directory, "behavior-receipts") &&
-		validated.BehaviorGraphPath == filepath.Join(directory, "behavior.sqlite3")
-	closeErr := validated.Close()
-	if !matches || closeErr != nil {
-		return errors.New("selected project paths failed validation")
-	}
+	// The Store open validated the schema. Reopening the same database
+	// read-only here can race its active WAL writer and adds no stronger
+	// identity check than the path and registry validations above.
 	for _, path := range []string{selected.VaultDirectory, selected.BehaviorReceiptPath} {
 		info, statErr := os.Lstat(path)
 		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
