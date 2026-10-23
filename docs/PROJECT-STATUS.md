@@ -28,6 +28,14 @@ loop remain `PARTIAL`.
   or dead letter; it took about 113 seconds. No worker remained running after
   the check. The queue's low observed throughput makes a full drain a material
   runtime task. Do not treat Neo4j parity as proof that this queue is complete.
+- A separate read-only reconciliation audit held the project's shared lock and
+  compared every pending job's digest, revision mapping, graph records, and
+  provenance against the current BehaviorGraph. Of 1,393 pending jobs, 1,362
+  had a revision mapping; 1,258 payloads were fully represented in the local
+  graph, while 135 had missing or mismatched records. No job was acknowledged.
+  This is evidence for a future guarded reconciliation path, not a durable
+  queue transition; the pending count remains 1,393 until such a path is
+  implemented and verified against Neo4j parity.
 - Caido 0.58.3 lists the Juice Shop project as `READY` but inactive; the
   selected project is the unrelated `sperpravo` project. No project switch,
   request enumeration, body read, replay, or target traffic was performed.
