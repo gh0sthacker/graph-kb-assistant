@@ -372,7 +372,7 @@ func historicalFormParameterFields(body []byte, location string, source Record, 
 	}
 	pairs := strings.Split(string(body), "&")
 	fields := make([]historicalParameterField, 0, minInt(remaining, len(pairs)))
-	occurrences := make(map[string]int)
+	occurrences := make(map[string][]int)
 	fieldIndex := 0
 	for _, pair := range pairs {
 		if pair == "" {
@@ -394,17 +394,30 @@ func historicalFormParameterFields(body []byte, location string, source Record, 
 		if err != nil {
 			return nil, false
 		}
-		occurrence := occurrences[safeName]
-		occurrences[safeName] = occurrence + 1
 		if len(fields) >= remaining {
-			return fields, false
+			return finalizeHistoricalFormOccurrences(fields, occurrences), false
 		}
+		occurrence := len(occurrences[safeName])
+		occurrences[safeName] = append(occurrences[safeName], len(fields))
 		path := location + "[\"" + safeName + "\"][" + strconv.Itoa(occurrence) + "]"
 		fields = append(fields, historicalParameterField{
-			path: historicalTemplateParameterPath(path), typeName: "string", location: location,
+			path: path, typeName: "string", location: location,
 		})
 	}
-	return fields, true
+	return finalizeHistoricalFormOccurrences(fields, occurrences), true
+}
+
+// finalizeHistoricalFormOccurrences retains source-order indices for duplicate
+// names and keeps the legacy wildcard path for singleton fields.
+func finalizeHistoricalFormOccurrences(fields []historicalParameterField, occurrences map[string][]int) []historicalParameterField {
+	for _, indices := range occurrences {
+		if len(indices) != 1 {
+			continue
+		}
+		index := indices[0]
+		fields[index].path = historicalTemplateParameterPath(fields[index].path)
+	}
+	return fields
 }
 
 func historicalJSONParameterFields(body []byte, location string, source Record, remaining int) ([]historicalParameterField, bool) {
@@ -423,7 +436,7 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 			return errHistoricalBodyFieldLimit
 		}
 		fields = append(fields, historicalParameterField{
-			path: historicalTemplateParameterPath(path), typeName: typeName, location: location,
+			path: path, typeName: typeName, location: location,
 		})
 		return nil
 	}
@@ -510,7 +523,24 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 	if _, err := decoder.Token(); err != io.EOF {
 		return nil, false
 	}
-	return fields, true
+	return finalizeHistoricalJSONOccurrences(fields), true
+}
+
+// finalizeHistoricalJSONOccurrences retains array indices when a templated
+// field occurs more than once and keeps legacy paths for singleton fields.
+func finalizeHistoricalJSONOccurrences(fields []historicalParameterField) []historicalParameterField {
+	indicesByTemplate := make(map[string][]int, len(fields))
+	for index, field := range fields {
+		template := historicalTemplateParameterPath(field.path)
+		indicesByTemplate[template] = append(indicesByTemplate[template], index)
+	}
+	for _, indices := range indicesByTemplate {
+		if len(indices) != 1 {
+			continue
+		}
+		fields[indices[0]].path = template
+	}
+	return fields
 }
 
 func historicalSafeFieldName(name string, source Record, location string) (string, error) {

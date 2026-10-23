@@ -87,21 +87,25 @@ older audit entries describe their own historical snapshots.
 
 ## Stage 3 field-occurrence slice (2026-10-23)
 
-- The Go historical graph mapper now keeps repeated query parameters as
-  separate parameter occurrences with indexed paths such as
-  `query["id"][0]` and `query["id"][1]`. A singleton retains its established
-  wildcard path and parameter ID; endpoint and capture identities do not
-  change. Query values are parsed only to validate the URL and are discarded
-  before graph construction.
+- The Go historical graph mapper now keeps repeated query and
+  `application/x-www-form-urlencoded` parameters, plus repeated JSON array
+  fields, as separate occurrences with indexed paths such as
+  `query["id"][0]`, `request.body["id"][0]`, and
+  `$["items"][1]["id"]`. A singleton retains its established wildcard path
+  and parameter ID; endpoint and capture identities do not change. Values are
+  parsed only to validate input and classify field type; literal values are
+  discarded before graph construction.
 - Synthetic regression tests confirm separate IDs for repeated occurrences,
-  stable singleton and endpoint identities, and absence of raw query values in
-  the graph bundle. `go test -count=1 ./...`, `go test -race -count=1 ./...`,
-  `go vet ./...`, and `git diff --check` passed.
+  stable singleton and endpoint identities, and absence of raw query/form
+  values in the graph bundle. `go test -count=1 ./...`,
+  `go test -race -count=1 ./...`, `go vet ./...`, and `git diff --check`
+  passed.
 - The current local graph was not reprojected, so existing captures still have
   the prior collapsed representation until a separately validated rebuild or
-  replay. This first slice covers query parameters only; repeated body fields,
-  route-family grouping, actor/session/object context and flow annotations
-  remain outstanding. Stage 3 stays `PARTIAL`.
+  replay. This first slice covers query fields, form fields and repeated JSON
+  array fields; multipart occurrences, route-family grouping,
+  actor/session/object context and flow annotations remain outstanding. Stage
+  3 stays `PARTIAL`.
 
 This repository is an early public alpha. The following boundaries are deliberate and should remain visible in documentation and user-facing output:
 
