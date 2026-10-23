@@ -1,6 +1,6 @@
-# Core architecture v2 — proposal for approval
+# Core architecture v2 — approved plan
 
-Status: **PROPOSED — implementation requires approval of this plan.**
+Status: **APPROVED — architecture and six-stage sequence approved on 2026-10-23.**
 
 Date: 2026-10-23. Source baseline: `2800260`, with the uncommitted direct
 Neo4j neighborhood and web navigation feature also reviewed separately.
@@ -270,9 +270,9 @@ capabilities.
 
 ## 9. Implementation sequence and approval gates
 
-Approval requested: approve the architecture and this sequence. Routine
-implementation, local verification and Git commits then follow the approved
-plan. Provider choice remains an operator decision. KB remains deferred.
+The operator approved the architecture and this sequence on 2026-10-23.
+Routine implementation, local verification and Git commits follow this plan.
+Provider choice remains an operator decision. KB remains deferred.
 
 | Stage | Deliverable | Acceptance criteria |
 | --- | --- | --- |
@@ -298,8 +298,8 @@ query contract during Stage 2.
 
 Keep existing evidence recoverable throughout migration. Schema upgrades and
 new grouping projections must have explicit versions, replay rules and a
-rollback path. The architecture is ready to implement when this proposal is
-approved; it is not a claim that the above services already exist.
+rollback path. The approved architecture is being implemented incrementally;
+this document is not a claim that the above services already exist.
 
 ## Review scope and limits
 
