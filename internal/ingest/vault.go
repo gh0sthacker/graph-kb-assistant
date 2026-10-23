@@ -179,7 +179,7 @@ func validateExchange(exchange caido.HttpExchange, selectedProjectKey string) (s
 	if len(observationID) != 64 {
 		return "", errors.New("history exchange identity is invalid")
 	}
-	if len(exchange.Method) > 128 || len(exchange.Scheme) > 16 || len(exchange.Host) > 253 || len(exchange.Target) > 8192 {
+	if len(exchange.Method) > 128 || len(exchange.Scheme) > 16 || len(exchange.Host) > 253 || len(exchange.Target) > caido.TargetURLBytesMaximum {
 		return "", errors.New("history exchange metadata exceeds its size limit")
 	}
 	if exchange.CapturedAt != nil && (len(*exchange.CapturedAt) > 128 || !utf8.ValidString(*exchange.CapturedAt)) {

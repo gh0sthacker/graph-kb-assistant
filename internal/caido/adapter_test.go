@@ -299,3 +299,21 @@ func TestParseRequestPageRejectsOversizedIDsAndCursors(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRequestLineAcceptsCaidoLineLongerThanEightKiB(t *testing.T) {
+	line := "GET /" + strings.Repeat("a", 9_000) + " HTTP/1.1"
+	got, err := parseRequestLine(line, "GET")
+	if err != nil {
+		t.Fatalf("parseRequestLine() rejected a bounded long request line (%d bytes): %v", len(line), err)
+	}
+	if got != line {
+		t.Fatal("parseRequestLine() changed the request line")
+	}
+}
+
+func TestParseRequestLineRejectsLineBeyondConfiguredMaximum(t *testing.T) {
+	line := "GET /" + strings.Repeat("a", MessageLineBytesMaximum+1) + " HTTP/1.1"
+	if _, err := parseRequestLine(line, "GET"); err == nil {
+		t.Fatalf("parseRequestLine() accepted a %d-byte line beyond the configured maximum", len(line))
+	}
+}

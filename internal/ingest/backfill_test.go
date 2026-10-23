@@ -70,6 +70,52 @@ func TestRunBackfillTerminalCursorDoesNotClaimCoverageReconciled(t *testing.T) {
 	}
 }
 
+func TestValidateExchangeAcceptsLongCaidoTargetWithinMessageLimit(t *testing.T) {
+	selected := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
+	projectKey, err := selected.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := caido.HttpExchange{
+		Ref:                  caido.ExchangeRef{Project: selected, RequestID: "long-target-fixture"},
+		RequestRaw:           []byte("GET / HTTP/1.1\r\n\r\n"),
+		Method:               "GET",
+		Scheme:               "https",
+		Host:                 "fixture.invalid",
+		Port:                 443,
+		Target:               "https://fixture.invalid/" + strings.Repeat("a", 9_000),
+		RequestWireFidelity:  "reconstructed_text",
+		ResponseWireFidelity: "unknown",
+	}
+
+	if _, err := validateExchange(exchange, projectKey); err != nil {
+		t.Fatalf("validateExchange() rejected a target longer than eight KiB but within the message limit: %v", err)
+	}
+}
+
+func TestValidateExchangeRejectsTargetBeyondMessageLimit(t *testing.T) {
+	selected := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
+	projectKey, err := selected.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := caido.HttpExchange{
+		Ref:                  caido.ExchangeRef{Project: selected, RequestID: "oversized-target-fixture"},
+		RequestRaw:           []byte("GET / HTTP/1.1\r\n\r\n"),
+		Method:               "GET",
+		Scheme:               "https",
+		Host:                 "fixture.invalid",
+		Port:                 443,
+		Target:               "https://fixture.invalid/" + strings.Repeat("a", caido.TargetURLBytesMaximum+1),
+		RequestWireFidelity:  "reconstructed_text",
+		ResponseWireFidelity: "unknown",
+	}
+
+	if _, err := validateExchange(exchange, projectKey); err == nil {
+		t.Fatal("validateExchange() accepted a target beyond the message limit")
+	}
+}
+
 type backfillSourceFixture struct {
 	project    project.CaidoProjectRef
 	metadata   caido.RequestMetadataPage

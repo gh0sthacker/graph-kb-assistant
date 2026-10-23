@@ -26,7 +26,8 @@ const (
 	bodyMaximumBytes        = 128 * 1024 * 1024
 	headerCountMaximum      = 2000
 	HeaderBytesMaximum      = 128 * 1024
-	MessageLineBytesMaximum = 8 * 1024
+	MessageLineBytesMaximum = 64 * 1024
+	TargetURLBytesMaximum   = MessageLineBytesMaximum + 512
 )
 
 // MaxSerializedMessageBytes returns a conservative upper bound for one
