@@ -2,12 +2,20 @@ package graphaccess
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/neo4jstore"
+	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/store"
 )
 
 type fakeNeo4jGraphStore struct {
@@ -19,6 +27,9 @@ func (*fakeNeo4jGraphStore) ReadProjectSnapshot(context.Context, string) (behavi
 }
 
 func (*fakeNeo4jGraphStore) ReadProjectNeighborhood(context.Context, string, []string, int) (neo4jstore.Neighborhood, error) {
+	return neo4jstore.Neighborhood{}, nil
+}
+func (*fakeNeo4jGraphStore) ReadProjectNeighborhoodPage(context.Context, string, []string, int, *neo4jstore.NeighborhoodCursor) (neo4jstore.Neighborhood, error) {
 	return neo4jstore.Neighborhood{}, nil
 }
 
@@ -129,4 +140,88 @@ func TestClosedServiceRejectsSQLiteNeighborhoodCalls(t *testing.T) {
 	if _, err := service.ReadNeighborhood(context.Background(), nil, nil); err == nil || err.Error() != "graph query service is closed" {
 		t.Fatalf("closed service neighborhood error = %v, want closed-service error", err)
 	}
+}
+
+func TestSQLiteNeighborhoodReturnsTypedUnsupportedCursorError(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	root := t.TempDir()
+	ref := project.CaidoProjectRef{InstanceID: "synthetic-instance", ProjectID: "continuation-test"}
+	writable, err := store.CreateProject(context.Background(), ref, root)
+	if err != nil {
+		t.Fatalf("create synthetic project: %v", err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatalf("close synthetic project: %v", err)
+	}
+	selected, err := store.OpenProjectReadOnly(context.Background(), ref, root)
+	if err != nil {
+		t.Fatalf("open synthetic project read-only: %v", err)
+	}
+	defer selected.Close()
+	cursor := &neo4jstore.NeighborhoodCursor{
+		Generation: 1, Priority: 1, AfterAssertionID: "assertion-" + strings.Repeat("a", 64),
+	}
+	_, err = NewService().ReadNeighborhoodPage(context.Background(), selected, []string{"endpoint-" + strings.Repeat("b", 64)}, cursor)
+	if !errors.Is(err, ErrNeighborhoodCursorUnsupported) {
+		t.Fatalf("SQLite continuation error = %v, want typed unsupported error", err)
+	}
+}
+
+func TestNeighborhoodSliceBudgetFitsEveryHighDegreePageCandidate(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	seed := graphFixtureID("asset", "high-degree-seed")
+	snapshot := highDegreeNeighborhoodSnapshot(projectKey, seed, 99)
+	options := neighborhoodSliceOptions([]string{seed})
+	if options.MaxNodes != 100 || options.MaxEdges != 99 {
+		t.Fatalf("one-seed page budget = nodes %d edges %d, want 100 and 99", options.MaxNodes, options.MaxEdges)
+	}
+	reader, err := behaviorgraph.OpenReaderFromSnapshot(context.Background(), snapshot, projectKey, t.TempDir())
+	if err != nil {
+		t.Fatalf("open synthetic high-degree graph: %v", err)
+	}
+	defer reader.Close()
+	page, err := reader.Slice(context.Background(), options)
+	if err != nil {
+		t.Fatalf("slice synthetic high-degree graph: %v", err)
+	}
+	if got := len(page["assertions"].([]behaviorgraph.Record)); got != 99 {
+		t.Fatalf("slice returned %d assertions from a 99-candidate page", got)
+	}
+	if got := len(page["entities"].([]behaviorgraph.Record)); got != 100 {
+		t.Fatalf("slice returned %d nodes from a 100-node page", got)
+	}
+	seeds := make([]string, 20)
+	for i := range seeds {
+		seeds[i] = graphFixtureID("endpoint", fmt.Sprintf("seed-%d", i))
+	}
+	if got := neighborhoodSliceOptions(seeds).MaxEdges; got != 80 {
+		t.Fatalf("20-seed page edge budget = %d, want 80", got)
+	}
+}
+
+func highDegreeNeighborhoodSnapshot(projectKey, seed string, edgeCount int) behaviorgraph.Record {
+	refs := []behaviorgraph.Record{{"path": "/synthetic/high-degree.json", "sha256": strings.Repeat("b", 64), "record_locator": "$.record"}}
+	entities := []behaviorgraph.Record{{"id": seed, "kind": "asset", "data": map[string]any{"label": "synthetic host"}, "source_refs": refs}}
+	assertions := make([]behaviorgraph.Record, 0, edgeCount)
+	for index := 0; index < edgeCount; index++ {
+		endpoint := graphFixtureID("endpoint", fmt.Sprintf("endpoint-%d", index))
+		entities = append(entities, behaviorgraph.Record{"id": endpoint, "kind": "endpoint", "data": map[string]any{"method": "GET"}, "source_refs": refs})
+		assertion := behaviorgraph.Record{
+			"subject": endpoint, "object": seed, "predicate": "references",
+			"context": map[string]any{"program": projectKey}, "origin_kind": "parsed", "evidence_state": "observed", "source_refs": refs,
+		}
+		identity, _ := json.Marshal(behaviorgraph.Record{"kind": "assertion", "identity": assertion})
+		digest := sha256.Sum256(identity)
+		assertion["id"] = "assertion-" + hex.EncodeToString(digest[:])
+		assertions = append(assertions, assertion)
+	}
+	return behaviorgraph.Record{
+		"schema_version": json.Number("2"), "program": projectKey,
+		"entities": entities, "assertions": assertions, "sources": refs, "cards": []behaviorgraph.Record{},
+	}
+}
+
+func graphFixtureID(kind, name string) string {
+	digest := sha256.Sum256([]byte(name))
+	return kind + "-" + hex.EncodeToString(digest[:])
 }

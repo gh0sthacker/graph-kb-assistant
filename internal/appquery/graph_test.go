@@ -34,6 +34,7 @@ func TestGraphRequestValidatesViewSpecificSeedAndBudgetRules(t *testing.T) {
 	}{
 		{name: "direct entity", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{entity}}},
 		{name: "direct source is rejected", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{"source-" + strings.Repeat("b", 64)}}, wantErr: true},
+		{name: "direct assertion is rejected", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{"assertion-" + strings.Repeat("b", 64)}}, wantErr: true},
 		{name: "direct rejects budget", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{entity}, Budget: GraphBudget{MaxNodes: 1}}, wantErr: true},
 		{name: "full allows source provenance seed", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewFull, SeedIDs: []string{"source-" + strings.Repeat("b", 64)}}},
 		{name: "full rejects partial budget", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewFull, SeedIDs: []string{entity}, Budget: GraphBudget{MaxNodes: 101, MaxEdges: 160, MaxDepth: 3}}, wantErr: true},
@@ -125,5 +126,55 @@ func TestGraphQueryRejectsInvalidFullSliceBudget(t *testing.T) {
 	var queryErr *QueryError
 	if !errors.As(err, &queryErr) || queryErr.Code != ErrorInvalidInput {
 		t.Fatalf("Graph() error = %v, want typed invalid-input error", err)
+	}
+}
+
+func TestGraphCursorIsBoundToProjectAndSortedSeedSet(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	seedA := "endpoint-" + strings.Repeat("b", 64)
+	seedB := "observation-" + strings.Repeat("c", 64)
+	cursor := graphCursorData{
+		Version: 1, ProjectKey: projectKey, SeedHash: graphSeedHash([]string{seedA, seedB}),
+		Generation: 7, Priority: 1, AfterAssertionID: "assertion-" + strings.Repeat("d", 64),
+	}
+	token, err := encodeGraphCursor(cursor)
+	if err != nil {
+		t.Fatalf("encodeGraphCursor: %v", err)
+	}
+	decoded, err := decodeGraphCursor(token, projectKey, []string{seedB, seedA})
+	if err != nil || decoded.Generation != 7 || decoded.AfterAssertionID != cursor.AfterAssertionID {
+		t.Fatalf("round-trip decoded %#v, %v", decoded, err)
+	}
+	for _, test := range []struct {
+		name       string
+		projectKey string
+		seeds      []string
+		wantErr    ErrorCode
+	}{
+		{name: "other project", projectKey: strings.Repeat("e", 64), seeds: []string{seedA, seedB}, wantErr: ErrorInvalidInput},
+		{name: "other seed set", projectKey: projectKey, seeds: []string{seedA}, wantErr: ErrorInvalidInput},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeGraphCursor(token, test.projectKey, test.seeds)
+			var queryErr *QueryError
+			if !errors.As(err, &queryErr) || queryErr.Code != test.wantErr {
+				t.Fatalf("decodeGraphCursor() error = %v, want %s", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestGraphCursorRejectsMalformedAndFullViewRequests(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	seed := "endpoint-" + strings.Repeat("b", 64)
+	request := GraphRequest{ProjectKey: projectKey, View: GraphViewDirect, SeedIDs: []string{seed}, Cursor: GraphCursor("not-a-cursor")}
+	_, err := decodeGraphCursor(string(request.Cursor), request.ProjectKey, request.SeedIDs)
+	var queryErr *QueryError
+	if !errors.As(err, &queryErr) || queryErr.Code != ErrorInvalidInput {
+		t.Fatalf("malformed cursor error = %v, want invalid-input", err)
+	}
+	request.View = GraphViewFull
+	if err := validateGraphRequest(request); err == nil {
+		t.Fatalf("full graph request accepted continuation cursor: %#v", request)
 	}
 }

@@ -715,6 +715,7 @@ type graphSliceArgs struct {
 type graphNeighborhoodArgs struct {
 	ProjectKey string   `json:"project_key"`
 	SeedIDs    []string `json:"seed_ids"`
+	Cursor     string   `json:"cursor,omitempty"`
 }
 
 func (t *Tools) graphSlice(ctx context.Context, args graphSliceArgs) (map[string]any, error) {
@@ -938,13 +939,14 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		},
 		{
 			Name: "bb_graph_neighborhood", Title: "Read direct graph relationships",
-			Description: "Read a bounded one-hop neighborhood for up to 20 selected graph nodes in one local project. Returns structural relationships and available capture references with partial-coverage limits; raw request/response bytes are not included and relationships do not prove causality or vulnerability. Use bb_graph_slice when you need deeper traversal and full evidence/card closure.",
+			Description: "Read one bounded one-hop page for up to 20 selected graph entities in one local project. If next_cursor is returned, pass it back with the same project_key and seed_ids to continue within the pinned graph generation; reload the first page if the cursor is stale. Returns structural relationships and available capture references with partial-coverage limits; raw request/response bytes are not included and relationships do not prove causality or vulnerability. Use bb_graph_slice when you need deeper traversal and full evidence/card closure.",
 			InputSchema: objectSchema(map[string]any{
 				"project_key": projectString,
+				"cursor":      stringSchema(4096, map[string]any{"minLength": 1}),
 				"seed_ids": map[string]any{
 					"type": "array", "items": stringSchema(maxGraphSeedIDBytes, map[string]any{
 						"minLength": 1, "pattern": `^[a-z][a-z0-9_]*-[a-f0-9]{64}$`,
-						"not": map[string]any{"pattern": `^(source|card)-`},
+						"not": map[string]any{"pattern": `^(source|card|assertion)-`},
 					}),
 					"minItems": 1, "maxItems": 20, "uniqueItems": true,
 				},

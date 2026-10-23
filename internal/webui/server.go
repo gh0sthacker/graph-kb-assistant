@@ -146,6 +146,12 @@ func graphHandler(api readAPI) http.HandlerFunc {
 		query := r.URL.Query()
 		projectKey := query.Get("project_key")
 		seeds := query["seed"]
+		cursorValues, hasCursor := query["cursor"]
+		if hasCursor && len(cursorValues) != 1 {
+			writeError(w, http.StatusBadRequest, "graph cursor is malformed")
+			return
+		}
+		cursor := query.Get("cursor")
 		view := query.Get("view")
 		if view != "" && view != "direct" && view != "full" {
 			writeError(w, http.StatusBadRequest, "graph view must be direct or full")
@@ -177,7 +183,7 @@ func graphHandler(api readAPI) http.HandlerFunc {
 		if view == "full" {
 			graphView = appquery.GraphViewFull
 		}
-		result, err := api.Graph(ctx, appquery.GraphRequest{ProjectKey: projectKey, View: graphView, SeedIDs: seeds})
+		result, err := api.Graph(ctx, appquery.GraphRequest{ProjectKey: projectKey, View: graphView, SeedIDs: seeds, Cursor: appquery.GraphCursor(cursor)})
 		if err != nil {
 			writeGraphResult(w, nil, err)
 			return
@@ -238,6 +244,10 @@ func writeGraphResult(w http.ResponseWriter, result map[string]any, err error) {
 				writeError(w, http.StatusNotFound, "selected project is not registered")
 			case appquery.ErrorProjectUnavailable:
 				writeError(w, http.StatusServiceUnavailable, "selected project is unavailable for graph reads")
+			case appquery.ErrorStaleCursor:
+				writeError(w, http.StatusConflict, "graph changed; reload the first page before continuing")
+			case appquery.ErrorCursorUnsupported:
+				writeError(w, http.StatusNotImplemented, "configured graph backend does not support continuation")
 			case appquery.ErrorOutputTooLarge:
 				writeError(w, http.StatusRequestEntityTooLarge, "graph response exceeds the local UI limit")
 			default:

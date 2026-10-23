@@ -25,7 +25,7 @@ const elements = {
   status: $("#status-text"), coverage: $("#coverage-status"), updated: $("#last-updated"),
   zoom: $("#zoom-readout"), zoomIn: $("#zoom-in"), zoomOut: $("#zoom-out"),
   focusGraph: $("#focus-graph"), workspace: $(".workspace"),
-  captureSelect: $("#capture-select"), graphBack: $("#graph-back"), graphDeeper: $("#graph-deeper"),
+  captureSelect: $("#capture-select"), graphBack: $("#graph-back"), graphMore: $("#graph-more"), graphDeeper: $("#graph-deeper"),
   toast: $("#toast"), viewport: $("#graph-viewport"),
 };
 
@@ -87,7 +87,11 @@ async function getJSON(path, signal) {
   const response = await fetch(path, { headers: { Accept: "application/json" }, credentials: "same-origin", cache: "no-store", signal });
   let payload;
   try { payload = await response.json(); } catch { throw new Error("The server returned an invalid response."); }
-  if (!response.ok) throw new Error(payload.error || `Read failed (${response.status}).`);
+  if (!response.ok) {
+    const error = new Error(payload.error || `Read failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -367,6 +371,8 @@ function resetGraphNavigation() {
   state.graphSeeds = [];
   state.loadingGraph = false;
   elements.graphBack.disabled = true;
+  elements.graphMore.disabled = true;
+  elements.graphMore.hidden = true;
   elements.graphDeeper.disabled = true;
   elements.captureSelect.hidden = true;
 }
@@ -387,11 +393,13 @@ function restoreGraphNavigation(previous) {
   renderGraph();
   if (previous.selectedNodeId) selectNode(previous.selectedNodeId);
   elements.graphBack.disabled = state.graphHistory.length === 0;
+  elements.graphMore.hidden = !state.graph || state.graphView !== "direct" || !state.graph.next_cursor;
+  elements.graphMore.disabled = elements.graphMore.hidden;
   elements.graphDeeper.disabled = state.loadingGraph || state.graphView === "full";
   setStatus(`Returned to ${state.graphView === "direct" ? "direct relationships" : "deeper slice"} · coverage is partial`, "ready");
 }
 
-async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember = false } = {}) {
+async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember = false, cursor = "", appendPage = false } = {}) {
   if (!state.projectKey || !Array.isArray(seeds) || !seeds.length) return;
   const previous = graphNavigationSnapshot();
   const projectKey = state.projectKey;
@@ -401,10 +409,12 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
   state.graphAbort = controller;
   state.loadingGraph = true;
   elements.graphDeeper.disabled = true;
-  renderEmpty(view === "full" ? "Loading a deeper graph slice" : "Loading direct relationships", view === "full" ? "Reading and validating the project snapshot. Large projects can take longer." : "Reading the selected node and its immediate connections.");
-  setStatus(view === "full" ? "Loading deeper slice" : "Loading direct relationships", "loading");
+  if (!appendPage) renderEmpty(view === "full" ? "Loading a deeper graph slice" : "Loading direct relationships", view === "full" ? "Reading and validating the project snapshot. Large projects can take longer." : "Reading the selected node and its immediate connections.");
+  elements.graphMore.disabled = true;
+  setStatus(appendPage ? "Loading more neighbors" : view === "full" ? "Loading deeper slice" : "Loading direct relationships", "loading");
   const query = new URLSearchParams({ project_key: projectKey, view });
   for (const seed of seeds.slice(0, 20)) query.append("seed", seed);
+  if (cursor) query.set("cursor", cursor);
   try {
     const graph = await getJSON(`/api/graph?${query}`, controller.signal);
     if (requestId !== state.graphRequestId || state.projectKey !== projectKey) return;
@@ -412,19 +422,19 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
       state.graphHistory.push(previous);
       if (state.graphHistory.length > 8) state.graphHistory.shift();
     }
-    state.graph = graph;
+    state.graph = appendPage && previous.graph ? mergeGraphPages(previous.graph, graph) : graph;
     state.graphSeeds = [...seeds];
     state.graphView = view;
-    state.focusedNodeId = focusNodeId;
+    state.focusedNodeId = appendPage ? previous.focus : focusNodeId;
     state.routeScope = false;
-    state.hiddenKinds = new Set();
+    state.hiddenKinds = appendPage ? previous.hiddenKinds : new Set();
     state.selectedNode = null;
-    renderGraph();
+    renderGraph(!appendPage);
     const first = state.renderedEntities.find(item => item.id === focusNodeId) || state.renderedEntities.find(item => seeds.includes(item.id)) || state.renderedEntities[0];
     if (first) selectNode(first.id);
     else renderInspectorEmpty();
     const partial = Boolean(state.graph.incomplete || state.graph.truncated);
-    const label = view === "direct" ? "Direct relationships" : "Deeper graph slice";
+    const label = appendPage ? "More direct relationships" : view === "direct" ? "Direct relationships" : "Deeper graph slice";
     setStatus(partial ? `${label} · coverage is partial` : label, "ready");
     if (partial) {
       const sampledEntities = Array.isArray(graph.provenance_truncated_entity_ids)
@@ -439,6 +449,15 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
     if (option && provenance?.request_id) option.textContent = `Caido #${provenance.request_id}`;
   } catch (error) {
     if (requestId !== state.graphRequestId || error.name === "AbortError") return;
+    if (appendPage && error.status === 409) {
+      state.graph = { ...(previous.graph || {}) };
+      delete state.graph.next_cursor;
+      state.graphHistory = [];
+      elements.graphBack.disabled = true;
+      setStatus("Graph changed · refreshing direct relationships", "loading");
+      void loadGraph(seeds, { view: "direct", focusNodeId: previous.focus, remember: false });
+      return;
+    }
     if (previous.graph) {
       restoreGraphNavigation(previous);
       showToast(`Could not load relationships: ${error.message}`);
@@ -453,9 +472,40 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
     if (requestId === state.graphRequestId) {
       state.loadingGraph = false;
       elements.graphBack.disabled = state.graphHistory.length === 0;
+      elements.graphMore.hidden = !state.graph || state.graphView !== "direct" || !state.graph.next_cursor;
+      elements.graphMore.disabled = state.loadingGraph || elements.graphMore.hidden;
       elements.graphDeeper.disabled = !state.graph || state.graphView === "full";
     }
   }
+}
+
+function mergeGraphPages(current, next) {
+  const merged = { ...current, ...next };
+  for (const key of new Set([...Object.keys(current), ...Object.keys(next)])) {
+    if (!Array.isArray(current[key]) && !Array.isArray(next[key])) continue;
+    const values = [...(current[key] || []), ...(next[key] || [])];
+    const seen = new Set();
+    merged[key] = values.filter(value => {
+      let stable;
+      if (value && typeof value === "object") {
+        if (value.id !== undefined) stable = `id:${value.id}`;
+        else if (value.graph_observation_id || value.revision_id) stable = `provenance:${value.graph_observation_id || ""}:${value.revision_id || ""}`;
+        else if (value.sha256 || value.record_locator) stable = `source:${value.sha256 || ""}:${value.record_locator || ""}`;
+        else stable = `object:${JSON.stringify(value)}`;
+      } else stable = `value:${JSON.stringify(value)}`;
+      if (seen.has(stable)) return false;
+      seen.add(stable);
+      return true;
+    });
+  }
+  if (next.next_cursor) merged.next_cursor = next.next_cursor;
+  else delete merged.next_cursor;
+  merged.truncated = Boolean(next.next_cursor || next.truncated);
+  merged.neighborhood_candidate_limit_reached = Boolean(next.next_cursor || next.neighborhood_candidate_limit_reached);
+  merged.client_merged_pages = Number(current.client_merged_pages || 1) + 1;
+  merged.result_page_ids = [...(current.result_page_ids || [current.result_id]).filter(Boolean), next.result_id].filter(Boolean);
+  delete merged.result_id;
+  return merged;
 }
 
 function renderEmpty(title, copy) {
@@ -965,6 +1015,10 @@ elements.graphBack.addEventListener("click", () => {
   if (!previous) return;
   state.graphAbort?.abort(); state.graphRequestId++; state.loadingGraph = false;
   restoreGraphNavigation(previous);
+});
+elements.graphMore.addEventListener("click", () => {
+  const cursor = state.graph?.next_cursor;
+  if (cursor) void loadGraph(state.graphSeeds, { view: "direct", cursor, appendPage: true, remember: true });
 });
 elements.graphDeeper.addEventListener("click", () => { void loadGraph(state.graphSeeds, { view: "full", remember: true }); });
 $("#refresh-button").addEventListener("click", () => loadProjects());

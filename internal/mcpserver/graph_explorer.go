@@ -81,7 +81,11 @@ func (t *Tools) GraphExplorerSlice(ctx context.Context, projectKey string, seeds
 
 // GraphExplorerNeighborhood is the shared bounded one-hop use case for web and MCP.
 func (t *Tools) GraphExplorerNeighborhood(ctx context.Context, projectKey string, seeds []string) (map[string]any, error) {
-	result, err := t.Graph(ctx, appquery.GraphRequest{ProjectKey: projectKey, View: appquery.GraphViewDirect, SeedIDs: seeds})
+	return t.GraphExplorerNeighborhoodPage(ctx, projectKey, seeds, "")
+}
+
+func (t *Tools) GraphExplorerNeighborhoodPage(ctx context.Context, projectKey string, seeds []string, cursor string) (map[string]any, error) {
+	result, err := t.Graph(ctx, appquery.GraphRequest{ProjectKey: projectKey, View: appquery.GraphViewDirect, SeedIDs: seeds, Cursor: appquery.GraphCursor(cursor)})
 	if err != nil {
 		return nil, err
 	}
@@ -89,14 +93,7 @@ func (t *Tools) GraphExplorerNeighborhood(ctx context.Context, projectKey string
 }
 
 func (t *Tools) graphNeighborhood(ctx context.Context, args graphNeighborhoodArgs) (map[string]any, error) {
-	if t.graphQueries == nil {
-		return nil, errors.New("graph query service is unavailable")
-	}
-	result, err := t.Graph(ctx, appquery.GraphRequest{ProjectKey: args.ProjectKey, View: appquery.GraphViewDirect, SeedIDs: args.SeedIDs})
-	if err != nil {
-		return nil, err
-	}
-	return t.checkGraphWireSize(result.WireMap())
+	return t.GraphExplorerNeighborhoodPage(ctx, args.ProjectKey, args.SeedIDs, args.Cursor)
 }
 
 func (t *Tools) Graph(ctx context.Context, request appquery.GraphRequest) (appquery.GraphResult, error) {

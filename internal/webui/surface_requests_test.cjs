@@ -36,6 +36,7 @@ function createApp() {
         requests.push({
           url: new URL(url, "http://local.test"), signal: options.signal,
           resolve(data) { resolve({ ok: true, json: async () => data }); },
+          fail(status, message) { resolve({ ok: false, status, json: async () => ({ error: message }) }); },
           reject,
         });
       });
@@ -44,7 +45,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -62,6 +63,71 @@ function page(host, extra = {}) {
 }
 
 function snapshot(value) { return JSON.parse(JSON.stringify(value)); }
+
+test("graph continuation merges distinct rows, deduplicates overlaps, and keeps cursor provenance", () => {
+  const app = createApp();
+  const first = {
+    entities: [{ id: "endpoint-a" }, { id: "observation-a" }],
+    assertions: [{ id: "assertion-a" }],
+    capture_provenance: [{ graph_observation_id: "observation-a", request_id: 10 }],
+    limitations: ["first page"],
+    next_cursor: "cursor-2", truncated: true, neighborhood_candidate_limit_reached: true,
+    result_id: "result-1",
+  };
+  const second = {
+    entities: [{ id: "observation-a" }, { id: "parameter-a" }],
+    assertions: [{ id: "assertion-a" }, { id: "assertion-b" }],
+    capture_provenance: [{ graph_observation_id: "observation-a", request_id: 10 }],
+    limitations: ["second page"],
+    next_cursor: "cursor-3", truncated: true, neighborhood_candidate_limit_reached: true,
+    result_id: "result-2",
+  };
+
+  const merged = app.mergeGraphPages(first, second);
+
+  assert.deepEqual(snapshot(merged.entities.map(row => row.id)), ["endpoint-a", "observation-a", "parameter-a"]);
+  assert.deepEqual(snapshot(merged.assertions.map(row => row.id)), ["assertion-a", "assertion-b"]);
+  assert.equal(merged.capture_provenance.length, 1);
+  assert.deepEqual(snapshot(merged.limitations), ["first page", "second page"]);
+  assert.equal(merged.next_cursor, "cursor-3");
+  assert.equal(merged.client_merged_pages, 2);
+  assert.deepEqual(snapshot(merged.result_page_ids), ["result-1", "result-2"]);
+
+  const last = app.mergeGraphPages(merged, {
+    entities: [{ id: "response-a" }], assertions: [{ id: "assertion-c" }],
+    next_cursor: undefined, truncated: false, neighborhood_candidate_limit_reached: false,
+    result_id: "result-3",
+  });
+  assert.equal("next_cursor" in last, false);
+  assert.equal(last.truncated, false);
+  assert.equal(last.neighborhood_candidate_limit_reached, false);
+  assert.deepEqual(snapshot(last.result_page_ids), ["result-1", "result-2", "result-3"]);
+});
+
+test("stale graph continuation reloads the first page without reusing its cursor", async () => {
+  const app = createApp();
+  const seed = `endpoint-${"b".repeat(64)}`;
+  app.state.projectKey = "a".repeat(64);
+  app.state.graphSeeds = [seed];
+  app.state.graph = { entities: [], assertions: [], next_cursor: "stale-token", result_id: "old-page" };
+  app.state.graphHistory = [
+    { graph: { next_cursor: "older-stale-token" }, seeds: [seed], view: "direct" },
+    { graph: { next_cursor: "previous-stale-token" }, seeds: [seed], view: "direct" },
+  ];
+
+  const pending = app.loadGraph([seed], { view: "direct", cursor: "stale-token", appendPage: true, remember: true });
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].url.searchParams.get("cursor"), "stale-token");
+  app.requests[0].fail(409, "graph changed; reload the first page before continuing");
+  await pending;
+
+  assert.equal(app.requests.length, 2, "a fresh first-page read should start after the conflict");
+  assert.equal(app.requests[1].url.searchParams.has("cursor"), false);
+  assert.equal("next_cursor" in app.state.graph, false, "the stale cursor must no longer be offered");
+  assert.equal(app.state.graphHistory.length, 0, "previous-generation pages must not be restored by Back");
+  assert.equal(app.elements.graphBack.disabled, true);
+  assert.equal(app.state.loadingGraph, true, "the fresh read should remain in progress");
+});
 
 test("project switch aborts A, starts B immediately, and keeps B loading when A finishes", async () => {
   const app = createApp();

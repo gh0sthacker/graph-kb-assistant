@@ -23,6 +23,13 @@ const (
 )
 
 var neighborhoodIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
+var ErrNeighborhoodCursorStale = errors.New("Neo4j neighborhood cursor generation is stale")
+
+type NeighborhoodCursor struct {
+	Generation       int64
+	Priority         int
+	AfterAssertionID string
+}
 
 // Neighborhood is an integrity-checked, bounded one-hop projection. It does not
 // establish the integrity or completeness of the entire project snapshot.
@@ -41,6 +48,7 @@ type Neighborhood struct {
 	// EntitySourceRefLimit is the per-entity ceiling; shared byte/record/ref
 	// budgets can reduce an entity's sample further.
 	EntitySourceRefLimit int
+	NextCursor           *NeighborhoodCursor
 }
 
 // ReadProjectNeighborhood reads seeds and their incident assertions using
@@ -50,8 +58,18 @@ type Neighborhood struct {
 // transaction. A dependency closure that exceeds the edge or safety budget
 // fails rather than returning dangling assertions.
 func (s *Store) ReadProjectNeighborhood(ctx context.Context, projectKey string, seedIDs []string, maxAssertions int) (Neighborhood, error) {
+	return s.ReadProjectNeighborhoodPage(ctx, projectKey, seedIDs, maxAssertions, nil)
+}
+
+// ReadProjectNeighborhoodPage reads one deterministic candidate page. A
+// continuation cursor is bound to the Neo4j project generation and must be
+// checked inside the same read transaction as the page query.
+func (s *Store) ReadProjectNeighborhoodPage(ctx context.Context, projectKey string, seedIDs []string, maxAssertions int, cursor *NeighborhoodCursor) (Neighborhood, error) {
 	seeds, err := neighborhoodSeeds(projectKey, seedIDs, maxAssertions)
 	if err != nil {
+		return Neighborhood{}, err
+	}
+	if err := validateNeighborhoodCursor(cursor); err != nil {
 		return Neighborhood{}, err
 	}
 	if s == nil || s.driver == nil {
@@ -60,7 +78,7 @@ func (s *Store) ReadProjectNeighborhood(ctx context.Context, projectKey string, 
 	session := s.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: s.database, AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 	value, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		return readProjectNeighborhoodTx(ctx, tx, projectKey, seeds, maxAssertions)
+		return readProjectNeighborhoodTx(ctx, tx, projectKey, seeds, maxAssertions, cursor)
 	})
 	if err != nil {
 		return Neighborhood{}, err
@@ -72,6 +90,31 @@ func (s *Store) ReadProjectNeighborhood(ctx context.Context, projectKey string, 
 	return result, nil
 }
 
+func validateNeighborhoodCursor(cursor *NeighborhoodCursor) error {
+	if cursor == nil {
+		return nil
+	}
+	if cursor.Generation < 1 || (cursor.Priority != 0 && cursor.Priority != 1) ||
+		!neighborhoodIDPattern.MatchString(cursor.AfterAssertionID) || !strings.HasPrefix(cursor.AfterAssertionID, "assertion-") {
+		return errors.New("Neo4j neighborhood continuation cursor is malformed")
+	}
+	return nil
+}
+
+func cursorPriority(cursor *NeighborhoodCursor) int {
+	if cursor == nil {
+		return -1
+	}
+	return cursor.Priority
+}
+
+func cursorAfterID(cursor *NeighborhoodCursor) string {
+	if cursor == nil {
+		return ""
+	}
+	return cursor.AfterAssertionID
+}
+
 func neighborhoodSeeds(projectKey string, ids []string, budget int) ([]string, error) {
 	if !projectKeyPattern.MatchString(projectKey) || len(ids) < 1 || len(ids) > 20 || budget < 1 || budget > 300 {
 		return nil, errors.New("Neo4j neighborhood selection is invalid")
@@ -79,7 +122,7 @@ func neighborhoodSeeds(projectKey string, ids []string, budget int) ([]string, e
 	seen := make(map[string]bool, len(ids))
 	seeds := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if !neighborhoodIDPattern.MatchString(id) || strings.HasPrefix(id, "source-") || strings.HasPrefix(id, "card-") {
+		if !neighborhoodIDPattern.MatchString(id) || strings.HasPrefix(id, "source-") || strings.HasPrefix(id, "card-") || strings.HasPrefix(id, "assertion-") {
 			return nil, errors.New("Neo4j neighborhood seed identity is invalid")
 		}
 		if !seen[id] {
@@ -309,10 +352,13 @@ func (r *neighborhoodRead) load(ctx context.Context, tx neo4j.ManagedTransaction
 	return nil
 }
 
-func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction, project string, seeds []string, budget int) (Neighborhood, error) {
+func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction, project string, seeds []string, budget int, cursor *NeighborhoodCursor) (Neighborhood, error) {
 	generation, err := neighborhoodGeneration(ctx, tx, project)
 	if err != nil {
 		return Neighborhood{}, err
+	}
+	if cursor != nil && cursor.Generation != generation {
+		return Neighborhood{}, ErrNeighborhoodCursorStale
 	}
 	read := &neighborhoodRead{project: project, records: make(map[string]neighborhoodRecord)}
 	if err := read.load(ctx, tx, seeds); err != nil {
@@ -331,22 +377,31 @@ func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction,
 			RETURN a.record_id AS assertion_id
 		}
 		WITH DISTINCT assertion_id
-		RETURN assertion_id
-		ORDER BY CASE WHEN assertion_id IN $seed_ids THEN 0 ELSE 1 END, assertion_id
-		LIMIT $limit`, map[string]any{"project_key": project, "seed_ids": seeds, "limit": budget + 1})
+		WITH assertion_id, CASE WHEN assertion_id IN $seed_ids THEN 0 ELSE 1 END AS page_priority
+		WHERE NOT $has_cursor OR page_priority > $after_priority OR
+		      (page_priority = $after_priority AND assertion_id > $after_assertion_id)
+		RETURN assertion_id, page_priority
+		ORDER BY page_priority, assertion_id
+		LIMIT $limit`, map[string]any{
+		"project_key": project, "seed_ids": seeds, "limit": budget + 1,
+		"has_cursor": cursor != nil, "after_priority": cursorPriority(cursor), "after_assertion_id": cursorAfterID(cursor),
+	})
 	if err != nil {
 		return Neighborhood{}, errors.New("Neo4j neighborhood assertions are unavailable")
 	}
-	candidates := make([]string, 0, budget+1)
+	candidates := make([]neighborhoodCandidate, 0, budget+1)
 	seen := make(map[string]bool)
 	for result.Next(ctx) {
-		value, _ := result.Record().Get("assertion_id")
+		row := result.Record()
+		value, _ := row.Get("assertion_id")
 		id, ok := value.(string)
-		if !ok || !neighborhoodIDPattern.MatchString(id) || !strings.HasPrefix(id, "assertion-") || seen[id] || len(candidates) >= budget+1 {
+		priorityValue, _ := row.Get("page_priority")
+		priority, priorityOK := priorityValue.(int64)
+		if !ok || !priorityOK || (priority != 0 && priority != 1) || !neighborhoodIDPattern.MatchString(id) || !strings.HasPrefix(id, "assertion-") || seen[id] || len(candidates) >= budget+1 {
 			return Neighborhood{}, errors.New("Neo4j neighborhood candidate identity is malformed")
 		}
 		seen[id] = true
-		candidates = append(candidates, id)
+		candidates = append(candidates, neighborhoodCandidate{id: id, priority: int(priority)})
 	}
 	if result.Err() != nil {
 		return Neighborhood{}, errors.New("Neo4j neighborhood assertions could not be read")
@@ -354,9 +409,12 @@ func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction,
 	output := Neighborhood{Generation: generation, CandidateCount: len(candidates), Truncated: len(candidates) > budget}
 	if output.Truncated {
 		candidates = candidates[:budget]
+		last := candidates[len(candidates)-1]
+		output.NextCursor = &NeighborhoodCursor{Generation: generation, Priority: last.priority, AfterAssertionID: last.id}
 	}
 	missing := make([]string, 0, len(candidates))
-	for _, id := range candidates {
+	for _, candidate := range candidates {
+		id := candidate.id
 		if _, exists := read.records[id]; !exists {
 			missing = append(missing, id)
 		}
@@ -440,6 +498,11 @@ func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction,
 		return Neighborhood{}, errors.New("Neo4j neighborhood project changed while it was being read")
 	}
 	return output, nil
+}
+
+type neighborhoodCandidate struct {
+	id       string
+	priority int
 }
 
 func (r *neighborhoodRead) checkTopology(ctx context.Context, tx neo4j.ManagedTransaction, ids []string) error {

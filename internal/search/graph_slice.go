@@ -14,6 +14,7 @@ import (
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
+	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/store"
 )
 
@@ -54,14 +55,28 @@ func GraphNeighborhood(ctx context.Context, projectStore *store.ProjectStore, se
 // GraphNeighborhoodWithService runs the shared one-hop query through a
 // process-owned graph access service.
 func GraphNeighborhoodWithService(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string) (map[string]any, error) {
-	if err := validateGraphProjectStore(projectStore); err != nil {
-		return nil, err
-	}
-	slice, err := service.ReadNeighborhood(ctx, projectStore, seedIDs)
+	page, err := GraphNeighborhoodPageWithService(ctx, service, projectStore, seedIDs, nil)
 	if err != nil {
 		return nil, err
 	}
-	return attachGraphProvenance(ctx, projectStore, slice)
+	return page.Payload, nil
+}
+
+// GraphNeighborhoodPageWithService runs one page of the shared one-hop read
+// and retains the backend generation/cursor for application-level encoding.
+func GraphNeighborhoodPageWithService(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, cursor *neo4jstore.NeighborhoodCursor) (graphaccess.NeighborhoodPage, error) {
+	if err := validateGraphProjectStore(projectStore); err != nil {
+		return graphaccess.NeighborhoodPage{}, err
+	}
+	page, err := service.ReadNeighborhoodPage(ctx, projectStore, seedIDs, cursor)
+	if err != nil {
+		return graphaccess.NeighborhoodPage{}, err
+	}
+	page.Payload, err = attachGraphProvenance(ctx, projectStore, page.Payload)
+	if err != nil {
+		return graphaccess.NeighborhoodPage{}, err
+	}
+	return page, nil
 }
 
 func validateGraphProjectStore(projectStore *store.ProjectStore) error {

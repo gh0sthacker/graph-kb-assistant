@@ -6,20 +6,26 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	"bb-graph-assistant/internal/graphaccess"
+	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/search"
 	"bb-graph-assistant/internal/store"
 )
 
 type GraphView string
+
+type GraphCursor string
 
 const (
 	GraphViewDirect GraphView = "direct"
@@ -37,6 +43,7 @@ type GraphRequest struct {
 	View       GraphView
 	SeedIDs    []string
 	Budget     GraphBudget
+	Cursor     GraphCursor
 }
 
 // GraphResult keeps query metadata typed while preserving the current graph
@@ -47,6 +54,15 @@ type GraphResult struct {
 	GraphVersion string
 	CoverageNote string
 	Payload      map[string]any
+}
+
+type graphCursorData struct {
+	Version          int    `json:"version"`
+	ProjectKey       string `json:"project_key"`
+	SeedHash         string `json:"seed_hash"`
+	Generation       int64  `json:"generation"`
+	Priority         int    `json:"priority"`
+	AfterAssertionID string `json:"after_assertion_id"`
 }
 
 func (r GraphResult) WireMap() map[string]any {
@@ -61,6 +77,8 @@ const (
 	ErrorProjectUnavailable   ErrorCode = "project_unavailable"
 	ErrorGraphUnavailable     ErrorCode = "graph_unavailable"
 	ErrorOutputTooLarge       ErrorCode = "output_too_large"
+	ErrorStaleCursor          ErrorCode = "stale_cursor"
+	ErrorCursorUnsupported    ErrorCode = "cursor_unsupported"
 )
 
 type QueryError struct {
@@ -85,6 +103,10 @@ func (e *QueryError) Error() string {
 		return "selected project is unavailable"
 	case ErrorOutputTooLarge:
 		return "graph result exceeds the output limit"
+	case ErrorStaleCursor:
+		return "graph continuation cursor is stale; reload the first page"
+	case ErrorCursorUnsupported:
+		return "configured graph backend does not support continuation; reload the first page"
 	default:
 		return "graph data is unavailable"
 	}
@@ -143,6 +165,14 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 	if !ok {
 		return GraphResult{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
 	}
+	var backendCursor *neo4jstore.NeighborhoodCursor
+	var err error
+	if request.View == GraphViewDirect && request.Cursor != "" {
+		backendCursor, err = decodeGraphCursor(string(request.Cursor), request.ProjectKey, request.SeedIDs)
+		if err != nil {
+			return GraphResult{}, err
+		}
+	}
 	selected, err := store.OpenProjectReadOnly(ctx, ref, s.dataRoot)
 	if err != nil {
 		return GraphResult{}, queryError(ErrorProjectUnavailable, "selected project is unavailable for graph reads", err)
@@ -153,7 +183,27 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 	var version, coverage string
 	switch request.View {
 	case GraphViewDirect:
-		payload, err = search.GraphNeighborhoodWithService(ctx, s.graph, selected, request.SeedIDs)
+		page, pageErr := search.GraphNeighborhoodPageWithService(ctx, s.graph, selected, request.SeedIDs, backendCursor)
+		err, payload = pageErr, page.Payload
+		if errors.Is(err, neo4jstore.ErrNeighborhoodCursorStale) {
+			return GraphResult{}, queryError(ErrorStaleCursor, "graph continuation cursor is stale; reload the first page", err)
+		}
+		if errors.Is(err, graphaccess.ErrNeighborhoodCursorUnsupported) {
+			return GraphResult{}, queryError(ErrorCursorUnsupported, "configured graph backend does not support continuation; reload the first page", err)
+		}
+		if err == nil && page.NextCursor != nil {
+			token, tokenErr := encodeGraphCursor(graphCursorData{
+				Version: 1, ProjectKey: request.ProjectKey, SeedHash: graphSeedHash(request.SeedIDs),
+				Generation: page.NextCursor.Generation, Priority: page.NextCursor.Priority,
+				AfterAssertionID: page.NextCursor.AfterAssertionID,
+			})
+			if tokenErr != nil {
+				return GraphResult{}, queryError(ErrorGraphUnavailable, "graph continuation cursor could not be encoded", tokenErr)
+			}
+			payload["next_cursor"] = token
+		} else if err == nil {
+			delete(payload, "next_cursor")
+		}
 		version = "behavior-graph-direct-v1"
 		coverage = "Direct structural neighborhood; coverage and full-project evidence integrity remain partial."
 	case GraphViewFull:
@@ -199,9 +249,61 @@ func fingerprintGraphPayload(payload map[string]any) (map[string]any, error) {
 	return payload, nil
 }
 
+func graphSeedHash(seedIDs []string) string {
+	seeds := append([]string(nil), seedIDs...)
+	sort.Strings(seeds)
+	encoded, _ := json.Marshal(seeds)
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
+func encodeGraphCursor(cursor graphCursorData) (string, error) {
+	if cursor.Version != 1 || !projectKeyPattern.MatchString(cursor.ProjectKey) ||
+		!projectKeyPattern.MatchString(cursor.SeedHash) || cursor.Generation < 1 ||
+		(cursor.Priority != 0 && cursor.Priority != 1) || !entitySeedPattern.MatchString(cursor.AfterAssertionID) ||
+		!strings.HasPrefix(cursor.AfterAssertionID, "assertion-") {
+		return "", errors.New("graph continuation cursor is malformed")
+	}
+	encoded, err := json.Marshal(cursor)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func decodeGraphCursor(token, projectKey string, seeds []string) (*neo4jstore.NeighborhoodCursor, error) {
+	if len(token) < 1 || len(token) > 4096 || !projectKeyPattern.MatchString(projectKey) {
+		return nil, queryError(ErrorInvalidInput, "graph continuation cursor is malformed", nil)
+	}
+	encoded, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(encoded) > 3072 {
+		return nil, queryError(ErrorInvalidInput, "graph continuation cursor is malformed", nil)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var cursor graphCursorData
+	if err := decoder.Decode(&cursor); err != nil {
+		return nil, queryError(ErrorInvalidInput, "graph continuation cursor is malformed", nil)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, queryError(ErrorInvalidInput, "graph continuation cursor is malformed", nil)
+	}
+	if cursor.Version != 1 || cursor.ProjectKey != projectKey || cursor.SeedHash != graphSeedHash(seeds) ||
+		cursor.Generation < 1 || (cursor.Priority != 0 && cursor.Priority != 1) ||
+		!entitySeedPattern.MatchString(cursor.AfterAssertionID) || !strings.HasPrefix(cursor.AfterAssertionID, "assertion-") {
+		return nil, queryError(ErrorInvalidInput, "graph continuation cursor does not match this project and seed set", nil)
+	}
+	return &neo4jstore.NeighborhoodCursor{
+		Generation: cursor.Generation, Priority: cursor.Priority, AfterAssertionID: cursor.AfterAssertionID,
+	}, nil
+}
+
 func validateGraphRequest(request GraphRequest) error {
 	if request.View != GraphViewDirect && request.View != GraphViewFull {
 		return errors.New("graph view must be direct or full")
+	}
+	if request.View == GraphViewFull && request.Cursor != "" {
+		return errors.New("full graph slices do not accept direct-view cursors")
 	}
 	if !projectKeyPattern.MatchString(request.ProjectKey) {
 		if request.View == GraphViewDirect {
@@ -227,7 +329,7 @@ func validateGraphRequest(request GraphRequest) error {
 			}
 			return errors.New("graph seed ID is empty, too long, or malformed")
 		}
-		if request.View == GraphViewDirect && (!entitySeedPattern.MatchString(seed) || strings.HasPrefix(seed, "source-") || strings.HasPrefix(seed, "card-")) {
+		if request.View == GraphViewDirect && (!entitySeedPattern.MatchString(seed) || strings.HasPrefix(seed, "source-") || strings.HasPrefix(seed, "card-") || strings.HasPrefix(seed, "assertion-")) {
 			return errors.New("graph neighborhood seed ID is malformed")
 		}
 		if _, exists := seen[seed]; exists {

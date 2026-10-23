@@ -121,12 +121,16 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 			if seeds["uniqueItems"] != true {
 				t.Errorf("graph neighborhood seeds do not require unique IDs: %#v", seeds)
 			}
+			cursor, _ := properties["cursor"].(map[string]any)
+			if cursor["type"] != "string" || cursor["maxLength"] != float64(4096) || cursor["minLength"] != float64(1) {
+				t.Errorf("graph neighborhood continuation cursor is not bounded: %#v", cursor)
+			}
 			seedItemSchema, _ := seeds["items"].(map[string]any)
 			if seedItemSchema["pattern"] != graphNeighborhoodSeedPattern.String() {
 				t.Errorf("graph neighborhood seed pattern %#v does not match runtime validation %q", seedItemSchema["pattern"], graphNeighborhoodSeedPattern.String())
 			}
 			forbiddenKinds, _ := seedItemSchema["not"].(map[string]any)
-			if forbiddenKinds["pattern"] != `^(source|card)-` {
+			if forbiddenKinds["pattern"] != `^(source|card|assertion)-` {
 				t.Errorf("graph neighborhood schema permits non-seed record kinds: %#v", seedItemSchema)
 			}
 			required, _ := schema["required"].([]any)

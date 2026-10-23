@@ -14,6 +14,25 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
 
+func TestNeighborhoodCursorRequiresPinnedGenerationAndAssertionAnchor(t *testing.T) {
+	valid := NeighborhoodCursor{Generation: 3, Priority: 1, AfterAssertionID: "assertion-" + strings.Repeat("a", 64)}
+	if err := validateNeighborhoodCursor(&valid); err != nil {
+		t.Fatalf("valid cursor rejected: %v", err)
+	}
+	for _, invalid := range []NeighborhoodCursor{
+		{Generation: 0, Priority: 1, AfterAssertionID: valid.AfterAssertionID},
+		{Generation: 3, Priority: 2, AfterAssertionID: valid.AfterAssertionID},
+		{Generation: 3, Priority: 1, AfterAssertionID: "endpoint-" + strings.Repeat("a", 64)},
+	} {
+		if err := validateNeighborhoodCursor(&invalid); err == nil {
+			t.Fatalf("accepted invalid neighborhood cursor: %#v", invalid)
+		}
+	}
+	if err := validateNeighborhoodCursor(nil); err != nil {
+		t.Fatalf("initial page cursor rejected: %v", err)
+	}
+}
+
 func TestNeighborhoodRecordChecksumsAndIdentity(t *testing.T) {
 	id := "endpoint-" + strings.Repeat("1", 64)
 	payload := `{"data":{"method":"GET"},"id":"` + id + `","kind":"endpoint"}`
@@ -50,6 +69,7 @@ func TestNeighborhoodSelectionRejectsInvalidArguments(t *testing.T) {
 		{"identity", project, []string{"endpoint-invalid"}, 1},
 		{"source seed", project, []string{"source-" + strings.Repeat("1", 64)}, 1},
 		{"card seed", project, []string{"card-" + strings.Repeat("1", 64)}, 1},
+		{"assertion seed", project, []string{"assertion-" + strings.Repeat("1", 64)}, 1},
 		{"zero budget", project, []string{id}, 0},
 		{"large budget", project, []string{id}, 301},
 	} {

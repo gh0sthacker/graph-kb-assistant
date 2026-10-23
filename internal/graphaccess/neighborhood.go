@@ -9,6 +9,10 @@ import (
 	"bb-graph-assistant/internal/store"
 )
 
+const maxNeighborhoodSliceNodes = 100
+
+var ErrNeighborhoodCursorUnsupported = errors.New("configured graph backend does not support generation-pinned continuation")
+
 // ReadNeighborhood is the interactive, one-hop graph view. Neo4j verifies and
 // loads only selected records and their dependencies; it makes no claim about
 // full-project integrity or the global evidence closure used by Reader.Slice.
@@ -16,16 +20,35 @@ func ReadNeighborhood(ctx context.Context, selected *store.ProjectStore, seeds [
 	return processService.ReadNeighborhood(ctx, selected, seeds)
 }
 
+type NeighborhoodPage struct {
+	Payload    map[string]any
+	Generation int64
+	NextCursor *neo4jstore.NeighborhoodCursor
+}
+
 // ReadNeighborhood loads a bounded one-hop graph view through this
 // process-owned service.
 func (s *Service) ReadNeighborhood(ctx context.Context, selected *store.ProjectStore, seeds []string) (map[string]any, error) {
-	if err := s.checkOpen(); err != nil {
+	page, err := s.ReadNeighborhoodPage(ctx, selected, seeds, nil)
+	if err != nil {
 		return nil, err
 	}
-	if selected == nil || selected.Database == nil || !selected.Database.ReadOnly() || len(seeds) < 1 || len(seeds) > 20 {
-		return nil, errors.New("graph neighborhood requires one selected read-only project and 1-20 seeds")
+	return page.Payload, nil
+}
+
+// ReadNeighborhoodPage loads one bounded one-hop page and returns its pinned
+// generation and continuation anchor for the application layer.
+func (s *Service) ReadNeighborhoodPage(ctx context.Context, selected *store.ProjectStore, seeds []string, cursor *neo4jstore.NeighborhoodCursor) (NeighborhoodPage, error) {
+	if err := s.checkOpen(); err != nil {
+		return NeighborhoodPage{}, err
 	}
-	options := behaviorgraph.SliceOptions{SeedIDs: seeds, MaxNodes: 80, MaxEdges: 160, MaxDepth: 1}
+	if selected == nil || selected.Database == nil || !selected.Database.ReadOnly() || len(seeds) < 1 || len(seeds) > 20 {
+		return NeighborhoodPage{}, errors.New("graph neighborhood requires one selected read-only project and 1-20 seeds")
+	}
+	if ConfiguredBackend() == "sqlite" && cursor != nil {
+		return NeighborhoodPage{}, ErrNeighborhoodCursorUnsupported
+	}
+	options := neighborhoodSliceOptions(seeds)
 	var reader *behaviorgraph.Reader
 	var generation int64
 	var candidates int
@@ -39,25 +62,25 @@ func (s *Service) ReadNeighborhood(ctx context.Context, selected *store.ProjectS
 	case "neo4j":
 		graphStore, release, openErr := s.acquireNeo4jStore(ctx)
 		if openErr != nil {
-			return nil, openErr
+			return NeighborhoodPage{}, openErr
 		}
-		neighborhoodResult, err = graphStore.ReadProjectNeighborhood(ctx, selected.ProjectKey, seeds, options.MaxEdges)
+		neighborhoodResult, err = graphStore.ReadProjectNeighborhoodPage(ctx, selected.ProjectKey, seeds, options.MaxEdges, cursor)
 		release()
 		if err != nil {
-			return nil, err
+			return NeighborhoodPage{}, err
 		}
 		generation, candidates, candidateLimit = neighborhoodResult.Generation, neighborhoodResult.CandidateCount, neighborhoodResult.Truncated
 		reader, err = behaviorgraph.OpenReaderFromSnapshot(ctx, neighborhoodResult.Snapshot, selected.ProjectKey, selected.BehaviorReceiptPath)
 	default:
-		return nil, errors.New("configured graph backend is unsupported")
+		return NeighborhoodPage{}, errors.New("configured graph backend is unsupported")
 	}
 	if err != nil {
-		return nil, err
+		return NeighborhoodPage{}, err
 	}
 	defer reader.Close()
 	result, err := reader.Slice(ctx, options)
 	if err != nil {
-		return nil, err
+		return NeighborhoodPage{}, err
 	}
 	delete(result, "slice_id") // The combined response gets its own result_id.
 	result["view"] = "direct"
@@ -82,7 +105,14 @@ func (s *Service) ReadNeighborhood(ctx context.Context, selected *store.ProjectS
 		result["limitations"] = append(result["limitations"].([]string), "Analysis cards are not loaded in the interactive Neo4j view; use the full slice for evidence analysis.")
 		applyNeighborhoodProvenanceCoverage(result, neighborhoodResult)
 	}
-	return result, nil
+	return NeighborhoodPage{Payload: result, Generation: generation, NextCursor: neighborhoodResult.NextCursor}, nil
+}
+
+func neighborhoodSliceOptions(seeds []string) behaviorgraph.SliceOptions {
+	return behaviorgraph.SliceOptions{
+		SeedIDs: seeds, MaxNodes: maxNeighborhoodSliceNodes,
+		MaxEdges: maxNeighborhoodSliceNodes - len(seeds), MaxDepth: 1,
+	}
 }
 
 func applyNeighborhoodProvenanceCoverage(result map[string]any, neighborhood neo4jstore.Neighborhood) {

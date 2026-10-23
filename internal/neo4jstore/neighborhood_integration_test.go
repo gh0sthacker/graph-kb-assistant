@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,6 +19,59 @@ import (
 func neighborhoodTestID(kind, name string) string {
 	digest := sha256.Sum256([]byte(name))
 	return kind + "-" + hex.EncodeToString(digest[:])
+}
+
+func TestNeo4jNeighborhoodIntegrationContinuesWithinPinnedGeneration(t *testing.T) {
+	store, ctx, project := neighborhoodIntegrationStore(t)
+	fixture := neighborhoodFixture(project, 340, 1)
+	if _, err := store.ReplaceProjectSnapshot(ctx, project, fixture); err != nil {
+		t.Fatal(err)
+	}
+	seed := neighborhoodTestID("asset", "host")
+	first, err := store.ReadProjectNeighborhoodPage(ctx, project, []string{seed}, 160, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.NextCursor == nil || !first.Truncated || first.CandidateCount != 161 {
+		t.Fatalf("first page was not bounded with continuation: %#v", first)
+	}
+	seen := make(map[string]bool)
+	collect := func(page Neighborhood) {
+		t.Helper()
+		for _, value := range page.Snapshot["assertions"].([]behaviorgraph.Record) {
+			id := value["id"].(string)
+			if seen[id] {
+				t.Fatalf("assertion %s appeared on more than one page", id)
+			}
+			seen[id] = true
+		}
+	}
+	collect(first)
+	second, err := store.ReadProjectNeighborhoodPage(ctx, project, []string{seed}, 160, first.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.NextCursor == nil || !second.Truncated || second.Generation != first.Generation {
+		t.Fatalf("second page lost generation or continuation: %#v", second)
+	}
+	collect(second)
+	third, err := store.ReadProjectNeighborhoodPage(ctx, project, []string{seed}, 160, second.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.NextCursor != nil || third.Truncated || third.Generation != first.Generation {
+		t.Fatalf("last page unexpectedly continued or changed generation: %#v", third)
+	}
+	collect(third)
+	if len(seen) != 340 {
+		t.Fatalf("continued pages returned %d unique assertions, want 340", len(seen))
+	}
+	if _, err := store.ReplaceProjectSnapshot(ctx, project, fixture); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadProjectNeighborhoodPage(ctx, project, []string{seed}, 160, first.NextCursor); !errors.Is(err, ErrNeighborhoodCursorStale) {
+		t.Fatalf("cursor after graph update returned %v, want ErrNeighborhoodCursorStale", err)
+	}
 }
 
 func neighborhoodFixture(project string, endpointCount, sourceCount int) behaviorgraph.Record {
@@ -311,7 +365,7 @@ func TestNeo4jNeighborhoodIntegrationRejectsGenerationChange(t *testing.T) {
 	session := store.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: store.database, AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		return readProjectNeighborhoodTx(ctx, &neighborhoodChangingGenerationTx{ManagedTransaction: tx}, project, []string{neighborhoodTestID("endpoint", "endpoint-0")}, 80)
+		return readProjectNeighborhoodTx(ctx, &neighborhoodChangingGenerationTx{ManagedTransaction: tx}, project, []string{neighborhoodTestID("endpoint", "endpoint-0")}, 80, nil)
 	})
 	if err == nil || !strings.Contains(err.Error(), "changed while") {
 		t.Fatal("a changed project generation was accepted")

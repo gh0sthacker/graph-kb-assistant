@@ -15,6 +15,7 @@ import (
 type explorerAPIFixture struct {
 	direct, full int
 	graphErr     error
+	lastRequest  appquery.GraphRequest
 }
 
 func (*explorerAPIFixture) GraphExplorerProjects(context.Context, string, int) (map[string]any, error) {
@@ -24,6 +25,7 @@ func (*explorerAPIFixture) GraphExplorerSurface(context.Context, string, *captur
 	return map[string]any{}, nil
 }
 func (f *explorerAPIFixture) Graph(_ context.Context, request appquery.GraphRequest) (appquery.GraphResult, error) {
+	f.lastRequest = request
 	if request.View == appquery.GraphViewFull {
 		f.full++
 	} else {
@@ -73,6 +75,8 @@ func TestGraphHandlerMapsTypedErrorsWithoutLeakingCauses(t *testing.T) {
 		{name: "unknown project", code: appquery.ErrorProjectNotRegistered, want: http.StatusNotFound},
 		{name: "unavailable project", code: appquery.ErrorProjectUnavailable, want: http.StatusServiceUnavailable},
 		{name: "large result", code: appquery.ErrorOutputTooLarge, want: http.StatusRequestEntityTooLarge},
+		{name: "stale cursor", code: appquery.ErrorStaleCursor, want: http.StatusConflict},
+		{name: "unsupported cursor", code: appquery.ErrorCursorUnsupported, want: http.StatusNotImplemented},
 		{name: "graph unavailable", code: appquery.ErrorGraphUnavailable, want: http.StatusServiceUnavailable},
 	}
 	for _, test := range tests {
@@ -94,5 +98,20 @@ func TestGraphHandlerMapsTypedErrorsWithoutLeakingCauses(t *testing.T) {
 				t.Fatalf("typed error leaked its internal cause: %s", response.Body.String())
 			}
 		})
+	}
+}
+
+func TestGraphHandlerPassesContinuationCursorToTypedQuery(t *testing.T) {
+	api := &explorerAPIFixture{}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := "opaque-cursor-value"
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/graph?project_key="+strings.Repeat("a", 64)+"&seed=endpoint-"+strings.Repeat("b", 64)+"&cursor="+cursor, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || string(api.lastRequest.Cursor) != cursor {
+		t.Fatalf("continuation request = %#v, status %d: %s", api.lastRequest, response.Code, response.Body.String())
 	}
 }
