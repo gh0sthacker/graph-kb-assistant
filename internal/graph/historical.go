@@ -584,7 +584,7 @@ func historicalQueryFields(target string, source Record) ([]string, []historical
 	if fieldCapacity > 2_000 {
 		fieldCapacity = 2_000
 	}
-	fieldSet := make(map[string]historicalParameterField, fieldCapacity)
+	fieldSet := make(map[string][]historicalParameterField, fieldCapacity)
 	fieldIndex := 0
 	fieldLimitExceeded := false
 	for _, pair := range pairs {
@@ -609,18 +609,29 @@ func historicalQueryFields(target string, source Record) ([]string, []historical
 		fieldIndex++
 		namesSet[safeName] = struct{}{}
 		if fieldIndex <= 2_000 {
-			fieldSet[safeName] = historicalParameterField{
-				path: "query[\"" + safeName + "\"][]", typeName: "string", location: "query",
-			}
+			fieldSet[safeName] = append(fieldSet[safeName], historicalParameterField{
+				typeName: "string", location: "query",
+			})
 		} else {
 			fieldLimitExceeded = true
 		}
 	}
 	names := make([]string, 0, len(namesSet))
-	fields := make([]historicalParameterField, 0, len(fieldSet))
-	for name := range namesSet {
+	fields := make([]historicalParameterField, 0, minInt(fieldIndex, 2_000))
+	for name, occurrences := range fieldSet {
 		names = append(names, name)
-		fields = append(fields, fieldSet[name])
+		if len(occurrences) == 1 {
+			// Keep the established identity for a singleton query field.
+			occurrences[0].path = "query[\"" + name + "\"][]"
+			fields = append(fields, occurrences[0])
+			continue
+		}
+		// Parameter values are discarded. The per-name ordinal preserves each
+		// repeated input as a separate graph occurrence without exposing values.
+		for index, occurrence := range occurrences {
+			occurrence.path = "query[\"" + name + "\"][" + strconv.Itoa(index) + "]"
+			fields = append(fields, occurrence)
+		}
 	}
 	sort.Strings(names)
 	return names, fields, fieldLimitExceeded, fieldIndex
