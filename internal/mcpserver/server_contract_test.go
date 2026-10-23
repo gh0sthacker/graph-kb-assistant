@@ -39,6 +39,39 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 			"jsonrpc": "2.0", "id": 3, "method": "tools/call",
 			"params": map[string]any{"name": "bb_list_projects", "arguments": map[string]any{}},
 		},
+		map[string]any{
+			"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+			"params": map[string]any{
+				"name": "bb_graph_neighborhood",
+				"arguments": map[string]any{
+					"project_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"seed_ids":    []string{"endpoint-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+				},
+			},
+		},
+		map[string]any{
+			"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+			"params": map[string]any{
+				"name": "bb_graph_neighborhood",
+				"arguments": map[string]any{
+					"project_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"seed_ids":    []string{"not-a-graph-id"},
+				},
+			},
+		},
+		map[string]any{
+			"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+			"params": map[string]any{
+				"name": "bb_graph_neighborhood",
+				"arguments": map[string]any{
+					"project_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"seed_ids": []string{
+						"endpoint-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+						"endpoint-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					},
+				},
+			},
+		},
 	)
 
 	listResult := responseForID(t, responses, "2").Result.(map[string]any)
@@ -47,10 +80,11 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 		t.Fatalf("tools/list result has type %T; want []any", listResult["tools"])
 	}
 	wantNames := []string{
-		"bb_get_capture", "bb_graph_slice", "bb_kb_get_source", "bb_kb_search",
+		"bb_get_capture", "bb_graph_neighborhood", "bb_graph_slice", "bb_kb_get_source", "bb_kb_search",
 		"bb_kb_stats", "bb_list_projects", "bb_search_captures", "bb_surface_map",
 	}
 	gotNames := make([]string, 0, len(listedTools))
+	neighborhoodAdvertised := false
 	for _, value := range listedTools {
 		spec, ok := value.(map[string]any)
 		if !ok {
@@ -65,6 +99,25 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 		schema, ok := spec["inputSchema"].(map[string]any)
 		if !ok || schema["type"] != "object" || schema["additionalProperties"] != false {
 			t.Errorf("tool %q does not have a closed object input schema: %#v", name, spec["inputSchema"])
+		}
+		if name == "bb_graph_neighborhood" {
+			neighborhoodAdvertised = true
+			properties, _ := schema["properties"].(map[string]any)
+			seeds, _ := properties["seed_ids"].(map[string]any)
+			if seeds["minItems"] != float64(1) || seeds["maxItems"] != float64(20) {
+				t.Errorf("graph neighborhood seed limit is not bounded to 1-20: %#v", seeds)
+			}
+			if seeds["uniqueItems"] != true {
+				t.Errorf("graph neighborhood seeds do not require unique IDs: %#v", seeds)
+			}
+			seedItemSchema, _ := seeds["items"].(map[string]any)
+			if seedItemSchema["pattern"] != graphNeighborhoodSeedPattern.String() {
+				t.Errorf("graph neighborhood seed pattern %#v does not match runtime validation %q", seedItemSchema["pattern"], graphNeighborhoodSeedPattern.String())
+			}
+			required, _ := schema["required"].([]any)
+			if len(required) != 2 || required[0] != "project_key" || required[1] != "seed_ids" {
+				t.Errorf("graph neighborhood does not require project and seeds: %#v", schema["required"])
+			}
 		}
 	}
 	sort.Strings(gotNames)
@@ -85,6 +138,24 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 	structured, ok := callResult["structuredContent"].(map[string]any)
 	if !ok || structured["project_count"] != float64(0) || structured["total_project_count"] != float64(0) {
 		t.Fatalf("empty synthetic project catalog returned %#v", callResult["structuredContent"])
+	}
+	neighborhoodCall := responseForID(t, responses, "4").Result.(map[string]any)
+	if !neighborhoodAdvertised || neighborhoodCall["isError"] != true {
+		t.Fatalf("bounded graph neighborhood tool was not advertised or rejected an unregistered project: %#v", neighborhoodCall)
+	}
+	content, _ := neighborhoodCall["content"].([]any)
+	if len(content) != 1 || !bytes.Contains([]byte(content[0].(map[string]any)["text"].(string)), []byte("not in the local project catalog")) {
+		t.Errorf("graph neighborhood call did not use the selected project path: %#v", neighborhoodCall["content"])
+	}
+	for id, wantMessage := range map[string]string{
+		"5": "graph neighborhood seed ID is malformed",
+		"6": "graph neighborhood seed IDs must be unique",
+	} {
+		result := responseForID(t, responses, id).Result.(map[string]any)
+		resultContent, _ := result["content"].([]any)
+		if result["isError"] != true || len(resultContent) != 1 || !bytes.Contains([]byte(resultContent[0].(map[string]any)["text"].(string)), []byte(wantMessage)) {
+			t.Errorf("graph neighborhood request %s did not reject invalid seeds: %#v", id, result)
+		}
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {

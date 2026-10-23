@@ -39,6 +39,7 @@ const (
 )
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var graphNeighborhoodSeedPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
 var publicRecordLocatorPattern = regexp.MustCompile(`^\$(\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])*$`)
 
 // Tools is an immutable snapshot of the local project catalog and the optional
@@ -328,6 +329,12 @@ func (t *Tools) call(ctx context.Context, name string, arguments json.RawMessage
 			return nil, err
 		}
 		return t.graphSlice(ctx, args)
+	case "bb_graph_neighborhood":
+		var args graphNeighborhoodArgs
+		if err := decodeObject(arguments, &args); err != nil {
+			return nil, err
+		}
+		return t.graphNeighborhood(ctx, args)
 	case "bb_kb_search":
 		var args kbSearchArgs
 		if err := decodeObject(arguments, &args); err != nil {
@@ -691,6 +698,11 @@ type graphSliceArgs struct {
 	MaxDepth   *int     `json:"max_depth,omitempty"`
 }
 
+type graphNeighborhoodArgs struct {
+	ProjectKey string   `json:"project_key"`
+	SeedIDs    []string `json:"seed_ids"`
+}
+
 func (t *Tools) graphSlice(ctx context.Context, args graphSliceArgs) (map[string]any, error) {
 	if !projectKeyPattern.MatchString(args.ProjectKey) {
 		return nil, errors.New("project key has an invalid format")
@@ -1006,6 +1018,19 @@ func toolCatalog(includeRaw bool) []toolSpec {
 				"max_nodes":   map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
 				"max_edges":   map[string]any{"type": "integer", "minimum": 0, "maximum": 300},
 				"max_depth":   map[string]any{"type": "integer", "minimum": 0, "maximum": 6},
+			}, "project_key", "seed_ids"), Annotations: readOnly(),
+		},
+		{
+			Name: "bb_graph_neighborhood", Title: "Read direct graph relationships",
+			Description: "Read a bounded one-hop neighborhood for up to 20 selected graph nodes in one local project. Returns structural relationships and available capture references with partial-coverage limits; raw request/response bytes are not included and relationships do not prove causality or vulnerability. Use bb_graph_slice when you need deeper traversal and full evidence/card closure.",
+			InputSchema: objectSchema(map[string]any{
+				"project_key": projectString,
+				"seed_ids": map[string]any{
+					"type": "array", "items": stringSchema(maxGraphSeedIDBytes, map[string]any{
+						"minLength": 1, "pattern": `^[a-z][a-z0-9_]*-[a-f0-9]{64}$`,
+					}),
+					"minItems": 1, "maxItems": 20, "uniqueItems": true,
+				},
 			}, "project_key", "seed_ids"), Annotations: readOnly(),
 		},
 		{

@@ -17,6 +17,7 @@ EXPECTED_TOOLS = [
     "bb_list_projects",
     "bb_search_captures",
     "bb_surface_map",
+    "bb_graph_neighborhood",
     "bb_graph_slice",
     "bb_kb_stats",
     "bb_kb_search",
@@ -114,6 +115,28 @@ class HermesSetupTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_upgrades_existing_managed_profile_without_replacing_other_settings(self) -> None:
+        created = self.run_setup()
+        self.assertEqual(created.returncode, 0, created.stderr)
+
+        config_path = self.profile / "config.yaml"
+        original = config_path.read_text(encoding="utf-8")
+        old_profile = original.replace("        - bb_graph_neighborhood\n", "")
+        old_profile += "\ncustom_setting: keep-me\n"
+        config_path.write_text(old_profile, encoding="utf-8")
+
+        upgraded = self.run_setup()
+
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+        updated = config_path.read_text(encoding="utf-8")
+        self.assertEqual(updated.count("        - bb_graph_neighborhood\n"), 1)
+        self.assertTrue(updated.endswith("\ncustom_setting: keep-me\n"))
+        self.assertIn("Updated managed Hermes profile", upgraded.stdout)
+
+        repeated = self.run_setup()
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(config_path.read_text(encoding="utf-8"), updated)
 
 
 if __name__ == "__main__":

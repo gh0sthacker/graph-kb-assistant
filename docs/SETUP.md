@@ -38,7 +38,7 @@ Hermes is the supported runtime harness for the local assistant. Install it and 
 ./scripts/run-hermes
 ```
 
-The generated profile is stored outside the checkout with private file permissions. It enables only the local MCP server, skills, and clarification tools, and allowlists the eight read-only `bb_*` tools. MCP resources and prompts are disabled; terminal, file, browser, web, computer-use, and code-execution toolsets are not enabled for this profile. `mcp test` should discover exactly eight tools, including no raw-capture body tool.
+The generated profile is stored outside the checkout with private file permissions. It enables only the local MCP server, skills, and clarification tools, and allowlists the nine read-only `bb_*` tools. Running `setup-hermes` or `run-hermes` adds the graph neighborhood tool to an existing managed profile while preserving its other settings; unmanaged profiles are left untouched. MCP resources and prompts are disabled; terminal, file, browser, web, computer-use, and code-execution toolsets are not enabled for this profile. `mcp test` should discover exactly nine tools, including no raw-capture body tool.
 
 The harness and model provider are separate choices. Hermes can verify MCP connectivity before a provider is selected; configure one with `./scripts/run-hermes model` when ready. Review that provider's data handling before sending real capture content. The current workflow has not verified model-backed hypothesis generation or validation.
 

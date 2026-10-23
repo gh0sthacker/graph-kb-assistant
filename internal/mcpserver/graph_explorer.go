@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	capturesearch "bb-graph-assistant/internal/search"
 	"bb-graph-assistant/internal/store"
@@ -80,22 +81,35 @@ func (t *Tools) GraphExplorerSlice(ctx context.Context, projectKey string, seeds
 	})
 }
 
-// GraphExplorerNeighborhood is the interactive web-only view. The MCP
-// graph_slice tool retains the full validated reader and evidence semantics.
+// GraphExplorerNeighborhood is the shared bounded one-hop use case for web and MCP.
 func (t *Tools) GraphExplorerNeighborhood(ctx context.Context, projectKey string, seeds []string) (map[string]any, error) {
-	if !projectKeyPattern.MatchString(projectKey) || len(seeds) < 1 || len(seeds) > 20 {
+	return t.graphNeighborhood(ctx, graphNeighborhoodArgs{ProjectKey: projectKey, SeedIDs: seeds})
+}
+
+func (t *Tools) graphNeighborhood(ctx context.Context, args graphNeighborhoodArgs) (map[string]any, error) {
+	if !projectKeyPattern.MatchString(args.ProjectKey) || len(args.SeedIDs) < 1 || len(args.SeedIDs) > 20 {
 		return nil, errors.New("select one project and 1-20 graph seeds")
 	}
-	ref, ok := t.projectsByKey[projectKey]
+	seen := make(map[string]struct{}, len(args.SeedIDs))
+	for _, seed := range args.SeedIDs {
+		if strings.TrimSpace(seed) != seed || !graphNeighborhoodSeedPattern.MatchString(seed) || len(seed) > maxGraphSeedIDBytes {
+			return nil, errors.New("graph neighborhood seed ID is malformed")
+		}
+		if _, exists := seen[seed]; exists {
+			return nil, errors.New("graph neighborhood seed IDs must be unique")
+		}
+		seen[seed] = struct{}{}
+	}
+	ref, ok := t.projectsByKey[args.ProjectKey]
 	if !ok {
-		return nil, errors.New("selected project is not in the local catalog")
+		return nil, errors.New("selected project is not in the local project catalog")
 	}
 	selected, err := store.OpenProjectReadOnly(ctx, ref, t.root)
 	if err != nil {
 		return nil, errors.New("selected project is unavailable for graph reads")
 	}
 	defer selected.Close()
-	result, err := capturesearch.GraphNeighborhood(ctx, selected, seeds)
+	result, err := capturesearch.GraphNeighborhood(ctx, selected, args.SeedIDs)
 	if err != nil {
 		return nil, errors.New("selected graph neighborhood is unavailable or exceeds its limits")
 	}

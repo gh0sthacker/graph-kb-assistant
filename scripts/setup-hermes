@@ -8,7 +8,9 @@ python3 - "$bb_hermes_repo_root" "$bb_hermes_profile_home" "$bb_hermes_install_d
     "$bb_hermes_data_root" "${BB_ASSISTANT_KB_INDEX:-}" <<'PY'
 import json
 import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
 
 repo = Path(sys.argv[1]).resolve()
@@ -41,10 +43,79 @@ for path in (home, home / "skills", home / "pending" / "skills"):
 
 config_path = home / "config.yaml"
 marker = "# Managed by bb-graph-assistant setup-hermes. Do not replace automatically."
+
+
+def upgrade_managed_profile(existing: str) -> str:
+    lines = existing.splitlines(keepends=True)
+    server_headers = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == "  bb_assistant:"]
+    if len(server_headers) != 1:
+        raise SystemExit(f"Cannot safely locate the managed bb_assistant server in {config_path}")
+    server_start = server_headers[0] + 1
+    server_end = next(
+        (index for index in range(server_start, len(lines))
+         if lines[index].startswith("  ") and not lines[index].startswith("    ") and lines[index].strip()),
+        len(lines),
+    )
+    include_headers = [
+        index for index in range(server_start, server_end)
+        if lines[index].rstrip("\r\n") == "      include:"
+        and index > server_start
+        and lines[index - 1].rstrip("\r\n") == "    tools:"
+    ]
+    if len(include_headers) != 1:
+        raise SystemExit(f"Cannot safely locate the managed bb_assistant tool allowlist in {config_path}")
+    include_index = include_headers[0]
+    item_indices = []
+    for index in range(include_index + 1, server_end):
+        line = lines[index]
+        if line.startswith("        - "):
+            item_indices.append(index)
+            continue
+        if line.strip() and not line.startswith("      "):
+            break
+        if line.startswith("      resources:") or line.startswith("      prompts:"):
+            break
+    tool_names = [lines[index].strip()[2:] for index in item_indices]
+    if "bb_graph_neighborhood" in tool_names:
+        return existing
+    if len(tool_names) != len(set(tool_names)) or "bb_surface_map" not in tool_names:
+        raise SystemExit(f"Managed Hermes tool allowlist is ambiguous; edit it manually: {config_path}")
+    anchor = next(index for index in item_indices if lines[index].strip() == "- bb_surface_map")
+    if not lines[anchor].endswith(("\n", "\r")):
+        lines[anchor] += "\n"
+    lines.insert(anchor + 1, "        - bb_graph_neighborhood\n")
+    return "".join(lines)
+
+
+def replace_managed_config(path: Path, contents: str) -> None:
+    current_mode = stat.S_IMODE(path.stat().st_mode)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=".config.yaml.", delete=False
+        ) as stream:
+            temporary_path = Path(stream.name)
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), current_mode)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+if config_path.is_symlink():
+    raise SystemExit(f"Refusing to update a symlinked Hermes config: {config_path}")
 if config_path.exists():
     existing = config_path.read_text(encoding="utf-8")
     if marker in existing:
-        print(f"Hermes profile already configured: {config_path}")
+        updated = upgrade_managed_profile(existing)
+        if updated != existing:
+            replace_managed_config(config_path, updated)
+            print(f"Updated managed Hermes profile with bb_graph_neighborhood: {config_path}")
+        else:
+            print(f"Hermes profile already configured: {config_path}")
         raise SystemExit(0)
     raise SystemExit(f"Refusing to overwrite an existing Hermes config: {config_path}")
 
@@ -53,6 +124,7 @@ tools = (
     "bb_list_projects",
     "bb_search_captures",
     "bb_surface_map",
+    "bb_graph_neighborhood",
     "bb_graph_slice",
     "bb_kb_stats",
     "bb_kb_search",
