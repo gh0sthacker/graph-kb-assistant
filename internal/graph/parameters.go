@@ -534,7 +534,7 @@ func finalizeHistoricalJSONOccurrences(fields []historicalParameterField) []hist
 		template := historicalTemplateParameterPath(field.path)
 		indicesByTemplate[template] = append(indicesByTemplate[template], index)
 	}
-	for _, indices := range indicesByTemplate {
+	for template, indices := range indicesByTemplate {
 		if len(indices) != 1 {
 			continue
 		}
