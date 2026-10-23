@@ -54,6 +54,17 @@ func main() {
 	}
 }
 
+func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress) error {
+	if output == nil {
+		return errors.New("Caido import progress output is unavailable")
+	}
+	event := struct {
+		Event string `json:"event"`
+		ingest.BackfillProgress
+	}{Event: "caido_import_page", BackfillProgress: progress}
+	return json.NewEncoder(output).Encode(event)
+}
+
 func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: bb-assistant <version|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
@@ -759,9 +770,18 @@ func importCaidoHistory(args []string) error {
 		return errors.New("selected project is not available from the configured Caido MCP instance")
 	}
 
+	var progressWriteErr error
 	result, runErr := ingest.RunBackfill(ctx, source, pageWriter, *selected, ingest.BackfillOptions{
 		PageSize: *pageSize, MaxPages: *maxPages, MaxBodyBytes: *bodyLimit, Delay: *delay,
+		OnProgress: func(progress ingest.BackfillProgress) {
+			if progressWriteErr == nil {
+				progressWriteErr = writeCaidoImportProgress(os.Stderr, progress)
+			}
+		},
 	})
+	if progressWriteErr != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "warning: Caido page progress output failed; import continued")
+	}
 	if result.RunID != "" {
 		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 			return errors.New("Caido import result could not be written")

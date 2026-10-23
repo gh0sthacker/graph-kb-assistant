@@ -1,15 +1,46 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/store"
 )
+
+func TestWriteCaidoImportProgressProducesOnlyBoundedSummary(t *testing.T) {
+	var output bytes.Buffer
+	progress := ingest.BackfillProgress{
+		PagesThisRun: 2, PageCount: 12, Stored: 84, Replayed: 16,
+		ProjectionPendingPages: 1, State: "running", CursorState: "continuing",
+		MetadataDurationMS: 3, DetailDurationMS: 120, PageProcessingDurationMS: 450,
+		GraphProjectionDurationMS: 210,
+	}
+	if err := writeCaidoImportProgress(&output, progress); err != nil {
+		t.Fatalf("writeCaidoImportProgress() error = %v", err)
+	}
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode progress event: %v", err)
+	}
+	if event["event"] != "caido_import_page" || event["page_count"] != float64(12) || event["detail_duration_ms"] != float64(120) || event["page_processing_duration_ms"] != float64(450) || event["graph_projection_duration_ms"] != float64(210) {
+		t.Fatalf("progress event omitted operational summary fields: %s", output.String())
+	}
+	if _, ok := event["cursor"]; ok {
+		t.Fatalf("progress event exposes a raw cursor: %s", output.String())
+	}
+	for _, forbidden := range []string{"request_id", "request_raw", "response_raw", "authorization", "cookie"} {
+		if strings.Contains(strings.ToLower(output.String()), forbidden) {
+			t.Fatalf("progress event exposes a forbidden field %q: %s", forbidden, output.String())
+		}
+	}
+}
 
 func TestRegisterCaidoProjectAddsOnlyExplicitIdentity(t *testing.T) {
 	dataRoot := filepath.Join(t.TempDir(), "private-data")

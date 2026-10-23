@@ -76,6 +76,93 @@ func TestRunBackfillTerminalCursorDoesNotClaimCoverageReconciled(t *testing.T) {
 	}
 }
 
+func TestRunBackfillReportsProgressOnlyAfterDurablePageAcceptance(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatalf("OpenPageWriter() error = %v", err)
+	}
+	t.Cleanup(pageWriter.Close)
+	pageWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+		return false, false, errors.New("synthetic projection pending")
+	}
+
+	const requestID = "sensitive-request-id"
+	const rawRequest = "GET /private-path HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"
+	target := "https://api.fixture.invalid/private-path"
+	metadata := caido.RequestMetadataPage{Requests: []caido.RequestMetadata{{
+		RequestID: requestID, Method: "GET", URL: target,
+	}}}
+	history := caido.HistoryPage{Exchanges: []caido.HttpExchange{{
+		Ref:                  caido.ExchangeRef{Project: selected, RequestID: requestID},
+		RequestRaw:           []byte(rawRequest),
+		Method:               "GET",
+		Scheme:               "https",
+		Host:                 "api.fixture.invalid",
+		Port:                 443,
+		Target:               target,
+		RequestWireFidelity:  "source_bytes",
+		ResponseWireFidelity: "unknown",
+	}}}
+	source := &backfillSourceFixture{project: selected, metadata: metadata, history: history}
+	progress := make([]BackfillProgress, 0, 1)
+
+	result, err := RunBackfill(ctx, source, pageWriter, selected, BackfillOptions{
+		PageSize: 1, MaxBodyBytes: 64 << 10,
+		OnProgress: func(item BackfillProgress) {
+			var captures, jobs int
+			var state string
+			if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM captures").Scan(&captures); err != nil {
+				t.Fatalf("read captures during progress callback: %v", err)
+			}
+			if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs").Scan(&jobs); err != nil {
+				t.Fatalf("read projection jobs during progress callback: %v", err)
+			}
+			if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT state FROM sync_state WHERE source_key=?", sourceKey).Scan(&state); err != nil {
+				t.Fatalf("read checkpoint during progress callback: %v", err)
+			}
+			if captures != 1 || jobs != 1 || state != "done" {
+				t.Fatalf("progress was reported before durable acceptance: captures=%d jobs=%d checkpoint=%q", captures, jobs, state)
+			}
+			progress = append(progress, item)
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunBackfill() error = %v", err)
+	}
+	if len(progress) != 1 {
+		t.Fatalf("progress events = %d, want 1", len(progress))
+	}
+	item := progress[0]
+	if item.PagesThisRun != 1 || item.PageCount != 1 || item.Stored != 1 || item.ProjectionPendingPages != 1 || item.State != "done" {
+		t.Fatalf("progress summary = %+v", item)
+	}
+	if result.MetadataDurationMS < 0 || result.DetailDurationMS < 0 || result.PageProcessingDurationMS < 0 || result.GraphProjectionDurationMS < 0 {
+		t.Fatalf("backfill timings must be non-negative: %+v", result)
+	}
+	if result.GraphProjectionDurationMS > result.PageProcessingDurationMS {
+		t.Fatalf("graph projection timing cannot exceed page processing: %+v", result)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("marshal progress summary: %v", err)
+	}
+	if strings.Contains(string(encoded), requestID) || strings.Contains(string(encoded), rawRequest) || strings.Contains(string(encoded), "/private-path") {
+		t.Fatalf("progress summary contains request identity or raw HTTP data: %s", encoded)
+	}
+}
+
+func TestDurationMillisecondsPreservesSubMillisecondTotals(t *testing.T) {
+	var total time.Duration
+	for range 3 {
+		total += 600 * time.Microsecond
+	}
+	if got, want := durationMilliseconds(total), 1.8; got != want {
+		t.Fatalf("durationMilliseconds(sum of sub-ms intervals) = %v, want %v", got, want)
+	}
+}
+
 func TestWritePageCommitsCaptureCheckpointAndProjectionJobBeforeGraphFailure(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)

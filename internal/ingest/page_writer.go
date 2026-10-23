@@ -51,18 +51,19 @@ type RunCheckpoint struct {
 
 // PageResult contains structural accounting only. It never returns HTTP data.
 type PageResult struct {
-	ProjectKey      string      `json:"project_key"`
-	RunID           string      `json:"run_id"`
-	PageCount       int64       `json:"page_count"`
-	Stored          int         `json:"stored"`
-	Replayed        int         `json:"replayed"`
-	Revised         int         `json:"revised"`
-	CursorState     string      `json:"cursor_state"`
-	State           string      `json:"state"`
-	GraphMapping    string      `json:"graph_mapping"`
-	ProjectionState string      `json:"projection_state"`
-	ReceiptSHA256   string      `json:"receipt_sha256"`
-	SourceRefs      []SourceRef `json:"source_refs"`
+	ProjectKey              string      `json:"project_key"`
+	RunID                   string      `json:"run_id"`
+	PageCount               int64       `json:"page_count"`
+	Stored                  int         `json:"stored"`
+	Replayed                int         `json:"replayed"`
+	Revised                 int         `json:"revised"`
+	CursorState             string      `json:"cursor_state"`
+	State                   string      `json:"state"`
+	GraphMapping            string      `json:"graph_mapping"`
+	ProjectionState         string      `json:"projection_state"`
+	ReceiptSHA256           string      `json:"receipt_sha256"`
+	SourceRefs              []SourceRef `json:"source_refs"`
+	graphProjectionDuration time.Duration
 }
 
 // SourceRef addresses one immutable per-record receipt. Page receipts are kept
@@ -353,11 +354,11 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 		committed = true
 		_ = conn.Close()
 		conn = nil
-		graphMapping, projectionState := w.projectAcceptedPage(ctx, prepared, bundles, graphObservationIDs)
+		graphMapping, projectionState, projectionDuration := w.projectAcceptedPage(ctx, prepared, bundles, graphObservationIDs)
 		return PageResult{
 			ProjectKey: projectKey, RunID: input.RunID, PageCount: pageCount,
 			Replayed: len(prepared), CursorState: cursorState(nullableStringPtr(currentCursor), syncState.String), State: syncState.String,
-			GraphMapping: graphMapping, ProjectionState: projectionState,
+			GraphMapping: graphMapping, ProjectionState: projectionState, graphProjectionDuration: projectionDuration,
 			ReceiptSHA256: receiptHash, SourceRefs: sourceRefs,
 		}, nil
 	}
@@ -435,12 +436,12 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 	committed = true
 	_ = conn.Close()
 	conn = nil
-	graphMapping, projectionState := w.projectAcceptedPage(ctx, prepared, bundles, graphObservationIDs)
+	graphMapping, projectionState, projectionDuration := w.projectAcceptedPage(ctx, prepared, bundles, graphObservationIDs)
 	return PageResult{
 		ProjectKey: projectKey, RunID: input.RunID, PageCount: pageCount + 1,
 		Stored: counts.stored, Replayed: counts.replayed, Revised: counts.revised,
 		CursorState: cursorState(storedCursor, nextState), State: nextState,
-		GraphMapping: graphMapping, ProjectionState: projectionState,
+		GraphMapping: graphMapping, ProjectionState: projectionState, graphProjectionDuration: projectionDuration,
 		ReceiptSHA256: receiptHash, SourceRefs: sourceRefs,
 	}, nil
 }
@@ -680,22 +681,23 @@ func (w *PageWriter) projectAcceptedPage(
 	prepared []preparedExchange,
 	bundles []behaviorgraph.Record,
 	graphObservationIDs []string,
-) (string, string) {
+) (string, string, time.Duration) {
+	started := time.Now()
 	projector := w.projector
 	if projector == nil {
 		projector = projectGraphBundles
 	}
 	materialized, neo4jReady, projectErr := projector(ctx, w.selected, bundles)
 	if !materialized {
-		return "pending", "pending"
+		return "pending", "pending", time.Since(started)
 	}
 	if err := persistProjectionCompletion(ctx, w, prepared, graphObservationIDs, neo4jReady && projectErr == nil); err != nil {
-		return "pending", "pending"
+		return "pending", "pending", time.Since(started)
 	}
 	if neo4jReady && projectErr == nil {
-		return "mapped", "applied"
+		return "mapped", "applied", time.Since(started)
 	}
-	return "mapped", "pending"
+	return "mapped", "pending", time.Since(started)
 }
 
 func persistProjectionCompletion(

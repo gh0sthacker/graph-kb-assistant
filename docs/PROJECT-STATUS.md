@@ -5,6 +5,44 @@
 This checkpoint supersedes earlier runtime claims below where they conflict;
 older audit entries describe their own historical snapshots.
 
+## Runtime follow-up (2026-10-23, after `c93b1b0`)
+
+- A resumed bounded Caido-history probe processed 27 pages: 31 captures were
+  new and 1,319 were replays. The run remains resumable and `PARTIAL`; the
+  preceding 196,809-ID inventory still has no stable snapshot token, so it is
+  not a point-in-time completeness guarantee.
+- A fresh read-only audit using the configured private data root found capture
+  schema v7 and BehaviorGraph v2 compatible. The store has 1,400 captures and
+  search-index entries, 1,369 graph mappings, 31 unmapped captures, 444
+  complete parses and 956 partial parses. Response fidelity is unknown for 37
+  captures. Historical sync and overall coverage remain `PARTIAL`.
+- The projection ledger has 1,400 pending jobs with 251,263,436 bytes of
+  normalized bundle JSON. The encrypted vault contains 2,763 objects totaling
+  33,124,199 bytes. The filesystem had 17 GB free at the last check. These
+  measurements show that another unbounded history import is not yet sized for
+  the available disk; do not scale it up until asynchronous projection and the
+  durable payload/storage plan account for the backlog. The import checkpoint
+  remains untouched and resumable.
+- `neo4j-backfill --verify-only` read the working Neo4j snapshot without
+  replacing it. The local snapshot digest was
+  `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`; Neo4j
+  returned `dc1b5523144061fd1deb0dfc19a536896bf355f7832c4a3b15b4d24f2c9388f8`.
+  Parity is therefore `PARTIAL`. Source-history completeness remains a
+  separate, unassessed property.
+- A fresh local KB stats snapshot reports 9,878 semantic files and 67,505
+  chunks/vectors, of which 2,852 files and 41,087 vectors match the current
+  version and source hashes. Semantic coverage is degraded: 7,026 rows are
+  wrong-version and unhashed, and integrity is not `ok`. The lexical tier is
+  available with 15,438 files and 67,991 passages; its last refresh was
+  2026-10-13. Semantic indexing last completed 2026-10-07. The MCP stats call
+  did not complete in the earlier audit, so this snapshot came from the local
+  CLI fallback. KB readiness remains `PARTIAL`.
+- Caido import progress now emits sanitized page counters and cumulative stage
+  timings to stderr. Millisecond values preserve sub-millisecond totals; graph
+  projection time is explicitly a breakdown included in page-processing time.
+  Full Go tests, race tests, `go vet`, and `git diff --check` passed for this
+  change.
+
 - The working Juice Shop capture database was migrated from schema v5 to v7
   using the existing Python migration path under the exclusive project lock.
   A private pre-migration backup outside the checkout was verified before the

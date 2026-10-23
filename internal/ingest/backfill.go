@@ -23,21 +23,45 @@ type BackfillOptions struct {
 	MaxPages     int
 	MaxBodyBytes int
 	Delay        time.Duration
+	OnProgress   func(BackfillProgress)
+}
+
+// BackfillProgress contains page-level operational counts and timings only.
+// It deliberately excludes cursors, request IDs, and message contents.
+// Durations are cumulative; graph projection is included in page processing,
+// so those values are a total and its breakdown rather than additive phases.
+type BackfillProgress struct {
+	PagesThisRun              int     `json:"pages_this_run"`
+	PageCount                 int64   `json:"page_count"`
+	Stored                    int     `json:"stored"`
+	Replayed                  int     `json:"replayed"`
+	Revised                   int     `json:"revised"`
+	ProjectionPendingPages    int     `json:"projection_pending_pages"`
+	State                     string  `json:"state"`
+	CursorState               string  `json:"cursor_state"`
+	MetadataDurationMS        float64 `json:"metadata_duration_ms"`
+	DetailDurationMS          float64 `json:"detail_duration_ms"`
+	PageProcessingDurationMS  float64 `json:"page_processing_duration_ms"`
+	GraphProjectionDurationMS float64 `json:"graph_projection_duration_ms"`
 }
 
 // BackfillResult is bounded accounting and checkpoint state. It contains no
 // request IDs, message data, credentials, or Caido cursors.
 type BackfillResult struct {
-	ProjectKey             string `json:"project_key"`
-	RunID                  string `json:"run_id"`
-	PagesThisRun           int    `json:"pages_this_run"`
-	PageCount              int64  `json:"page_count"`
-	Stored                 int    `json:"stored"`
-	Replayed               int    `json:"replayed"`
-	Revised                int    `json:"revised"`
-	ProjectionPendingPages int    `json:"projection_pending_pages"`
-	State                  string `json:"state"`
-	CursorState            string `json:"cursor_state"`
+	ProjectKey                string  `json:"project_key"`
+	RunID                     string  `json:"run_id"`
+	PagesThisRun              int     `json:"pages_this_run"`
+	PageCount                 int64   `json:"page_count"`
+	Stored                    int     `json:"stored"`
+	Replayed                  int     `json:"replayed"`
+	Revised                   int     `json:"revised"`
+	ProjectionPendingPages    int     `json:"projection_pending_pages"`
+	MetadataDurationMS        float64 `json:"metadata_duration_ms"`
+	DetailDurationMS          float64 `json:"detail_duration_ms"`
+	PageProcessingDurationMS  float64 `json:"page_processing_duration_ms"`
+	GraphProjectionDurationMS float64 `json:"graph_projection_duration_ms"`
+	State                     string  `json:"state"`
+	CursorState               string  `json:"cursor_state"`
 	// CoverageReconciled stays false because the read API provides no stable
 	// point-in-time inventory or expected history total to compare against.
 	CoverageReconciled bool   `json:"coverage_reconciled"`
@@ -88,6 +112,7 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		CoverageNote: "Caido provided no stable snapshot token or expected history total to reconcile completeness; the cursor reports enumeration progress only.",
 	}
 	cursor := checkpoint.Cursor
+	var metadataDuration, detailDuration, pageProcessingDuration, graphProjectionDuration time.Duration
 
 	markPartial := func(cause error) (BackfillResult, error) {
 		partialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -104,7 +129,10 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		if err := ctx.Err(); err != nil {
 			return markPartial(errors.New("Caido backfill was interrupted"))
 		}
+		metadataStarted := time.Now()
 		metadata, err := source.ListRequestPage(selected, cursor, options.PageSize, nil)
+		metadataDuration += time.Since(metadataStarted)
+		result.MetadataDurationMS = durationMilliseconds(metadataDuration)
 		if err != nil {
 			return markPartial(err)
 		}
@@ -125,17 +153,25 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 			return result, nil
 		}
 
+		detailsStarted := time.Now()
 		page, err := source.FetchHistoryPage(selected, metadata, nil, options.MaxBodyBytes)
+		detailDuration += time.Since(detailsStarted)
+		result.DetailDurationMS = durationMilliseconds(detailDuration)
 		if err != nil {
 			return markPartial(err)
 		}
 		if err := validateFetchedPage(page, metadata, selected); err != nil {
 			return markPartial(err)
 		}
+		pageWriteStarted := time.Now()
 		pageResult, err := writer.WritePage(ctx, HistoryPageInput{RunID: checkpoint.RunID, Cursor: cursor, Page: page})
+		pageProcessingDuration += time.Since(pageWriteStarted)
+		result.PageProcessingDurationMS = durationMilliseconds(pageProcessingDuration)
 		if err != nil {
 			return markPartial(err)
 		}
+		graphProjectionDuration += pageResult.graphProjectionDuration
+		result.GraphProjectionDurationMS = durationMilliseconds(graphProjectionDuration)
 		result.PagesThisRun++
 		result.PageCount = pageResult.PageCount
 		result.Stored += pageResult.Stored
@@ -146,6 +182,16 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		}
 		result.State = pageResult.State
 		result.CursorState = pageResult.CursorState
+		if options.OnProgress != nil {
+			options.OnProgress(BackfillProgress{
+				PagesThisRun: result.PagesThisRun, PageCount: result.PageCount,
+				Stored: result.Stored, Replayed: result.Replayed, Revised: result.Revised,
+				ProjectionPendingPages: result.ProjectionPendingPages, State: result.State,
+				CursorState: result.CursorState, MetadataDurationMS: result.MetadataDurationMS,
+				DetailDurationMS: result.DetailDurationMS, PageProcessingDurationMS: result.PageProcessingDurationMS,
+				GraphProjectionDurationMS: result.GraphProjectionDurationMS,
+			})
+		}
 		if !page.HasMore {
 			return result, nil
 		}
@@ -171,6 +217,10 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		}
 	}
 	return result, nil
+}
+
+func durationMilliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
 }
 
 func validateMetadataPage(page caido.RequestMetadataPage, selected project.CaidoProjectRef, pageSize int, cursor *string) error {
