@@ -107,6 +107,36 @@ older audit entries describe their own historical snapshots.
   actor/session/object context and flow annotations remain outstanding. Stage
   3 stays `PARTIAL`.
 
+## Stage 3 full-data shadow reproject check (2026-10-23)
+
+- Added a read-only, authenticated full-message recovery path bounded to 1 MiB
+  per request or response and a shadow graph writer that requires an absent
+  graph file in an owner-only local directory outside the selected project.
+  The one-time check held the selected Juice Shop project's exclusive
+  maintenance lease and read only its local capture index, encrypted vault,
+  graph and receipts. It did not call Caido, switch projects, or replace the
+  active graph. The temporary shadow graph and plaintext message buffers were
+  removed/cleared after the check.
+- All 1,369 indexed captures were reprojected. Recomputed request and response
+  HMACs matched all stored signatures; all card IDs stayed stable, and the
+  active graph's digest stayed unchanged. The new projection contains 112,135
+  entities (107,137 parameters) and 112,753 assertions, compared with 25,064
+  entities (20,069 parameters) and 25,685 assertions in the active graph.
+  The temporary SQLite graph was 655,867,904 bytes versus 135,913,472 bytes
+  for the active graph. One old non-parameter entity was absent and four new
+  non-parameter entities appeared; their identity delta has not been
+  reconciled.
+- The active graph was not replaced. The occurrence-complete projection is
+  materially larger and still has an unresolved non-parameter identity delta;
+  investigate both before planning a production rebuild or Neo4j sync. Current
+  captures therefore still use the prior collapsed representation. Stage 3
+  remains `PARTIAL`; multipart occurrences, route-family grouping,
+  actor/session/object context and flow annotations remain outstanding.
+- The bounded read API, shadow-path checks, full Go test suite, race suite,
+  `go vet ./...`, and `git diff --check` passed. The shadow check is a local
+  feasibility result, not a Caido completeness or browser/JavaScript coverage
+  result.
+
 This repository is an early public alpha. The following boundaries are deliberate and should remain visible in documentation and user-facing output:
 
 - Architecture v2 now defines project schema v7, with a bounded revision-keyed projection-job ledger and an independent cursor for late live-response refresh. Go ingestion commits accepted capture metadata, source checkpoints, and projection jobs in one SQLite transaction. The bounded `projection-worker` command retries jobs and records revision-specific graph mappings; Python owns upgrades of existing databases. A post-commit projection is acknowledged only after local mapping and Neo4j sync report ready. The working runtime database was not migrated or read during the v7 change, so runtime compatibility and the live refresh path remain unverified; Stage 1 remains `PARTIAL`.

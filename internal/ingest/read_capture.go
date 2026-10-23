@@ -13,7 +13,10 @@ import (
 	"bb-graph-assistant/internal/store"
 )
 
-const maxRawCaptureRange = 16 << 10
+const (
+	maxRawCaptureRange               = 16 << 10
+	maxGraphReprojectionMessageBytes = 1 << 20
+)
 
 // CaptureRange contains only the requested decrypted bytes, never a full
 // plaintext copy of the stored message.
@@ -33,6 +36,18 @@ type CaptureRange struct {
 // from the explicitly selected project's private vault, then returns a bounded
 // byte range. Live-tail rows are not copied to the local vault.
 func ReadCaptureRange(ctx context.Context, projectStore *store.ProjectStore, requestID, side string, offset int64, maximum int) (CaptureRange, error) {
+	return readCaptureMessage(ctx, projectStore, requestID, side, offset, maximum, false)
+}
+
+// ReadCaptureMessageForGraphRebuild decrypts one complete historical message
+// for a local graph reprojection. The per-side limit is 1 MiB; callers must
+// clear Data as soon as the projection has consumed it. Live-tail rows are not
+// copied to the local vault.
+func ReadCaptureMessageForGraphRebuild(ctx context.Context, projectStore *store.ProjectStore, requestID, side string) (CaptureRange, error) {
+	return readCaptureMessage(ctx, projectStore, requestID, side, 0, maxGraphReprojectionMessageBytes, true)
+}
+
+func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, requestID, side string, offset int64, maximum int, fullMessage bool) (CaptureRange, error) {
 	if projectStore == nil || projectStore.Database == nil || projectStore.Database.DB() == nil || !projectStore.Database.ReadOnly() {
 		return CaptureRange{}, errors.New("raw capture requires a read-only selected project store")
 	}
@@ -44,7 +59,9 @@ func ReadCaptureRange(ctx context.Context, projectStore *store.ProjectStore, req
 	if side != "request" && side != "response" {
 		return CaptureRange{}, errors.New("raw capture side is invalid")
 	}
-	if offset < 0 || maximum < 1 || maximum > maxRawCaptureRange || requestID == "" || len(requestID) > 512 {
+	if offset < 0 || maximum < 1 || requestID == "" || len(requestID) > 512 ||
+		(fullMessage && (offset != 0 || maximum != maxGraphReprojectionMessageBytes)) ||
+		(!fullMessage && maximum > maxRawCaptureRange) {
 		return CaptureRange{}, errors.New("raw capture range is outside its allowed bounds")
 	}
 	selectedRef := project.CaidoExchangeRef{Project: projectStore.Project, RequestID: requestID}
@@ -106,6 +123,9 @@ func ReadCaptureRange(ctx context.Context, projectStore *store.ProjectStore, req
 	if offset > size.Int64 {
 		return CaptureRange{}, errors.New("raw capture offset is beyond the message")
 	}
+	if fullMessage && size.Int64 > int64(maximum) {
+		return CaptureRange{}, errors.New("historical capture exceeds the bounded graph-reprojection read limit")
+	}
 	if len(digest.String) != 64 || strings.Trim(digest.String, "0123456789abcdef") != "" {
 		return CaptureRange{}, errors.New("raw capture hash metadata is invalid")
 	}
@@ -152,13 +172,19 @@ func ReadCaptureRange(ctx context.Context, projectStore *store.ProjectStore, req
 	if err != nil {
 		return CaptureRange{}, errors.New("raw capture vault authentication failed")
 	}
-	defer clear(raw)
+	defer func() { clear(raw) }()
 	if int64(len(raw)) != size.Int64 || sha256Hex(raw) != digest.String {
 		return CaptureRange{}, errors.New("raw capture vault content failed integrity verification")
 	}
-	start := int(offset)
-	end := min(start+maximum, len(raw))
-	block := append([]byte(nil), raw[start:end]...)
+	var block []byte
+	if fullMessage {
+		block = raw
+		raw = nil
+	} else {
+		start := int(offset)
+		end := min(start+maximum, len(raw))
+		block = append([]byte(nil), raw[start:end]...)
+	}
 	return CaptureRange{
 		Data: block, TotalSize: size.Int64, SHA256: digest.String,
 		RevisionID: stringPointer(row.revision), CapturedAt: stringPointer(row.capturedAt),

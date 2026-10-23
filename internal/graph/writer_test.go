@@ -1,10 +1,69 @@
 package graph
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/store"
 )
+
+func TestOpenShadowWriterRequiresNewPrivatePathOutsideSelectedProject(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ref := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "shadow-writer"}
+	selected, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer selected.Close()
+
+	shadowDir := filepath.Join(root, "shadow")
+	if err := os.Mkdir(shadowDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shadowPath := filepath.Join(shadowDir, "behavior.sqlite3")
+	writer, err := OpenShadowWriter(ctx, selected, shadowPath)
+	if err != nil {
+		t.Fatalf("OpenShadowWriter() error = %v", err)
+	}
+	if writer.graphPath != shadowPath || writer.receiptRoot != selected.BehaviorReceiptPath {
+		t.Fatal("shadow writer did not preserve the selected provenance root")
+	}
+	if _, err := os.Lstat(shadowPath); !os.IsNotExist(err) {
+		t.Fatal("opening a shadow writer created or replaced the target graph")
+	}
+
+	if _, err := OpenShadowWriter(ctx, selected, selected.BehaviorGraphPath+".shadow"); err == nil {
+		t.Fatal("OpenShadowWriter() accepted a path inside the selected project")
+	}
+	if err := os.WriteFile(filepath.Join(shadowDir, "existing.sqlite3"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	existingPath := filepath.Join(shadowDir, "existing.sqlite3")
+	if _, err := OpenShadowWriter(ctx, selected, existingPath); err == nil {
+		t.Fatal("OpenShadowWriter() accepted an existing output file")
+	}
+	contents, err := os.ReadFile(existingPath)
+	if err != nil || string(contents) != "keep" {
+		t.Fatal("existing output file was changed")
+	}
+
+	sharedDir := filepath.Join(root, "shared")
+	if err := os.Mkdir(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenShadowWriter(ctx, selected, filepath.Join(sharedDir, "behavior.sqlite3")); err == nil {
+		t.Fatal("OpenShadowWriter() accepted a non-private output directory")
+	}
+}
 
 func TestRecordDifferencePathsReportsSchemaPathsWithoutValues(t *testing.T) {
 	left := Record{

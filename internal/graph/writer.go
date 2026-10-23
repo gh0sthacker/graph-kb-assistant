@@ -141,6 +141,49 @@ func OpenWriter(ctx context.Context, selected *store.ProjectStore) (*Writer, err
 	return writer, nil
 }
 
+// OpenShadowWriter binds a new graph database to the selected project's
+// verified provenance receipts while keeping its active BehaviorGraph
+// untouched. The caller must hold the selected project's exclusive
+// maintenance lease for the complete rebuild. The shadow path must be absent
+// and inside an existing owner-only local directory outside the selected
+// project directory.
+func OpenShadowWriter(ctx context.Context, selected *store.ProjectStore, shadowGraphPath string) (*Writer, error) {
+	writer, err := OpenWriter(ctx, selected)
+	if err != nil {
+		return nil, err
+	}
+	if shadowGraphPath == "" {
+		return nil, errors.New("shadow graph path is invalid")
+	}
+	absolute, err := filepath.Abs(shadowGraphPath)
+	if err != nil || filepath.Clean(absolute) != absolute || absolute == writer.graphPath {
+		return nil, errors.New("shadow graph path is invalid")
+	}
+	projectRelative, err := filepath.Rel(writer.projectDir, absolute)
+	if err != nil || projectRelative == "." || projectRelative != ".." && !strings.HasPrefix(projectRelative, ".."+string(filepath.Separator)) {
+		return nil, errors.New("shadow graph path must be outside the selected project")
+	}
+	parent := filepath.Dir(absolute)
+	parentInfo, err := os.Lstat(parent)
+	if err != nil || parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("shadow graph directory must be owner-only")
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil || resolvedParent != parent {
+		return nil, errors.New("shadow graph directory is unavailable")
+	}
+	if _, err := project.EnsurePrivateDirectory(parent); err != nil {
+		return nil, errors.New("shadow graph directory must be on a local filesystem")
+	}
+	if _, err := os.Lstat(absolute); err == nil {
+		return nil, errors.New("shadow graph path already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("shadow graph path is unavailable")
+	}
+	writer.graphPath = absolute
+	return writer, nil
+}
+
 // DecodeBundleJSON strictly decodes one bounded JSON object and rejects
 // duplicate keys so canonical bundle identity is unambiguous.
 func DecodeBundleJSON(encoded []byte) (Record, error) {
