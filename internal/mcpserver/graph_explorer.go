@@ -110,7 +110,7 @@ func (t *Tools) graphNeighborhood(ctx context.Context, args graphNeighborhoodArg
 		return nil, errors.New("selected project is unavailable for graph reads")
 	}
 	defer selected.Close()
-	result, err := capturesearch.GraphNeighborhood(ctx, selected, args.SeedIDs)
+	result, err := capturesearch.GraphNeighborhoodWithService(ctx, t.graphService, selected, args.SeedIDs)
 	if err != nil {
 		return nil, errors.New("selected graph neighborhood is unavailable or exceeds its limits")
 	}

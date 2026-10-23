@@ -13,6 +13,15 @@ import (
 // loads only selected records and their dependencies; it makes no claim about
 // full-project integrity or the global evidence closure used by Reader.Slice.
 func ReadNeighborhood(ctx context.Context, selected *store.ProjectStore, seeds []string) (map[string]any, error) {
+	return processService.ReadNeighborhood(ctx, selected, seeds)
+}
+
+// ReadNeighborhood loads a bounded one-hop graph view through this
+// process-owned service.
+func (s *Service) ReadNeighborhood(ctx context.Context, selected *store.ProjectStore, seeds []string) (map[string]any, error) {
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
 	if selected == nil || selected.Database == nil || !selected.Database.ReadOnly() || len(seeds) < 1 || len(seeds) > 20 {
 		return nil, errors.New("graph neighborhood requires one selected read-only project and 1-20 seeds")
 	}
@@ -28,22 +37,14 @@ func ReadNeighborhood(ctx context.Context, selected *store.ProjectStore, seeds [
 	case "sqlite":
 		reader, err = behaviorgraph.OpenReader(ctx, selected.BehaviorGraphPath, selected.ProjectKey, selected.BehaviorReceiptPath)
 	case "neo4j":
-		cfg, configErr := neo4jstore.ConfigFromEnv()
-		if configErr != nil {
-			return nil, configErr
-		}
-		graphStore, openErr := neo4jstore.New(ctx, cfg)
+		graphStore, release, openErr := s.acquireNeo4jStore(ctx)
 		if openErr != nil {
 			return nil, openErr
 		}
-		var readErr error
-		neighborhoodResult, readErr = graphStore.ReadProjectNeighborhood(ctx, selected.ProjectKey, seeds, options.MaxEdges)
-		closeErr := graphStore.Close(context.Background())
-		if readErr != nil {
-			return nil, readErr
-		}
-		if closeErr != nil {
-			return nil, errors.New("Neo4j neighborhood connection could not be closed")
+		neighborhoodResult, err = graphStore.ReadProjectNeighborhood(ctx, selected.ProjectKey, seeds, options.MaxEdges)
+		release()
+		if err != nil {
+			return nil, err
 		}
 		generation, candidates, candidateLimit = neighborhoodResult.Generation, neighborhoodResult.CandidateCount, neighborhoodResult.Truncated
 		reader, err = behaviorgraph.OpenReaderFromSnapshot(ctx, neighborhoodResult.Snapshot, selected.ProjectKey, selected.BehaviorReceiptPath)

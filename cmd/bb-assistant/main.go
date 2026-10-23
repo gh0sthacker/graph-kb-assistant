@@ -17,6 +17,7 @@ import (
 
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
+	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/graphsync"
 	"bb-graph-assistant/internal/historyreconcile"
 	"bb-graph-assistant/internal/ingest"
@@ -38,7 +39,11 @@ func isWatchLeaseContention(watch bool, parent context.Context, err error) bool 
 }
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	if closeErr := graphaccess.CloseProcessService(context.Background()); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
@@ -984,7 +989,7 @@ func searchKB(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(result)
 }
 
-func serveMCP(args []string) error {
+func serveMCP(args []string) (retErr error) {
 	flags := flag.NewFlagSet("mcp-server", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	root := flags.String("data-root", "", "private assistant data root")
@@ -999,7 +1004,7 @@ func serveMCP(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer tools.Close()
+	defer func() { retErr = errors.Join(retErr, tools.Close()) }()
 	server, err := mcpserver.NewServer(tools)
 	if err != nil {
 		return err
@@ -1021,7 +1026,7 @@ func printMCPTools(args []string) error {
 	return nil
 }
 
-func serveWebUI(args []string) error {
+func serveWebUI(args []string) (retErr error) {
 	flags := flag.NewFlagSet("web-ui", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	root := flags.String("data-root", "", "private assistant data root")
@@ -1040,7 +1045,7 @@ func serveWebUI(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer tools.Close()
+	defer func() { retErr = errors.Join(retErr, tools.Close()) }()
 	handler, err := webui.NewHandler(tools)
 	if err != nil {
 		return err

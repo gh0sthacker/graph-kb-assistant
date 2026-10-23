@@ -11,7 +11,6 @@ import (
 	"time"
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
-	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/store"
 )
 
@@ -74,10 +73,18 @@ func Invalidate(projectKey string) {
 	}
 }
 
-// OpenReader opens the project's selected graph backend. SQLite remains the
-// default during migration; setting BB_ASSISTANT_GRAPH_BACKEND=neo4j switches
-// reads to the project-scoped Neo4j projection after a verified backfill.
+// OpenReader opens the project's selected graph backend. Neo4j is the default;
+// set BB_ASSISTANT_GRAPH_BACKEND=sqlite only for explicit compatibility reads.
 func OpenReader(ctx context.Context, selected *store.ProjectStore) (Reader, error) {
+	return processService.OpenReader(ctx, selected)
+}
+
+// OpenReader opens the selected project's graph backend through this
+// process-owned service.
+func (s *Service) OpenReader(ctx context.Context, selected *store.ProjectStore) (Reader, error) {
+	if err := s.checkOpen(); err != nil {
+		return nil, err
+	}
 	if selected == nil || selected.Database == nil || selected.Database.DB() == nil || !selected.Database.ReadOnly() {
 		return nil, errors.New("graph reader requires a read-only selected project store")
 	}
@@ -99,7 +106,7 @@ func OpenReader(ctx context.Context, selected *store.ProjectStore) (Reader, erro
 			return sharedReader{entry: entry}, nil
 		}
 	}
-	loaded, err := loadNeo4jReader(ctx, selected)
+	loaded, err := loadNeo4jReader(ctx, selected, s)
 	if err != nil {
 		return nil, err
 	}
@@ -118,22 +125,15 @@ func OpenReader(ctx context.Context, selected *store.ProjectStore) (Reader, erro
 	return sharedReader{entry: entry}, nil
 }
 
-func loadNeo4jReader(ctx context.Context, selected *store.ProjectStore) (*behaviorgraph.Reader, error) {
-	cfg, err := neo4jstore.ConfigFromEnv()
+func loadNeo4jReader(ctx context.Context, selected *store.ProjectStore, service *Service) (*behaviorgraph.Reader, error) {
+	graphStore, release, err := service.acquireNeo4jStore(ctx)
 	if err != nil {
 		return nil, err
 	}
-	graphStore, err := neo4jstore.New(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
+	defer release()
 	snapshot, readErr := graphStore.ReadProjectSnapshot(ctx, selected.ProjectKey)
-	closeErr := graphStore.Close(context.Background())
 	if readErr != nil {
 		return nil, readErr
-	}
-	if closeErr != nil {
-		return nil, errors.New("Neo4j connection could not be closed")
 	}
 	return behaviorgraph.OpenReaderFromSnapshot(ctx, snapshot, selected.ProjectKey, selected.BehaviorReceiptPath)
 }
@@ -141,7 +141,7 @@ func loadNeo4jReader(ctx context.Context, selected *store.ProjectStore) (*behavi
 func ConfiguredBackend() string {
 	backend := strings.ToLower(strings.TrimSpace(os.Getenv("BB_ASSISTANT_GRAPH_BACKEND")))
 	if backend == "" {
-		return "sqlite"
+		return "neo4j"
 	}
 	return backend
 }

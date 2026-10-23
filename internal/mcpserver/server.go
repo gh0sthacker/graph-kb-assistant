@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/kb"
 	"bb-graph-assistant/internal/project"
@@ -48,6 +49,7 @@ type Tools struct {
 	root          string
 	projects      []project.CaidoProjectRef
 	projectsByKey map[string]project.CaidoProjectRef
+	graphService  *graphaccess.Service
 	kbIndex       *kb.Index
 	allowRawReads bool
 }
@@ -91,6 +93,7 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 	}
 	tools := &Tools{
 		root: root, projects: projects, projectsByKey: byKey,
+		graphService:  graphaccess.NewService(),
 		allowRawReads: os.Getenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1",
 	}
 	index, indexErr := kb.OpenIndex(kbIndexPath)
@@ -101,10 +104,17 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 }
 
 func (t *Tools) Close() error {
-	if t == nil || t.kbIndex == nil {
+	if t == nil {
 		return nil
 	}
-	return t.kbIndex.Close()
+	var closeErr error
+	if t.graphService != nil {
+		closeErr = errors.Join(closeErr, t.graphService.Close(context.Background()))
+	}
+	if t.kbIndex != nil {
+		closeErr = errors.Join(closeErr, t.kbIndex.Close())
+	}
+	return closeErr
 }
 
 func NewServer(tools *Tools) (*Server, error) {
@@ -742,7 +752,7 @@ func (t *Tools) graphSlice(ctx context.Context, args graphSliceArgs) (map[string
 		return nil, errors.New("selected project is not available for graph reads")
 	}
 	defer projectStore.Close()
-	result, err := capturesearch.GraphSlice(ctx, projectStore, args.SeedIDs, maxNodes, maxEdges, maxDepth, nil)
+	result, err := capturesearch.GraphSliceWithService(ctx, t.graphService, projectStore, args.SeedIDs, maxNodes, maxEdges, maxDepth, nil)
 	if err != nil {
 		return nil, errors.New("graph slice arguments are invalid or the local graph is unavailable")
 	}

@@ -22,10 +22,16 @@ const maxCaptureProvenanceRows = 1_000
 // GraphSlice reads one project's existing BehaviorGraph and joins selected
 // observations to exact historical/live Caido request IDs.
 func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any) (map[string]any, error) {
+	return GraphSliceWithService(ctx, graphaccess.DefaultService(), projectStore, seedIDs, maxNodes, maxEdges, maxDepth, selectedContext)
+}
+
+// GraphSliceWithService runs the shared graph query through a process-owned
+// graph access service.
+func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any) (map[string]any, error) {
 	if err := validateGraphProjectStore(projectStore); err != nil {
 		return nil, err
 	}
-	reader, err := graphaccess.OpenReader(ctx, projectStore)
+	reader, err := service.OpenReader(ctx, projectStore)
 	if err != nil {
 		return nil, err
 	}
@@ -42,10 +48,16 @@ func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs [
 // GraphNeighborhood serves the interactive one-hop view without loading the
 // entire Neo4j project. Full analysis slices continue through GraphSlice.
 func GraphNeighborhood(ctx context.Context, projectStore *store.ProjectStore, seedIDs []string) (map[string]any, error) {
+	return GraphNeighborhoodWithService(ctx, graphaccess.DefaultService(), projectStore, seedIDs)
+}
+
+// GraphNeighborhoodWithService runs the shared one-hop query through a
+// process-owned graph access service.
+func GraphNeighborhoodWithService(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string) (map[string]any, error) {
 	if err := validateGraphProjectStore(projectStore); err != nil {
 		return nil, err
 	}
-	slice, err := graphaccess.ReadNeighborhood(ctx, projectStore, seedIDs)
+	slice, err := service.ReadNeighborhood(ctx, projectStore, seedIDs)
 	if err != nil {
 		return nil, err
 	}
