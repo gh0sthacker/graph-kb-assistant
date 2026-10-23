@@ -779,6 +779,7 @@ func persistExchanges(ctx context.Context, conn *sql.Conn, selected *store.Proje
 		}
 		requestTruncated := nullableBoolInt(exchange.RequestTruncated)
 		responseTruncated := nullableBoolInt(exchange.ResponseTruncated)
+		firstSeenAt := utcNow()
 		if _, err := conn.ExecContext(ctx,
 			`INSERT OR IGNORE INTO capture_revisions(revision_id,observation_id,request_sha256,response_sha256,
 			 request_size,response_size,request_vault_ref,response_vault_ref,captured_at,request_truncated,response_truncated,
@@ -786,9 +787,21 @@ func persistExchanges(ctx context.Context, conn *sql.Conn, selected *store.Proje
 			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			item.revisionID, observationID, item.requestSHA256, item.responseSHA256,
 			len(exchange.RequestRaw), responseSize, item.requestRef, item.responseRef, exchange.CapturedAt,
-			requestTruncated, responseTruncated, exchange.RequestWireFidelity, exchange.ResponseWireFidelity, utcNow(),
+			requestTruncated, responseTruncated, exchange.RequestWireFidelity, exchange.ResponseWireFidelity, firstSeenAt,
 		); err != nil {
 			return counts, errors.New("capture revision could not be stored")
+		}
+		if _, err := conn.ExecContext(ctx,
+			`INSERT OR IGNORE INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at)
+			 VALUES(?,?,'historical',?)`, item.revisionID, observationID, firstSeenAt,
+		); err != nil {
+			return counts, errors.New("capture revision registry entry could not be stored")
+		}
+		var registeredObservation, registeredSource string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?", item.revisionID,
+		).Scan(&registeredObservation, &registeredSource); err != nil || registeredObservation != observationID || registeredSource != "historical" {
+			return counts, errors.New("capture revision registry identity conflicts with the stored revision")
 		}
 		if err := verifyRevision(ctx, conn, item); err != nil {
 			return counts, err

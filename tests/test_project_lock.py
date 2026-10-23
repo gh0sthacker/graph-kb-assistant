@@ -15,7 +15,7 @@ import time
 import pytest
 
 from bb_assistant.caido import HistoryPage, RequestMetadataPage
-from bb_assistant.domain import CaidoProjectRef
+from bb_assistant.domain import CaidoExchangeRef, CaidoProjectRef, HttpExchange
 from bb_assistant.ingest import sync_live_project, sync_project
 from bb_assistant.storage import ProjectStore
 
@@ -248,6 +248,92 @@ def test_read_only_project_store_does_not_migrate_or_write(tmp_path):
     assert readonly.db_path.stat().st_mtime_ns == old_mtime
     assert registry.read_bytes() == old_registry
     assert {path.name for path in writable.directory.iterdir()} == old_entries
+
+
+def test_writable_project_store_migrates_v5_projection_job_ledger(tmp_path):
+    import sqlite3
+
+    project = CaidoProjectRef("synthetic-instance", "projection-job-v5-migration")
+    old_store = ProjectStore(project, root=tmp_path)
+    with sqlite3.connect(old_store.db_path) as connection:
+        connection.execute("DROP TABLE IF EXISTS projection_jobs")
+        connection.execute("DROP TABLE IF EXISTS capture_revision_registry")
+        connection.execute(
+            "INSERT INTO captures(observation_id,caido_instance_id,caido_project_id,request_id,"
+            "request_sha256,request_size,request_vault_ref) VALUES(?,?,?,?,?,?,?)",
+            ("obs-v5", "synthetic-instance", "projection-job-v5-migration", "req-v5", "a" * 64, 12, "vault/ref"),
+        )
+        connection.execute(
+            "INSERT INTO capture_revisions(revision_id,observation_id,request_sha256,request_size,"
+            "request_vault_ref,first_seen_at) VALUES(?,?,?,?,?,?)",
+            ("b" * 64, "obs-v5", "a" * 64, 12, "vault/ref", "2026-10-23T12:00:00Z"),
+        )
+        connection.execute("PRAGMA user_version = 5")
+
+    upgraded = ProjectStore(project, root=tmp_path)
+    with upgraded.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(projection_jobs)").fetchall()
+        }
+        revision = connection.execute(
+            "SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?",
+            ("b" * 64,),
+        ).fetchone()
+    assert {
+        "job_id",
+        "revision_id",
+        "payload_json",
+        "payload_sha256",
+        "state",
+        "attempt_count",
+        "next_attempt_at",
+    } <= columns
+    assert tuple(revision) == ("obs-v5", "historical")
+
+
+def test_python_history_writer_registers_new_capture_revision(tmp_path):
+    project = CaidoProjectRef("synthetic-instance", "python-revision-registry")
+    store = ProjectStore(project, root=tmp_path)
+    exchange = HttpExchange(
+        ref=CaidoExchangeRef(project, "request-1"),
+        captured_at="2026-10-23T12:00:00Z",
+        request_raw=b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+        response_raw=None,
+        method="GET",
+        scheme="http",
+        host="example.test",
+        port=80,
+        target="/",
+    )
+
+    receipt = store.save_exchange(exchange, key=bytes(32))
+
+    with store.connect() as connection:
+        registered = connection.execute(
+            "SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?",
+            (receipt["revision_id"],),
+        ).fetchone()
+    assert tuple(registered) == (exchange.ref.observation_id, "historical")
+
+
+def test_writable_project_store_rejects_unknown_schema_without_mutating_it(tmp_path):
+    import sqlite3
+
+    project = CaidoProjectRef("synthetic-instance", "unsupported-schema-is-untouched")
+    store = ProjectStore(project, root=tmp_path)
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute("DROP TABLE projection_jobs")
+        connection.execute("PRAGMA user_version = 99")
+
+    with pytest.raises(RuntimeError, match="Unsupported project database schema version 99"):
+        ProjectStore(project, root=tmp_path)
+
+    with sqlite3.connect(store.db_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 99
+        assert connection.execute(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='projection_jobs'"
+        ).fetchone()[0] == 0
 
 
 def test_read_only_tool_startup_does_not_create_registry_or_runtime_directories(tmp_path):

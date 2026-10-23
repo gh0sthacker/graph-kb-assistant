@@ -153,3 +153,36 @@ CREATE VIRTUAL TABLE IF NOT EXISTS capture_search_fts USING fts5(
   tokenize='unicode61 remove_diacritics 2'
 );
 `
+
+// schemaV6 adds the authoritative, per-project projection job ledger. It is
+// applied when creating a new database; Python owns upgrades of existing files.
+const schemaV6 = schemaV5 + `
+CREATE TABLE IF NOT EXISTS capture_revision_registry (
+  revision_id TEXT PRIMARY KEY CHECK (length(revision_id) = 64),
+  observation_id TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('historical','live')),
+  first_seen_at TEXT NOT NULL,
+  UNIQUE (source_kind, observation_id, revision_id)
+);
+CREATE TABLE IF NOT EXISTS projection_jobs (
+  sequence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL UNIQUE,
+  revision_id TEXT NOT NULL UNIQUE REFERENCES capture_revision_registry(revision_id),
+  payload_json TEXT NOT NULL,
+  payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+  state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (state IN ('pending','leased','applied','dead_letter')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  next_attempt_at TEXT NOT NULL,
+  lease_token TEXT,
+  lease_until TEXT,
+  last_error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  applied_at TEXT,
+  CHECK ((state = 'leased' AND lease_token IS NOT NULL AND lease_until IS NOT NULL)
+      OR (state <> 'leased' AND lease_token IS NULL AND lease_until IS NULL))
+);
+CREATE INDEX IF NOT EXISTS projection_jobs_due_idx
+  ON projection_jobs(state, next_attempt_at, sequence_id);
+`

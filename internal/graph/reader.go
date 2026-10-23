@@ -17,7 +17,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf8"
+
+	"bb-graph-assistant/internal/publicdata"
 
 	_ "modernc.org/sqlite"
 )
@@ -33,24 +34,12 @@ const (
 )
 
 var (
-	graphDigestPattern      = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	graphIDPattern          = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
-	jsonIntegerPattern      = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
-	classifierCategory      = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
-	classifierASVS          = regexp.MustCompile(`^V[0-9V./]{1,32}$`)
-	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session[_-]?(id|cookie)|cookie|secret)\s*[=:]\s*([^\s&;,]+)`)
-	secretOtherValuePattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[^\s/@]+@[^\s/]+\.[A-Za-z]{2,}\b`)
-	privateGraphKeys        = map[string]struct{}{
-		"raw": {}, "body": {}, "headers": {}, "header_values": {}, "request_body": {},
-		"response_body": {}, "field_values": {}, "token": {}, "session_id": {},
-		"session_cookie": {}, "credential": {}, "credentials": {}, "pii": {},
-		"authorization": {}, "cookie": {}, "set_cookie": {}, "password": {},
-		"passwd": {}, "access_token": {}, "refresh_token": {}, "csrf_token": {},
-		"api_key": {}, "apikey": {}, "private_key": {}, "raw_request": {},
-		"raw_response": {}, "private_oracle": {}, "ground_truth": {},
-		"known_vulnerabilities": {}, "session_store": {},
-	}
-	allowedKinds = map[string]struct{}{
+	graphDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	graphIDPattern     = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
+	jsonIntegerPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
+	classifierCategory = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+	classifierASVS     = regexp.MustCompile(`^V[0-9V./]{1,32}$`)
+	allowedKinds       = map[string]struct{}{
 		"asset": {}, "endpoint": {}, "actor": {}, "session_context": {}, "object": {},
 		"observation": {}, "parameter": {}, "condition": {}, "flow": {},
 		"classifier_signal": {}, "hypothesis": {}, "request_variant": {}, "response_variant": {},
@@ -1316,93 +1305,7 @@ func unescapeJSONLineSeparators(encoded string) string {
 }
 
 func validatePublic(value any) error {
-	return walkPublic(value, "")
-}
-
-func walkPublic(value any, parent string) error {
-	switch node := value.(type) {
-	case Record:
-		for key, child := range node {
-			normalized := strings.ReplaceAll(strings.ToLower(key), "-", "_")
-			if _, private := privateGraphKeys[normalized]; private && child != nil && child != "" && child != "[REDACTED]" && child != "<REDACTED>" {
-				return errors.New("private graph field")
-			}
-			if (parent == "fields" || parent == "header_metadata") && (normalized == "value" || normalized == "values") && child != nil && child != "" {
-				return errors.New("private graph value")
-			}
-			if err := walkPublic(child, key); err != nil {
-				return err
-			}
-		}
-	case map[string]any:
-		for key, child := range node {
-			normalized := strings.ReplaceAll(strings.ToLower(key), "-", "_")
-			if _, private := privateGraphKeys[normalized]; private && child != nil && child != "" && child != "[REDACTED]" && child != "<REDACTED>" {
-				return errors.New("private graph field")
-			}
-			if (parent == "fields" || parent == "header_metadata") && (normalized == "value" || normalized == "values") && child != nil && child != "" {
-				return errors.New("private graph value")
-			}
-			if err := walkPublic(child, key); err != nil {
-				return err
-			}
-		}
-	case []any:
-		for _, child := range node {
-			if err := walkPublic(child, parent); err != nil {
-				return err
-			}
-		}
-	case []Record:
-		for _, child := range node {
-			if err := walkPublic(child, parent); err != nil {
-				return err
-			}
-		}
-	case string:
-		if !utf8.ValidString(node) || containsSecretLikeValue(node) {
-			return errors.New("secret-like graph value")
-		}
-		decoded := node
-		for i := 0; i < 3; i++ {
-			if unescaped, err := url.QueryUnescape(decoded); err == nil {
-				decoded = unescaped
-			}
-		}
-		if containsSecretLikeValue(decoded) {
-			return errors.New("secret-like graph value")
-		}
-		if strings.HasPrefix(decoded, "http://") || strings.HasPrefix(decoded, "https://") {
-			parsed, err := url.Parse(decoded)
-			if err != nil || parsed.User != nil {
-				return errors.New("unsafe graph URL")
-			}
-			for _, values := range parsed.Query() {
-				for _, item := range values {
-					if item != "" && item != "[REDACTED]" && item != "<REDACTED>" {
-						return errors.New("unsafe graph URL")
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func containsSecretLikeValue(value string) bool {
-	if secretOtherValuePattern.MatchString(value) {
-		return true
-	}
-	for _, match := range secretAssignmentPattern.FindAllStringSubmatchIndex(value, -1) {
-		if len(match) < 8 {
-			return true
-		}
-		assignmentValue := value[match[6]:match[7]]
-		if !strings.EqualFold(assignmentValue, "[REDACTED]") && !strings.EqualFold(assignmentValue, "<REDACTED>") {
-			return true
-		}
-	}
-	return false
+	return publicdata.Validate(value)
 }
 
 func (r *Reader) sourceIntegrity(refs []Record) ([]Record, map[string]string, bool) {
