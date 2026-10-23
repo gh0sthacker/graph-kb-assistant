@@ -393,10 +393,19 @@ function restoreGraphNavigation(previous) {
   renderGraph();
   if (previous.selectedNodeId) selectNode(previous.selectedNodeId);
   elements.graphBack.disabled = state.graphHistory.length === 0;
-  elements.graphMore.hidden = !state.graph || state.graphView !== "direct" || !state.graph.next_cursor;
-  elements.graphMore.disabled = elements.graphMore.hidden;
+  updateGraphMoreControl();
   elements.graphDeeper.disabled = state.loadingGraph || state.graphView === "full";
   setStatus(`Returned to ${state.graphView === "direct" ? "direct relationships" : "deeper slice"} · coverage is partial`, "ready");
+}
+
+function updateGraphMoreControl() {
+  const canContinue = Boolean(state.graph?.next_cursor) && (state.graphView === "direct" || state.graphView === "full");
+  elements.graphMore.hidden = !canContinue;
+  elements.graphMore.disabled = state.loadingGraph || !canContinue;
+  elements.graphMore.textContent = state.graphView === "full" ? "More omitted branches" : "More neighbors";
+  elements.graphMore.title = state.graphView === "full"
+    ? "Continue rendered omitted assertion branches in the pinned graph generation"
+    : "Continue with the next generation-pinned neighbor page";
 }
 
 async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember = false, cursor = "", appendPage = false } = {}) {
@@ -411,9 +420,10 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
   elements.graphDeeper.disabled = true;
   if (!appendPage) renderEmpty(view === "full" ? "Loading a deeper graph slice" : "Loading direct relationships", view === "full" ? "Reading and validating the project snapshot. Large projects can take longer." : "Reading the selected node and its immediate connections.");
   elements.graphMore.disabled = true;
-  setStatus(appendPage ? "Loading more neighbors" : view === "full" ? "Loading deeper slice" : "Loading direct relationships", "loading");
+  setStatus(appendPage ? view === "full" ? "Loading omitted graph branches" : "Loading more neighbors" : view === "full" ? "Loading deeper slice" : "Loading direct relationships", "loading");
   const query = new URLSearchParams({ project_key: projectKey, view });
-  for (const seed of seeds.slice(0, 20)) query.append("seed", seed);
+  const seedLimit = view === "full" ? 80 : 20;
+  for (const seed of seeds.slice(0, seedLimit)) query.append("seed", seed);
   if (cursor) query.set("cursor", cursor);
   try {
     const graph = await getJSON(`/api/graph?${query}`, controller.signal);
@@ -422,7 +432,9 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
       state.graphHistory.push(previous);
       if (state.graphHistory.length > 8) state.graphHistory.shift();
     }
-    state.graph = appendPage && previous.graph ? mergeGraphPages(previous.graph, graph) : graph;
+    state.graph = appendPage && previous.graph && view === "direct"
+      ? mergeGraphPages(previous.graph, graph)
+      : graph;
     state.graphSeeds = [...seeds];
     state.graphView = view;
     state.focusedNodeId = appendPage ? previous.focus : focusNodeId;
@@ -434,7 +446,7 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
     if (first) selectNode(first.id);
     else renderInspectorEmpty();
     const partial = Boolean(state.graph.incomplete || state.graph.truncated);
-    const label = appendPage ? "More direct relationships" : view === "direct" ? "Direct relationships" : "Deeper graph slice";
+    const label = appendPage ? view === "full" ? "Omitted graph branches" : "More direct relationships" : view === "direct" ? "Direct relationships" : "Deeper graph slice";
     setStatus(partial ? `${label} · coverage is partial` : label, "ready");
     if (partial) {
       const sampledEntities = Array.isArray(graph.provenance_truncated_entity_ids)
@@ -450,12 +462,13 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
   } catch (error) {
     if (requestId !== state.graphRequestId || error.name === "AbortError") return;
     if (appendPage && error.status === 409) {
+      const reloadView = previous.view || view;
       state.graph = { ...(previous.graph || {}) };
       delete state.graph.next_cursor;
       state.graphHistory = [];
       elements.graphBack.disabled = true;
-      setStatus("Graph changed · refreshing direct relationships", "loading");
-      void loadGraph(seeds, { view: "direct", focusNodeId: previous.focus, remember: false });
+      setStatus(reloadView === "full" ? "Graph changed · refreshing the full slice" : "Graph changed · refreshing direct relationships", "loading");
+      void loadGraph(seeds, { view: reloadView, focusNodeId: previous.focus, remember: false });
       return;
     }
     if (previous.graph) {
@@ -472,14 +485,14 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
     if (requestId === state.graphRequestId) {
       state.loadingGraph = false;
       elements.graphBack.disabled = state.graphHistory.length === 0;
-      elements.graphMore.hidden = !state.graph || state.graphView !== "direct" || !state.graph.next_cursor;
-      elements.graphMore.disabled = state.loadingGraph || elements.graphMore.hidden;
+      updateGraphMoreControl();
       elements.graphDeeper.disabled = !state.graph || state.graphView === "full";
     }
   }
 }
 
 function mergeGraphPages(current, next) {
+  if (current.continuation_scope === "rendered_missing_assertion_branches" || next.continuation_scope === "rendered_missing_assertion_branches") return next;
   const merged = { ...current, ...next };
   for (const key of new Set([...Object.keys(current), ...Object.keys(next)])) {
     if (!Array.isArray(current[key]) && !Array.isArray(next[key])) continue;
@@ -1018,7 +1031,7 @@ elements.graphBack.addEventListener("click", () => {
 });
 elements.graphMore.addEventListener("click", () => {
   const cursor = state.graph?.next_cursor;
-  if (cursor) void loadGraph(state.graphSeeds, { view: "direct", cursor, appendPage: true, remember: true });
+  if (cursor) return loadGraph(state.graphSeeds, { view: state.graphView, cursor, appendPage: true, remember: true });
 });
 elements.graphDeeper.addEventListener("click", () => { void loadGraph(state.graphSeeds, { view: "full", remember: true }); });
 $("#refresh-button").addEventListener("click", () => loadProjects());

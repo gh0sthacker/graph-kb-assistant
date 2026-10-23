@@ -96,6 +96,7 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 	}
 	gotNames := make([]string, 0, len(listedTools))
 	neighborhoodAdvertised := false
+	sliceContinuationAdvertised := false
 	for _, value := range listedTools {
 		spec, ok := value.(map[string]any)
 		if !ok {
@@ -138,10 +139,21 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 				t.Errorf("graph neighborhood does not require project and seeds: %#v", schema["required"])
 			}
 		}
+		if name == "bb_graph_slice" {
+			sliceContinuationAdvertised = true
+			properties, _ := schema["properties"].(map[string]any)
+			cursor, _ := properties["cursor"].(map[string]any)
+			if cursor["type"] != "string" || cursor["minLength"] != float64(43) || cursor["maxLength"] != float64(43) || cursor["pattern"] != `^[A-Za-z0-9_-]{43}$` {
+				t.Errorf("full graph continuation cursor is not an exact bounded token: %#v", cursor)
+			}
+		}
 	}
 	sort.Strings(gotNames)
 	if len(listedTools) != len(wantNames) || len(gotNames) != len(wantNames) {
 		t.Fatalf("advertised %d tools %v; want exactly %d %v", len(listedTools), gotNames, len(wantNames), wantNames)
+	}
+	if !sliceContinuationAdvertised {
+		t.Fatal("bounded full graph continuation cursor was not advertised")
 	}
 	for i := range wantNames {
 		if gotNames[i] != wantNames[i] {

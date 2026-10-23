@@ -12,10 +12,11 @@ function createApp() {
   function node() {
     return {
       textContent: "", value: "", hidden: false, disabled: false, children: [],
+      options: [], listeners: {},
       classList: { add() {}, remove() {}, toggle() {} },
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
-      setAttribute() {}, addEventListener() {},
+      setAttribute() {}, addEventListener(name, callback) { this.listeners[name] = callback; },
       querySelector() { return node(); },
     };
   }
@@ -45,7 +46,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -127,6 +128,77 @@ test("stale graph continuation reloads the first page without reusing its cursor
   assert.equal(app.state.graphHistory.length, 0, "previous-generation pages must not be restored by Back");
   assert.equal(app.elements.graphBack.disabled, true);
   assert.equal(app.state.loadingGraph, true, "the fresh read should remain in progress");
+});
+
+test("full graph continuation replaces client state with the cumulative server slice", async () => {
+  const app = createApp();
+  const seed = `endpoint-${"b".repeat(64)}`;
+  const omitted = `assertion-${"c".repeat(64)}`;
+  const cursor = "A".repeat(43);
+  app.state.projectKey = "a".repeat(64);
+  app.state.graphSeeds = [seed];
+  app.state.graphView = "full";
+  app.state.graph = {
+    entities: [], assertions: [], assertion_nodes: [],
+    missing_branches: [{ assertion_id: omitted, reason: "max_edges" }],
+    continuation_scope: "rendered_missing_assertion_branches", continuation_state: "available",
+    next_cursor: cursor, truncated: true, incomplete: true, result_id: "result-1",
+  };
+  app.updateGraphMoreControl();
+  assert.equal(app.elements.graphMore.hidden, false);
+  assert.equal(app.elements.graphMore.textContent, "More omitted branches");
+
+  const pending = app.clickGraphMore();
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].url.searchParams.get("view"), "full");
+  assert.equal(app.requests[0].url.searchParams.get("cursor"), cursor);
+  app.requests[0].resolve({
+    entities: [{ id: "cumulative-entity" }], assertions: [{ id: "cumulative-assertion" }], assertion_nodes: [{ id: omitted }],
+    missing_branches: [], continuation_scope: "rendered_missing_assertion_branches",
+    continuation_state: "branches_complete", truncated: false, incomplete: false,
+    result_id: "result-2",
+  });
+  await pending;
+
+  assert.equal(app.state.graphView, "full");
+  assert.equal(app.state.graph.continuation_state, "branches_complete");
+  assert.deepEqual(snapshot(app.state.graph.entities.map(row => row.id)), ["cumulative-entity"]);
+  assert.deepEqual(snapshot(app.state.graph.assertions.map(row => row.id)), ["cumulative-assertion"]);
+  assert.equal("client_merged_pages" in app.state.graph, false, "full slices are already cumulative on the server");
+  assert.deepEqual(snapshot(app.state.graph.missing_branches), []);
+  assert.equal(app.state.graph.next_cursor, undefined);
+  assert.equal(app.elements.graphMore.hidden, true);
+});
+
+test("full graph requests preserve their 80-seed budget", async () => {
+  const app = createApp();
+  const seeds = Array.from({ length: 25 }, (_, index) => `endpoint-${String(index).padStart(64, "0")}`);
+  app.state.projectKey = "a".repeat(64);
+  const pending = app.loadGraph(seeds, { view: "full" });
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].url.searchParams.getAll("seed").length, seeds.length);
+  app.requests[0].resolve({ entities: [], assertions: [], incomplete: true });
+  await pending;
+  assert.equal(app.state.graphSeeds.length, seeds.length);
+});
+
+test("stale full-slice continuation reloads full view without its cursor", async () => {
+  const app = createApp();
+  const seed = `endpoint-${"b".repeat(64)}`;
+  const cursor = "A".repeat(43);
+  app.state.projectKey = "a".repeat(64);
+  app.state.graphSeeds = [seed];
+  app.state.graphView = "full";
+  app.state.graph = { entities: [], assertions: [], next_cursor: cursor, continuation_scope: "rendered_missing_assertion_branches" };
+
+  const pending = app.loadGraph([seed], { view: "full", cursor, appendPage: true, remember: true });
+  assert.equal(app.requests[0].url.searchParams.get("view"), "full");
+  app.requests[0].fail(409, "graph changed; reload the first page before continuing");
+  await pending;
+
+  assert.equal(app.requests.length, 2, "a fresh full-slice read should start after the conflict");
+  assert.equal(app.requests[1].url.searchParams.get("view"), "full");
+  assert.equal(app.requests[1].url.searchParams.has("cursor"), false);
 });
 
 test("project switch aborts A, starts B immediately, and keeps B loading when A finishes", async () => {

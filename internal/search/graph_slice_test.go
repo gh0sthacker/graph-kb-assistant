@@ -2,8 +2,10 @@ package search
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/store"
 )
@@ -115,5 +117,96 @@ func TestCaptureProvenanceRetainsEarlierLiveGraphRevision(t *testing.T) {
 	legacyRevision, legacyRevisionOK := legacy["revision_id"].(*string)
 	if legacy == nil || !legacyRevisionOK || legacyRevision != nil || legacy["revision_mapping"] != "current" || legacy["request_id"] != "request-legacy" {
 		t.Fatalf("legacy graph provenance without revision registry = %#v", legacy)
+	}
+}
+
+func TestMergeAnalyticalSnapshotsDeduplicatesAndSortsRecordFamilies(t *testing.T) {
+	projectKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	first := map[string]any{
+		"project_key": projectKey,
+		"entities": []behaviorgraph.Record{
+			{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "endpoint"},
+		},
+		"assertions": []behaviorgraph.Record{{"id": "assertion-" + strings.Repeat("c", 64), "predicate": "exposes"}},
+		"cards":      []behaviorgraph.Record{{"id": "card-" + strings.Repeat("d", 64), "analysis_state": "candidate"}},
+		"sources":    []behaviorgraph.Record{{"id": "source-" + strings.Repeat("e", 64), "sha256": strings.Repeat("e", 64)}},
+	}
+	second := map[string]any{
+		"project_key": projectKey,
+		"entities": []any{
+			map[string]any{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "endpoint"},
+			map[string]any{"id": "observation-" + strings.Repeat("f", 64), "kind": "observation"},
+		},
+		"assertions": []any{map[string]any{"id": "assertion-" + strings.Repeat("a", 64), "predicate": "returns"}},
+		"cards":      []any{},
+		"sources":    []any{},
+	}
+	snapshot, counts, err := mergeAnalyticalSnapshots(projectKey, first, second)
+	if err != nil {
+		t.Fatalf("mergeAnalyticalSnapshots: %v", err)
+	}
+	entities, ok := snapshot["entities"].([]behaviorgraph.Record)
+	if !ok || len(entities) != 2 || entities[0]["id"] != "endpoint-"+strings.Repeat("b", 64) || entities[1]["id"] != "observation-"+strings.Repeat("f", 64) {
+		t.Fatalf("merged entities = %#v", snapshot["entities"])
+	}
+	if counts["entities"] != 2 || counts["assertions"] != 2 || counts["cards"] != 1 || counts["sources"] != 1 {
+		t.Fatalf("merged record counts = %#v", counts)
+	}
+	if snapshot["program"] != projectKey || snapshot["schema_version"] == nil {
+		t.Fatalf("merged snapshot identity missing: %#v", snapshot)
+	}
+}
+
+func TestAnalyticalContinuationTruncationRecomputesResolvedRendererOmissions(t *testing.T) {
+	current := map[string]any{"truncated": false}
+	prior := map[string]any{"truncated": true}
+	if analyticalContinuationTruncated(current, prior, nil) {
+		t.Fatal("resolved renderer omissions remained truncated from an earlier page")
+	}
+	for _, key := range []string{
+		"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached",
+		"candidate_card_limit_reached", "provenance_truncated",
+	} {
+		if !analyticalContinuationTruncated(current, map[string]any{key: true}, nil) {
+			t.Errorf("persistent native limit %q was lost", key)
+		}
+	}
+	for _, key := range []string{
+		"truncated", "missing_branches_truncated", "omitted_cards_truncated",
+		"missing_evidence_truncated", "source_integrity_budget_exceeded",
+	} {
+		if !analyticalContinuationTruncated(map[string]any{key: true}, nil, nil) {
+			t.Errorf("current rendered limit %q was lost", key)
+		}
+	}
+}
+
+func TestMergeAnalyticalSnapshotsRejectsDifferentProjects(t *testing.T) {
+	_, _, err := mergeAnalyticalSnapshots("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"project_key": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"entities":    []behaviorgraph.Record{}, "assertions": []behaviorgraph.Record{},
+		"cards": []behaviorgraph.Record{}, "sources": []behaviorgraph.Record{},
+	})
+	if err == nil {
+		t.Fatal("snapshot from another project was accepted")
+	}
+}
+
+func TestMergeAnalyticalSnapshotsRejectsConflictingRecordVersions(t *testing.T) {
+	projectKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	_, _, err := mergeAnalyticalSnapshots(projectKey,
+		map[string]any{
+			"project_key": projectKey,
+			"entities":    []behaviorgraph.Record{{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "endpoint"}},
+			"assertions":  []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{}, "sources": []behaviorgraph.Record{},
+		},
+		map[string]any{
+			"project_key": projectKey,
+			"entities":    []behaviorgraph.Record{{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "different-kind"}},
+			"assertions":  []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{}, "sources": []behaviorgraph.Record{},
+		},
+	)
+	if err == nil {
+		t.Fatal("conflicting immutable record versions were merged")
 	}
 }

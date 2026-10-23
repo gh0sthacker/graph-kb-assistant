@@ -707,6 +707,7 @@ func (t *Tools) surfaceMap(ctx context.Context, args surfaceMapArgs) (map[string
 type graphSliceArgs struct {
 	ProjectKey string   `json:"project_key"`
 	SeedIDs    []string `json:"seed_ids"`
+	Cursor     string   `json:"cursor,omitempty"`
 	MaxNodes   *int     `json:"max_nodes,omitempty"`
 	MaxEdges   *int     `json:"max_edges,omitempty"`
 	MaxDepth   *int     `json:"max_depth,omitempty"`
@@ -732,6 +733,7 @@ func (t *Tools) graphSlice(ctx context.Context, args graphSliceArgs) (map[string
 	result, err := t.Graph(ctx, appquery.GraphRequest{
 		ProjectKey: args.ProjectKey, View: appquery.GraphViewFull, SeedIDs: args.SeedIDs,
 		Budget: appquery.GraphBudget{MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth},
+		Cursor: appquery.GraphCursor(args.Cursor),
 	})
 	if err != nil {
 		return nil, err
@@ -928,10 +930,11 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		},
 		{
 			Name: "bb_graph_slice", Title: "Read a bounded behavior graph slice",
-			Description: "Read a bounded slice from one explicitly selected local project's BehaviorGraph with capture provenance, source hashes, integrity, and coverage gaps. Local receipt paths and unsafe source locators are redacted; endpoint routes are preserved. Captured relationships do not prove causality, vulnerability, or impact.",
+			Description: "Read a bounded slice from one explicitly selected local project's BehaviorGraph with capture provenance, source hashes, integrity, and coverage gaps. If next_cursor is returned, pass it back with the same project, seed_ids, and budgets to continue rendered omitted assertion branches in the pinned Neo4j generation. Native candidate limits remain partial. Local receipt paths and unsafe source locators are redacted; endpoint routes are preserved. Captured relationships do not prove causality, vulnerability, or impact.",
 			InputSchema: objectSchema(map[string]any{
 				"project_key": projectString,
 				"seed_ids":    map[string]any{"type": "array", "items": stringSchema(maxGraphSeedIDBytes, map[string]any{"minLength": 1}), "minItems": 1, "maxItems": maxGraphSeedIDs},
+				"cursor":      map[string]any{"type": "string", "minLength": 43, "maxLength": 43, "pattern": `^[A-Za-z0-9_-]{43}$`},
 				"max_nodes":   map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
 				"max_edges":   map[string]any{"type": "integer", "minimum": 0, "maximum": 300},
 				"max_depth":   map[string]any{"type": "integer", "minimum": 0, "maximum": 6},

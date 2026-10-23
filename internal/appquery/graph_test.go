@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
 )
 
@@ -164,7 +165,7 @@ func TestGraphCursorIsBoundToProjectAndSortedSeedSet(t *testing.T) {
 	}
 }
 
-func TestGraphCursorRejectsMalformedAndFullViewRequests(t *testing.T) {
+func TestGraphCursorRejectsMalformedAndAcceptsBoundedFullViewRequests(t *testing.T) {
 	projectKey := strings.Repeat("a", 64)
 	seed := "endpoint-" + strings.Repeat("b", 64)
 	request := GraphRequest{ProjectKey: projectKey, View: GraphViewDirect, SeedIDs: []string{seed}, Cursor: GraphCursor("not-a-cursor")}
@@ -174,7 +175,64 @@ func TestGraphCursorRejectsMalformedAndFullViewRequests(t *testing.T) {
 		t.Fatalf("malformed cursor error = %v, want invalid-input", err)
 	}
 	request.View = GraphViewFull
+	request.Cursor = GraphCursor(strings.Repeat("A", 43))
+	if err := validateGraphRequest(request); err != nil {
+		t.Fatalf("full graph request rejected a bounded opaque continuation cursor: %v", err)
+	}
+	request.Cursor = GraphCursor("too-short")
 	if err := validateGraphRequest(request); err == nil {
-		t.Fatalf("full graph request accepted continuation cursor: %#v", request)
+		t.Fatalf("full graph request accepted a malformed continuation cursor: %#v", request)
+	}
+}
+
+func TestFullContinuationBranchSeedsOnlyResumableAssertionOmissions(t *testing.T) {
+	assertionA := "assertion-" + strings.Repeat("a", 64)
+	assertionB := "assertion-" + strings.Repeat("b", 64)
+	payload := map[string]any{
+		"missing_branches": []behaviorgraph.Record{
+			{"assertion_id": assertionB, "reason": "max_edges"},
+			{"assertion_id": assertionA, "reason": "max_nodes"},
+			{"assertion_id": assertionB, "reason": "mandatory_evidence_branch_omitted"},
+			{"assertion_id": "assertion-" + strings.Repeat("c", 64), "reason": "max_depth"},
+			{"assertion_id": "endpoint-" + strings.Repeat("d", 64), "reason": "max_edges"},
+		},
+	}
+	got := fullContinuationBranchSeeds(payload)
+	if len(got) != 2 || got[0] != assertionA || got[1] != assertionB {
+		t.Fatalf("resumable branch IDs = %v, want sorted unique assertions %v", got, []string{assertionA, assertionB})
+	}
+}
+
+func TestFullContinuationBranchSeedsAcceptsJSONDecodedPayload(t *testing.T) {
+	assertion := "assertion-" + strings.Repeat("a", 64)
+	got := fullContinuationBranchSeeds(map[string]any{
+		"missing_branches": []any{
+			map[string]any{"assertion_id": assertion, "reason": "mandatory_evidence_branch_omitted"},
+		},
+	})
+	if len(got) != 1 || got[0] != assertion {
+		t.Fatalf("JSON-decoded resumable branch IDs = %v", got)
+	}
+}
+
+func TestGraphPayloadGenerationAndNativeCandidateLimits(t *testing.T) {
+	for _, value := range []any{int(7), int64(7), json.Number("7")} {
+		if got := graphPayloadGeneration(map[string]any{"graph_generation": value}); got != 7 {
+			t.Errorf("graph generation for %T = %d, want 7", value, got)
+		}
+	}
+	if got := graphPayloadGeneration(map[string]any{"graph_generation": json.Number("invalid")}); got != 0 {
+		t.Errorf("invalid graph generation = %d, want 0", got)
+	}
+	for _, flag := range []string{
+		"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached",
+		"candidate_card_limit_reached", "provenance_truncated", "source_integrity_budget_exceeded",
+	} {
+		if !graphCandidateLimitReached(map[string]any{flag: true}) {
+			t.Errorf("candidate limit flag %q was ignored", flag)
+		}
+	}
+	if graphCandidateLimitReached(map[string]any{"candidate_assertion_limit_reached": false}) {
+		t.Fatal("false candidate limit flag was treated as reached")
 	}
 }

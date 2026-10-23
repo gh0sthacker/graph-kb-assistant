@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
@@ -115,9 +116,10 @@ func (e *QueryError) Error() string {
 func (e *QueryError) Unwrap() error { return e.Err }
 
 type Service struct {
-	dataRoot string
-	projects map[string]project.CaidoProjectRef
-	graph    *graphaccess.Service
+	dataRoot    string
+	projects    map[string]project.CaidoProjectRef
+	graph       *graphaccess.Service
+	fullCursors *fullCursorStore
 }
 
 var (
@@ -144,11 +146,15 @@ func NewGraphQueryService(dataRoot string, refs []project.CaidoProjectRef, graph
 		}
 		projects[key] = ref
 	}
-	return &Service{dataRoot: dataRoot, projects: projects, graph: graph}, nil
+	return &Service{dataRoot: dataRoot, projects: projects, graph: graph, fullCursors: newFullCursorStore()}, nil
 }
 
 func (s *Service) Close(ctx context.Context) error {
-	if s == nil || s.graph == nil {
+	if s == nil {
+		return nil
+	}
+	s.fullCursors.clear()
+	if s.graph == nil {
 		return nil
 	}
 	return s.graph.Close(ctx)
@@ -164,6 +170,9 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 	ref, ok := s.projects[request.ProjectKey]
 	if !ok {
 		return GraphResult{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
+	}
+	if request.View == GraphViewFull && request.Cursor != "" && graphaccess.ConfiguredBackend() != "neo4j" {
+		return GraphResult{}, queryError(ErrorCursorUnsupported, "full analytical continuation requires the Neo4j backend", nil)
 	}
 	var backendCursor *neo4jstore.NeighborhoodCursor
 	var err error
@@ -181,6 +190,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 
 	var payload map[string]any
 	var version, coverage string
+	responsePrepared := false
 	switch request.View {
 	case GraphViewDirect:
 		page, pageErr := search.GraphNeighborhoodPageWithService(ctx, s.graph, selected, request.SeedIDs, backendCursor)
@@ -207,35 +217,153 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 		version = "behavior-graph-direct-v1"
 		coverage = "Direct structural neighborhood; coverage and full-project evidence integrity remain partial."
 	case GraphViewFull:
-		budget := request.Budget
-		if budget == (GraphBudget{}) {
-			budget = GraphBudget{MaxNodes: 80, MaxEdges: 160, MaxDepth: 3}
-		}
-		payload, err = search.GraphSliceWithService(ctx, s.graph, selected, request.SeedIDs, budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, nil)
 		version = "behavior-graph-source-pinned-v1"
 		coverage = "Graph entities and edges describe captured evidence; they do not establish vulnerability or impact."
+		budget := effectiveGraphBudget(request.Budget)
+		binding := fullCursorBinding{
+			ProjectKey: request.ProjectKey, SeedHash: graphSeedHash(request.SeedIDs), Budget: budget,
+		}
+		if request.Cursor == "" {
+			payload, err = search.GraphSliceWithService(ctx, s.graph, selected, request.SeedIDs, budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, nil)
+			if err == nil {
+				payload["continuation_scope"] = "rendered_missing_assertion_branches"
+				branchSeeds := fullContinuationBranchSeeds(payload)
+				candidateLimits := graphCandidateLimitReached(payload)
+				branchListTruncated := graphPayloadBool(payload["missing_branches_truncated"])
+				if len(branchSeeds) > 0 && graphaccess.ConfiguredBackend() == "neo4j" && graphPayloadGeneration(payload) > 0 {
+					token, cursorErr := s.fullCursors.create(binding, graphPayloadGeneration(payload), branchSeeds, payload)
+					if cursorErr == nil {
+						payload["next_cursor"] = token
+						payload["continuation_state"] = "available"
+						if branchListTruncated {
+							payload["continuation_state"] = "available_with_truncated_branch_list"
+							payload["continuation_branches_truncated"] = true
+						}
+					} else {
+						payload["continuation_state"] = "unavailable"
+						appendGraphLimitation(payload, "Rendered omitted assertion branches could not be queued for continuation; reload and retry this focused slice.")
+					}
+				} else if len(branchSeeds) > 0 && graphaccess.ConfiguredBackend() != "neo4j" {
+					payload["continuation_state"] = "unsupported_backend"
+					appendGraphLimitation(payload, "This graph backend cannot pin rendered-branch continuation to a Neo4j generation.")
+				} else if len(branchSeeds) > 0 {
+					payload["continuation_state"] = "unavailable"
+					appendGraphLimitation(payload, "Neo4j did not provide a generation for the rendered-branch cursor; reload and retry this focused slice.")
+				} else if branchListTruncated {
+					payload["continuation_state"] = "branch_list_truncated"
+					payload["continuation_branches_truncated"] = true
+				} else if candidateLimits {
+					payload["continuation_state"] = "bounded_candidates_remain"
+				} else {
+					payload["continuation_state"] = "no_resumable_rendered_branches"
+				}
+				if candidateLimits {
+					payload["continuation_candidate_limits_reached"] = true
+					appendGraphLimitation(payload, "This cursor continues rendered omitted assertion branches only; native assertion, frontier, card, and provenance candidate limits still require a narrower query or a future native continuation page.")
+				}
+			}
+		} else {
+			payload, _, _, err = s.fullCursors.next(string(request.Cursor), binding, func(branches []string, accumulated map[string]any, page int) (map[string]any, []string, int64, error) {
+				pagePayload, pageErr := search.ContinueGraphSliceWithService(
+					ctx, s.graph, selected, request.SeedIDs, branches,
+					budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, page, accumulated,
+				)
+				if pageErr != nil {
+					if errors.Is(pageErr, search.ErrAnalyticalGenerationChanged) {
+						return nil, nil, 0, queryError(ErrorStaleCursor, "Neo4j project changed during graph continuation; reload the first page", pageErr)
+					}
+					return nil, nil, 0, queryError(ErrorGraphUnavailable, "full graph continuation page could not be read", pageErr)
+				}
+				pagePayload["continuation_scope"] = "rendered_missing_assertion_branches"
+				if graphCandidateLimitReached(pagePayload) {
+					pagePayload["continuation_candidate_limits_reached"] = true
+					appendGraphLimitation(pagePayload, "This cursor continues rendered omitted assertion branches only; native assertion, frontier, card, and provenance candidate limits still require a narrower query or a future native continuation page.")
+				}
+				return pagePayload, fullContinuationBranchSeeds(pagePayload), graphPayloadGeneration(pagePayload), nil
+			}, func(pagePayload map[string]any) (map[string]any, error) {
+				prepared, prepareErr := prepareGraphPayload(pagePayload, version, coverage)
+				if prepareErr != nil {
+					return nil, prepareErr
+				}
+				if sizeErr := validateFullGraphWireSize(prepared); sizeErr != nil {
+					return nil, sizeErr
+				}
+				return prepared, nil
+			})
+			if err == nil {
+				responsePrepared = true
+			}
+		}
 	default:
 		return GraphResult{}, queryError(ErrorInvalidInput, "graph view must be direct or full", nil)
 	}
 	if err != nil {
+		var queryErr *QueryError
+		if errors.As(err, &queryErr) {
+			return GraphResult{}, queryErr
+		}
 		return GraphResult{}, queryError(ErrorGraphUnavailable, "selected graph view is unavailable or exceeds its limits", err)
 	}
-	payload["graph_version"] = version
-	payload["coverage_note"] = coverage
-	redacted, paths, locators, err := redactSourcePaths(payload)
-	if err != nil {
-		return GraphResult{}, queryError(ErrorGraphUnavailable, "graph result could not be prepared", err)
-	}
-	redacted["local_source_paths_redacted"] = paths
-	redacted["unsafe_source_locators_redacted"] = locators
-	redacted, err = fingerprintGraphPayload(redacted)
-	if err != nil {
-		return GraphResult{}, queryError(ErrorGraphUnavailable, "graph result could not be fingerprinted", err)
+	redacted := payload
+	if !responsePrepared {
+		redacted, err = prepareGraphPayload(payload, version, coverage)
+		if err != nil {
+			if request.View == GraphViewFull && request.Cursor == "" {
+				if token, ok := payload["next_cursor"].(string); ok {
+					s.fullCursors.discard(token)
+				}
+			}
+			return GraphResult{}, err
+		}
+		if request.View == GraphViewFull {
+			if err := validateFullGraphWireSize(redacted); err != nil {
+				if request.Cursor == "" {
+					if token, ok := payload["next_cursor"].(string); ok {
+						s.fullCursors.discard(token)
+					}
+				}
+				return GraphResult{}, err
+			}
+		}
 	}
 	return GraphResult{
 		ProjectKey: request.ProjectKey, View: request.View, GraphVersion: version,
 		CoverageNote: coverage, Payload: redacted,
 	}, nil
+}
+
+func prepareGraphPayload(payload map[string]any, version, coverage string) (map[string]any, error) {
+	if payload == nil {
+		return nil, queryError(ErrorGraphUnavailable, "graph result could not be prepared", nil)
+	}
+	prepared, err := cloneGraphPayload(payload)
+	if err != nil {
+		return nil, queryError(ErrorGraphUnavailable, "graph result could not be prepared", err)
+	}
+	prepared["graph_version"] = version
+	prepared["coverage_note"] = coverage
+	redacted, paths, locators, err := redactSourcePaths(prepared)
+	if err != nil {
+		return nil, queryError(ErrorGraphUnavailable, "graph result could not be prepared", err)
+	}
+	redacted["local_source_paths_redacted"] = paths
+	redacted["unsafe_source_locators_redacted"] = locators
+	redacted, err = fingerprintGraphPayload(redacted)
+	if err != nil {
+		return nil, queryError(ErrorGraphUnavailable, "graph result could not be fingerprinted", err)
+	}
+	return redacted, nil
+}
+
+func validateFullGraphWireSize(payload map[string]any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return queryError(ErrorGraphUnavailable, "full graph response could not be encoded", err)
+	}
+	if len(encoded) > maxFullCursorReplayPayloadBytes {
+		return queryError(ErrorOutputTooLarge, "full graph response exceeds the shared wire limit; reload with a narrower seed set", nil)
+	}
+	return nil
 }
 
 func fingerprintGraphPayload(payload map[string]any) (map[string]any, error) {
@@ -255,6 +383,113 @@ func graphSeedHash(seedIDs []string) string {
 	encoded, _ := json.Marshal(seeds)
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
+}
+
+func effectiveGraphBudget(budget GraphBudget) GraphBudget {
+	if budget == (GraphBudget{}) {
+		return GraphBudget{MaxNodes: 80, MaxEdges: 160, MaxDepth: 3}
+	}
+	return budget
+}
+
+func graphPayloadGeneration(payload map[string]any) int64 {
+	if payload == nil {
+		return 0
+	}
+	switch value := payload["graph_generation"].(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case json.Number:
+		generation, err := value.Int64()
+		if err == nil {
+			return generation
+		}
+	case float64:
+		if value >= 1 && value == float64(int64(value)) {
+			return int64(value)
+		}
+	}
+	return 0
+}
+
+func fullContinuationBranchSeeds(payload map[string]any) []string {
+	if payload == nil {
+		return nil
+	}
+	values, _ := payload["missing_branches"]
+	branches := make([]map[string]any, 0)
+	switch rows := values.(type) {
+	case []behaviorgraph.Record:
+		for _, row := range rows {
+			branches = append(branches, row)
+		}
+	case []map[string]any:
+		branches = append(branches, rows...)
+	case []any:
+		for _, item := range rows {
+			if row, ok := item.(map[string]any); ok {
+				branches = append(branches, row)
+			}
+		}
+	}
+	unique := make(map[string]struct{}, len(branches))
+	for _, branch := range branches {
+		reason, _ := branch["reason"].(string)
+		if reason != "max_nodes" && reason != "max_edges" && reason != "mandatory_evidence_branch_omitted" {
+			continue
+		}
+		id, _ := branch["assertion_id"].(string)
+		if !entitySeedPattern.MatchString(id) || !strings.HasPrefix(id, "assertion-") {
+			continue
+		}
+		unique[id] = struct{}{}
+	}
+	seeds := make([]string, 0, len(unique))
+	for id := range unique {
+		seeds = append(seeds, id)
+	}
+	sort.Strings(seeds)
+	return seeds
+}
+
+func graphCandidateLimitReached(payload map[string]any) bool {
+	if payload == nil {
+		return false
+	}
+	for _, key := range []string{
+		"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached",
+		"candidate_card_limit_reached", "provenance_truncated", "source_integrity_budget_exceeded",
+	} {
+		if reached, _ := payload[key].(bool); reached {
+			return true
+		}
+	}
+	return false
+}
+
+func appendGraphLimitation(payload map[string]any, limitation string) {
+	if payload == nil || strings.TrimSpace(limitation) == "" {
+		return
+	}
+	limitations := make([]string, 0)
+	switch values := payload["limitations"].(type) {
+	case []string:
+		limitations = append(limitations, values...)
+	case []any:
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				limitations = append(limitations, text)
+			}
+		}
+	}
+	for _, existing := range limitations {
+		if existing == limitation {
+			return
+		}
+	}
+	payload["limitations"] = append(limitations, limitation)
 }
 
 func encodeGraphCursor(cursor graphCursorData) (string, error) {
@@ -302,8 +537,8 @@ func validateGraphRequest(request GraphRequest) error {
 	if request.View != GraphViewDirect && request.View != GraphViewFull {
 		return errors.New("graph view must be direct or full")
 	}
-	if request.View == GraphViewFull && request.Cursor != "" {
-		return errors.New("full graph slices do not accept direct-view cursors")
+	if request.View == GraphViewFull && request.Cursor != "" && !fullCursorTokenPattern.MatchString(string(request.Cursor)) {
+		return errors.New("full graph continuation cursor is malformed")
 	}
 	if !projectKeyPattern.MatchString(request.ProjectKey) {
 		if request.View == GraphViewDirect {
@@ -341,7 +576,7 @@ func validateGraphRequest(request GraphRequest) error {
 		seen[seed] = struct{}{}
 	}
 	if request.View == GraphViewFull && request.Budget != (GraphBudget{}) {
-		b := request.Budget
+		b := effectiveGraphBudget(request.Budget)
 		if b.MaxNodes < 1 || b.MaxNodes > 100 || b.MaxEdges < 0 || b.MaxEdges > 300 || b.MaxDepth < 0 || b.MaxDepth > 6 {
 			return errors.New("graph slice limits are outside the supported range")
 		}

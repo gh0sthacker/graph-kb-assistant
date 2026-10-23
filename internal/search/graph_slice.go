@@ -1,6 +1,7 @@
 package search
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -19,6 +20,8 @@ import (
 )
 
 const maxCaptureProvenanceRows = 1_000
+
+var ErrAnalyticalGenerationChanged = errors.New("Neo4j graph generation changed during analytical continuation")
 
 // GraphSlice reads one project's existing BehaviorGraph and joins selected
 // observations to exact historical/live Caido request IDs.
@@ -100,6 +103,232 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 		}
 	}
 	return attachGraphProvenance(ctx, projectStore, slice)
+}
+
+// ContinueGraphSliceWithService adds one bounded set of omitted assertion
+// branches to the accumulated selected records, then reruns the shared Reader
+// from the original seeds. This preserves one cumulative graph interpretation
+// instead of concatenating independently rendered branch slices.
+func ContinueGraphSliceWithService(
+	ctx context.Context,
+	service *graphaccess.Service,
+	projectStore *store.ProjectStore,
+	originalSeedIDs, branchSeedIDs []string,
+	maxNodes, maxEdges, maxDepth, page int,
+	accumulated map[string]any,
+) (map[string]any, error) {
+	if page < 1 || page > 5_000 || accumulated == nil || len(originalSeedIDs) == 0 || len(branchSeedIDs) == 0 {
+		return nil, errors.New("analytical graph continuation input is invalid")
+	}
+	if generationFromGraphPayload(accumulated) < 1 {
+		return nil, errors.New("analytical graph continuation has no pinned generation")
+	}
+	nextPage, err := GraphSliceWithService(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, nil)
+	if err != nil {
+		return nil, err
+	}
+	if generationFromGraphPayload(nextPage) != generationFromGraphPayload(accumulated) {
+		return nil, ErrAnalyticalGenerationChanged
+	}
+
+	snapshot, counts, err := mergeAnalyticalSnapshots(projectStore.ProjectKey, accumulated, nextPage)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := behaviorgraph.OpenReaderFromSnapshot(ctx, snapshot, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	continuedNodes := min(100, maxNodes+20*page)
+	continuedEdges := min(300, maxEdges+60*page)
+	slice, err := reader.Slice(ctx, behaviorgraph.SliceOptions{
+		SeedIDs: originalSeedIDs, MaxNodes: continuedNodes, MaxEdges: continuedEdges, MaxDepth: maxDepth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	slice["graph_generation"] = generationFromGraphPayload(accumulated)
+	slice["view"] = "analytical"
+	slice["coverage_state"] = "partial"
+	slice["incomplete"] = true
+	slice["project_snapshot_integrity"] = "not_assessed"
+	slice["integrity_scope"] = "selected_records"
+	slice["analysis_closure_scope"] = "bounded_frontier"
+	slice["analysis_closure_complete"] = false
+	slice["query_frontier_hops"] = maxIntValue(accumulated["query_frontier_hops"], nextPage["query_frontier_hops"])
+	slice["candidate_assertion_count"] = counts["assertions"]
+	slice["candidate_card_count"] = counts["cards"]
+	slice["candidate_assertion_limit_reached"] = anyGraphFlag(accumulated, nextPage, "candidate_assertion_limit_reached")
+	slice["analytical_frontier_node_limit_reached"] = anyGraphFlag(accumulated, nextPage, "analytical_frontier_node_limit_reached")
+	slice["candidate_card_limit_reached"] = anyGraphFlag(accumulated, nextPage, "candidate_card_limit_reached")
+	slice["provenance_truncated"] = anyGraphFlag(accumulated, nextPage, "provenance_truncated")
+	// These are native read limits. Keep them across pages even when the
+	// renderer's earlier omissions are resolved by the larger cumulative slice.
+	slice["truncated"] = analyticalContinuationTruncated(slice, accumulated, nextPage)
+	truncatedIDs := append(graphStringList(accumulated["provenance_truncated_entity_ids"]), graphStringList(nextPage["provenance_truncated_entity_ids"])...)
+	slice["provenance_truncated_entity_ids"] = uniqueStrings(truncatedIDs)
+	slice["entity_source_ref_limit"] = maxIntValue(accumulated["entity_source_ref_limit"], nextPage["entity_source_ref_limit"])
+	limitations := append(graphStringList(accumulated["limitations"]), graphStringList(nextPage["limitations"])...)
+	slice["limitations"] = uniqueStrings(limitations)
+	return attachGraphProvenance(ctx, projectStore, slice)
+}
+
+func analyticalContinuationTruncated(current, accumulated, nextPage map[string]any) bool {
+	if graphPayloadFlag(current, "truncated") ||
+		graphPayloadFlag(current, "missing_branches_truncated") ||
+		graphPayloadFlag(current, "omitted_cards_truncated") ||
+		graphPayloadFlag(current, "missing_evidence_truncated") ||
+		graphPayloadFlag(current, "source_integrity_budget_exceeded") {
+		return true
+	}
+	for _, key := range []string{
+		"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached",
+		"candidate_card_limit_reached", "provenance_truncated",
+	} {
+		if anyGraphFlag(accumulated, nextPage, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func graphPayloadFlag(payload map[string]any, key string) bool {
+	flag, _ := payload[key].(bool)
+	return flag
+}
+
+func mergeAnalyticalSnapshots(projectKey string, pages ...map[string]any) (behaviorgraph.Record, map[string]int, error) {
+	fields := []string{"entities", "assertions", "cards", "sources"}
+	merged := make(map[string]map[string]behaviorgraph.Record, len(fields))
+	counts := make(map[string]int, len(fields))
+	for _, field := range fields {
+		merged[field] = make(map[string]behaviorgraph.Record)
+	}
+	for _, page := range pages {
+		if page == nil || page["project_key"] != projectKey {
+			return nil, nil, errors.New("analytical graph continuation project is inconsistent")
+		}
+		for _, field := range fields {
+			records, ok := graphRecordList(page[field])
+			if !ok {
+				return nil, nil, errors.New("analytical graph continuation record list is malformed")
+			}
+			for _, record := range records {
+				id, ok := record["id"].(string)
+				if !ok || id == "" {
+					return nil, nil, errors.New("analytical graph continuation record has no identity")
+				}
+				if previous, exists := merged[field][id]; exists && field != "sources" {
+					previousJSON, previousErr := json.Marshal(previous)
+					recordJSON, recordErr := json.Marshal(record)
+					if previousErr != nil || recordErr != nil || !bytes.Equal(previousJSON, recordJSON) {
+						return nil, nil, errors.New("analytical graph continuation contains conflicting record versions")
+					}
+				}
+				merged[field][id] = record
+			}
+		}
+	}
+	snapshot := behaviorgraph.Record{"schema_version": json.Number("2"), "program": projectKey}
+	for _, field := range fields {
+		ids := make([]string, 0, len(merged[field]))
+		for id := range merged[field] {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		records := make([]behaviorgraph.Record, 0, len(ids))
+		for _, id := range ids {
+			records = append(records, merged[field][id])
+		}
+		snapshot[field] = records
+		counts[field] = len(records)
+	}
+	return snapshot, counts, nil
+}
+
+func graphRecordList(value any) ([]behaviorgraph.Record, bool) {
+	switch records := value.(type) {
+	case []behaviorgraph.Record:
+		return records, true
+	case []map[string]any:
+		result := make([]behaviorgraph.Record, 0, len(records))
+		for _, record := range records {
+			result = append(result, behaviorgraph.Record(record))
+		}
+		return result, true
+	case []any:
+		result := make([]behaviorgraph.Record, 0, len(records))
+		for _, value := range records {
+			record, ok := value.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, behaviorgraph.Record(record))
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func generationFromGraphPayload(payload map[string]any) int64 {
+	switch value := payload["graph_generation"].(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case json.Number:
+		generation, _ := value.Int64()
+		return generation
+	case float64:
+		if value >= 1 && value == float64(int64(value)) {
+			return int64(value)
+		}
+	}
+	return 0
+}
+
+func anyGraphFlag(left, right map[string]any, key string) bool {
+	leftFlag, _ := left[key].(bool)
+	rightFlag, _ := right[key].(bool)
+	return leftFlag || rightFlag
+}
+
+func maxIntValue(left, right any) int {
+	return max(graphIntValue(left), graphIntValue(right))
+}
+
+func graphIntValue(value any) int {
+	switch number := value.(type) {
+	case int:
+		return number
+	case int64:
+		return int(number)
+	case json.Number:
+		parsed, _ := number.Int64()
+		return int(parsed)
+	case float64:
+		return int(number)
+	}
+	return 0
+}
+
+func graphStringList(value any) []string {
+	switch values := value.(type) {
+	case []string:
+		return values
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
 }
 
 // GraphNeighborhood serves the interactive one-hop view without loading the
