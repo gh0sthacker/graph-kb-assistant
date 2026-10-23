@@ -1,5 +1,5 @@
 // Package appquery owns typed, read-only application graph queries shared by
-// the HTTP and MCP adapters.
+// the CLI, HTTP, and MCP adapters.
 package appquery
 
 import (
@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -30,8 +31,9 @@ type GraphView string
 type GraphCursor string
 
 const (
-	GraphViewDirect GraphView = "direct"
-	GraphViewFull   GraphView = "full"
+	GraphViewDirect      GraphView = "direct"
+	GraphViewFull        GraphView = "full"
+	maxGraphContextBytes           = 64 << 10
 )
 
 type GraphBudget struct {
@@ -45,6 +47,7 @@ type GraphRequest struct {
 	View       GraphView
 	SeedIDs    []string
 	Budget     GraphBudget
+	Context    map[string]any // Full-view context is included in continuation binding.
 	Cursor     GraphCursor
 }
 
@@ -65,6 +68,21 @@ type graphCursorData struct {
 	Generation       int64  `json:"generation"`
 	Priority         int    `json:"priority"`
 	AfterAssertionID string `json:"after_assertion_id"`
+}
+
+func graphContextHash(value map[string]any) (string, error) {
+	if len(value) == 0 {
+		return "", nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	if len(encoded) > maxGraphContextBytes {
+		return "", errors.New("graph context exceeds the supported size")
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func (r GraphResult) WireMap() map[string]any {
@@ -158,15 +176,36 @@ func NewGraphQueryService(dataRoot string, refs []project.CaidoProjectRef, graph
 	return &Service{dataRoot: dataRoot, projects: projects, graph: graph, fullCursors: newFullCursorStore(), surfaceKey: surfaceKey}, nil
 }
 
+// NewGraphQueryServiceWithPersistentCursors keeps bounded full-view cursor
+// state in the private query-state directory so short-lived CLI invocations
+// can resume a page. Project capture and graph databases remain read-only.
+func NewGraphQueryServiceWithPersistentCursors(dataRoot string, refs []project.CaidoProjectRef, graph *graphaccess.Service) (*Service, error) {
+	service, err := NewGraphQueryService(dataRoot, refs, graph)
+	if err != nil {
+		return nil, err
+	}
+	cursors, err := openPersistentFullCursorStore(filepath.Join(dataRoot, "query-state"))
+	if err != nil {
+		_ = service.Close(context.Background())
+		return nil, errors.New("persistent graph continuation state is unavailable")
+	}
+	service.fullCursors = cursors
+	return service, nil
+}
+
 func (s *Service) Close(ctx context.Context) error {
 	if s == nil {
 		return nil
 	}
 	s.fullCursors.clear()
-	if s.graph == nil {
-		return nil
+	var cursorErr error
+	if s.fullCursors != nil {
+		cursorErr = s.fullCursors.close()
 	}
-	return s.graph.Close(ctx)
+	if s.graph == nil {
+		return cursorErr
+	}
+	return errors.Join(cursorErr, s.graph.Close(ctx))
 }
 
 func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult, error) {
@@ -176,6 +215,10 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 	if err := validateGraphRequest(request); err != nil {
 		return GraphResult{}, queryError(ErrorInvalidInput, err.Error(), err)
 	}
+	contextHash, err := graphContextHash(request.Context)
+	if err != nil {
+		return GraphResult{}, queryError(ErrorInvalidInput, "graph context is invalid or exceeds its limit", err)
+	}
 	ref, ok := s.projects[request.ProjectKey]
 	if !ok {
 		return GraphResult{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
@@ -184,7 +227,6 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 		return GraphResult{}, queryError(ErrorCursorUnsupported, "full analytical continuation requires the Neo4j backend", nil)
 	}
 	var backendCursor *neo4jstore.NeighborhoodCursor
-	var err error
 	if request.View == GraphViewDirect && request.Cursor != "" {
 		backendCursor, err = decodeGraphCursor(string(request.Cursor), request.ProjectKey, request.SeedIDs)
 		if err != nil {
@@ -231,9 +273,10 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 		budget := effectiveGraphBudget(request.Budget)
 		binding := fullCursorBinding{
 			ProjectKey: request.ProjectKey, SeedHash: graphSeedHash(request.SeedIDs), Budget: budget,
+			ContextHash: contextHash,
 		}
 		if request.Cursor == "" {
-			payload, err = search.GraphSliceWithService(ctx, s.graph, selected, request.SeedIDs, budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, nil)
+			payload, err = search.GraphSliceWithService(ctx, s.graph, selected, request.SeedIDs, budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, request.Context)
 			if err == nil {
 				payload["continuation_scope"] = "rendered_missing_assertion_branches"
 				branchSeeds := fullContinuationBranchSeeds(payload)
@@ -275,7 +318,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 			payload, _, _, err = s.fullCursors.next(string(request.Cursor), binding, func(branches []string, accumulated map[string]any, page int) (map[string]any, []string, int64, error) {
 				pagePayload, pageErr := search.ContinueGraphSliceWithService(
 					ctx, s.graph, selected, request.SeedIDs, branches,
-					budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, page, accumulated,
+					budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, page, request.Context, accumulated,
 				)
 				if pageErr != nil {
 					if errors.Is(pageErr, search.ErrAnalyticalGenerationChanged) {
@@ -592,6 +635,12 @@ func validateGraphRequest(request GraphRequest) error {
 	}
 	if request.View == GraphViewDirect && request.Budget != (GraphBudget{}) {
 		return errors.New("direct graph queries do not accept a slice budget")
+	}
+	if request.View == GraphViewDirect && len(request.Context) != 0 {
+		return errors.New("direct graph queries do not accept an analysis context")
+	}
+	if _, err := graphContextHash(request.Context); err != nil {
+		return errors.New("graph context is invalid or exceeds its limit")
 	}
 	return nil
 }

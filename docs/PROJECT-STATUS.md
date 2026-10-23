@@ -5,6 +5,24 @@
 This checkpoint supersedes earlier runtime claims below where they conflict;
 older audit entries describe their own historical snapshots.
 
+## Live service recheck (2026-10-23)
+
+- Caido 0.58.3 still lists the Juice Shop project as `READY` but inactive;
+  `sperpravo` remains selected. No project switch or history request was made.
+- The local web UI is running and `/api/projects` returns the registered Juice
+  Shop identity. A fresh `project-audit` fails closed with
+  `database has a SQLite sidecar; read-only open refused`; the selected
+  project's `/api/surface` returns HTTP 503 (`selected project is unavailable
+  for graph reads`). SQLite WAL/SHM sidecars are present. Current working-DB
+  compatibility and Neo4j parity were therefore not re-established in this
+  recheck; use the prior verified snapshot only as dated evidence. Runtime
+  coverage remains `PARTIAL`.
+- The connected `kb_stats` call timed out after 300 seconds. The documented
+  local `query-kb.sh stats` fallback did not finish within two minutes and was
+  stopped without requesting a refresh or changing the KB. The completed
+  same-day snapshot below remains the latest available coverage evidence;
+  current semantic integrity is unverified and KB readiness remains `PARTIAL`.
+
 ## Runtime follow-up (2026-10-23, after `c93b1b0`)
 
 - A resumed bounded Caido-history probe processed 27 pages: 31 captures were
@@ -123,6 +141,23 @@ older audit entries describe their own historical snapshots.
   that checkpoint. The fresh follow-up measurements and current database state
   are recorded above. Caido history completeness remains unverified, so Stage
   2 stays `PARTIAL`.
+
+## Stage 2 CLI graph continuation (2026-10-23)
+
+- The graph-slice CLI now uses the shared typed appquery service and accepts
+  a full-view continuation cursor. To resume across short-lived CLI processes,
+  it stores the bounded cursor session in a separate query-state SQLite
+  database under the private data root. The directory and database are
+  owner-only (0700 and 0600); the project capture and graph databases stay
+  read-only. Cursor state expires after 15 minutes, is capped at 16 sessions,
+  expired rows are pruned when the store opens, and SQLite secure-delete is
+  enabled. The store preserves idempotent replay of the latest accepted page.
+- Synthetic tests cover service-store restart, continuation after restart,
+  replay after another restart, expired-state cleanup, concurrent advancement
+  from two stores, and cursor forwarding through two fresh CLI invocations.
+  The CLI fixture also confirms query-state permissions and context forwarding.
+  No working Neo4j continuation was exercised here; Stage 2 and runtime
+  coverage remain `PARTIAL`.
 
 ## Stage 3 field-occurrence slice (2026-10-23)
 

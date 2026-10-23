@@ -34,7 +34,7 @@ reproduced during this review.
 | P1 | Neo4j draining is synchronous inside ingestion. A graph outage can block capture/checkpoint progress after a separate graph transaction has committed. | `internal/ingest/page_writer.go:382`, `:428`, `:579`; `internal/ingest/live_tail.go:298`, `:303` |
 | P1 | Actor, session, tenant, object and policy context are unknown; live semantic/business analysis is explicitly unimplemented. Schema vocabulary alone does not supply those relationships. | `internal/graph/historical.go:441`; `internal/graph/live.go:56` |
 | P1 | Hermes receives structural summaries, but has no integrated semantic evidence broker or application-owned save/resume consultation cycle. | `internal/search/capture_detail.go:12`; `scripts/setup-hermes:52`; `internal/mcpserver/server.go:290` |
-| P1 | Full analytical reads download the whole Neo4j project and reconstruct a local reader. Existing local checks record 50–102 second cold reads; the new direct path is web-only and omits analysis cards. | `internal/graphaccess/reader.go:91`, `:121`; `internal/mcpserver/graph_explorer.go:83`; `docs/PROJECT-STATUS.md:29` |
+| P1 | Signature-filtered historical capture search still downloads the whole Neo4j project and reconstructs a local reader. The web/MCP graph explorer now uses bounded native reads, but the direct view omits analysis cards. Recorded 50–102 second cold reads belong to the full-snapshot path; the newer bounded-view measurements cover only two query shapes. | `internal/search/captures.go:260`, `:274`; `internal/graphaccess/reader.go:128`; `internal/neo4jstore/analytical_slice.go:50`; `docs/PROJECT-STATUS.md:29` |
 | P1 | Resolved in the Stage 2 implementation: stale surface responses are rejected across project and filter changes. | `internal/webui/assets/app.js` |
 | P2 | Display route masking can merge distinct operations, while source-bound graph aliases can fragment equivalent routes. There is no separate reviewed operation grouping layer. | `internal/graph/projection.go:163`; `internal/graph/historical.go:127`, `:518`, `:634` |
 | P2 | Direct graph neighbors and local operation browsing now have bounded continuation/filter contracts. Catalog materialization is bounded, but each page rescans the full local structural index for exact totals and a snapshot fingerprint; large-index latency is unmeasured. Native analytical candidate limits remain partial; operation counts cover only indexed local records and do not establish complete Caido history. | `internal/neo4jstore/neighborhood.go:248`; `internal/search/surface_catalog.go` |
@@ -169,6 +169,12 @@ paths, field occurrences, capture comparisons and source/card closure. Each
 query returns generation, limits, continuation, omissions and integrity scope.
 Pin continuation to a graph generation and return an explicit stale-cursor
 result when that generation is no longer available.
+
+Short-lived CLI graph queries persist only their bounded, generation-bound
+continuation session in an owner-only query-state database so a later CLI
+invocation can resume it. HTTP and MCP services keep their cursor sessions
+process-local. The query-state database is separate from project capture and
+graph stores.
 
 Use one process-owned Neo4j driver and short-lived sessions. Partition cache
 coordination by project/generation. Full-project checksum/parity scans remain

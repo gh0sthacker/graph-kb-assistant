@@ -115,6 +115,7 @@ func ContinueGraphSliceWithService(
 	projectStore *store.ProjectStore,
 	originalSeedIDs, branchSeedIDs []string,
 	maxNodes, maxEdges, maxDepth, page int,
+	selectedContext map[string]any,
 	accumulated map[string]any,
 ) (map[string]any, error) {
 	if page < 1 || page > 5_000 || accumulated == nil || len(originalSeedIDs) == 0 || len(branchSeedIDs) == 0 {
@@ -123,7 +124,7 @@ func ContinueGraphSliceWithService(
 	if generationFromGraphPayload(accumulated) < 1 {
 		return nil, errors.New("analytical graph continuation has no pinned generation")
 	}
-	nextPage, err := GraphSliceWithService(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, nil)
+	nextPage, err := GraphSliceWithService(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, selectedContext)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +144,7 @@ func ContinueGraphSliceWithService(
 	continuedNodes := min(100, maxNodes+20*page)
 	continuedEdges := min(300, maxEdges+60*page)
 	slice, err := reader.Slice(ctx, behaviorgraph.SliceOptions{
-		SeedIDs: originalSeedIDs, MaxNodes: continuedNodes, MaxEdges: continuedEdges, MaxDepth: maxDepth,
+		SeedIDs: originalSeedIDs, MaxNodes: continuedNodes, MaxEdges: continuedEdges, MaxDepth: maxDepth, Context: selectedContext,
 	})
 	if err != nil {
 		return nil, err

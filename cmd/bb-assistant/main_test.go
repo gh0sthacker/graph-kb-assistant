@@ -3,19 +3,230 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/caido"
+	behaviorgraph "bb-graph-assistant/internal/graph"
+	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
 )
+
+func TestGraphSliceCLIUsesSharedQueryServiceAndPreservesContext(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	ctx := t.Context()
+	root := filepath.Join(t.TempDir(), "private-data")
+	ref := project.CaidoProjectRef{InstanceID: "graph-slice-cli", ProjectID: "fixture-project"}
+	projectStore, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("CreateProject(): %v", err)
+	}
+	projectKey := projectStore.ProjectKey
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		_ = projectStore.Close()
+		t.Fatalf("Acquire(): %v", err)
+	}
+	requestRaw := []byte("GET /items HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	receiptPath := filepath.Join(projectStore.BehaviorReceiptPath, "cli-fixture.json")
+	receipt := []byte(`{"fixture":true}`)
+	if err := os.WriteFile(receiptPath, receipt, 0o600); err != nil {
+		_ = maintenance.Close()
+		_ = projectStore.Close()
+		t.Fatalf("WriteFile(receipt): %v", err)
+	}
+	digest := sha256.Sum256(receipt)
+	status := 200
+	truncated := false
+	exchange := caido.HttpExchange{
+		Ref:        caido.ExchangeRef{Project: ref, RequestID: "cli-fixture-request"},
+		RequestRaw: requestRaw, ResponseRaw: []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
+		HasResponse: true, Method: "GET", Scheme: "https", Host: "fixture.invalid", Port: 443,
+		Target: "https://fixture.invalid/items", ResponseStatus: &status,
+		RequestTruncated: &truncated, ResponseTruncated: &truncated,
+		RequestWireFidelity: "reconstructed_text", ResponseWireFidelity: "reconstructed_text",
+	}
+	bundle, endpointID, err := behaviorgraph.BuildHistoricalBundle(exchange, projectKey, behaviorgraph.Record{
+		"path": receiptPath, "sha256": hex.EncodeToString(digest[:]), "record_locator": "$.records[0]",
+	})
+	if err != nil {
+		_ = maintenance.Close()
+		_ = projectStore.Close()
+		t.Fatalf("BuildHistoricalBundle(): %v", err)
+	}
+	writer, err := behaviorgraph.OpenWriter(ctx, projectStore)
+	if err != nil {
+		_ = maintenance.Close()
+		_ = projectStore.Close()
+		t.Fatalf("OpenWriter(): %v", err)
+	}
+	if _, err := writer.ImportBundle(ctx, bundle); err != nil {
+		_ = maintenance.Close()
+		_ = projectStore.Close()
+		t.Fatalf("ImportBundle(): %v", err)
+	}
+	if err := maintenance.Close(); err != nil {
+		_ = projectStore.Close()
+		t.Fatalf("Close maintenance lock: %v", err)
+	}
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("Close project store: %v", err)
+	}
+
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = writeEnd
+	t.Cleanup(func() { os.Stdout = originalStdout })
+	if err := readGraphSlice([]string{
+		"--data-root", root, "--project-key", projectKey, "--seed", endpointID,
+		"--context-json", `{"actor":"synthetic-actor"}`,
+	}); err != nil {
+		_ = writeEnd.Close()
+		t.Fatalf("readGraphSlice(): %v", err)
+	}
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(readEnd).Decode(&result); err != nil {
+		t.Fatalf("graph-slice output is not JSON: %v", err)
+	}
+	_ = readEnd.Close()
+	contextValue, ok := result["context"].(map[string]any)
+	if !ok || contextValue["actor"] != "synthetic-actor" || result["graph_version"] != "behavior-graph-source-pinned-v1" {
+		t.Fatalf("shared graph query result lost its context or metadata: %#v", result)
+	}
+	for _, pathMode := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: filepath.Join(root, "query-state"), mode: 0o700},
+		{path: filepath.Join(root, "query-state", "full-cursors.sqlite3"), mode: 0o600},
+	} {
+		info, statErr := os.Stat(pathMode.path)
+		if statErr != nil {
+			t.Fatalf("stat persistent cursor state %q: %v", pathMode.path, statErr)
+		}
+		if info.Mode().Perm() != pathMode.mode {
+			t.Fatalf("persistent cursor state %q permissions = %o, want %o", pathMode.path, info.Mode().Perm(), pathMode.mode)
+		}
+	}
+}
+
+type graphSliceCLIServiceFixture struct {
+	graph    *graphaccess.Service
+	requests *[]appquery.GraphRequest
+	result   appquery.GraphResult
+}
+
+func (f *graphSliceCLIServiceFixture) Graph(_ context.Context, request appquery.GraphRequest) (appquery.GraphResult, error) {
+	*f.requests = append(*f.requests, request)
+	return f.result, nil
+}
+
+func (f *graphSliceCLIServiceFixture) Close(ctx context.Context) error {
+	return f.graph.Close(ctx)
+}
+
+func TestGraphSliceCLIForwardsCursorAcrossFreshServiceInvocations(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private-data")
+	ref := project.CaidoProjectRef{InstanceID: "graph-slice-cli-cursor", ProjectID: "fixture-project"}
+	projectStore, err := store.CreateProject(t.Context(), ref, root)
+	if err != nil {
+		t.Fatalf("CreateProject(): %v", err)
+	}
+	projectKey := projectStore.ProjectKey
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("close project store: %v", err)
+	}
+	seed := "endpoint-" + strings.Repeat("a", 64)
+	token := strings.Repeat("A", 43)
+	var requests []appquery.GraphRequest
+	created := 0
+	factory := func(_ string, _ []project.CaidoProjectRef, graph *graphaccess.Service) (graphSliceQueryService, error) {
+		created++
+		payload := map[string]any{"page": created}
+		if created == 1 {
+			payload["next_cursor"] = token
+		} else {
+			payload["continuation_branches_complete"] = true
+		}
+		return &graphSliceCLIServiceFixture{
+			graph: graph, requests: &requests,
+			result: appquery.GraphResult{ProjectKey: projectKey, View: appquery.GraphViewFull, Payload: payload},
+		}, nil
+	}
+
+	baseArgs := []string{
+		"--data-root", root, "--project-key", projectKey, "--seed", seed,
+		"--max-nodes", "42", "--max-edges", "73", "--max-depth", "2",
+		"--context-json", `{"actor":"synthetic-actor","tenant":"tenant-a"}`,
+	}
+	readResult := func(args []string) map[string]any {
+		t.Helper()
+		readEnd, writeEnd, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		originalStdout := os.Stdout
+		os.Stdout = writeEnd
+		err = readGraphSliceWithFactory(args, factory)
+		os.Stdout = originalStdout
+		if err != nil {
+			_ = readEnd.Close()
+			_ = writeEnd.Close()
+			t.Fatalf("readGraphSliceWithFactory(): %v", err)
+		}
+		if err := writeEnd.Close(); err != nil {
+			t.Fatalf("close graph-slice output: %v", err)
+		}
+		var result map[string]any
+		if err := json.NewDecoder(readEnd).Decode(&result); err != nil {
+			_ = readEnd.Close()
+			t.Fatalf("decode graph-slice output: %v", err)
+		}
+		_ = readEnd.Close()
+		return result
+	}
+
+	firstResult := readResult(baseArgs)
+	if firstResult["next_cursor"] != token {
+		t.Fatalf("first CLI page cursor = %#v, want %q", firstResult["next_cursor"], token)
+	}
+	secondArgs := append(append([]string(nil), baseArgs...), "--cursor", token)
+	secondResult := readResult(secondArgs)
+	if secondResult["continuation_branches_complete"] != true || created != 2 || len(requests) != 2 {
+		t.Fatalf("second CLI invocation = %#v; service creations %d, requests %d", secondResult, created, len(requests))
+	}
+	wantContext := map[string]any{"actor": "synthetic-actor", "tenant": "tenant-a"}
+	for i, request := range requests {
+		wantCursor := appquery.GraphCursor("")
+		if i == 1 {
+			wantCursor = appquery.GraphCursor(token)
+		}
+		if request.ProjectKey != projectKey || request.View != appquery.GraphViewFull ||
+			!reflect.DeepEqual(request.SeedIDs, []string{seed}) ||
+			request.Budget != (appquery.GraphBudget{MaxNodes: 42, MaxEdges: 73, MaxDepth: 2}) ||
+			!reflect.DeepEqual(request.Context, wantContext) || request.Cursor != wantCursor {
+			t.Errorf("CLI request %d = %#v; project/seeds/budget/context/cursor mismatch", i, request)
+		}
+	}
+}
 
 func TestWriteCaidoImportProgressProducesOnlyBoundedSummary(t *testing.T) {
 	var output bytes.Buffer

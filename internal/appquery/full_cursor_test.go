@@ -3,10 +3,167 @@ package appquery
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestPersistentFullCursorSurvivesStoreRestartAndReplaysAcceptedPage(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "query-state")
+	binding := testFullCursorBinding()
+	branch := "assertion-" + strings.Repeat("c", 64)
+	continuationBranch := "assertion-" + strings.Repeat("d", 64)
+
+	firstStore, err := openPersistentFullCursorStore(stateDir)
+	if err != nil {
+		t.Fatalf("open persistent cursor store: %v", err)
+	}
+	firstToken, err := firstStore.create(binding, 7, []string{branch}, map[string]any{"page": 0})
+	if err != nil {
+		_ = firstStore.close()
+		t.Fatalf("create persistent cursor: %v", err)
+	}
+	firstPage, nextToken, pageNo, err := firstStore.next(firstToken, binding, func(_ []string, _ map[string]any, page int) (map[string]any, []string, int64, error) {
+		return map[string]any{"page": page}, []string{continuationBranch}, 7, nil
+	}, nil)
+	if err != nil || pageNo != 1 || nextToken == "" {
+		_ = firstStore.close()
+		t.Fatalf("first page = %#v, next %q, page %d, err %v", firstPage, nextToken, pageNo, err)
+	}
+	if err := firstStore.close(); err != nil {
+		t.Fatalf("close first cursor store: %v", err)
+	}
+
+	restartedStore, err := openPersistentFullCursorStore(stateDir)
+	if err != nil {
+		t.Fatalf("reopen persistent cursor store: %v", err)
+	}
+	defer restartedStore.close()
+	replayed, replayNext, replayPage, err := restartedStore.next(firstToken, binding, func([]string, map[string]any, int) (map[string]any, []string, int64, error) {
+		t.Fatal("replaying an accepted cursor must not read the graph again")
+		return nil, nil, 0, nil
+	}, nil)
+	if err != nil || replayNext != nextToken || replayPage != pageNo || fmt.Sprint(replayed) != fmt.Sprint(firstPage) {
+		t.Fatalf("replayed page = %#v, next %q, page %d, err %v; want %#v", replayed, replayNext, replayPage, err, firstPage)
+	}
+
+	secondPage, finalToken, secondPageNo, err := restartedStore.next(nextToken, binding, func(_ []string, _ map[string]any, page int) (map[string]any, []string, int64, error) {
+		return map[string]any{"page": page}, nil, 7, nil
+	}, nil)
+	if err != nil || secondPageNo != 2 || finalToken != "" || secondPage["continuation_branches_complete"] != true {
+		t.Fatalf("continued page = %#v, next %q, page %d, err %v", secondPage, finalToken, secondPageNo, err)
+	}
+	if err := restartedStore.close(); err != nil {
+		t.Fatalf("close restarted cursor store: %v", err)
+	}
+
+	thirdStore, err := openPersistentFullCursorStore(stateDir)
+	if err != nil {
+		t.Fatalf("open cursor store for final replay: %v", err)
+	}
+	defer thirdStore.close()
+	finalReplay, _, replayPage, err := thirdStore.next(nextToken, binding, func([]string, map[string]any, int) (map[string]any, []string, int64, error) {
+		t.Fatal("replaying the final accepted cursor must not read the graph again")
+		return nil, nil, 0, nil
+	}, nil)
+	if err != nil || replayPage != 2 || fmt.Sprint(finalReplay) != fmt.Sprint(secondPage) {
+		t.Fatalf("final replay = %#v, page %d, err %v; want %#v", finalReplay, replayPage, err, secondPage)
+	}
+}
+
+func TestPersistentFullCursorPrunesExpiredStateWhenOpeningStore(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "query-state")
+	store, err := openPersistentFullCursorStore(stateDir)
+	if err != nil {
+		t.Fatalf("open cursor store: %v", err)
+	}
+	store.now = func() time.Time { return time.Now().Add(-2 * fullCursorTTL) }
+	if _, err := store.create(testFullCursorBinding(), 7, []string{"assertion-" + strings.Repeat("c", 64)}, map[string]any{"private_path": "/tmp/expired-evidence.json"}); err != nil {
+		_ = store.close()
+		t.Fatalf("create expired cursor state: %v", err)
+	}
+	if err := store.close(); err != nil {
+		t.Fatalf("close cursor store: %v", err)
+	}
+
+	reopened, err := openPersistentFullCursorStore(stateDir)
+	if err != nil {
+		t.Fatalf("reopen cursor store: %v", err)
+	}
+	defer reopened.close()
+	var sessions, tokens, secureDelete int
+	if err := reopened.db.QueryRow("SELECT count(*) FROM full_cursor_sessions").Scan(&sessions); err != nil {
+		t.Fatalf("count persisted sessions: %v", err)
+	}
+	if err := reopened.db.QueryRow("SELECT count(*) FROM full_cursor_tokens").Scan(&tokens); err != nil {
+		t.Fatalf("count persisted tokens: %v", err)
+	}
+	if err := reopened.db.QueryRow("PRAGMA secure_delete").Scan(&secureDelete); err != nil {
+		t.Fatalf("read secure_delete setting: %v", err)
+	}
+	if sessions != 0 || tokens != 0 || secureDelete != 1 {
+		t.Fatalf("expired cursor cleanup = sessions:%d tokens:%d secure_delete:%d; want 0, 0, 1", sessions, tokens, secureDelete)
+	}
+}
+
+func TestPersistentFullCursorConcurrentAdvanceReturnsOneAcceptedPage(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "query-state")
+	binding := testFullCursorBinding()
+	branch := "assertion-" + strings.Repeat("c", 64)
+	storeA, err := openPersistentFullCursorStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeA.close()
+	storeB, err := openPersistentFullCursorStore(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeB.close()
+	token, err := storeA.create(binding, 7, []string{branch}, map[string]any{"page": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	type result struct {
+		payload map[string]any
+		token   string
+		page    int
+		err     error
+	}
+	results := make(chan result, 2)
+	var start sync.WaitGroup
+	start.Add(2)
+	load := func([]string, map[string]any, int) (map[string]any, []string, int64, error) {
+		ready <- struct{}{}
+		<-release
+		return map[string]any{"accepted": true}, nil, 7, nil
+	}
+	for _, cursorStore := range []*fullCursorStore{storeA, storeB} {
+		go func(cursorStore *fullCursorStore) {
+			defer start.Done()
+			payload, next, page, err := cursorStore.next(token, binding, load, nil)
+			results <- result{payload: payload, token: next, page: page, err: err}
+		}(cursorStore)
+	}
+	<-ready
+	<-ready
+	close(release)
+	start.Wait()
+	first, second := <-results, <-results
+	for i, got := range []result{first, second} {
+		if got.err != nil || got.page != 1 || got.token != "" || got.payload["accepted"] != true {
+			t.Fatalf("concurrent result %d = %#v, want the same accepted page; err=%v", i, got.payload, got.err)
+		}
+	}
+	if fmt.Sprint(first.payload) != fmt.Sprint(second.payload) {
+		t.Fatalf("concurrent callers received different page payloads: %#v and %#v", first.payload, second.payload)
+	}
+}
 
 func TestFullSliceCursorPagesUniqueBranchesAndRetriesIdempotently(t *testing.T) {
 	store := newFullCursorStore()
@@ -86,6 +243,7 @@ func TestFullSliceCursorBindsProjectSeedsAndBudget(t *testing.T) {
 		{ProjectKey: strings.Repeat("d", 64), SeedHash: binding.SeedHash, Budget: binding.Budget},
 		{ProjectKey: binding.ProjectKey, SeedHash: strings.Repeat("e", 64), Budget: binding.Budget},
 		{ProjectKey: binding.ProjectKey, SeedHash: binding.SeedHash, Budget: GraphBudget{MaxNodes: 80, MaxEdges: 159, MaxDepth: 3}},
+		{ProjectKey: binding.ProjectKey, SeedHash: binding.SeedHash, ContextHash: strings.Repeat("f", 64), Budget: binding.Budget},
 	} {
 		if _, _, _, err := store.next(token, changed, func([]string, map[string]any, int) (map[string]any, []string, int64, error) {
 			t.Fatal("mismatched cursor reached the graph loader")

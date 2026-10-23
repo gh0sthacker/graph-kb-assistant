@@ -11,6 +11,39 @@ import (
 	"bb-graph-assistant/internal/graphaccess"
 )
 
+func TestGraphQueryServiceCloseAndReopenPreservesFullCursor(t *testing.T) {
+	dataRoot := t.TempDir()
+	first, err := NewGraphQueryServiceWithPersistentCursors(dataRoot, nil, graphaccess.NewService())
+	if err != nil {
+		t.Fatalf("construct first graph query service: %v", err)
+	}
+	binding := testFullCursorBinding()
+	branch := "assertion-" + strings.Repeat("c", 64)
+	cursor, err := first.fullCursors.create(binding, 7, []string{branch}, map[string]any{"page": 0})
+	if err != nil {
+		_ = first.Close(context.Background())
+		t.Fatalf("create continuation cursor: %v", err)
+	}
+	if err := first.Close(context.Background()); err != nil {
+		t.Fatalf("close first graph query service: %v", err)
+	}
+
+	second, err := NewGraphQueryServiceWithPersistentCursors(dataRoot, nil, graphaccess.NewService())
+	if err != nil {
+		t.Fatalf("reconstruct graph query service: %v", err)
+	}
+	defer second.Close(context.Background())
+	continued, nextCursor, page, err := second.fullCursors.next(cursor, binding, func(branches []string, _ map[string]any, page int) (map[string]any, []string, int64, error) {
+		if len(branches) != 1 || branches[0] != branch {
+			t.Fatalf("reopened service cursor branches = %v, want %q", branches, branch)
+		}
+		return map[string]any{"page": page}, nil, 7, nil
+	}, nil)
+	if err != nil || page != 1 || nextCursor != "" || continued["continuation_branches_complete"] != true {
+		t.Fatalf("continuation after service restart = %#v, next %q, page %d, err %v", continued, nextCursor, page, err)
+	}
+}
+
 func TestGraphQueryRejectsNonEntityNeighborhoodSeeds(t *testing.T) {
 	service, err := NewGraphQueryService(t.TempDir(), nil, graphaccess.NewService())
 	if err != nil {
@@ -37,6 +70,7 @@ func TestGraphRequestValidatesViewSpecificSeedAndBudgetRules(t *testing.T) {
 		{name: "direct source is rejected", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{"source-" + strings.Repeat("b", 64)}}, wantErr: true},
 		{name: "direct assertion is rejected", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{"assertion-" + strings.Repeat("b", 64)}}, wantErr: true},
 		{name: "direct rejects budget", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{entity}, Budget: GraphBudget{MaxNodes: 1}}, wantErr: true},
+		{name: "direct rejects analysis context", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewDirect, SeedIDs: []string{entity}, Context: map[string]any{"actor": "actor-a"}}, wantErr: true},
 		{name: "full allows source provenance seed", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewFull, SeedIDs: []string{"source-" + strings.Repeat("b", 64)}}},
 		{name: "full rejects partial budget", request: GraphRequest{ProjectKey: strings.Repeat("a", 64), View: GraphViewFull, SeedIDs: []string{entity}, Budget: GraphBudget{MaxNodes: 101, MaxEdges: 160, MaxDepth: 3}}, wantErr: true},
 	}
@@ -47,6 +81,30 @@ func TestGraphRequestValidatesViewSpecificSeedAndBudgetRules(t *testing.T) {
 				t.Fatalf("validateGraphRequest() error = %v, wantErr %v", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestGraphContextHashIsStableAndDistinct(t *testing.T) {
+	first, err := graphContextHash(map[string]any{"actor": "actor-a", "tenant": "tenant-a"})
+	if err != nil {
+		t.Fatalf("graphContextHash(first): %v", err)
+	}
+	second, err := graphContextHash(map[string]any{"tenant": "tenant-a", "actor": "actor-a"})
+	if err != nil {
+		t.Fatalf("graphContextHash(second): %v", err)
+	}
+	other, err := graphContextHash(map[string]any{"actor": "actor-b", "tenant": "tenant-a"})
+	if err != nil {
+		t.Fatalf("graphContextHash(other): %v", err)
+	}
+	if first == "" || first != second || first == other {
+		t.Fatalf("context hashes are not stable and distinct: %q, %q, %q", first, second, other)
+	}
+	if _, err := graphContextHash(map[string]any{"unsupported": func() {}}); err == nil {
+		t.Fatal("graphContextHash accepted a non-JSON value")
+	}
+	if _, err := graphContextHash(map[string]any{"oversized": strings.Repeat("x", maxGraphContextBytes)}); err == nil {
+		t.Fatal("graphContextHash accepted a context above the byte limit")
 	}
 }
 

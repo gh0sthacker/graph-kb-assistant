@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"bb-graph-assistant/internal/appquery"
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
@@ -969,7 +970,20 @@ func importGraphBundle(args []string) error {
 	return syncErr
 }
 
+type graphSliceQueryService interface {
+	Graph(context.Context, appquery.GraphRequest) (appquery.GraphResult, error)
+	Close(context.Context) error
+}
+
+type graphSliceQueryServiceFactory func(string, []project.CaidoProjectRef, *graphaccess.Service) (graphSliceQueryService, error)
+
 func readGraphSlice(args []string) error {
+	return readGraphSliceWithFactory(args, func(dataRoot string, refs []project.CaidoProjectRef, graph *graphaccess.Service) (graphSliceQueryService, error) {
+		return appquery.NewGraphQueryServiceWithPersistentCursors(dataRoot, refs, graph)
+	})
+}
+
+func readGraphSliceWithFactory(args []string, makeQueryService graphSliceQueryServiceFactory) error {
 	flags := flag.NewFlagSet("graph-slice", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	var selectedKeys stringListFlag
@@ -981,11 +995,12 @@ func readGraphSlice(args []string) error {
 	maxEdges := flags.Int("max-edges", 160, "maximum selected graph edges (0-300)")
 	maxDepth := flags.Int("max-depth", 3, "maximum graph traversal depth (0-6)")
 	contextJSON := flags.String("context-json", "", "optional JSON object restricting actor/tenant/role context")
+	cursor := flags.String("cursor", "", "full graph continuation cursor; reuse the same project, seeds, limits, and context")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: bb-assistant graph-slice --project-key <sha256> --seed <typed-id> [--seed <typed-id>] [limits]")
+		return errors.New("usage: bb-assistant graph-slice --project-key <sha256> --seed <typed-id> [--seed <typed-id>] [--cursor token] [limits]")
 	}
 	if len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
 		return errors.New("select exactly one registered project with --project-key <sha256>")
@@ -1033,16 +1048,37 @@ func readGraphSlice(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	projectStore, err := store.OpenProjectReadOnly(ctx, *selected, *root)
+	dataRoot := *root
+	if strings.TrimSpace(dataRoot) == "" {
+		dataRoot, err = project.DataRoot()
+		if err != nil {
+			return err
+		}
+	}
+	graphService := graphaccess.NewService()
+	if makeQueryService == nil {
+		_ = graphService.Close(context.Background())
+		return errors.New("graph query service factory is unavailable")
+	}
+	queries, err := makeQueryService(dataRoot, refs, graphService)
+	if err != nil {
+		_ = graphService.Close(context.Background())
+		return errors.New("graph query service could not be initialized")
+	}
+	defer func() { _ = queries.Close(context.Background()) }()
+	projectKey, err := selected.StorageKey()
+	if err != nil {
+		return errors.New("selected project identity is invalid")
+	}
+	result, err := queries.Graph(ctx, appquery.GraphRequest{
+		ProjectKey: projectKey, View: appquery.GraphViewFull, SeedIDs: seeds,
+		Budget:  appquery.GraphBudget{MaxNodes: *maxNodes, MaxEdges: *maxEdges, MaxDepth: *maxDepth},
+		Context: selectedContext, Cursor: appquery.GraphCursor(*cursor),
+	})
 	if err != nil {
 		return err
 	}
-	defer projectStore.Close()
-	result, err := capturesearch.GraphSlice(ctx, projectStore, seeds, *maxNodes, *maxEdges, *maxDepth, selectedContext)
-	if err != nil {
-		return err
-	}
-	return json.NewEncoder(os.Stdout).Encode(result)
+	return json.NewEncoder(os.Stdout).Encode(result.WireMap())
 }
 
 func dbCheck(args []string) error {
