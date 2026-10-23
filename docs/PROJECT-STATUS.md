@@ -1,5 +1,58 @@
 # Project status and known limitations
 
+## Latest verified checkpoint (2026-10-23)
+
+This checkpoint supersedes conflicting runtime measurements in the older
+same-day sections below. The overall runtime, source coverage, and analysis
+loop remain `PARTIAL`.
+
+- After confirming no active SQLite writer under the exclusive project lock,
+  the local read-only `project-audit` passed: capture schema v7 and
+  BehaviorGraph v2 are compatible. It found 1,400 captures and search-index
+  entries, 1,369 graph mappings, and 31 unmapped captures. Parsing is complete
+  for 444 and partial for 956; response fidelity is unknown for 37. Request
+  text is reconstructed for 1,400 captures, response text for 1,363, and no
+  source-byte fidelity was established. Historical synchronization and overall
+  coverage are `PARTIAL`.
+- A read-only `neo4j-backfill --verify-only` now reports `verified`: local and
+  Neo4j snapshot digests both equal
+  `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`, with
+  33,366 entities, 33,987 assertions, 1,369 cards, and 1,369 sources. This
+  verifies graph parity for the mapped local snapshot only; it does not prove
+  Caido history completeness or source coverage.
+- The local behavior outbox has 44 applied entries and none pending. The
+  separate graph projection queue is not drained: at the last read-only check,
+  6 jobs were applied, 1 leased, and 1,393 pending (about 251 MB of normalized
+  payloads; 77 pending jobs exceed 1 MiB). A bounded worker run applied six
+  jobs, then was stopped after roughly ten minutes. No worker is currently
+  running. Do not treat Neo4j parity as proof that this queue is complete.
+- Caido 0.58.3 lists the Juice Shop project as `READY` but inactive; the
+  selected project is the unrelated `sperpravo` project. No project switch,
+  request enumeration, body read, replay, or target traffic was performed.
+  Caido reconciliation remains unverified.
+- The local KB fallback reports 15,374 semantic files and 74,446 vectors;
+  12,829 files and 53,342 vectors match the current version. Semantic integrity
+  is degraded (`ok=false`) with 2,545 wrong-version or unhashed rows. Lexical
+  search is available with 15,438 files and 67,991 passages; its last refresh
+  was 2026-10-13. The MCP `kb_stats` call timed out. KB readiness remains
+  `PARTIAL`; no reindex was run.
+- `./scripts/run-hermes mcp test bb_assistant` passed and discovered the
+  nine-tool read-only local MCP allowlist. The private Hermes profile is mode
+  0600 and has no provider/model selection. A model-backed analysis and
+  hypothesis-validation cycle remains unverified.
+- Go verification passed: `go test -count=1 ./...`,
+  `go test -race -count=1 ./...`, and `go vet ./...`. The opt-in Neo4j
+  integration package exposed two failures: analytical slices omit a linked
+  assertion-to-assertion `contradicts` closure; a neighborhood integration test
+  passes an assertion seed to an entity-only API. The second fixture conflicts
+  with the current direct-neighborhood contract. Both tests register cleanup
+  for synthetic project namespaces, but the captured failure summary did not
+  independently confirm cleanup completion. ECC Gate 1 is pending before
+  implementing these fixes.
+- Browser walkthrough, JavaScript endpoint coverage, and the end-to-end
+  Hermes analysis loop are still absent. Keep product and coverage claims
+  `PARTIAL` until those gaps are closed and verified.
+
 ## Fresh local verification (2026-10-23, after `b4f460e`)
 
 This checkpoint supersedes earlier runtime claims below where they conflict;
