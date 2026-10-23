@@ -6,26 +6,28 @@ This checkpoint supersedes conflicting runtime measurements in the older
 same-day sections below. The overall runtime, source coverage, and analysis
 loop remain `PARTIAL`.
 
-- After confirming no active SQLite writer under the exclusive project lock,
-  the local read-only `project-audit` passed: capture schema v7 and
+- A fresh local read-only `project-audit` passed: capture schema v7 and
   BehaviorGraph v2 are compatible. It found 1,400 captures and search-index
   entries, 1,369 graph mappings, and 31 unmapped captures. Parsing is complete
   for 444 and partial for 956; response fidelity is unknown for 37. Request
   text is reconstructed for 1,400 captures, response text for 1,363, and no
   source-byte fidelity was established. Historical synchronization and overall
   coverage are `PARTIAL`.
-- A read-only `neo4j-backfill --verify-only` now reports `verified`: local and
+- A read-only `neo4j-backfill --verify-only`, rerun after the latest projection
+  job, reports `verified`: local and
   Neo4j snapshot digests both equal
   `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`, with
   33,366 entities, 33,987 assertions, 1,369 cards, and 1,369 sources. This
   verifies graph parity for the mapped local snapshot only; it does not prove
   Caido history completeness or source coverage.
-- The local behavior outbox has 44 applied entries and none pending. The
-  separate graph projection queue is not drained: at the last read-only check,
-  6 jobs were applied, 1 leased, and 1,393 pending (about 251 MB of normalized
-  payloads; 77 pending jobs exceed 1 MiB). A bounded worker run applied six
-  jobs, then was stopped after roughly ten minutes. No worker is currently
-  running. Do not treat Neo4j parity as proof that this queue is complete.
+- The local behavior outbox has 45 applied entries and none pending. The
+  separate graph projection queue is not drained: 7 jobs are applied and 1,393
+  remain pending (about 251 MB of normalized payloads; 77 pending jobs exceed
+  1 MiB). After a prior bounded run applied six jobs, the next single-job run
+  reclaimed an expired lease and applied that job on attempt 2, with no retry
+  or dead letter; it took about 113 seconds. No worker remained running after
+  the check. The queue's low observed throughput makes a full drain a material
+  runtime task. Do not treat Neo4j parity as proof that this queue is complete.
 - Caido 0.58.3 lists the Juice Shop project as `READY` but inactive; the
   selected project is the unrelated `sperpravo` project. No project switch,
   request enumeration, body read, replay, or target traffic was performed.
