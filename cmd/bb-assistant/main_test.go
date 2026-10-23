@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/store"
@@ -189,12 +190,51 @@ func TestCaidoReconcileCLIValidatesProjectAndBoundsBeforeStartingBridge(t *testi
 	}
 	for _, args := range [][]string{
 		{"--page-size", "0"},
-		{"--max-pages", "1001"},
-		{"--max-requests", "100001"},
+		{"--max-pages", "10001"},
+		{"--max-requests", "1000001"},
 	} {
 		commandArgs := append([]string{"--project-key", key}, args...)
 		if err := reconcileCaidoHistory(commandArgs); err == nil {
 			t.Errorf("caido-reconcile accepted invalid bounds %v", args)
+		}
+	}
+}
+
+func TestParseCaidoReconcileOptionsAllowsObservedCatalogScale(t *testing.T) {
+	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	options, err := parseCaidoReconcileOptions([]string{
+		"--project-key", key, "--max-pages", "10000", "--max-requests", "1000000", "--timeout", "30m",
+	})
+	if err != nil {
+		t.Fatalf("parseCaidoReconcileOptions() rejected large bounded inventory: %v", err)
+	}
+	if options.maxPages != 10000 || options.maxRequests != 1000000 || options.timeout != 30*time.Minute {
+		t.Fatalf("parsed inventory bounds = pages:%d requests:%d timeout:%s", options.maxPages, options.maxRequests, options.timeout)
+	}
+	for _, args := range [][]string{{"--max-pages", "10001"}, {"--max-requests", "1000001"}} {
+		commandArgs := append([]string{"--project-key", key}, args...)
+		if _, err := parseCaidoReconcileOptions(commandArgs); err == nil {
+			t.Errorf("accepted inventory bound above the new cap: %v", args)
+		}
+	}
+}
+
+func TestParseCaidoReconcileOptionsAllowsBoundedLongerDeadline(t *testing.T) {
+	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	options, err := parseCaidoReconcileOptions([]string{"--project-key", key, "--timeout", "5m"})
+	if err != nil {
+		t.Fatalf("parseCaidoReconcileOptions() error = %v", err)
+	}
+	if options.timeout != 5*time.Minute {
+		t.Fatalf("reconciliation timeout = %s, want 5m", options.timeout)
+	}
+}
+
+func TestParseCaidoReconcileOptionsRejectsUnboundedDeadlines(t *testing.T) {
+	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, value := range []string{"0s", "500ms", "31m"} {
+		if _, err := parseCaidoReconcileOptions([]string{"--project-key", key, "--timeout", value}); err == nil {
+			t.Errorf("accepted reconciliation timeout %q", value)
 		}
 	}
 }

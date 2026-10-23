@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	maxRunDuration    = 30 * time.Second
-	maxPageSize       = 100
-	maxPages          = 1000
-	maxRequestIDs     = 100000
-	maxRequestIDBytes = 512
-	maxCursorBytes    = 4096
+	defaultRunDuration = 30 * time.Second
+	maxRunDuration     = 30 * time.Minute
+	maxPageSize        = 100
+	maxPages           = 10000
+	maxRequestIDs      = 1000000
+	maxRequestIDBytes  = 512
+	maxCursorBytes     = 4096
 )
 
 // InventorySource exposes only the no-switch metadata operations needed by
@@ -36,6 +37,7 @@ type Options struct {
 	PageSize      int
 	MaxPages      int
 	MaxRequestIDs int
+	MaxDuration   time.Duration
 }
 
 // Report contains aggregate counts only. It intentionally excludes project
@@ -74,7 +76,7 @@ func Reconcile(ctx context.Context, dataRoot, projectKey string, source Inventor
 	if err := validateOptions(options); err != nil {
 		return Report{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, maxRunDuration)
+	ctx, cancel := context.WithTimeout(ctx, reconciliationDuration(options.MaxDuration))
 	defer cancel()
 
 	selected, err := registeredProject(dataRoot, projectKey)
@@ -217,10 +219,18 @@ func Reconcile(ctx context.Context, dataRoot, projectKey string, source Inventor
 func validateOptions(options Options) error {
 	if options.PageSize < 1 || options.PageSize > maxPageSize ||
 		options.MaxPages < 1 || options.MaxPages > maxPages ||
-		options.MaxRequestIDs < 1 || options.MaxRequestIDs > maxRequestIDs {
+		options.MaxRequestIDs < 1 || options.MaxRequestIDs > maxRequestIDs ||
+		options.MaxDuration < 0 || options.MaxDuration > maxRunDuration {
 		return fmt.Errorf("Caido reconciliation bounds must be page-size 1-%d, pages 1-%d, IDs 1-%d", maxPageSize, maxPages, maxRequestIDs)
 	}
 	return nil
+}
+
+func reconciliationDuration(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return defaultRunDuration
+	}
+	return configured
 }
 
 func registeredProject(dataRoot, projectKey string) (*project.CaidoProjectRef, error) {

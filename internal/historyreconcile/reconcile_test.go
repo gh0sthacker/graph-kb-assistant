@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"bb-graph-assistant/internal/caido"
 	"bb-graph-assistant/internal/project"
@@ -155,6 +156,37 @@ func page(requestIDs []string, next *string, hasMore bool) caido.RequestMetadata
 
 func fixtureOptions() Options {
 	return Options{PageSize: 3, MaxPages: 10, MaxRequestIDs: 100}
+}
+
+func TestReconciliationDurationUsesBoundedOverride(t *testing.T) {
+	if got := reconciliationDuration(0); got != 30*time.Second {
+		t.Fatalf("default reconciliation deadline = %s, want 30s", got)
+	}
+	if got := reconciliationDuration(5 * time.Minute); got != 5*time.Minute {
+		t.Fatalf("configured reconciliation deadline = %s, want 5m", got)
+	}
+	if err := validateOptions(Options{PageSize: 1, MaxPages: 1, MaxRequestIDs: 1, MaxDuration: 31 * time.Minute}); err == nil {
+		t.Fatal("accepted reconciliation deadline above the 30-minute limit")
+	}
+}
+
+func TestReconciliationBoundsSupportLargeInventoriesWithinCaps(t *testing.T) {
+	options := fixtureOptions()
+	options.MaxPages = 10000
+	options.MaxRequestIDs = 1000000
+	if err := validateOptions(options); err != nil {
+		t.Fatalf("validateOptions() rejected supported bounded inventory: %v", err)
+	}
+
+	options.MaxPages++
+	if err := validateOptions(options); err == nil {
+		t.Fatal("validateOptions() accepted page count above 10000")
+	}
+	options = fixtureOptions()
+	options.MaxRequestIDs = 1000001
+	if err := validateOptions(options); err == nil {
+		t.Fatal("validateOptions() accepted request count above 1000000")
+	}
 }
 
 func runFixture(t *testing.T, fixture projectFixture, source *inventoryFixture, options Options) (Report, error) {

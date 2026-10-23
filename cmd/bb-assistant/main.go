@@ -34,6 +34,11 @@ import (
 
 const version = "0.1.0-go-dev"
 
+const (
+	maxCaidoReconcilePages    = 10000
+	maxCaidoReconcileRequests = 1000000
+)
+
 func isWatchLeaseContention(watch bool, parent context.Context, err error) bool {
 	return watch && parent != nil && parent.Err() == nil && errors.Is(err, context.DeadlineExceeded)
 }
@@ -423,30 +428,11 @@ func runProjectionWorker(args []string) error {
 }
 
 func reconcileCaidoHistory(args []string) error {
-	flags := flag.NewFlagSet("caido-reconcile", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	var selectedKeys stringListFlag
-	flags.Var(&selectedKeys, "project-key", "registered Caido project key (exactly one required)")
-	root := flags.String("data-root", "", "private assistant data root")
-	mcpCommand := flags.String("mcp-command", "", "pinned Caido MCP v4.3.0 executable")
-	mcpSHA256 := flags.String("mcp-sha256", "", "expected SHA-256 of the Caido MCP executable")
-	tokenFile := flags.String("token-file", "", "private Caido MCP token JSON file")
-	pageSize := flags.Int("page-size", 50, "metadata rows per page (1-100)")
-	maxPages := flags.Int("max-pages", 100, "maximum metadata pages (1-1000)")
-	maxRequests := flags.Int("max-requests", 10000, "maximum distinct IDs per inventory (1-100000)")
-	if err := flags.Parse(args); err != nil {
+	options, err := parseCaidoReconcileOptions(args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 0 {
-		return errors.New("usage: bb-assistant caido-reconcile --project-key <sha256> [--page-size 50] [--max-pages 100] [--max-requests 10000]")
-	}
-	if len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
-		return errors.New("select exactly one registered project with --project-key <sha256>")
-	}
-	if *pageSize < 1 || *pageSize > 100 || *maxPages < 1 || *maxPages > 1000 || *maxRequests < 1 || *maxRequests > 100000 {
-		return errors.New("Caido reconciliation limits are invalid")
-	}
-	refs, err := project.LoadProjectRefsReadOnly(*root)
+	refs, err := project.LoadProjectRefsReadOnly(options.dataRoot)
 	if err != nil {
 		return err
 	}
@@ -456,7 +442,7 @@ func reconcileCaidoHistory(args []string) error {
 		if keyErr != nil {
 			return errors.New("project registry contains an invalid identity")
 		}
-		if key == selectedKeys[0] {
+		if key == options.projectKey {
 			instanceID = ref.InstanceID
 			break
 		}
@@ -467,10 +453,10 @@ func reconcileCaidoHistory(args []string) error {
 
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(baseCtx, options.timeout)
 	defer cancel()
 	client, err := caido.StartMCPProcess(caido.MCPProcessConfig{
-		Context: ctx, Command: *mcpCommand, ExpectedSHA256: *mcpSHA256, TokenFile: *tokenFile,
+		Context: ctx, Command: options.mcpCommand, ExpectedSHA256: options.mcpSHA256, TokenFile: options.tokenFile,
 		StartupTimeout: 30 * time.Second, CallTimeout: 30 * time.Second,
 	})
 	if err != nil {
@@ -481,8 +467,9 @@ func reconcileCaidoHistory(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := historyreconcile.Run(ctx, *root, selectedKeys[0], source, historyreconcile.Options{
-		PageSize: *pageSize, MaxPages: *maxPages, MaxRequestIDs: *maxRequests,
+	result, err := historyreconcile.Run(ctx, options.dataRoot, options.projectKey, source, historyreconcile.Options{
+		PageSize: options.pageSize, MaxPages: options.maxPages, MaxRequestIDs: options.maxRequests,
+		MaxDuration: options.timeout,
 	})
 	if result.State != "" {
 		if encodeErr := json.NewEncoder(os.Stdout).Encode(result); encodeErr != nil {
@@ -493,6 +480,51 @@ func reconcileCaidoHistory(args []string) error {
 		return err
 	}
 	return nil
+}
+
+type caidoReconcileOptions struct {
+	projectKey  string
+	dataRoot    string
+	mcpCommand  string
+	mcpSHA256   string
+	tokenFile   string
+	pageSize    int
+	maxPages    int
+	maxRequests int
+	timeout     time.Duration
+}
+
+func parseCaidoReconcileOptions(args []string) (caidoReconcileOptions, error) {
+	flags := flag.NewFlagSet("caido-reconcile", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered Caido project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	mcpCommand := flags.String("mcp-command", "", "pinned Caido MCP v4.3.0 executable")
+	mcpSHA256 := flags.String("mcp-sha256", "", "expected SHA-256 of the Caido MCP executable")
+	tokenFile := flags.String("token-file", "", "private Caido MCP token JSON file")
+	pageSize := flags.Int("page-size", 50, "metadata rows per page (1-100)")
+	maxPages := flags.Int("max-pages", 100, "maximum metadata pages (1-10000)")
+	maxRequests := flags.Int("max-requests", 10000, "maximum distinct IDs per inventory (1-1000000)")
+	timeout := flags.Duration("timeout", 30*time.Second, "total reconciliation deadline (1s-30m)")
+	if err := flags.Parse(args); err != nil {
+		return caidoReconcileOptions{}, err
+	}
+	if flags.NArg() != 0 {
+		return caidoReconcileOptions{}, errors.New("usage: bb-assistant caido-reconcile --project-key <sha256> [--page-size 50] [--max-pages 100] [--max-requests 10000] [--timeout 30s]")
+	}
+	if len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
+		return caidoReconcileOptions{}, errors.New("select exactly one registered project with --project-key <sha256>")
+	}
+	if *pageSize < 1 || *pageSize > 100 || *maxPages < 1 || *maxPages > maxCaidoReconcilePages ||
+		*maxRequests < 1 || *maxRequests > maxCaidoReconcileRequests || *timeout < time.Second || *timeout > 30*time.Minute {
+		return caidoReconcileOptions{}, errors.New("Caido reconciliation limits are invalid")
+	}
+	return caidoReconcileOptions{
+		projectKey: selectedKeys[0], dataRoot: *root, mcpCommand: *mcpCommand,
+		mcpSHA256: *mcpSHA256, tokenFile: *tokenFile, pageSize: *pageSize,
+		maxPages: *maxPages, maxRequests: *maxRequests, timeout: *timeout,
+	}, nil
 }
 
 func tailCaidoHistory(args []string) error {
