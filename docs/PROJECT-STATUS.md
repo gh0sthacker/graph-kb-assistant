@@ -50,15 +50,15 @@ loop remain `PARTIAL`.
   nine-tool read-only local MCP allowlist. The private Hermes profile is mode
   0600 and has no provider/model selection. A model-backed analysis and
   hypothesis-validation cycle remains unverified.
-- Go verification passed: `go test -count=1 ./...`,
-  `go test -race -count=1 ./...`, and `go vet ./...`. The opt-in Neo4j
-  integration package exposed two failures: analytical slices omit a linked
-  assertion-to-assertion `contradicts` closure; a neighborhood integration test
-  passes an assertion seed to an entity-only API. The second fixture conflicts
-  with the current direct-neighborhood contract. Both tests register cleanup
-  for synthetic project namespaces, but the captured failure summary did not
-  independently confirm cleanup completion. ECC Gate 1 is pending before
-  implementing these fixes.
+- ECC fixed the Neo4j analytical-slice omission: the bounded frontier now
+  follows both entity and assertion records, so linked assertion-to-assertion
+  `contradicts` evidence is included. The neighborhood integration fixture now
+  seeds the entity-only API with an entity and checks its assertion dependency.
+  The regression reproduced before the production change. Afterward,
+  `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`,
+  and the full opt-in `go test -count=1 ./internal/neo4jstore` all passed.
+  This verifies the tested graph-closure behavior, not full source coverage or
+  end-to-end Caido synchronization.
 - Browser walkthrough, JavaScript endpoint coverage, and the end-to-end
   Hermes analysis loop are still absent. Keep product and coverage claims
   `PARTIAL` until those gaps are closed and verified.

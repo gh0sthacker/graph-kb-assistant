@@ -150,7 +150,7 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 
 		frontier = frontier[:0]
 		for id, record := range read.records {
-			if record.kind != "entity" {
+			if record.kind != "entity" && record.kind != "assertion" {
 				continue
 			}
 			if !seenFrontier[id] {
@@ -260,7 +260,8 @@ func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTran
 	rowLimit := len(frontier) * perNodeProbeLimit
 	result, err := tx.Run(ctx, `
 		UNWIND $record_ids AS record_id
-		MATCH (node:GraphRecord {project_key: $project_key, record_id: record_id, record_type: 'entity'})
+		MATCH (node:GraphRecord {project_key: $project_key, record_id: record_id})
+		WHERE node.record_type IN ['entity', 'assertion']
 		CALL {
 			WITH node
 			MATCH (node)<-[:SUBJECT|OBJECT {project_key: $project_key}]-(incident:GraphRecord {project_key: $project_key, record_type: 'assertion'})

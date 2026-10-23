@@ -230,16 +230,22 @@ func TestNeo4jNeighborhoodIntegrationSamplesEntityProvenanceAndClosesEvidence(t 
 	fixture := neighborhoodFixture(project, 2, 1_100)
 	assertions := fixture["assertions"].([]behaviorgraph.Record)
 	source := fixture["sources"].([]behaviorgraph.Record)[0]
-	evidence := neighborhoodFixtureAssertion(project, assertions[0]["id"].(string), assertions[1]["id"].(string), "supports", source)
+	evidenceSeed := neighborhoodTestID("asset", "evidence-seed")
+	entities := fixture["entities"].([]behaviorgraph.Record)
+	entities = append(entities, behaviorgraph.Record{
+		"id": evidenceSeed, "kind": "asset", "data": map[string]any{"label": "evidence-seed"}, "source_refs": []behaviorgraph.Record{source},
+	})
+	fixture["entities"] = entities
+	evidence := neighborhoodFixtureAssertion(project, evidenceSeed, assertions[0]["id"].(string), "supports", source)
 	fixture["assertions"] = append(assertions, evidence)
 	if _, err := store.ReplaceProjectSnapshot(ctx, project, fixture); err != nil {
 		t.Fatal(err)
 	}
-	neighborhood, err := store.ReadProjectNeighborhood(ctx, project, []string{evidence["id"].(string)}, 80)
+	neighborhood, err := store.ReadProjectNeighborhood(ctx, project, []string{evidenceSeed}, 80)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(neighborhood.Snapshot["assertions"].([]behaviorgraph.Record)) != 3 || len(neighborhood.Snapshot["sources"].([]behaviorgraph.Record)) > maxNeighborhoodEntityRefs+1 || !neighborhood.ProvenanceTruncated {
+	if len(neighborhood.Snapshot["assertions"].([]behaviorgraph.Record)) != 2 || len(neighborhood.Snapshot["sources"].([]behaviorgraph.Record)) > maxNeighborhoodEntityRefs+1 || !neighborhood.ProvenanceTruncated {
 		t.Fatal("evidence dependencies were omitted or large entity provenance was not marked as sampled")
 	}
 	reader, err := behaviorgraph.OpenReaderFromSnapshot(ctx, neighborhood.Snapshot, project, t.TempDir())
@@ -247,7 +253,7 @@ func TestNeo4jNeighborhoodIntegrationSamplesEntityProvenanceAndClosesEvidence(t 
 		t.Fatalf("closed evidence neighborhood failed shared validation: %v", err)
 	}
 	_ = reader.Close()
-	if _, err := store.ReadProjectNeighborhood(ctx, project, []string{evidence["id"].(string)}, 1); err == nil {
+	if _, err := store.ReadProjectNeighborhood(ctx, project, []string{evidenceSeed}, 1); err == nil {
 		t.Fatal("dependency closure bypassed the requested edge budget")
 	}
 }

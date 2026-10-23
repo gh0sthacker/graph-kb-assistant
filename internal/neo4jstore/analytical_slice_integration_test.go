@@ -110,6 +110,18 @@ func TestNeo4jAnalyticalSliceReadsBoundedClosureWithoutProjectSnapshot(t *testin
 	if got := len(slice["cards"].([]behaviorgraph.Record)); got != 1 {
 		t.Fatalf("analysis slice returned %d cards, want 1 card attached to the selected endpoint", got)
 	}
+	conflictingEvidence := slice["conflicting_evidence"].([]string)
+	contradictionID := contradiction["id"].(string)
+	foundContradiction := false
+	for _, assertionID := range conflictingEvidence {
+		if assertionID == contradictionID {
+			foundContradiction = true
+			break
+		}
+	}
+	if !foundContradiction {
+		t.Fatalf("analysis slice omitted linked contradiction %q from conflicting evidence: %v", contradictionID, conflictingEvidence)
+	}
 }
 
 func TestAnalyticalCandidatePageTruncatesOnlyWhenAnotherCandidateExists(t *testing.T) {
