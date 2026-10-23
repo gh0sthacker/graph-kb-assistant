@@ -71,4 +71,8 @@ func TestOutboxIsChecksummedIdempotentAndAcknowledgedAfterMaterialization(t *tes
 	if len(items) != 0 {
 		t.Fatalf("outbox still has %d pending event(s) after acknowledgement", len(items))
 	}
+	applied, err := writer.OutboxBundleApplied(ctx, bundleID)
+	if err != nil || !applied {
+		t.Fatalf("targeted outbox status: applied=%t err=%v", applied, err)
+	}
 }

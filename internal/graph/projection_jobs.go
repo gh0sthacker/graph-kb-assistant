@@ -3,12 +3,14 @@ package graph
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,6 +36,7 @@ const projectionTimestampLayout = "2006-01-02T15:04:05.000000000Z"
 type ProjectionJob struct {
 	JobID         string
 	RevisionID    string
+	ObservationID string
 	PayloadJSON   string
 	PayloadSHA256 string
 	State         string
@@ -43,6 +46,8 @@ type ProjectionJob struct {
 	UpdatedAt     string
 	LastErrorCode sql.NullString
 	AppliedAt     sql.NullString
+	LeaseToken    sql.NullString
+	LeaseUntil    sql.NullString
 }
 
 type projectionJobTx interface {
@@ -183,6 +188,227 @@ func MarkProjectionJobApplied(
 	return nil
 }
 
+// ClaimNextProjectionJob leases the earliest due job inside the caller's
+// transaction. Expired leases are returned to the queue or dead-lettered when
+// their attempt budget is exhausted. Commit before starting projection I/O.
+func ClaimNextProjectionJob(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	now time.Time,
+	leaseDuration time.Duration,
+	maxAttempts int,
+) (ProjectionJob, bool, error) {
+	if ctx == nil || tx == nil || !graphDigestPattern.MatchString(projectKey) || now.IsZero() ||
+		leaseDuration < time.Second || leaseDuration > 30*time.Minute || maxAttempts < 1 || maxAttempts > 100 {
+		return ProjectionJob{}, false, ErrInvalidProjectionJob
+	}
+	if err := ctx.Err(); err != nil {
+		return ProjectionJob{}, false, err
+	}
+	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
+		return ProjectionJob{}, false, err
+	}
+	nowText := now.UTC().Format(projectionTimestampLayout)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projection_jobs
+		 SET state=CASE WHEN attempt_count>=? THEN 'dead_letter' ELSE 'pending' END,
+		  next_attempt_at=CASE WHEN attempt_count>=? THEN next_attempt_at ELSE ? END,
+		  last_error_code=CASE WHEN attempt_count>=? THEN 'lease_expired' ELSE last_error_code END,
+		  lease_token=NULL,lease_until=NULL,updated_at=?
+		 WHERE state='leased' AND lease_until<=?`,
+		maxAttempts, maxAttempts, nowText, maxAttempts, nowText, nowText,
+	); err != nil {
+		return ProjectionJob{}, false, errors.New("expired projection leases could not be recovered")
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE projection_jobs SET state='dead_letter',last_error_code=COALESCE(last_error_code,'attempts_exhausted'),updated_at=?
+		 WHERE state='pending' AND attempt_count>=?`, nowText, maxAttempts,
+	); err != nil {
+		return ProjectionJob{}, false, errors.New("exhausted projection jobs could not be closed")
+	}
+	for rejected := 0; rejected < 100; rejected++ {
+		var revisionID string
+		err := tx.QueryRowContext(ctx,
+			`SELECT revision_id FROM projection_jobs
+			 WHERE state='pending' AND next_attempt_at<=? AND attempt_count<?
+			 ORDER BY sequence_id LIMIT 1`, nowText, maxAttempts,
+		).Scan(&revisionID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProjectionJob{}, false, nil
+		}
+		if err != nil {
+			return ProjectionJob{}, false, errors.New("due projection job could not be selected")
+		}
+		var tokenBytes [16]byte
+		if _, err := rand.Read(tokenBytes[:]); err != nil {
+			return ProjectionJob{}, false, errors.New("projection lease token could not be generated")
+		}
+		leaseToken := hex.EncodeToString(tokenBytes[:])
+		leaseUntil := now.Add(leaseDuration).UTC().Format(projectionTimestampLayout)
+		result, err := tx.ExecContext(ctx,
+			`UPDATE projection_jobs SET state='leased',attempt_count=attempt_count+1,
+			 lease_token=?,lease_until=?,updated_at=?
+			 WHERE revision_id=? AND state='pending' AND next_attempt_at<=? AND attempt_count<?`,
+			leaseToken, leaseUntil, nowText, revisionID, nowText, maxAttempts,
+		)
+		if err != nil {
+			return ProjectionJob{}, false, errors.New("projection job could not be leased")
+		}
+		updated, err := result.RowsAffected()
+		if err != nil || updated != 1 {
+			return ProjectionJob{}, false, errors.New("selected projection job was claimed concurrently")
+		}
+		job, err := queryProjectionJobByRevision(ctx, tx, projectKey, revisionID)
+		if err != nil {
+			// Quarantine corrupt queue data with a fixed reason. Do not expose its
+			// payload or error text, and continue to the next due job.
+			result, quarantineErr := tx.ExecContext(ctx,
+				`UPDATE projection_jobs SET state='dead_letter',lease_token=NULL,lease_until=NULL,
+				 last_error_code='invalid_job',updated_at=?
+				 WHERE revision_id=? AND state='leased' AND lease_token=?`, nowText, revisionID, leaseToken,
+			)
+			if quarantineErr != nil {
+				return ProjectionJob{}, false, errors.New("invalid projection job could not be quarantined")
+			}
+			if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+				return ProjectionJob{}, false, errors.New("invalid projection job quarantine could not be verified")
+			}
+			var invalidJob ProjectionJob
+			if err := tx.QueryRowContext(ctx,
+				"SELECT job_id,revision_id,state,attempt_count FROM projection_jobs WHERE revision_id=?", revisionID,
+			).Scan(&invalidJob.JobID, &invalidJob.RevisionID, &invalidJob.State, &invalidJob.AttemptCount); err != nil {
+				return ProjectionJob{}, false, errors.New("quarantined projection job could not be read")
+			}
+			invalidJob.LastErrorCode = sql.NullString{String: "invalid_job", Valid: true}
+			return invalidJob, true, nil
+		}
+		if !job.LeaseToken.Valid || job.LeaseToken.String != leaseToken || !job.LeaseUntil.Valid {
+			return ProjectionJob{}, false, errors.New("claimed projection job could not be verified")
+		}
+		return job, true, nil
+	}
+	return ProjectionJob{}, false, nil
+}
+
+// MarkLeasedProjectionJobApplied acknowledges only the lease currently owned
+// by the caller. A stale worker cannot acknowledge a reclaimed job.
+func MarkLeasedProjectionJobApplied(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	revisionID string,
+	leaseToken string,
+	payloadSHA256 string,
+	appliedAt time.Time,
+) error {
+	if ctx == nil || tx == nil || !graphDigestPattern.MatchString(projectKey) ||
+		!validProjectionRevisionID(revisionID) || !validProjectionLeaseToken(leaseToken) ||
+		!validProjectionRevisionID(payloadSHA256) || appliedAt.IsZero() {
+		return ErrInvalidProjectionJob
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
+		return err
+	}
+	job, err := queryProjectionJobByRevision(ctx, tx, projectKey, revisionID)
+	if err != nil {
+		return err
+	}
+	if job.State != "leased" || !job.LeaseToken.Valid || job.LeaseToken.String != leaseToken {
+		return ErrProjectionJobNotPending
+	}
+	if job.PayloadSHA256 != payloadSHA256 {
+		return ErrProjectionJobConflict
+	}
+	now := appliedAt.UTC().Format(projectionTimestampLayout)
+	result, err := tx.ExecContext(ctx,
+		`UPDATE projection_jobs SET state='applied',lease_token=NULL,lease_until=NULL,
+		 applied_at=?,updated_at=? WHERE revision_id=? AND state='leased' AND lease_token=? AND payload_sha256=?`,
+		now, now, revisionID, leaseToken, payloadSHA256,
+	)
+	if err != nil {
+		return errors.New("leased projection job acknowledgement could not be stored")
+	}
+	updated, err := result.RowsAffected()
+	if err != nil || updated != 1 {
+		return ErrProjectionJobNotPending
+	}
+	return nil
+}
+
+// FailLeasedProjectionJob releases a failed delivery for retry or moves it to
+// dead_letter after maxAttempts. Only the worker presenting the current lease
+// token can change the job.
+func FailLeasedProjectionJob(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	revisionID string,
+	leaseToken string,
+	payloadSHA256 string,
+	errorCode string,
+	now time.Time,
+	nextAttemptAt time.Time,
+	maxAttempts int,
+) error {
+	if ctx == nil || tx == nil || !graphDigestPattern.MatchString(projectKey) || !validProjectionRevisionID(revisionID) ||
+		!validProjectionLeaseToken(leaseToken) || !validProjectionRevisionID(payloadSHA256) || !projectionErrorCodePattern.MatchString(errorCode) ||
+		now.IsZero() || nextAttemptAt.Before(now) || maxAttempts < 1 || maxAttempts > 100 {
+		return ErrInvalidProjectionJob
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
+		return err
+	}
+	job, err := queryProjectionJobByRevision(ctx, tx, projectKey, revisionID)
+	if err != nil {
+		return err
+	}
+	if job.State != "leased" || !job.LeaseToken.Valid || job.LeaseToken.String != leaseToken {
+		return ErrProjectionJobNotPending
+	}
+	if job.PayloadSHA256 != payloadSHA256 {
+		return ErrProjectionJobConflict
+	}
+	state := "pending"
+	if job.AttemptCount >= maxAttempts {
+		state = "dead_letter"
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE projection_jobs SET state=?,next_attempt_at=?,lease_token=NULL,lease_until=NULL,
+		 last_error_code=?,updated_at=? WHERE revision_id=? AND state='leased' AND lease_token=? AND payload_sha256=?`,
+		state, nextAttemptAt.UTC().Format(projectionTimestampLayout), errorCode,
+		now.UTC().Format(projectionTimestampLayout), revisionID, leaseToken, payloadSHA256,
+	)
+	if err != nil {
+		return errors.New("failed projection job could not be rescheduled")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return ErrProjectionJobNotPending
+	}
+	return nil
+}
+
+var projectionErrorCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+func validProjectionLeaseToken(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 type projectionJobQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
@@ -208,21 +434,21 @@ func queryProjectionJobByRevision(
 	revisionID string,
 ) (ProjectionJob, error) {
 	var job ProjectionJob
-	var observationID string
 	err := queryer.QueryRowContext(ctx,
 		`SELECT j.job_id,j.revision_id,j.payload_json,j.payload_sha256,j.state,j.attempt_count,
-		 j.next_attempt_at,j.created_at,j.updated_at,j.last_error_code,j.applied_at,r.observation_id
+		 j.next_attempt_at,j.created_at,j.updated_at,j.last_error_code,j.applied_at,
+		 j.lease_token,j.lease_until,r.observation_id
 		 FROM projection_jobs j JOIN capture_revision_registry r ON r.revision_id=j.revision_id
 		 WHERE j.revision_id=?`, revisionID,
 	).Scan(
 		&job.JobID, &job.RevisionID, &job.PayloadJSON, &job.PayloadSHA256, &job.State,
 		&job.AttemptCount, &job.NextAttemptAt, &job.CreatedAt, &job.UpdatedAt,
-		&job.LastErrorCode, &job.AppliedAt, &observationID,
+		&job.LastErrorCode, &job.AppliedAt, &job.LeaseToken, &job.LeaseUntil, &job.ObservationID,
 	)
 	if err != nil {
 		return ProjectionJob{}, err
 	}
-	if err := validateStoredProjectionJob(job, projectKey, observationID); err != nil {
+	if err := validateStoredProjectionJob(job, projectKey, job.ObservationID); err != nil {
 		return ProjectionJob{}, err
 	}
 	return job, nil
@@ -248,6 +474,13 @@ func validateStoredProjectionJob(job ProjectionJob, projectKey, observationID st
 	case "pending", "leased", "applied", "dead_letter":
 	default:
 		return errors.New("stored projection job state is invalid")
+	}
+	if job.State == "leased" {
+		if !job.LeaseToken.Valid || !validProjectionLeaseToken(job.LeaseToken.String) || !job.LeaseUntil.Valid {
+			return errors.New("stored projection job lease is invalid")
+		}
+	} else if job.LeaseToken.Valid || job.LeaseUntil.Valid {
+		return errors.New("stored non-leased projection job has lease metadata")
 	}
 	return nil
 }

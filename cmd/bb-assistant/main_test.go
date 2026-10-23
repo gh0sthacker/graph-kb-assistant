@@ -143,6 +143,42 @@ func TestProjectAuditCLIOutputIsJSON(t *testing.T) {
 	}
 }
 
+func TestProjectionWorkerCLIReportsEmptyQueueAsJSON(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "neo4j")
+	dataRoot := filepath.Join(t.TempDir(), "private-data")
+	ref := project.CaidoProjectRef{InstanceID: "projection-worker-cli", ProjectID: "empty-queue"}
+	projectStore, err := store.CreateProject(t.Context(), ref, dataRoot)
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	key := projectStore.ProjectKey
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	originalStdout := os.Stdout
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writeEnd
+	t.Cleanup(func() { os.Stdout = originalStdout })
+	if err := runProjectionWorker([]string{"--project-key", key, "--data-root", dataRoot}); err != nil {
+		t.Fatalf("runProjectionWorker() error = %v", err)
+	}
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output projectionWorkerDrainOutput
+	if err := json.NewDecoder(readEnd).Decode(&output); err != nil {
+		t.Fatalf("projection-worker output is not JSON: %v", err)
+	}
+	_ = readEnd.Close()
+	if output.ProjectKey != key || !output.Idle || output.Processed != 0 || len(output.Jobs) != 1 || output.Jobs[0].State != "idle" {
+		t.Fatalf("unexpected projection-worker output: %+v", output)
+	}
+}
+
 func TestCaidoReconcileCLIValidatesProjectAndBoundsBeforeStartingBridge(t *testing.T) {
 	if err := reconcileCaidoHistory([]string{"--project-key", "invalid"}); err == nil {
 		t.Fatal("caido-reconcile accepted an invalid project key")

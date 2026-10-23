@@ -762,15 +762,15 @@ func projectGraphBundles(ctx context.Context, selected *store.ProjectStore, bund
 	if err != nil {
 		return false, false, errors.New("selected project graph writer could not be opened")
 	}
-	_, importErr := graphWriter.ImportBundles(ctx, bundles)
+	importResult, importErr := graphWriter.ImportBundles(ctx, bundles)
 	if importErr != nil {
 		return false, false, importErr
 	}
-	syncResult, syncErr := graphsync.Drain(ctx, selected)
+	syncResult, syncErr := graphsync.DrainUntilBundleApplied(ctx, selected, importResult.BundleID)
 	if syncErr != nil {
 		return true, false, syncErr
 	}
-	return true, syncResult.State == "ready" && syncResult.Pending == 0, nil
+	return true, syncResult.State == "ready", nil
 }
 
 func persistGraphMappings(ctx context.Context, conn *sql.Conn, prepared []preparedExchange, graphObservationIDs []string) error {

@@ -22,23 +22,39 @@ var (
 	ErrUnsupported           = errors.New("project maintenance locking is supported on Linux only")
 )
 
-// Lock is an exclusive project maintenance lease. It must not be copied.
+// Lock is an exclusive maintenance lease or shared project read lease. It must not be copied.
 type Lock struct {
 	mu        sync.Mutex
 	directory string
+	exclusive bool
 	release   func() error
 }
 
-// CoversDirectory reports whether this lease was acquired for the given
+// CoversDirectory reports whether this active lease was acquired for the given
 // directory. Callers that open a snapshot under an existing exclusive lease
 // use it to prevent accidentally bypassing coordination with a lease for a
 // different project.
 func (l *Lock) CoversDirectory(path string) bool {
+	return l.coversDirectory(path, false)
+}
+
+// CoversExclusiveDirectory reports whether this lock currently holds the
+// exclusive maintenance lease for path. Closed and shared-read leases fail.
+func (l *Lock) CoversExclusiveDirectory(path string) bool {
+	return l.coversDirectory(path, true)
+}
+
+func (l *Lock) coversDirectory(path string, requireExclusive bool) bool {
 	if l == nil || path == "" {
 		return false
 	}
 	absolute, err := filepath.Abs(path)
-	return err == nil && l.directory == filepath.Clean(absolute)
+	if err != nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.release != nil && l.directory == filepath.Clean(absolute) && (!requireExclusive || l.exclusive)
 }
 
 // Acquire waits for exclusive access to projectDir for at most

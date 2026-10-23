@@ -74,7 +74,7 @@ func acquireWithMode(ctx context.Context, projectDir string, maxWait time.Durati
 			return nil, err
 		}
 		directoryOwned = true
-		return &Lock{directory: projectDir, release: func() error {
+		return &Lock{directory: projectDir, exclusive: false, release: func() error {
 			unlockErr := syscall.Flock(directory, syscall.LOCK_UN)
 			closeErr := syscall.Close(directory)
 			if unlockErr != nil || closeErr != nil {
@@ -115,7 +115,7 @@ func acquireWithMode(ctx context.Context, projectDir string, maxWait time.Durati
 			}
 			owned = true
 			directoryOwned = true
-			return &Lock{directory: projectDir, release: func() error {
+			return &Lock{directory: projectDir, exclusive: true, release: func() error {
 				unlockErr := syscall.Flock(fd, syscall.LOCK_UN)
 				closeErr := file.Close()
 				directoryUnlockErr := syscall.Flock(directory, syscall.LOCK_UN)

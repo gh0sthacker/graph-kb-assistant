@@ -253,6 +253,260 @@ func TestStoredProjectionJobMustMatchRegisteredCapture(t *testing.T) {
 	}
 }
 
+func TestProjectionJobLeaseIsExclusiveAndAckRequiresCurrentToken(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("6", 64)
+	now := time.Date(2026, 10, 23, 14, 0, 0, 0, time.UTC)
+	registerAndEnqueueProjectionJob(t, db, revisionID, "capture-lease", now)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, found, err := ClaimNextProjectionJob(ctx, tx, projectionTestProjectKey, now, time.Minute, 3)
+	if err != nil || !found {
+		_ = tx.Rollback()
+		t.Fatalf("claim due job: found=%v err=%v", found, err)
+	}
+	if claimed.State != "leased" || claimed.AttemptCount != 1 || !claimed.LeaseToken.Valid || claimed.LeaseToken.String == "" || claimed.ObservationID != "capture-lease" {
+		_ = tx.Rollback()
+		t.Fatalf("claimed job fields = %+v", claimed)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ClaimNextProjectionJob(ctx, tx, projectionTestProjectKey, now.Add(30*time.Second), time.Minute, 3); err != nil || found {
+		_ = tx.Rollback()
+		t.Fatalf("active lease was claimable again: found=%v err=%v", found, err)
+	}
+	_ = tx.Rollback()
+
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLeasedProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID, strings.Repeat("b", 32), claimed.PayloadSHA256, now.Add(31*time.Second)); !errors.Is(err, ErrProjectionJobNotPending) {
+		_ = tx.Rollback()
+		t.Fatalf("stale lease token acknowledgement error = %v", err)
+	}
+	if err := MarkLeasedProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID, claimed.LeaseToken.String, claimed.PayloadSHA256, now.Add(31*time.Second)); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("current lease token acknowledgement: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || job.State != "applied" {
+		t.Fatalf("leased job state = %q err=%v, want applied", job.State, err)
+	}
+}
+
+func TestProjectionJobFailureSchedulesRetryThenDeadLetters(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("5", 64)
+	now := time.Date(2026, 10, 23, 15, 0, 0, 0, time.UTC)
+	registerAndEnqueueProjectionJob(t, db, revisionID, "capture-retry", now)
+
+	claim := func(at time.Time) ProjectionJob {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, found, err := ClaimNextProjectionJob(ctx, tx, projectionTestProjectKey, at, time.Minute, 2)
+		if err != nil || !found {
+			_ = tx.Rollback()
+			t.Fatalf("claim retry job at %s: found=%v err=%v", at, found, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	fail := func(job ProjectionJob, at time.Time, next time.Time) {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := FailLeasedProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, job.LeaseToken.String, job.PayloadSHA256, "projection_unavailable", at, next, 2); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("schedule projection retry: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first := claim(now)
+	retryAt := now.Add(10 * time.Second)
+	fail(first, now.Add(time.Second), retryAt)
+	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || job.State != "pending" || job.AttemptCount != 1 || job.NextAttemptAt != retryAt.Format(projectionTimestampLayout) || !job.LastErrorCode.Valid || job.LastErrorCode.String != "projection_unavailable" {
+		t.Fatalf("retry state = %+v err=%v", job, err)
+	}
+
+	second := claim(retryAt)
+	fail(second, retryAt.Add(time.Second), retryAt.Add(20*time.Second))
+	job, err = ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || job.State != "dead_letter" || job.AttemptCount != 2 {
+		t.Fatalf("exhausted retry state = %+v err=%v, want dead_letter", job, err)
+	}
+}
+
+func TestProjectionJobExpiredLeaseCanBeReclaimed(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("4", 64)
+	now := time.Date(2026, 10, 23, 16, 0, 0, 0, time.UTC)
+	registerAndEnqueueProjectionJob(t, db, revisionID, "capture-expired", now)
+
+	claimAt := func(at time.Time) ProjectionJob {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, found, err := ClaimNextProjectionJob(ctx, tx, projectionTestProjectKey, at, time.Second, 3)
+		if err != nil || !found {
+			_ = tx.Rollback()
+			t.Fatalf("claim expired projection: found=%v err=%v", found, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	first := claimAt(now)
+	second := claimAt(now.Add(2 * time.Second))
+	if first.LeaseToken.String == second.LeaseToken.String || second.AttemptCount != 2 {
+		t.Fatalf("expired lease was not replaced: first=%+v second=%+v", first, second)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLeasedProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID, second.LeaseToken.String, second.PayloadSHA256, now.Add(3*time.Second)); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("acknowledge reclaimed lease: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProjectionJobClaimQuarantinesCorruptJobAndContinues(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
+	corruptRevision, validRevision := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	registerAndEnqueueProjectionJob(t, db, corruptRevision, "capture-corrupt", now)
+	registerAndEnqueueProjectionJob(t, db, validRevision, "capture-valid", now.Add(time.Second))
+	if _, err := db.ExecContext(ctx,
+		"UPDATE projection_jobs SET payload_sha256=? WHERE revision_id=?", strings.Repeat("f", 64), corruptRevision,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, found, err := ClaimNextProjectionJob(ctx, tx, projectionTestProjectKey, now.Add(2*time.Second), time.Minute, 3)
+	if err != nil || !found || claimed.RevisionID != corruptRevision || claimed.State != "dead_letter" {
+		_ = tx.Rollback()
+		t.Fatalf("claim should report quarantined job: job=%+v found=%v err=%v", claimed, found, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var state, reason string
+	if err := db.QueryRowContext(ctx,
+		"SELECT state,last_error_code FROM projection_jobs WHERE revision_id=?", corruptRevision,
+	).Scan(&state, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if state != "dead_letter" || reason != "invalid_job" {
+		t.Fatalf("corrupt job state=%q reason=%q, want dead_letter/invalid_job", state, reason)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, found, err := ClaimNextProjectionJob(ctx, tx, projectionTestProjectKey, now.Add(3*time.Second), time.Minute, 3)
+	if err != nil || !found || valid.RevisionID != validRevision || valid.State != "leased" {
+		_ = tx.Rollback()
+		t.Fatalf("claim valid job after quarantine: job=%+v found=%v err=%v", valid, found, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLeasedProjectionAcknowledgementRequiresPayloadDigest(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("3", 64)
+	now := time.Date(2026, 10, 23, 18, 0, 0, 0, time.UTC)
+	registerAndEnqueueProjectionJob(t, db, revisionID, "capture-digest-fence", now)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, found, err := ClaimNextProjectionJob(ctx, tx, projectionTestProjectKey, now, time.Minute, 3)
+	if err != nil || !found {
+		_ = tx.Rollback()
+		t.Fatalf("claim digest-fenced job: found=%v err=%v", found, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLeasedProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID,
+		claimed.LeaseToken.String, strings.Repeat("f", 64), now.Add(time.Second)); !errors.Is(err, ErrProjectionJobConflict) {
+		_ = tx.Rollback()
+		t.Fatalf("wrong payload digest acknowledgement error=%v", err)
+	}
+	_ = tx.Rollback()
+	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || job.State != "leased" {
+		t.Fatalf("wrong digest changed the leased job: job=%+v err=%v", job, err)
+	}
+}
+
+func registerAndEnqueueProjectionJob(t *testing.T, db *sql.DB, revisionID, captureID string, createdAt time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerProjectionRevision(t, ctx, tx, revisionID, captureID, createdAt)
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, captureID, minimalProjectionPayload(projectionTestProjectKey, captureID), createdAt); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMarkProjectionJobAppliedAcknowledgesPendingAndIsIdempotent(t *testing.T) {
 	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
 	defer db.Close()
@@ -307,7 +561,7 @@ func TestMarkProjectionJobAppliedRejectsLeasedJob(t *testing.T) {
 	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-leased", minimalProjectionPayload(projectionTestProjectKey, "observation-leased"), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE projection_jobs SET state='leased',lease_token='lease',lease_until=? WHERE revision_id=?", now.Add(time.Minute).Format(projectionTimestampLayout), revisionID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE projection_jobs SET state='leased',lease_token=?,lease_until=? WHERE revision_id=?", strings.Repeat("a", 32), now.Add(time.Minute).Format(projectionTimestampLayout), revisionID); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

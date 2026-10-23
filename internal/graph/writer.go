@@ -718,6 +718,42 @@ func (w *Writer) PendingOutbox(ctx context.Context, limit int) ([]OutboxItem, er
 	return items, nil
 }
 
+// OutboxBundleApplied reports whether the exact imported bundle has been
+// acknowledged by Neo4j. It reads only the selected BehaviorGraph outbox.
+func (w *Writer) OutboxBundleApplied(ctx context.Context, bundleID string) (bool, error) {
+	if w == nil || w.graphPath == "" || len(bundleID) != len("bundle-")+64 || !strings.HasPrefix(bundleID, "bundle-") {
+		return false, errors.New("Neo4j outbox bundle identity is invalid")
+	}
+	digest := strings.TrimPrefix(bundleID, "bundle-")
+	if !graphDigestPattern.MatchString(digest) {
+		return false, errors.New("Neo4j outbox bundle identity is invalid")
+	}
+	info, err := os.Lstat(w.graphPath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return false, errors.New("BehaviorGraph outbox database is unavailable")
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: w.graphPath}).String()+"?mode=ro")
+	if err != nil {
+		return false, errors.New("BehaviorGraph outbox database could not be opened")
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var state, payloadSHA string
+	if err := db.QueryRowContext(ctx,
+		"SELECT state,payload_sha256 FROM neo4j_outbox WHERE bundle_id=?", bundleID,
+	).Scan(&state, &payloadSHA); err != nil || payloadSHA != digest || (state != "pending" && state != "applied") {
+		return false, errors.New("Neo4j outbox bundle state is unavailable")
+	}
+	if state == "pending" {
+		return false, nil
+	}
+	var appliedSHA string
+	if err := db.QueryRowContext(ctx, "SELECT applied_sha256 FROM neo4j_outbox WHERE bundle_id=?", bundleID).Scan(&appliedSHA); err != nil || appliedSHA != digest {
+		return false, errors.New("Neo4j outbox applied checksum is invalid")
+	}
+	return true, nil
+}
+
 // MarkOutboxApplied acknowledges one item only after its Neo4j transaction
 // committed. The payload hash remains available for local audit.
 func (w *Writer) MarkOutboxApplied(ctx context.Context, item OutboxItem) error {

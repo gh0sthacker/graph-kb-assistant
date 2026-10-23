@@ -46,7 +46,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
+		return errors.New("usage: bb-assistant <version|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
 	}
 	switch args[0] {
 	case "version":
@@ -62,6 +62,8 @@ func run(args []string) error {
 		return backfillNeo4j(args[1:])
 	case "neo4j-sync":
 		return syncNeo4j(args[1:])
+	case "projection-worker":
+		return runProjectionWorker(args[1:])
 	case "caido-reconcile":
 		return reconcileCaidoHistory(args[1:])
 	case "kb-validate":
@@ -308,6 +310,111 @@ func auditProject(args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(report)
+}
+
+type projectionWorkerDrainOutput struct {
+	ProjectKey      string                          `json:"project_key"`
+	Processed       int                             `json:"processed"`
+	Applied         int                             `json:"applied"`
+	Retried         int                             `json:"retried"`
+	DeadLetter      int                             `json:"dead_letter"`
+	Idle            bool                            `json:"idle"`
+	BackendDisabled bool                            `json:"backend_disabled"`
+	Jobs            []ingest.ProjectionWorkerResult `json:"jobs"`
+}
+
+func runProjectionWorker(args []string) error {
+	flags := flag.NewFlagSet("projection-worker", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	maxJobs := flags.Int("max-jobs", 10, "maximum projection jobs to process in this invocation (1-100)")
+	leaseDuration := flags.Duration("lease-duration", 10*time.Minute, "lease and per-job execution limit (30s-30m)")
+	maxAttempts := flags.Int("max-attempts", 8, "maximum delivery attempts before dead-lettering (1-100)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
+		return errors.New("usage: bb-assistant projection-worker --project-key <sha256> [--max-jobs 10] [--lease-duration 10m] [--max-attempts 8] [--data-root path]")
+	}
+	if *maxJobs < 1 || *maxJobs > 100 || *leaseDuration < 30*time.Second ||
+		*leaseDuration > 30*time.Minute || *maxAttempts < 1 || *maxAttempts > 100 {
+		return errors.New("projection worker limits are invalid")
+	}
+	refs, err := project.LoadProjectRefsReadOnly(*root)
+	if err != nil {
+		return err
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if key == selectedKeys[0] {
+			copyRef := ref
+			selected = &copyRef
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("selected project is not in the local project registry")
+	}
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	output := projectionWorkerDrainOutput{ProjectKey: selectedKeys[0], Jobs: make([]ingest.ProjectionWorkerResult, 0, *maxJobs)}
+	for index := 0; index < *maxJobs; index++ {
+		localCtx, cancel := context.WithTimeout(ctx, *leaseDuration-time.Second)
+		result, runErr := func() (ingest.ProjectionWorkerResult, error) {
+			maintenance, lockErr := projectlock.Acquire(localCtx, projectDirectory)
+			if lockErr != nil {
+				return ingest.ProjectionWorkerResult{}, lockErr
+			}
+			defer maintenance.Close()
+			selectedStore, openErr := store.OpenProjectForWrite(localCtx, *selected, *root)
+			if openErr != nil {
+				return ingest.ProjectionWorkerResult{}, openErr
+			}
+			defer selectedStore.Close()
+			return ingest.RunProjectionWorkerOnce(localCtx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{
+				LeaseDuration: *leaseDuration, MaxAttempts: *maxAttempts,
+			})
+		}()
+		cancel()
+		if runErr != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			return runErr
+		}
+		output.Jobs = append(output.Jobs, result)
+		if result.State == "backend_disabled" {
+			output.BackendDisabled = true
+			break
+		}
+		if result.State == "idle" {
+			output.Idle = true
+			break
+		}
+		output.Processed++
+		switch result.State {
+		case "applied":
+			output.Applied++
+		case "pending":
+			output.Retried++
+		case "dead_letter":
+			output.DeadLetter++
+		}
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
+		return errors.New("projection worker result could not be written")
+	}
+	return nil
 }
 
 func reconcileCaidoHistory(args []string) error {

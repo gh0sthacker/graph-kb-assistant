@@ -83,3 +83,73 @@ func Drain(ctx context.Context, selected *store.ProjectStore) (Result, error) {
 	}
 	return result, nil
 }
+
+// DrainUntilBundleApplied advances ordered outbox pages until the requested
+// bundle is acknowledged. Older backlog does not count as a failed projection
+// delivery; context cancellation leaves the projection lease recoverable.
+func DrainUntilBundleApplied(ctx context.Context, selected *store.ProjectStore, bundleID string) (Result, error) {
+	if selected == nil || selected.ProjectKey == "" || selected.Database == nil || selected.Database.DB() == nil || bundleID == "" {
+		return Result{}, errors.New("targeted graph outbox sync requires one selected project and bundle")
+	}
+	if backend := graphaccess.ConfiguredBackend(); backend != "neo4j" {
+		return Result{State: "disabled", ProjectKey: selected.ProjectKey, Backend: backend}, nil
+	}
+	writer, err := behaviorgraph.OpenWriter(ctx, selected)
+	if err != nil {
+		return Result{}, err
+	}
+	return drainUntilBundleApplied(ctx, selected.ProjectKey, bundleID,
+		func(ctx context.Context, target string) (bool, error) { return writer.OutboxBundleApplied(ctx, target) },
+		func(ctx context.Context) (Result, error) { return Drain(ctx, selected) },
+	)
+}
+
+func drainUntilBundleApplied(
+	ctx context.Context,
+	projectKey string,
+	bundleID string,
+	check func(context.Context, string) (bool, error),
+	drain func(context.Context) (Result, error),
+) (Result, error) {
+	if ctx == nil || projectKey == "" || bundleID == "" || check == nil || drain == nil {
+		return Result{}, errors.New("targeted graph outbox sync is invalid")
+	}
+	result := Result{State: "partial", ProjectKey: projectKey, Backend: "neo4j"}
+	for {
+		applied, err := check(ctx, bundleID)
+		if err != nil {
+			return result, err
+		}
+		if applied {
+			result.State = "ready"
+			return result, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		page, err := drain(ctx)
+		result.Applied += page.Applied
+		result.Pending = page.Pending
+		if page.Backend != "" {
+			result.Backend = page.Backend
+		}
+		if err != nil {
+			// A drain page can acknowledge the target and then fail on a later
+			// unrelated item. The target job is complete once its own durable
+			// applied marker is present, even if the following backlog item failed.
+			applied, checkErr := check(ctx, bundleID)
+			if checkErr == nil && applied {
+				result.State = "ready"
+				return result, nil
+			}
+			return result, err
+		}
+		if page.State == "disabled" {
+			result.State = "disabled"
+			return result, nil
+		}
+		if page.Applied == 0 {
+			return result, errors.New("Neo4j outbox made no progress before the target bundle was applied")
+		}
+	}
+}

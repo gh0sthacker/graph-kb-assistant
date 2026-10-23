@@ -42,7 +42,7 @@ func OpenReadOnlyUnderMaintenance(ctx context.Context, path string, maintenance 
 		return nil, errors.New("project maintenance lease is required for this read-only open")
 	}
 	absolute, err := filepath.Abs(path)
-	if err != nil || !maintenance.CoversDirectory(filepath.Dir(absolute)) {
+	if err != nil || !maintenance.CoversExclusiveDirectory(filepath.Dir(absolute)) {
 		return nil, errors.New("project maintenance lease does not match the database directory")
 	}
 	return open(ctx, path, true, false)

@@ -119,6 +119,37 @@ func TestReadLeaseDoesNotCreateLockFiles(t *testing.T) {
 	}
 }
 
+func TestLeaseCoverageRequiresActiveExclusiveLockWhenRequested(t *testing.T) {
+	dir := privateDirectory(t)
+	reader, err := AcquireRead(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reader.CoversDirectory(dir) || reader.CoversExclusiveDirectory(dir) {
+		t.Fatal("shared lease coverage did not distinguish its lock mode")
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reader.CoversDirectory(dir) || reader.CoversExclusiveDirectory(dir) {
+		t.Fatal("closed shared lease still reported directory coverage")
+	}
+
+	writer, err := Acquire(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !writer.CoversDirectory(dir) || !writer.CoversExclusiveDirectory(dir) {
+		t.Fatal("active exclusive lease did not report directory coverage")
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if writer.CoversDirectory(dir) || writer.CoversExclusiveDirectory(dir) {
+		t.Fatal("closed exclusive lease still reported directory coverage")
+	}
+}
+
 func TestAcquisitionCancellationAndWaitBound(t *testing.T) {
 	dir := privateDirectory(t)
 	takeLock(t, dir)
