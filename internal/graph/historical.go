@@ -163,6 +163,12 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 		"Actor, session, tenant, role, and object context were not provided by the historical exchange.",
 		"Business-action semantics and body media other than JSON, form-urlencoded, multipart/form-data, HTML, and XHTML are not implemented by the Go mapper.",
 	}
+	if exchange.ResponseStatusMetadataMismatch {
+		cardMissing = append(cardMissing, "Caido history status metadata differed from the fetched response line; the detailed response status was retained.")
+	}
+	if exchange.MalformedHeaderNamePresent {
+		cardMissing = append(cardMissing, "One or more printable Caido header names were preserved in reconstructed text but could not be mapped as HTTP header fields.")
+	}
 	if queryParseIncomplete {
 		cardMissing = append(cardMissing, "Query parameter names or field nodes could not be mapped within the mapper limit.")
 	}

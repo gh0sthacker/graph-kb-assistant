@@ -16,22 +16,28 @@ var ErrMCP = errors.New("Caido MCP history read failed")
 // ProjectRef is a stable local identity. Caido's current MCP tools do not
 // expose a stable instance identifier, so InstanceID must be operator-set.
 type HttpExchange struct {
-	Ref                  ExchangeRef
-	CapturedAt           *string
-	RequestRaw           []byte
-	ResponseRaw          []byte
-	HasResponse          bool
-	Method               string
-	Scheme               string
-	Host                 string
-	Port                 int
-	Target               string
-	ResponseStatus       *int
-	RequestTruncated     *bool
-	ResponseTruncated    *bool
-	SourceCursor         *string
-	RequestWireFidelity  string
-	ResponseWireFidelity string
+	Ref         ExchangeRef
+	CapturedAt  *string
+	RequestRaw  []byte
+	ResponseRaw []byte
+	HasResponse bool
+	Method      string
+	Scheme      string
+	Host        string
+	Port        int
+	Target      string
+	// MalformedHeaderNamePresent marks printable header names retained from
+	// Caido that cannot be represented as HTTP tokens or HTTP/2 pseudo-headers.
+	MalformedHeaderNamePresent bool
+	ResponseStatus             *int
+	// ResponseStatusMetadataMismatch records a disagreement between Caido's
+	// history-list status and the status parsed from its detailed response.
+	ResponseStatusMetadataMismatch bool
+	RequestTruncated               *bool
+	ResponseTruncated              *bool
+	SourceCursor                   *string
+	RequestWireFidelity            string
+	ResponseWireFidelity           string
 }
 
 func (e HttpExchange) Validate() error {

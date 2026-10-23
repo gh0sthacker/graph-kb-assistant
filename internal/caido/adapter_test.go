@@ -317,3 +317,153 @@ func TestParseRequestLineRejectsLineBeyondConfiguredMaximum(t *testing.T) {
 		t.Fatalf("parseRequestLine() accepted a %d-byte line beyond the configured maximum", len(line))
 	}
 }
+
+func TestParseHeadersReportsControlCharacterIndexWithoutEchoingValue(t *testing.T) {
+	privateValue := "private-header-value\r\nInjected: do-not-log"
+	_, err := parseHeaders([]any{
+		map[string]any{"name": "X-Trace", "value": "ok"},
+		map[string]any{"name": "X-Unsafe", "value": privateValue},
+	})
+	if err == nil {
+		t.Fatal("parseHeaders() accepted a header value with a control character")
+	}
+	if !strings.Contains(err.Error(), "header 2") || !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("parseHeaders() error does not identify the safe failure location: %v", err)
+	}
+	if strings.Contains(err.Error(), privateValue) || strings.Contains(err.Error(), "private-header-value") {
+		t.Fatal("parseHeaders() included the private header value in its error")
+	}
+}
+
+func TestParseHeadersReportsNonTextValueWithoutEchoingValue(t *testing.T) {
+	_, err := parseHeaders([]any{map[string]any{"name": "X-Trace", "value": map[string]any{"secret": "private"}}})
+	if err == nil {
+		t.Fatal("parseHeaders() accepted a non-text header value")
+	}
+	if !strings.Contains(err.Error(), "header 1") || !strings.Contains(err.Error(), "non-text value") {
+		t.Fatalf("parseHeaders() error does not identify the safe failure location: %v", err)
+	}
+	if strings.Contains(err.Error(), "private") {
+		t.Fatal("parseHeaders() included a private header value in its error")
+	}
+}
+
+func TestParseHeadersPreservesNonTokenPrintableName(t *testing.T) {
+	name := "X-Invalid/Name"
+	got, err := parseHeaders([]any{map[string]any{"name": name, "value": "preserved"}})
+	if err != nil {
+		t.Fatalf("parseHeaders() rejected a printable non-token name: %v", err)
+	}
+	want := [][2]string{{name, "preserved"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseHeaders() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseHeadersRejectsControlCharacterInNameWithoutEchoingValue(t *testing.T) {
+	privateName := "X-Unsafe\r\nInjected"
+	_, err := parseHeaders([]any{map[string]any{"name": privateName, "value": "private"}})
+	if err == nil {
+		t.Fatal("parseHeaders() accepted a header name with a control character")
+	}
+	if !strings.Contains(err.Error(), "header 1") || !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("parseHeaders() error does not identify the safe failure category: %v", err)
+	}
+	if strings.Contains(err.Error(), privateName) || strings.Contains(err.Error(), "private") {
+		t.Fatal("parseHeaders() included a private header in its error")
+	}
+}
+
+func TestParseHeadersReportsNonTextNameCategoryWithoutEchoingValue(t *testing.T) {
+	_, err := parseHeaders([]any{map[string]any{"name": map[string]any{"private": "name"}, "value": "private-value"}})
+	if err == nil {
+		t.Fatal("parseHeaders() accepted a non-text header name")
+	}
+	if !strings.Contains(err.Error(), "header 1") || !strings.Contains(err.Error(), "non-text name") {
+		t.Fatalf("parseHeaders() error does not identify the safe failure category: %v", err)
+	}
+	if strings.Contains(err.Error(), "private") {
+		t.Fatal("parseHeaders() included a private header value in its error")
+	}
+}
+
+func TestParseHeadersAcceptsHTTP2PseudoHeaderNames(t *testing.T) {
+	input := []any{
+		map[string]any{"name": ":method", "value": "GET"},
+		map[string]any{"name": ":authority", "value": "fixture.invalid"},
+		map[string]any{"name": ":path", "value": "/items?id=1"},
+	}
+	got, err := parseHeaders(input)
+	if err != nil {
+		t.Fatalf("parseHeaders() rejected valid HTTP/2 pseudo-header names: %v", err)
+	}
+	want := [][2]string{{":method", "GET"}, {":authority", "fixture.invalid"}, {":path", "/items?id=1"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseHeaders() = %#v, want %#v", got, want)
+	}
+}
+
+func TestHasMalformedHeaderNameRequiresHTTP2ForPseudoHeaders(t *testing.T) {
+	headers := [][2]string{{":method", "GET"}, {":authority", "fixture.invalid"}}
+	if hasMalformedHeaderName(headers, "GET / HTTP/2") {
+		t.Fatal("hasMalformedHeaderName() rejected HTTP/2 pseudo-headers")
+	}
+	if !hasMalformedHeaderName(headers, "GET / HTTP/1.1") {
+		t.Fatal("hasMalformedHeaderName() accepted pseudo-headers on HTTP/1.1")
+	}
+}
+
+func TestFetchExchangeFlagsPrintableNonTokenHeaderName(t *testing.T) {
+	selected := ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
+	metadata := RequestMetadata{RequestID: "fixture-request", Method: "GET", URL: "https://fixture.invalid/"}
+	payload := map[string]any{
+		"request": map[string]any{
+			"firstLine": "GET / HTTP/1.1",
+			"headers": []any{map[string]any{
+				"name": "X-Invalid/Name", "value": "preserved",
+			}},
+			"fingerprint": map[string]any{"kind": "empty", "bodySize": 0},
+		},
+	}
+	exchange, err := (&MCPReadSource{}).fetchExchange(selected, metadata, payload, bodyChunkBytes)
+	if err != nil {
+		t.Fatalf("fetchExchange() rejected a printable non-token header name: %v", err)
+	}
+	if !exchange.MalformedHeaderNamePresent {
+		t.Fatal("fetchExchange() did not retain the malformed-header-name state")
+	}
+	if !strings.Contains(string(exchange.RequestRaw), "X-Invalid/Name: preserved") {
+		t.Fatal("fetchExchange() did not preserve the printable header name in reconstructed text")
+	}
+}
+
+func TestFetchExchangePreservesDetailedResponseStatusOnMetadataMismatch(t *testing.T) {
+	selected := ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
+	metadataStatus := 200
+	metadata := RequestMetadata{
+		RequestID: "fixture-request", Method: "GET", URL: "https://fixture.invalid/", StatusCode: &metadataStatus,
+	}
+	payload := map[string]any{
+		"request": map[string]any{
+			"firstLine":   "GET / HTTP/1.1",
+			"headers":     []any{map[string]any{"name": "Host", "value": "fixture.invalid"}},
+			"fingerprint": map[string]any{"kind": "empty", "bodySize": 0},
+		},
+		"response": map[string]any{
+			"firstLine":   "HTTP/1.1 201 Created",
+			"headers":     []any{},
+			"bodySize":    0,
+			"fingerprint": map[string]any{"kind": "empty", "bodySize": 0},
+		},
+	}
+	exchange, err := (&MCPReadSource{}).fetchExchange(selected, metadata, payload, bodyChunkBytes)
+	if err != nil {
+		t.Fatalf("fetchExchange() rejected a detailed response with differing history metadata: %v", err)
+	}
+	if exchange.ResponseStatus == nil || *exchange.ResponseStatus != 201 {
+		t.Fatalf("fetchExchange() status = %v, want detailed status 201", exchange.ResponseStatus)
+	}
+	if !exchange.ResponseStatusMetadataMismatch {
+		t.Fatal("fetchExchange() did not retain the metadata mismatch state")
+	}
+}

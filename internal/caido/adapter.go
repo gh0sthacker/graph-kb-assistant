@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -42,6 +43,7 @@ func MaxSerializedMessageBytes(bodyLimit int) int64 {
 var (
 	processToolMu       = &sync.Mutex{}
 	httpToken           = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
+	http2PseudoHeader   = regexp.MustCompile(`^:[a-z0-9!#$%&'*+.^_` + "`" + `|~-]{1,128}$`)
 	requestLinePattern  = regexp.MustCompile(`^(\S+)\s+(\S+)\s+(HTTP/\d(\.\d)?)$`)
 	responseLinePattern = regexp.MustCompile(`^HTTP/\d(\.\d)?\s+(\d{3})(\s|$)`)
 )
@@ -302,10 +304,10 @@ func (s *MCPReadSource) FetchHistoryPage(project ProjectRef, page RequestMetadat
 				return err
 			}
 			var batchErr error
-			for _, row := range batch {
+			for rowIndex, row := range batch {
 				exchange, err := s.fetchExchange(project, row, payloads[row.RequestID], maxBodyBytes)
 				if err != nil {
-					batchErr = err
+					batchErr = sanitized("Caido history page row " + strconv.Itoa(start+rowIndex+1) + ": " + err.Error())
 					break
 				}
 				result.Exchanges = append(result.Exchanges, exchange)
@@ -851,8 +853,9 @@ func (s *MCPReadSource) fetchExchange(project ProjectRef, metadata RequestMetada
 	}
 	requestHeaders, err := parseHeaders(request["headers"])
 	if err != nil {
-		return HttpExchange{}, err
+		return HttpExchange{}, sanitized("Caido request headers are invalid: " + err.Error())
 	}
+	malformedHeaderNamePresent := hasMalformedHeaderName(requestHeaders, requestLine)
 	requestSize, err := bodySize(request, true)
 	if err != nil {
 		return HttpExchange{}, err
@@ -861,18 +864,18 @@ func (s *MCPReadSource) fetchExchange(project ProjectRef, metadata RequestMetada
 	var responseHeaders [][2]string
 	var responseSize int
 	var responseStatus *int
+	responseStatusMetadataMismatch := false
 	if response != nil {
 		responseLine, responseStatus, err = parseResponseLine(response["firstLine"])
 		if err != nil {
 			return HttpExchange{}, err
 		}
-		if metadata.StatusCode != nil && *responseStatus != *metadata.StatusCode {
-			return HttpExchange{}, sanitized("Caido response status does not match request metadata")
-		}
+		responseStatusMetadataMismatch = metadata.StatusCode != nil && *responseStatus != *metadata.StatusCode
 		responseHeaders, err = parseHeaders(response["headers"])
 		if err != nil {
-			return HttpExchange{}, err
+			return HttpExchange{}, sanitized("Caido response headers are invalid: " + err.Error())
 		}
+		malformedHeaderNamePresent = malformedHeaderNamePresent || hasMalformedHeaderName(responseHeaders, responseLine)
 		responseSize, err = bodySize(response, false)
 		if err != nil {
 			return HttpExchange{}, err
@@ -923,7 +926,8 @@ func (s *MCPReadSource) fetchExchange(project ProjectRef, metadata RequestMetada
 		Ref:        ExchangeRef{Project: project, RequestID: metadata.RequestID},
 		RequestRaw: requestRaw, ResponseRaw: responseRaw, HasResponse: response != nil,
 		Method: method, Scheme: strings.ToLower(parsedURL.Scheme), Host: parsedURL.Hostname(), Port: port,
-		Target: metadata.URL, ResponseStatus: responseStatus,
+		Target: metadata.URL, MalformedHeaderNamePresent: malformedHeaderNamePresent,
+		ResponseStatus: responseStatus, ResponseStatusMetadataMismatch: responseStatusMetadataMismatch,
 		RequestTruncated: requestTruncated, ResponseTruncated: responseTruncated,
 		RequestWireFidelity: "reconstructed_text", ResponseWireFidelity: choose(response != nil, "reconstructed_text", "unknown"),
 	}, nil
@@ -1130,19 +1134,27 @@ func parseHeaders(value any) ([][2]string, error) {
 	}
 	headers := make([][2]string, 0, len(rows))
 	totalBytes := 0
-	for _, item := range rows {
+	for index, item := range rows {
 		row, ok := item.(map[string]any)
 		if !ok {
-			return nil, sanitized("Caido exchange headers have an unsupported shape")
+			return nil, sanitized("Caido exchange header " + strconv.Itoa(index+1) + " has an unsupported shape")
 		}
 		name, nameOK := row["name"].(string)
 		value, valueOK := row["value"].(string)
-		if !nameOK || !httpToken.MatchString(name) || !valueOK {
-			return nil, sanitized("Caido exchange headers have an unsupported value")
+		if !nameOK {
+			return nil, sanitized("Caido exchange header " + strconv.Itoa(index+1) + " has a non-text name")
+		}
+		for _, r := range name {
+			if unicode.IsControl(r) {
+				return nil, sanitized("Caido exchange header " + strconv.Itoa(index+1) + " has a control character in its name")
+			}
+		}
+		if !valueOK {
+			return nil, sanitized("Caido exchange header " + strconv.Itoa(index+1) + " has a non-text value")
 		}
 		for _, r := range value {
 			if (r < 32 && r != '\t') || r == 127 {
-				return nil, sanitized("Caido exchange headers have an unsupported value")
+				return nil, sanitized("Caido exchange header " + strconv.Itoa(index+1) + " contains a disallowed control character")
 			}
 		}
 		totalBytes += len(name) + len(value) + 4
@@ -1152,6 +1164,28 @@ func parseHeaders(value any) ([][2]string, error) {
 		headers = append(headers, [2]string{name, value})
 	}
 	return headers, nil
+}
+
+func hasMalformedHeaderName(headers [][2]string, messageLine string) bool {
+	allowPseudoHeaders := false
+	for _, field := range strings.Fields(messageLine) {
+		if field == "HTTP/2" || field == "HTTP/3" {
+			allowPseudoHeaders = true
+			break
+		}
+	}
+	for _, header := range headers {
+		if httpToken.MatchString(header[0]) {
+			continue
+		}
+		if allowPseudoHeaders && http2PseudoHeader.MatchString(header[0]) {
+			continue
+		}
+		if !httpToken.MatchString(header[0]) {
+			return true
+		}
+	}
+	return false
 }
 
 func declaredUTF8Text(headers [][2]string) bool {

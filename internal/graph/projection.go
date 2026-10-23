@@ -23,10 +23,11 @@ import (
 const maxParsedBodyBytes = 2 << 20
 
 var (
-	fieldNamePattern    = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$`)
-	secretNamePattern   = regexp.MustCompile(`(?i)(token|secret|password|passwd|cookie|authorization|session|api[_-]?key|credential|email|phone|ssn)`)
-	httpMethodPattern = regexp.MustCompile(`^[A-Z]{1,16}$`)
-	headerNamePattern = regexp.MustCompile(`^[a-z0-9!#$%&'*+.^_` + "`" + `|~0-9-]{1,128}$`)
+	fieldNamePattern        = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$`)
+	secretNamePattern       = regexp.MustCompile(`(?i)(token|secret|password|passwd|cookie|authorization|session|api[_-]?key|credential|email|phone|ssn)`)
+	httpMethodPattern       = regexp.MustCompile(`^[A-Z]{1,16}$`)
+	headerNamePattern       = regexp.MustCompile(`^[a-z0-9!#$%&'*+.^_` + "`" + `|~0-9-]{1,128}$`)
+	pseudoHeaderNamePattern = regexp.MustCompile(`^:[a-z0-9!#$%&'*+.^_` + "`" + `|~-]{1,128}$`)
 )
 
 type SearchRecord struct {
@@ -140,7 +141,8 @@ func ProjectExchange(exchange caido.HttpExchange) (ExchangeProjection, error) {
 	}
 	parseComplete = parseComplete && requestBoundary && requestHeadersComplete && reqBodyComplete &&
 		exchange.HasResponse && responseBoundary && responseHeadersComplete && responseBodyComplete && status != nil &&
-		isExplicitFalse(exchange.RequestTruncated) && isExplicitFalse(exchange.ResponseTruncated)
+		isExplicitFalse(exchange.RequestTruncated) && isExplicitFalse(exchange.ResponseTruncated) &&
+		!exchange.ResponseStatusMetadataMismatch && !exchange.MalformedHeaderNamePresent
 	state := "partial"
 	if parseComplete {
 		state = "complete"
@@ -368,21 +370,48 @@ func splitMessage(raw []byte) ([]headerField, []byte, bool, bool) {
 	if len(lines) > 257 {
 		lines = lines[:257]
 	}
+	pseudoHeadersAllowed := supportsPseudoHeaders(string(lines[0]))
 	headers := make([]headerField, 0, len(lines)-1)
 	for _, line := range lines[1:] {
 		line = bytes.TrimSuffix(line, []byte("\r"))
-		name, value, found := bytes.Cut(line, []byte(":"))
-		if !found {
+		separator := bytes.IndexByte(line, ':')
+		if separator < 0 {
+			complete = false
 			continue
 		}
-		name = bytes.TrimSpace(name)
+		if separator == 0 {
+			pseudoSeparator := bytes.IndexByte(line[1:], ':')
+			if pseudoSeparator < 0 {
+				complete = false
+				continue
+			}
+			separator = pseudoSeparator + 1
+		}
+		name, value := line[:separator], line[separator+1:]
+		trimmedName := bytes.TrimSpace(name)
+		if !bytes.Equal(name, trimmedName) {
+			complete = false
+		}
+		name = trimmedName
 		nameText := strings.ToLower(string(name))
-		if !headerNamePattern.MatchString(nameText) {
+		validHeaderName := headerNamePattern.MatchString(nameText)
+		validPseudoHeaderName := pseudoHeadersAllowed && pseudoHeaderNamePattern.MatchString(nameText)
+		if !validHeaderName && !validPseudoHeaderName {
+			complete = false
 			continue
 		}
 		headers = append(headers, headerField{name: nameText, value: strings.TrimSpace(string(value))})
 	}
 	return headers, raw[index+delim:], true, complete
+}
+
+func supportsPseudoHeaders(messageLine string) bool {
+	for _, field := range strings.Fields(messageLine) {
+		if field == "HTTP/2" || field == "HTTP/3" {
+			return true
+		}
+	}
+	return false
 }
 
 func contentType(headers []headerField) string {
