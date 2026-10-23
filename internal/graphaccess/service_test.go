@@ -22,6 +22,12 @@ type fakeNeo4jGraphStore struct {
 	closeCount          atomic.Int32
 	snapshotReads       atomic.Int32
 	analyticalSliceRead atomic.Int32
+	signatureLookupRead atomic.Int32
+	signatureProjectKey string
+	signatureRequest    string
+	signatureResponse   string
+	signatureIDs        []string
+	signatureTruncated  bool
 	analyticalSlice     neo4jstore.AnalyticalSlice
 }
 
@@ -40,6 +46,14 @@ func (*fakeNeo4jGraphStore) ReadProjectNeighborhoodPage(context.Context, string,
 func (s *fakeNeo4jGraphStore) ReadProjectAnalyticalSlice(context.Context, string, []string, neo4jstore.AnalyticalSliceOptions) (neo4jstore.AnalyticalSlice, error) {
 	s.analyticalSliceRead.Add(1)
 	return s.analyticalSlice, nil
+}
+
+func (s *fakeNeo4jGraphStore) ReadProjectObservationIDsByVariantSignatures(_ context.Context, projectKey, requestSignature, responseSignature string, _ int) ([]string, bool, error) {
+	s.signatureLookupRead.Add(1)
+	s.signatureProjectKey = projectKey
+	s.signatureRequest = requestSignature
+	s.signatureResponse = responseSignature
+	return s.signatureIDs, s.signatureTruncated, nil
 }
 
 func (s *fakeNeo4jGraphStore) Close(context.Context) error {
@@ -208,6 +222,51 @@ func TestReadAnalyticalSliceUsesBoundedNeo4jQueryWithoutSnapshotReader(t *testin
 	}
 	if backend.snapshotReads.Load() != 0 {
 		t.Fatalf("bounded analytical query opened the full snapshot %d times", backend.snapshotReads.Load())
+	}
+}
+
+func TestSignatureLookupUsesBoundedNeo4jStoreWithoutSnapshotReader(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "neo4j")
+	t.Setenv("BB_ASSISTANT_NEO4J_PASSWORD", "test-password")
+	root := t.TempDir()
+	ref := project.CaidoProjectRef{InstanceID: "synthetic-instance", ProjectID: "signature-lookup-test"}
+	writable, err := store.CreateProject(context.Background(), ref, root)
+	if err != nil {
+		t.Fatalf("create synthetic project: %v", err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatalf("close synthetic project: %v", err)
+	}
+	selected, err := store.OpenProjectReadOnly(context.Background(), ref, root)
+	if err != nil {
+		t.Fatalf("open synthetic project read-only: %v", err)
+	}
+	defer selected.Close()
+
+	wantIDs := []string{"observation-" + strings.Repeat("a", 64)}
+	backend := &fakeNeo4jGraphStore{
+		signatureProjectKey: selected.ProjectKey,
+		signatureRequest:    strings.Repeat("b", 64),
+		signatureResponse:   strings.Repeat("c", 64),
+		signatureIDs:        wantIDs,
+		signatureTruncated:  true,
+	}
+	service := newService(func(context.Context, neo4jstore.Config) (neo4jGraphStore, error) { return backend, nil })
+	defer service.Close(context.Background())
+	gotIDs, truncated, err := service.ObservationIDsByVariantSignatures(
+		context.Background(), selected, backend.signatureRequest, backend.signatureResponse, behaviorgraph.MaxVariantObservations,
+	)
+	if err != nil {
+		t.Fatalf("ObservationIDsByVariantSignatures(): %v", err)
+	}
+	if !truncated || len(gotIDs) != 1 || gotIDs[0] != wantIDs[0] {
+		t.Fatalf("signature lookup result = %#v truncated=%t", gotIDs, truncated)
+	}
+	if backend.signatureLookupRead.Load() != 1 || backend.signatureProjectKey != selected.ProjectKey {
+		t.Fatalf("signature query calls=%d project=%q, want one query for %q", backend.signatureLookupRead.Load(), backend.signatureProjectKey, selected.ProjectKey)
+	}
+	if backend.snapshotReads.Load() != 0 {
+		t.Fatalf("bounded signature query loaded %d complete snapshots", backend.snapshotReads.Load())
 	}
 }
 

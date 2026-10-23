@@ -1430,7 +1430,9 @@ func searchCaptures(args []string) error {
 	if status.set {
 		filters.Status = &status.value
 	}
-	result, err := capturesearch.Captures(ctx, stores, filters)
+	graphService := graphaccess.NewService()
+	defer graphService.Close(context.Background())
+	result, err := capturesearch.CapturesWithGraphService(ctx, graphService, stores, filters)
 	if err != nil {
 		return err
 	}

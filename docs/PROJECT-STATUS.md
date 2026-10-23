@@ -159,6 +159,32 @@ older audit entries describe their own historical snapshots.
   No working Neo4j continuation was exercised here; Stage 2 and runtime
   coverage remain `PARTIAL`.
 
+## Stage 2 signature-filtered capture search (2026-10-23)
+
+- Historical request/response signature filters now use the caller-owned
+  `graphaccess.Service`. Neo4j reads exact signatures through project-scoped
+  variant indexes and follows only matching assertion links to observation
+  IDs; the query is capped at the requested maximum plus one row and does not
+  transfer `payload_json` or reconstruct a full-project Reader. MCP passes its
+  own graph service into capture search; the CLI compatibility entry point
+  uses the process service.
+- Snapshot projection now promotes keyed request/response signatures to Neo4j
+  properties and creates composite project/kind/signature indexes. A
+  `signature_index_version` plus `signature_index_generation` marker binds the
+  index to the current graph generation. Signature search fails with a
+  specific reproject-required message if the marker is absent or stale,
+  preventing false empty results after a graph update from an older writer.
+  Incremental outbox writes advance the marker only when it matched the prior
+  graph generation; they cannot revalidate an index made stale by an older
+  writer. The opt-in Neo4j integration fixture exercises both a successful
+  indexed match and a stale-marker transition, but it was not run in this
+  environment.
+- Focused synthetic Go tests passed for the native-query contract, signature
+  property projection, service ownership, and avoidance of full snapshots.
+  Working Neo4j query plans and the existing project snapshot were not checked
+  or reprojected; capture search against the live graph remains unverified and
+  Stage 2 remains `PARTIAL`. Caido was not queried for this code slice.
+
 ## Stage 3 field-occurrence slice (2026-10-23)
 
 - The Go historical graph mapper now keeps repeated query and

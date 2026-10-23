@@ -47,6 +47,7 @@ type Tools struct {
 	root          string
 	projects      []project.CaidoProjectRef
 	projectsByKey map[string]project.CaidoProjectRef
+	graphService  *graphaccess.Service
 	graphQueries  *appquery.Service
 	kbIndex       *kb.Index
 	allowRawReads bool
@@ -97,7 +98,7 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 	}
 	tools := &Tools{
 		root: root, projects: projects, projectsByKey: byKey,
-		graphQueries:  graphQueries,
+		graphService: graphService, graphQueries: graphQueries,
 		allowRawReads: os.Getenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1",
 	}
 	index, indexErr := kb.OpenIndex(kbIndexPath)
@@ -630,12 +631,15 @@ func (t *Tools) searchCaptures(ctx context.Context, args searchCapturesArgs) (ma
 		}
 		stores = append(stores, projectStore)
 	}
-	result, err := capturesearch.Captures(ctx, stores, capturesearch.Filters{
+	result, err := capturesearch.CapturesWithGraphService(ctx, t.graphService, stores, capturesearch.Filters{
 		Text: args.Text, Method: args.Method, Host: args.Host, Route: args.Route, Status: args.Status,
 		FieldName: args.FieldName, RequestSignature: args.RequestSignature,
 		ResponseSignature: args.ResponseSignature, Since: args.Since, Until: args.Until, Limit: limit,
 	})
 	if err != nil {
+		if errors.Is(err, capturesearch.ErrSignatureIndexUnavailable) {
+			return nil, err
+		}
 		return nil, errors.New("capture search arguments are invalid or the local index is unavailable")
 	}
 	resultValue := map[string]any{

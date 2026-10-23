@@ -77,6 +77,126 @@ func TestPrepareSnapshotPromotesAnalysisCardLookupFields(t *testing.T) {
 	}
 }
 
+func TestPrepareSnapshotPromotesVariantSignaturesForIndexedLookup(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	requestSignature := strings.Repeat("b", 64)
+	responseSignature := strings.Repeat("c", 64)
+	snapshot := testSnapshot(projectKey)
+	entities := snapshot["entities"].([]behaviorgraph.Record)
+	entities = append(entities,
+		behaviorgraph.Record{
+			"id": "observation-" + strings.Repeat("d", 64), "kind": "observation",
+			"data":        map[string]any{},
+			"source_refs": []behaviorgraph.Record{{"path": "/private/receipt.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.exchange"}},
+		},
+		behaviorgraph.Record{
+			"id": "request_variant-" + strings.Repeat("e", 64), "kind": "request_variant",
+			"data":        behaviorgraph.Record{"request_signature": requestSignature},
+			"source_refs": []behaviorgraph.Record{{"path": "/private/receipt.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.exchange"}},
+		},
+		behaviorgraph.Record{
+			"id": "response_variant-" + strings.Repeat("f", 64), "kind": "response_variant",
+			"data":        behaviorgraph.Record{"response_signature": responseSignature},
+			"source_refs": []behaviorgraph.Record{{"path": "/private/receipt.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.exchange"}},
+		},
+	)
+	snapshot["entities"] = entities
+	assertions := snapshot["assertions"].([]behaviorgraph.Record)
+	assertions = append(assertions,
+		behaviorgraph.Record{
+			"id": "assertion-" + strings.Repeat("1", 64), "subject": "observation-" + strings.Repeat("d", 64),
+			"predicate": "uses_request_variant", "object": "request_variant-" + strings.Repeat("e", 64),
+			"source_refs": []behaviorgraph.Record{{"path": "/private/receipt.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.exchange"}},
+		},
+		behaviorgraph.Record{
+			"id": "assertion-" + strings.Repeat("3", 64), "subject": "observation-" + strings.Repeat("d", 64),
+			"predicate": "received_response", "object": "response_variant-" + strings.Repeat("f", 64),
+			"source_refs": []behaviorgraph.Record{{"path": "/private/receipt.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.exchange"}},
+		},
+	)
+	snapshot["assertions"] = assertions
+	prepared, err := prepareSnapshot(projectKey, snapshot)
+	if err != nil {
+		t.Fatalf("prepare signature fixture: %v", err)
+	}
+	var request, response preparedRecord
+	for _, record := range prepared.Records {
+		switch record.Kind {
+		case "request_variant":
+			request = record
+		case "response_variant":
+			response = record
+		}
+	}
+	if request.RequestSignature != requestSignature || request.ResponseSignature != "" {
+		t.Fatalf("request variant index fields = %#v", request)
+	}
+	if response.ResponseSignature != responseSignature || response.RequestSignature != "" {
+		t.Fatalf("response variant index fields = %#v", response)
+	}
+	rows := recordRows([]preparedRecord{request, response})
+	if rows[0]["request_signature"] != requestSignature || rows[1]["response_signature"] != responseSignature {
+		t.Fatalf("record rows omitted signature lookup properties: %#v", rows)
+	}
+}
+
+func TestObservationIDsByVariantSignaturesQueryUsesScopedIndexedProperties(t *testing.T) {
+	requestOnly := observationIDsByVariantSignaturesQuery(true, false)
+	responseOnly := observationIDsByVariantSignaturesQuery(false, true)
+	both := observationIDsByVariantSignaturesQuery(true, true)
+	for name, query := range map[string]string{"request": requestOnly, "response": responseOnly, "both": both} {
+		if !strings.Contains(query, "$project_key") || !strings.Contains(query, "LIMIT $limit_plus_one") || strings.Contains(query, "payload_json") {
+			t.Errorf("%s signature query is not project scoped, bounded, or payload-free: %s", name, query)
+		}
+	}
+	if !strings.Contains(requestOnly, "request_signature: $request_signature") || strings.Contains(requestOnly, "response_signature") {
+		t.Fatalf("request-only signature query has the wrong index key: %s", requestOnly)
+	}
+	if !strings.Contains(responseOnly, "response_signature: $response_signature") || strings.Contains(responseOnly, "request_signature") {
+		t.Fatalf("response-only signature query has the wrong index key: %s", responseOnly)
+	}
+	if strings.Count(both, "->(observation:GraphRecord") != 2 {
+		t.Fatalf("dual-signature query does not intersect on the same observation: %s", both)
+	}
+}
+
+func TestSignatureIndexMarkerMustMatchCurrentGraphGeneration(t *testing.T) {
+	tests := []struct {
+		name        string
+		version     any
+		generation  any
+		indexedGen  any
+		wantCurrent bool
+	}{
+		{name: "current index", version: int64(1), generation: int64(7), indexedGen: int64(7), wantCurrent: true},
+		{name: "old writer advanced graph", version: int64(1), generation: int64(8), indexedGen: int64(7)},
+		{name: "index generation absent", version: int64(1), generation: int64(7)},
+		{name: "index version unsupported", version: int64(2), generation: int64(7), indexedGen: int64(7)},
+		{name: "graph generation invalid", version: int64(1), generation: int64(0), indexedGen: int64(0)},
+		{name: "unexpected driver value", version: 1, generation: int64(7), indexedGen: int64(7)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := signatureIndexMarkerCurrent(test.version, test.generation, test.indexedGen); got != test.wantCurrent {
+				t.Fatalf("signatureIndexMarkerCurrent() = %t, want %t", got, test.wantCurrent)
+			}
+		})
+	}
+}
+
+func TestIncrementalProjectionDoesNotRevalidateAStaleSignatureMarker(t *testing.T) {
+	for _, condition := range []string{
+		"m.signature_index_version = 1",
+		"m.signature_index_generation = previous_generation",
+		"previous_generation >= 1",
+		"ELSE null",
+	} {
+		if !strings.Contains(incrementalProjectionMarkerQuery, condition) {
+			t.Errorf("incremental projection marker query omits guard %q", condition)
+		}
+	}
+}
+
 func TestPrepareOutboxBundleAllowsReferencesToEarlierBatches(t *testing.T) {
 	projectKey := strings.Repeat("a", 64)
 	snapshot := testSnapshot(projectKey)

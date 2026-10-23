@@ -24,12 +24,16 @@ const (
 	// The full-data occurrence projection measured 227,626 records. Keep
 	// bounded headroom for that verified local shape; the 256 MiB aggregate
 	// payload limit remains the primary size bound.
-	maxSnapshotRecords = 300_000
-	maxSnapshotBytes   = 256 << 20
-	writeBatchSize     = 500
+	maxSnapshotRecords       = 300_000
+	maxSnapshotBytes         = 256 << 20
+	writeBatchSize           = 500
+	maxSignatureObservations = behaviorgraph.MaxVariantObservations
 )
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var signatureDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+var ErrSignatureIndexUnavailable = errors.New("Neo4j project signature index is unavailable")
 
 // Config contains connection settings only. Passwords are never included in
 // formatted errors or status reports.
@@ -142,6 +146,8 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		"CREATE INDEX graph_record_project_kind IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.kind)",
 		"CREATE INDEX graph_record_project_card_endpoint IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.card_endpoint_id)",
 		"CREATE INDEX graph_record_project_card_capture IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.card_capture_id)",
+		"CREATE INDEX graph_record_project_request_signature IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.kind, n.request_signature)",
+		"CREATE INDEX graph_record_project_response_signature IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.kind, n.response_signature)",
 	} {
 		result, err := session.Run(ctx, query, nil)
 		if err != nil {
@@ -155,14 +161,16 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 }
 
 type preparedRecord struct {
-	ID             string
-	Type           string
-	Payload        string
-	PayloadHash    string
-	Kind           string
-	Predicate      string
-	CardEndpointID string
-	CardCaptureID  string
+	ID                string
+	Type              string
+	Payload           string
+	PayloadHash       string
+	Kind              string
+	RequestSignature  string
+	ResponseSignature string
+	Predicate         string
+	CardEndpointID    string
+	CardCaptureID     string
 }
 
 type preparedRef struct {
@@ -222,6 +230,8 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 				    n.payload_json = row.payload_json,
 				    n.payload_sha256 = row.payload_sha256,
 				    n.kind = row.kind,
+				    n.request_signature = row.request_signature,
+				    n.response_signature = row.response_signature,
 				    n.predicate = row.predicate,
 				    n.card_endpoint_id = row.card_endpoint_id,
 				    n.card_capture_id = row.card_capture_id`,
@@ -270,9 +280,12 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 		}
 		meta, runErr := tx.Run(ctx, `
 			MERGE (m:GraphProject {project_key: $project_key})
+			WITH m, coalesce(m.generation, 0) + 1 AS next_generation
 			SET m.snapshot_sha256 = $snapshot_sha256,
-			    m.generation = coalesce(m.generation, 0) + 1,
+			    m.generation = next_generation,
 			    m.schema_version = 2,
+			    m.signature_index_version = 1,
+			    m.signature_index_generation = next_generation,
 			    m.projection_state = 'snapshot',
 			    m.record_count = $record_count,
 			    m.reference_count = $reference_count,
@@ -375,16 +388,7 @@ func (s *Store) ApplyOutboxBundle(ctx context.Context, projectKey, bundleID stri
 		if _, runErr = checkpoint.Consume(ctx); runErr != nil || !valid || checkpointDigest != hex.EncodeToString(digest[:]) {
 			return nil, errors.New("Neo4j outbox checkpoint has a conflicting payload")
 		}
-		projectMarker, runErr := tx.Run(ctx, `
-			MERGE (m:GraphProject {project_key: $project_key})
-			SET m.schema_version = 2,
-			    m.snapshot_sha256 = null,
-			    m.generation = coalesce(m.generation, 0) + 1,
-			    m.record_count = null,
-			    m.reference_count = null,
-			    m.assertion_count = null,
-			    m.projection_state = 'incremental'
-			RETURN m.project_key AS project_key`,
+		projectMarker, runErr := tx.Run(ctx, incrementalProjectionMarkerQuery,
 			map[string]any{"project_key": projectKey},
 		)
 		if runErr != nil || !projectMarker.Next(ctx) {
@@ -424,6 +428,152 @@ func (s *Store) ReadProjectSnapshot(ctx context.Context, projectKey string) (beh
 		return nil, errors.New("Neo4j graph snapshot result is invalid")
 	}
 	return snapshot, nil
+}
+
+// ReadProjectObservationIDsByVariantSignatures performs an exact indexed
+// lookup over one project's signature-bearing variant nodes and follows only
+// their assertion relationships. It never loads the full graph snapshot.
+func (s *Store) ReadProjectObservationIDsByVariantSignatures(
+	ctx context.Context,
+	projectKey, requestSignature, responseSignature string,
+	limit int,
+) ([]string, bool, error) {
+	if s == nil || s.driver == nil || !projectKeyPattern.MatchString(projectKey) ||
+		(requestSignature == "" && responseSignature == "") ||
+		(requestSignature != "" && !signatureDigestPattern.MatchString(requestSignature)) ||
+		(responseSignature != "" && !signatureDigestPattern.MatchString(responseSignature)) ||
+		limit < 1 || limit > maxSignatureObservations {
+		return nil, false, errors.New("Neo4j variant signature lookup is invalid")
+	}
+
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: s.database, AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+	type lookupResult struct {
+		ids       []string
+		truncated bool
+	}
+	value, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		metadata, runErr := tx.Run(ctx, `
+			MATCH (project:GraphProject {project_key: $project_key})
+			RETURN project.signature_index_version AS signature_index_version,
+			       project.generation AS generation,
+			       project.signature_index_generation AS signature_index_generation`,
+			map[string]any{"project_key": projectKey},
+		)
+		if runErr != nil {
+			return nil, errors.New("Neo4j project signature index is unavailable")
+		}
+		if !metadata.Next(ctx) {
+			if metadata.Err() != nil {
+				return nil, errors.New("Neo4j project signature index is unavailable")
+			}
+			return nil, fmt.Errorf("%w; reproject the selected graph", ErrSignatureIndexUnavailable)
+		}
+		metadataRecord := metadata.Record()
+		versionValue, _ := metadataRecord.Get("signature_index_version")
+		generationValue, _ := metadataRecord.Get("generation")
+		indexedGenerationValue, _ := metadataRecord.Get("signature_index_generation")
+		current := signatureIndexMarkerCurrent(versionValue, generationValue, indexedGenerationValue)
+		if _, runErr = metadata.Consume(ctx); runErr != nil || !current {
+			return nil, fmt.Errorf("%w; reproject the selected graph", ErrSignatureIndexUnavailable)
+		}
+
+		parameters := map[string]any{"project_key": projectKey, "limit_plus_one": limit + 1}
+		if requestSignature != "" {
+			parameters["request_signature"] = requestSignature
+		}
+		if responseSignature != "" {
+			parameters["response_signature"] = responseSignature
+		}
+		result, queryErr := tx.Run(ctx, observationIDsByVariantSignaturesQuery(requestSignature != "", responseSignature != ""), parameters)
+		if queryErr != nil {
+			return nil, errors.New("Neo4j project signature query failed")
+		}
+		ids := make([]string, 0, min(limit+1, 256))
+		for result.Next(ctx) {
+			idValue, _ := result.Record().Get("observation_id")
+			id, ok := idValue.(string)
+			if !ok || id == "" || len(id) > 512 {
+				return nil, errors.New("Neo4j project signature query returned an invalid observation")
+			}
+			ids = append(ids, id)
+		}
+		if queryErr := result.Err(); queryErr != nil {
+			return nil, errors.New("Neo4j project signature query could not finish")
+		}
+		if _, queryErr := result.Consume(ctx); queryErr != nil {
+			return nil, errors.New("Neo4j project signature query could not finish")
+		}
+		truncated := len(ids) > limit
+		if truncated {
+			ids = ids[:limit]
+		}
+		return lookupResult{ids: ids, truncated: truncated}, nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	result, ok := value.(lookupResult)
+	if !ok {
+		return nil, false, errors.New("Neo4j project signature query result is invalid")
+	}
+	return result.ids, result.truncated, nil
+}
+
+func signatureIndexMarkerCurrent(versionValue, generationValue, indexedGenerationValue any) bool {
+	version, versionOK := versionValue.(int64)
+	generation, generationOK := generationValue.(int64)
+	indexedGeneration, indexedGenerationOK := indexedGenerationValue.(int64)
+	return versionOK && version == 1 && generationOK && generation >= 1 &&
+		indexedGenerationOK && indexedGeneration == generation
+}
+
+const incrementalProjectionMarkerQuery = `
+	MERGE (m:GraphProject {project_key: $project_key})
+	WITH m, coalesce(m.generation, 0) AS previous_generation
+	WITH m, previous_generation, previous_generation + 1 AS next_generation
+	SET m.schema_version = 2,
+	    m.snapshot_sha256 = null,
+	    m.generation = next_generation,
+	    m.signature_index_generation = CASE
+	        WHEN m.signature_index_version = 1
+	            AND m.signature_index_generation = previous_generation
+	            AND previous_generation >= 1
+	        THEN next_generation
+	        ELSE null
+	    END,
+	    m.record_count = null,
+	    m.reference_count = null,
+	    m.assertion_count = null,
+	    m.projection_state = 'incremental'
+	RETURN m.project_key AS project_key`
+
+func observationIDsByVariantSignaturesQuery(requestSignature, responseSignature bool) string {
+	requestPattern := `
+		MATCH (requestVariant:GraphRecord {project_key: $project_key, record_type: 'entity', kind: 'request_variant', request_signature: $request_signature})
+		MATCH (requestAssertion:GraphRecord {project_key: $project_key, record_type: 'assertion', predicate: 'uses_request_variant'})
+		MATCH (requestAssertion)-[:OBJECT {project_key: $project_key}]->(requestVariant)
+		MATCH (requestAssertion)-[:SUBJECT {project_key: $project_key}]->(observation:GraphRecord {project_key: $project_key, record_type: 'entity', kind: 'observation'})`
+	responsePattern := `
+		MATCH (responseVariant:GraphRecord {project_key: $project_key, record_type: 'entity', kind: 'response_variant', response_signature: $response_signature})
+		MATCH (responseAssertion:GraphRecord {project_key: $project_key, record_type: 'assertion', predicate: 'received_response'})
+		MATCH (responseAssertion)-[:OBJECT {project_key: $project_key}]->(responseVariant)
+		MATCH (responseAssertion)-[:SUBJECT {project_key: $project_key}]->(observation:GraphRecord {project_key: $project_key, record_type: 'entity', kind: 'observation'})`
+	query := ""
+	switch {
+	case requestSignature && responseSignature:
+		query = requestPattern + responsePattern
+	case requestSignature:
+		query = requestPattern
+	case responseSignature:
+		query = responsePattern
+	default:
+		return ""
+	}
+	return query + `
+		RETURN DISTINCT observation.record_id AS observation_id
+		ORDER BY observation_id
+		LIMIT $limit_plus_one`
 }
 
 func (s *Store) readProjectSnapshotTx(ctx context.Context, tx neo4j.ManagedTransaction, projectKey string) (behaviorgraph.Record, error) {
@@ -663,6 +813,8 @@ func writePreparedGraph(ctx context.Context, tx neo4j.ManagedTransaction, projec
 			    n.payload_json = CASE WHEN row.record_type = 'entity' AND n.payload_json IS NOT NULL THEN n.payload_json ELSE row.payload_json END,
 			    n.payload_sha256 = CASE WHEN row.record_type = 'entity' AND n.payload_sha256 IS NOT NULL THEN n.payload_sha256 ELSE row.payload_sha256 END,
 			    n.kind = row.kind,
+			    n.request_signature = row.request_signature,
+			    n.response_signature = row.response_signature,
 			    n.predicate = row.predicate,
 			    n.card_endpoint_id = row.card_endpoint_id,
 			    n.card_capture_id = row.card_capture_id`,
@@ -837,6 +989,25 @@ func prepareGraphSnapshot(projectKey string, snapshot behaviorgraph.Record, requ
 		if value, ok := record["kind"].(string); ok {
 			item.Kind = value
 		}
+		var variantData map[string]any
+		switch data := record["data"].(type) {
+		case map[string]any:
+			variantData = data
+		case behaviorgraph.Record:
+			variantData = map[string]any(data)
+		}
+		if variantData != nil {
+			if item.Kind == "request_variant" {
+				if value, ok := variantData["request_signature"].(string); ok && signatureDigestPattern.MatchString(value) {
+					item.RequestSignature = value
+				}
+			}
+			if item.Kind == "response_variant" {
+				if value, ok := variantData["response_signature"].(string); ok && signatureDigestPattern.MatchString(value) {
+					item.ResponseSignature = value
+				}
+			}
+		}
 		if value, ok := record["predicate"].(string); ok {
 			item.Predicate = value
 		}
@@ -976,10 +1147,19 @@ func recordRows(records []preparedRecord) []map[string]any {
 		rows = append(rows, map[string]any{
 			"record_id": record.ID, "record_type": record.Type, "payload_json": record.Payload,
 			"payload_sha256": record.PayloadHash, "kind": record.Kind, "predicate": record.Predicate,
-			"card_endpoint_id": record.CardEndpointID, "card_capture_id": record.CardCaptureID,
+			"request_signature":  optionalSignatureProperty(record.RequestSignature),
+			"response_signature": optionalSignatureProperty(record.ResponseSignature),
+			"card_endpoint_id":   record.CardEndpointID, "card_capture_id": record.CardCaptureID,
 		})
 	}
 	return rows
+}
+
+func optionalSignatureProperty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func refRows(refs []preparedRef) []map[string]any {

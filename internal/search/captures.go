@@ -32,6 +32,8 @@ const (
 
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+var ErrSignatureIndexUnavailable = errors.New("selected graph needs a signature index rebuild before signature-filtered search")
+
 // Filters are applied with AND semantics. Limit must be between 1 and 500.
 type Filters struct {
 	Text              string
@@ -97,6 +99,12 @@ type Hit struct {
 
 // Captures searches only the stores explicitly passed by the caller.
 func Captures(ctx context.Context, stores []*store.ProjectStore, filters Filters) (Result, error) {
+	return CapturesWithGraphService(ctx, graphaccess.DefaultService(), stores, filters)
+}
+
+// CapturesWithGraphService searches only explicitly selected projects and
+// resolves signature filters through the caller-owned graph service.
+func CapturesWithGraphService(ctx context.Context, graphService *graphaccess.Service, stores []*store.ProjectStore, filters Filters) (Result, error) {
 	limit, matchQuery, err := validate(stores, &filters)
 	if err != nil {
 		return Result{}, err
@@ -112,7 +120,7 @@ func Captures(ctx context.Context, stores []*store.ProjectStore, filters Filters
 		if projectStore == nil || projectStore.Database == nil || projectStore.Database.DB() == nil {
 			return Result{}, errors.New("selected project store is unavailable")
 		}
-		historical, truncated, queryErr := searchHistorical(ctx, projectStore, filters, matchQuery, limit)
+		historical, truncated, queryErr := searchHistorical(ctx, graphService, projectStore, filters, matchQuery, limit)
 		if queryErr != nil {
 			return Result{}, queryErr
 		}
@@ -257,7 +265,7 @@ func searchTerms(input string) []string {
 	return terms
 }
 
-func searchHistorical(ctx context.Context, projectStore *store.ProjectStore, filters Filters, matchQuery string, limit int) ([]Hit, bool, error) {
+func searchHistorical(ctx context.Context, graphService *graphaccess.Service, projectStore *store.ProjectStore, filters Filters, matchQuery string, limit int) ([]Hit, bool, error) {
 	signatureScoped := filters.RequestSignature != "" || filters.ResponseSignature != ""
 	if !signatureScoped {
 		hits, truncated, err := queryHistoricalBatch(ctx, projectStore, filters, matchQuery, limit, nil, false)
@@ -271,15 +279,13 @@ func searchHistorical(ctx context.Context, projectStore *store.ProjectStore, fil
 			return nil, false, errors.New("historical graph signature index is unavailable")
 		}
 	}
-	reader, err := graphaccess.OpenReader(ctx, projectStore)
-	if err != nil {
-		return nil, false, errors.New("historical graph signature index could not be opened")
-	}
-	variantObservationIDs, variantTruncated, err := reader.ObservationIDsByVariantSignatures(
-		filters.RequestSignature, filters.ResponseSignature, behaviorgraph.MaxVariantObservations,
+	variantObservationIDs, variantTruncated, err := graphService.ObservationIDsByVariantSignatures(
+		ctx, projectStore, filters.RequestSignature, filters.ResponseSignature, behaviorgraph.MaxVariantObservations,
 	)
-	closeErr := reader.Close()
-	if err != nil || closeErr != nil {
+	if err != nil {
+		if errors.Is(err, graphaccess.ErrSignatureIndexUnavailable) {
+			return nil, false, ErrSignatureIndexUnavailable
+		}
 		return nil, false, errors.New("historical graph signatures could not be searched")
 	}
 	if len(variantObservationIDs) == 0 {

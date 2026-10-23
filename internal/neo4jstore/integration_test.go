@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -60,8 +61,33 @@ func TestNeo4jOutboxIntegrationPreservesCanonicalEntityProjection(t *testing.T) 
 	})
 
 	baseSnapshot := testSnapshot(projectKey)
+	baseSource := baseSnapshot["sources"].([]behaviorgraph.Record)[0]
+	observationID := "observation-" + strings.Repeat("d", 64)
+	requestVariantID := "request_variant-" + strings.Repeat("e", 64)
+	requestSignature := strings.Repeat("f", 64)
+	entities := baseSnapshot["entities"].([]behaviorgraph.Record)
+	baseSnapshot["entities"] = append(entities,
+		behaviorgraph.Record{
+			"id": observationID, "kind": "observation", "data": map[string]any{},
+			"source_refs": []behaviorgraph.Record{baseSource},
+		},
+		behaviorgraph.Record{
+			"id": requestVariantID, "kind": "request_variant",
+			"data":        map[string]any{"request_signature": requestSignature},
+			"source_refs": []behaviorgraph.Record{baseSource},
+		},
+	)
+	assertions := baseSnapshot["assertions"].([]behaviorgraph.Record)
+	baseSnapshot["assertions"] = append(assertions, behaviorgraph.Record{
+		"id": "assertion-" + strings.Repeat("3", 64), "subject": observationID,
+		"predicate": "uses_request_variant", "object": requestVariantID,
+		"source_refs": []behaviorgraph.Record{baseSource},
+	})
 	if _, err := store.ReplaceProjectSnapshot(ctx, projectKey, baseSnapshot); err != nil {
 		t.Fatal("could not write integration fixture snapshot")
+	}
+	if ids, truncated, err := store.ReadProjectObservationIDsByVariantSignatures(ctx, projectKey, requestSignature, "", 1); err != nil || truncated || len(ids) != 1 || ids[0] != observationID {
+		t.Fatalf("indexed signature lookup: ids=%v truncated=%v err=%v", ids, truncated, err)
 	}
 
 	endpointID := "endpoint-" + strings.Repeat("1", 64)
@@ -94,12 +120,64 @@ func TestNeo4jOutboxIntegrationPreservesCanonicalEntityProjection(t *testing.T) 
 	if err != nil {
 		t.Fatal("could not read the incrementally updated integration fixture")
 	}
-	entities := readBack["entities"].([]behaviorgraph.Record)
-	if len(entities) != 1 || entities[0]["data"].(map[string]any)["method"] != "GET" {
-		t.Fatalf("outbox update replaced the canonical entity projection: %#v", entities)
+	readBackEntities := readBack["entities"].([]behaviorgraph.Record)
+	var canonicalEndpoint behaviorgraph.Record
+	for _, entity := range readBackEntities {
+		if entity["id"] == endpointID {
+			canonicalEndpoint = entity
+		}
 	}
-	refs := entities[0]["source_refs"].([]behaviorgraph.Record)
+	if len(readBackEntities) != 3 || canonicalEndpoint == nil || canonicalEndpoint["data"].(map[string]any)["method"] != "GET" {
+		t.Fatalf("outbox update replaced the canonical entity projection: %#v", readBackEntities)
+	}
+	refs := canonicalEndpoint["source_refs"].([]behaviorgraph.Record)
 	if len(refs) != 2 {
 		t.Fatalf("outbox update did not merge provenance: got %d references", len(refs))
+	}
+
+	legacySession := store.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: store.database})
+	_, err = legacySession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, runErr := tx.Run(ctx, `
+			MATCH (m:GraphProject {project_key: $project_key})
+			SET m.generation = m.generation + 1
+			RETURN m.generation AS generation`, map[string]any{"project_key": projectKey})
+		if runErr != nil {
+			return nil, runErr
+		}
+		if !result.Next(ctx) {
+			if result.Err() != nil {
+				return nil, result.Err()
+			}
+			return nil, errors.New("integration GraphProject marker is missing")
+		}
+		return result.Consume(ctx)
+	})
+	_ = legacySession.Close(ctx)
+	if err != nil {
+		t.Fatal("could not simulate an older writer advancing the graph generation")
+	}
+
+	staleSource := behaviorgraph.Record{
+		"path": "/receipt-after-stale.json", "sha256": strings.Repeat("c", 64), "record_locator": "$.after_stale",
+	}
+	staleBundle := behaviorgraph.Record{
+		"schema_version": json.Number("1"), "program": projectKey,
+		"sources": []behaviorgraph.Record{staleSource},
+		"entities": []behaviorgraph.Record{{
+			"id": endpointID, "kind": "endpoint", "data": map[string]any{"method": "PATCH"},
+			"source_refs": []behaviorgraph.Record{staleSource},
+		}},
+		"assertions": []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{},
+	}
+	staleBundleJSON, err := json.Marshal(staleBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleBundleDigest := sha256.Sum256(staleBundleJSON)
+	if applied, err := store.ApplyOutboxBundle(ctx, projectKey, "bundle-"+hex.EncodeToString(staleBundleDigest[:]), staleBundleJSON); err != nil || !applied {
+		t.Fatalf("outbox apply after legacy graph generation change: applied=%v err=%v", applied, err)
+	}
+	if _, _, err := store.ReadProjectObservationIDsByVariantSignatures(ctx, projectKey, strings.Repeat("a", 64), "", 1); !errors.Is(err, ErrSignatureIndexUnavailable) {
+		t.Fatalf("signature lookup accepted a stale marker after incremental projection: %v", err)
 	}
 }

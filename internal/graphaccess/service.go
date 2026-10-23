@@ -14,6 +14,7 @@ type neo4jGraphStore interface {
 	ReadProjectNeighborhood(context.Context, string, []string, int) (neo4jstore.Neighborhood, error)
 	ReadProjectNeighborhoodPage(context.Context, string, []string, int, *neo4jstore.NeighborhoodCursor) (neo4jstore.Neighborhood, error)
 	ReadProjectAnalyticalSlice(context.Context, string, []string, neo4jstore.AnalyticalSliceOptions) (neo4jstore.AnalyticalSlice, error)
+	ReadProjectObservationIDsByVariantSignatures(context.Context, string, string, string, int) ([]string, bool, error)
 	Close(context.Context) error
 }
 
