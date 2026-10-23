@@ -2,14 +2,11 @@ package mcpserver
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"strings"
 
+	"bb-graph-assistant/internal/appquery"
 	capturesearch "bb-graph-assistant/internal/search"
-	"bb-graph-assistant/internal/store"
 )
 
 // GraphExplorerProjects returns one page of project identities from the local
@@ -72,68 +69,52 @@ func (t *Tools) GraphExplorerSurface(ctx context.Context, projectKey string, aft
 // GraphExplorerSlice returns a bounded, source-redacted graph neighborhood
 // from exactly one selected project.
 func (t *Tools) GraphExplorerSlice(ctx context.Context, projectKey string, seeds []string) (map[string]any, error) {
-	return t.graphSlice(ctx, graphSliceArgs{
-		ProjectKey: projectKey,
-		SeedIDs:    seeds,
-		MaxNodes:   intPointer(80),
-		MaxEdges:   intPointer(160),
-		MaxDepth:   intPointer(3),
+	result, err := t.Graph(ctx, appquery.GraphRequest{
+		ProjectKey: projectKey, View: appquery.GraphViewFull, SeedIDs: seeds,
+		Budget: appquery.GraphBudget{MaxNodes: 80, MaxEdges: 160, MaxDepth: 3},
 	})
+	if err != nil {
+		return nil, err
+	}
+	return t.checkGraphWireSize(result.WireMap())
 }
 
 // GraphExplorerNeighborhood is the shared bounded one-hop use case for web and MCP.
 func (t *Tools) GraphExplorerNeighborhood(ctx context.Context, projectKey string, seeds []string) (map[string]any, error) {
-	return t.graphNeighborhood(ctx, graphNeighborhoodArgs{ProjectKey: projectKey, SeedIDs: seeds})
+	result, err := t.Graph(ctx, appquery.GraphRequest{ProjectKey: projectKey, View: appquery.GraphViewDirect, SeedIDs: seeds})
+	if err != nil {
+		return nil, err
+	}
+	return t.checkGraphWireSize(result.WireMap())
 }
 
 func (t *Tools) graphNeighborhood(ctx context.Context, args graphNeighborhoodArgs) (map[string]any, error) {
-	if !projectKeyPattern.MatchString(args.ProjectKey) || len(args.SeedIDs) < 1 || len(args.SeedIDs) > 20 {
-		return nil, errors.New("select one project and 1-20 graph seeds")
+	if t.graphQueries == nil {
+		return nil, errors.New("graph query service is unavailable")
 	}
-	seen := make(map[string]struct{}, len(args.SeedIDs))
-	for _, seed := range args.SeedIDs {
-		if strings.TrimSpace(seed) != seed || !graphNeighborhoodSeedPattern.MatchString(seed) ||
-			strings.HasPrefix(seed, "source-") || strings.HasPrefix(seed, "card-") || len(seed) > maxGraphSeedIDBytes {
-			return nil, errors.New("graph neighborhood seed ID is malformed")
-		}
-		if _, exists := seen[seed]; exists {
-			return nil, errors.New("graph neighborhood seed IDs must be unique")
-		}
-		seen[seed] = struct{}{}
-	}
-	ref, ok := t.projectsByKey[args.ProjectKey]
-	if !ok {
-		return nil, errors.New("selected project is not in the local project catalog")
-	}
-	selected, err := store.OpenProjectReadOnly(ctx, ref, t.root)
+	result, err := t.Graph(ctx, appquery.GraphRequest{ProjectKey: args.ProjectKey, View: appquery.GraphViewDirect, SeedIDs: args.SeedIDs})
 	if err != nil {
-		return nil, errors.New("selected project is unavailable for graph reads")
+		return nil, err
 	}
-	defer selected.Close()
-	result, err := capturesearch.GraphNeighborhoodWithService(ctx, t.graphService, selected, args.SeedIDs)
+	return t.checkGraphWireSize(result.WireMap())
+}
+
+func (t *Tools) Graph(ctx context.Context, request appquery.GraphRequest) (appquery.GraphResult, error) {
+	if t.graphQueries == nil {
+		return appquery.GraphResult{}, &appquery.QueryError{Code: appquery.ErrorGraphUnavailable, Message: "graph query service is unavailable"}
+	}
+	return t.graphQueries.Graph(ctx, request)
+}
+
+func (t *Tools) checkGraphWireSize(wire map[string]any) (map[string]any, error) {
+	encoded, err := json.Marshal(wire)
 	if err != nil {
-		return nil, errors.New("selected graph neighborhood is unavailable or exceeds its limits")
+		return nil, &appquery.QueryError{Code: appquery.ErrorGraphUnavailable, Message: "graph result could not be encoded", Err: errors.New("graph result encoding failed")}
 	}
-	result["graph_version"] = "behavior-graph-direct-v1"
-	result["coverage_note"] = "Direct structural neighborhood; coverage and full-project evidence integrity remain partial."
-	result, redactedPaths, redactedLocators, err := redactGraphSourcePaths(result)
-	if err != nil {
-		return nil, errors.New("graph neighborhood could not be prepared")
+	if len(encoded) > maxToolResultBytes {
+		return nil, &appquery.QueryError{Code: appquery.ErrorOutputTooLarge, Message: "graph result exceeds the output limit"}
 	}
-	result["local_source_paths_redacted"] = redactedPaths
-	result["unsafe_source_locators_redacted"] = redactedLocators
-	delete(result, "result_id")
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		return nil, errors.New("graph neighborhood could not be fingerprinted")
-	}
-	digest := sha256.Sum256(encoded)
-	result["result_id"] = "result-" + hex.EncodeToString(digest[:])
-	encoded, err = json.Marshal(result)
-	if err != nil || len(encoded) > maxToolResultBytes {
-		return nil, errors.New("graph neighborhood exceeds the output limit")
-	}
-	return result, nil
+	return wire, nil
 }
 
 func intPointer(value int) *int { return &value }

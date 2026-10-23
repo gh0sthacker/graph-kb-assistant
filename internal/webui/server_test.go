@@ -2,15 +2,20 @@ package webui
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"bb-graph-assistant/internal/appquery"
 	capturesearch "bb-graph-assistant/internal/search"
 )
 
-type explorerAPIFixture struct{ direct, full int }
+type explorerAPIFixture struct {
+	direct, full int
+	graphErr     error
+}
 
 func (*explorerAPIFixture) GraphExplorerProjects(context.Context, string, int) (map[string]any, error) {
 	return map[string]any{}, nil
@@ -18,13 +23,13 @@ func (*explorerAPIFixture) GraphExplorerProjects(context.Context, string, int) (
 func (*explorerAPIFixture) GraphExplorerSurface(context.Context, string, *capturesearch.SurfaceCursor, int) (map[string]any, error) {
 	return map[string]any{}, nil
 }
-func (f *explorerAPIFixture) GraphExplorerNeighborhood(context.Context, string, []string) (map[string]any, error) {
-	f.direct++
-	return map[string]any{"view": "direct"}, nil
-}
-func (f *explorerAPIFixture) GraphExplorerSlice(context.Context, string, []string) (map[string]any, error) {
-	f.full++
-	return map[string]any{"view": "full"}, nil
+func (f *explorerAPIFixture) Graph(_ context.Context, request appquery.GraphRequest) (appquery.GraphResult, error) {
+	if request.View == appquery.GraphViewFull {
+		f.full++
+	} else {
+		f.direct++
+	}
+	return appquery.GraphResult{View: request.View, Payload: map[string]any{"view": string(request.View)}}, f.graphErr
 }
 
 func TestGraphHandlerLoadsDirectNeighborhoodUnlessFullSliceRequested(t *testing.T) {
@@ -53,6 +58,40 @@ func TestGraphHandlerLoadsDirectNeighborhoodUnlessFullSliceRequested(t *testing.
 				}
 			} else if api.direct != 1 || api.full != 0 {
 				t.Fatal("default view loaded the full project reader")
+			}
+		})
+	}
+}
+
+func TestGraphHandlerMapsTypedErrorsWithoutLeakingCauses(t *testing.T) {
+	tests := []struct {
+		name string
+		code appquery.ErrorCode
+		want int
+	}{
+		{name: "invalid input", code: appquery.ErrorInvalidInput, want: http.StatusBadRequest},
+		{name: "unknown project", code: appquery.ErrorProjectNotRegistered, want: http.StatusNotFound},
+		{name: "unavailable project", code: appquery.ErrorProjectUnavailable, want: http.StatusServiceUnavailable},
+		{name: "large result", code: appquery.ErrorOutputTooLarge, want: http.StatusRequestEntityTooLarge},
+		{name: "graph unavailable", code: appquery.ErrorGraphUnavailable, want: http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := &explorerAPIFixture{graphErr: &appquery.QueryError{
+				Code: test.code, Err: errors.New("/private/home/secret/database.sqlite3"),
+			}}
+			handler, err := NewHandler(api)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/graph?project_key="+strings.Repeat("a", 64)+"&seed=endpoint-"+strings.Repeat("b", 64), nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want {
+				t.Fatalf("status=%d, want %d: %s", response.Code, test.want, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "private/home/secret") {
+				t.Fatalf("typed error leaked its internal cause: %s", response.Body.String())
 			}
 		})
 	}

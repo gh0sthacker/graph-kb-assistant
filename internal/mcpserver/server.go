@@ -6,9 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"bb-graph-assistant/internal/appquery"
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/kb"
@@ -41,7 +40,6 @@ const (
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var graphNeighborhoodSeedPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
-var publicRecordLocatorPattern = regexp.MustCompile(`^\$(\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])*$`)
 
 // Tools is an immutable snapshot of the local project catalog and the optional
 // read-only KB index used by MCP calls in this server process.
@@ -49,7 +47,7 @@ type Tools struct {
 	root          string
 	projects      []project.CaidoProjectRef
 	projectsByKey map[string]project.CaidoProjectRef
-	graphService  *graphaccess.Service
+	graphQueries  *appquery.Service
 	kbIndex       *kb.Index
 	allowRawReads bool
 }
@@ -91,9 +89,15 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 		}
 		byKey[key] = ref
 	}
+	graphService := graphaccess.NewService()
+	graphQueries, err := appquery.NewGraphQueryService(root, projects, graphService)
+	if err != nil {
+		_ = graphService.Close(context.Background())
+		return nil, errors.New("graph query service could not be initialized")
+	}
 	tools := &Tools{
 		root: root, projects: projects, projectsByKey: byKey,
-		graphService:  graphaccess.NewService(),
+		graphQueries:  graphQueries,
 		allowRawReads: os.Getenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1",
 	}
 	index, indexErr := kb.OpenIndex(kbIndexPath)
@@ -108,8 +112,8 @@ func (t *Tools) Close() error {
 		return nil
 	}
 	var closeErr error
-	if t.graphService != nil {
-		closeErr = errors.Join(closeErr, t.graphService.Close(context.Background()))
+	if t.graphQueries != nil {
+		closeErr = errors.Join(closeErr, t.graphQueries.Close(context.Background()))
 	}
 	if t.kbIndex != nil {
 		closeErr = errors.Join(closeErr, t.kbIndex.Close())
@@ -714,26 +718,6 @@ type graphNeighborhoodArgs struct {
 }
 
 func (t *Tools) graphSlice(ctx context.Context, args graphSliceArgs) (map[string]any, error) {
-	if !projectKeyPattern.MatchString(args.ProjectKey) {
-		return nil, errors.New("project key has an invalid format")
-	}
-	if len(args.SeedIDs) == 0 || len(args.SeedIDs) > maxGraphSeedIDs {
-		return nil, errors.New("provide between 1 and 80 graph seed IDs")
-	}
-	seen := make(map[string]struct{}, len(args.SeedIDs))
-	for _, id := range args.SeedIDs {
-		if strings.TrimSpace(id) != id || id == "" || len(id) > maxGraphSeedIDBytes {
-			return nil, errors.New("graph seed ID is empty, too long, or malformed")
-		}
-		if _, exists := seen[id]; exists {
-			return nil, errors.New("graph seed IDs must be unique")
-		}
-		seen[id] = struct{}{}
-	}
-	ref, ok := t.projectsByKey[args.ProjectKey]
-	if !ok {
-		return nil, errors.New("selected project is not in the local project catalog")
-	}
 	maxNodes, maxEdges, maxDepth := 80, 160, 3
 	if args.MaxNodes != nil {
 		maxNodes = *args.MaxNodes
@@ -744,92 +728,14 @@ func (t *Tools) graphSlice(ctx context.Context, args graphSliceArgs) (map[string
 	if args.MaxDepth != nil {
 		maxDepth = *args.MaxDepth
 	}
-	if maxNodes < 1 || maxNodes > 100 || maxEdges < 0 || maxEdges > 300 || maxDepth < 0 || maxDepth > 6 {
-		return nil, errors.New("graph slice limits are outside the supported range")
-	}
-	projectStore, err := store.OpenProjectReadOnly(ctx, ref, t.root)
+	result, err := t.Graph(ctx, appquery.GraphRequest{
+		ProjectKey: args.ProjectKey, View: appquery.GraphViewFull, SeedIDs: args.SeedIDs,
+		Budget: appquery.GraphBudget{MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth},
+	})
 	if err != nil {
-		return nil, errors.New("selected project is not available for graph reads")
+		return nil, err
 	}
-	defer projectStore.Close()
-	result, err := capturesearch.GraphSliceWithService(ctx, t.graphService, projectStore, args.SeedIDs, maxNodes, maxEdges, maxDepth, nil)
-	if err != nil {
-		return nil, errors.New("graph slice arguments are invalid or the local graph is unavailable")
-	}
-	result["graph_version"] = "behavior-graph-source-pinned-v1"
-	result["coverage_note"] = "Graph entities and edges describe captured evidence; they do not establish vulnerability or impact."
-	result, redactedPaths, redactedLocators, err := redactGraphSourcePaths(result)
-	if err != nil {
-		return nil, errors.New("graph slice could not be prepared for MCP")
-	}
-	result["local_source_paths_redacted"] = redactedPaths
-	result["unsafe_source_locators_redacted"] = redactedLocators
-	delete(result, "result_id")
-	digestInput, err := json.Marshal(result)
-	if err != nil {
-		return nil, errors.New("graph slice could not be fingerprinted for MCP")
-	}
-	digest := sha256.Sum256(digestInput)
-	result["result_id"] = "result-" + hex.EncodeToString(digest[:])
-	encoded, err := json.Marshal(result)
-	if err != nil || len(encoded) > maxToolResultBytes {
-		return nil, errors.New("graph slice exceeds the output limit")
-	}
-	return result, nil
-}
-
-// redactGraphSourcePaths keeps source hashes, record locators, and integrity
-// states available to the model while hiding machine-local receipt paths.
-func redactGraphSourcePaths(input map[string]any) (map[string]any, int, int, error) {
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.UseNumber()
-	var output map[string]any
-	if err := decoder.Decode(&output); err != nil {
-		return nil, 0, 0, err
-	}
-	paths, locators := stripLocalSourcePaths(output)
-	return output, paths, locators, nil
-}
-
-func stripLocalSourcePaths(value any) (int, int) {
-	switch node := value.(type) {
-	case map[string]any:
-		paths, locators := 0, 0
-		_, hasPath := node["path"]
-		_, hasDigest := node["sha256"]
-		locator, hasLocator := node["record_locator"].(string)
-		isSourceRef := hasDigest && hasLocator
-		if isSourceRef && hasPath {
-			delete(node, "path")
-			node["path_redacted"] = true
-			paths++
-		}
-		if isSourceRef && !publicRecordLocatorPattern.MatchString(locator) {
-			node["record_locator"] = "[REDACTED_UNSAFE_LOCATOR]"
-			node["record_locator_redacted"] = true
-			locators++
-		}
-		for _, child := range node {
-			childPaths, childLocators := stripLocalSourcePaths(child)
-			paths += childPaths
-			locators += childLocators
-		}
-		return paths, locators
-	case []any:
-		paths, locators := 0, 0
-		for _, child := range node {
-			childPaths, childLocators := stripLocalSourcePaths(child)
-			paths += childPaths
-			locators += childLocators
-		}
-		return paths, locators
-	default:
-		return 0, 0
-	}
+	return t.checkGraphWireSize(result.WireMap())
 }
 
 type kbSearchArgs struct {

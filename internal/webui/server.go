@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"bb-graph-assistant/internal/appquery"
 	capturesearch "bb-graph-assistant/internal/search"
 )
 
@@ -34,8 +35,7 @@ var assets embed.FS
 type readAPI interface {
 	GraphExplorerProjects(context.Context, string, int) (map[string]any, error)
 	GraphExplorerSurface(context.Context, string, *capturesearch.SurfaceCursor, int) (map[string]any, error)
-	GraphExplorerSlice(context.Context, string, []string) (map[string]any, error)
-	GraphExplorerNeighborhood(context.Context, string, []string) (map[string]any, error)
+	Graph(context.Context, appquery.GraphRequest) (appquery.GraphResult, error)
 }
 
 // NewHandler constructs the local UI and its narrowly scoped read-only API.
@@ -173,14 +173,16 @@ func graphHandler(api readAPI) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
-		var result map[string]any
-		var err error
+		graphView := appquery.GraphViewDirect
 		if view == "full" {
-			result, err = api.GraphExplorerSlice(ctx, projectKey, seeds)
-		} else {
-			result, err = api.GraphExplorerNeighborhood(ctx, projectKey, seeds)
+			graphView = appquery.GraphViewFull
 		}
-		writeResult(w, result, err)
+		result, err := api.Graph(ctx, appquery.GraphRequest{ProjectKey: projectKey, View: graphView, SeedIDs: seeds})
+		if err != nil {
+			writeGraphResult(w, nil, err)
+			return
+		}
+		writeGraphResult(w, result.WireMap(), nil)
 	}
 }
 
@@ -223,6 +225,30 @@ func writeResult(w http.ResponseWriter, result map[string]any, err error) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, bytes.NewReader(encoded))
+}
+
+func writeGraphResult(w http.ResponseWriter, result map[string]any, err error) {
+	if err != nil {
+		var queryErr *appquery.QueryError
+		if errors.As(err, &queryErr) {
+			switch queryErr.Code {
+			case appquery.ErrorInvalidInput:
+				writeError(w, http.StatusBadRequest, "graph query is invalid")
+			case appquery.ErrorProjectNotRegistered:
+				writeError(w, http.StatusNotFound, "selected project is not registered")
+			case appquery.ErrorProjectUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "selected project is unavailable for graph reads")
+			case appquery.ErrorOutputTooLarge:
+				writeError(w, http.StatusRequestEntityTooLarge, "graph response exceeds the local UI limit")
+			default:
+				writeError(w, http.StatusServiceUnavailable, "local graph data is unavailable")
+			}
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "graph query failed")
+		return
+	}
+	writeResult(w, result, nil)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
