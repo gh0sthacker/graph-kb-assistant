@@ -145,3 +145,21 @@ func TestAddSnapshotBytesEnforcesCumulativeBudget(t *testing.T) {
 		t.Fatal("accepted provenance bytes beyond the cumulative snapshot limit")
 	}
 }
+
+func TestSnapshotRecordBudgetIncludesMeasuredOccurrenceProjection(t *testing.T) {
+	if !withinSnapshotRecordBudget(227_626, 0) {
+		t.Fatal("measured 227,626-record occurrence projection exceeds the bounded record budget")
+	}
+	if !withinSnapshotRecordBudget(maxSnapshotRecords, maxSnapshotRecords) {
+		t.Fatal("accepted maximum snapshot record counts were rejected")
+	}
+	if withinSnapshotRecordBudget(maxSnapshotRecords+1, 0) {
+		t.Fatal("accepted record count above the bounded snapshot budget")
+	}
+	if withinSnapshotRecordBudget(1, maxSnapshotRecords+1) {
+		t.Fatal("accepted provenance count above the bounded snapshot budget")
+	}
+	if withinSnapshotRecordBudget(0, 0) {
+		t.Fatal("accepted empty snapshot")
+	}
+}

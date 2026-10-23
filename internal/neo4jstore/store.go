@@ -21,7 +21,10 @@ import (
 )
 
 const (
-	maxSnapshotRecords = 200_000
+	// The full-data occurrence projection measured 227,626 records. Keep
+	// bounded headroom for that verified local shape; the 256 MiB aggregate
+	// payload limit remains the primary size bound.
+	maxSnapshotRecords = 300_000
 	maxSnapshotBytes   = 256 << 20
 	writeBatchSize     = 500
 )
@@ -921,7 +924,7 @@ func prepareGraphSnapshot(projectKey string, snapshot behaviorgraph.Record, requ
 			return preparedSnapshot{}, err
 		}
 	}
-	if len(output.Records) == 0 || len(output.Records) > maxSnapshotRecords || len(output.Refs) > maxSnapshotRecords {
+	if !withinSnapshotRecordBudget(len(output.Records), len(output.Refs)) {
 		return preparedSnapshot{}, errors.New("graph snapshot record count is outside the safe limit")
 	}
 	if requireAllEndpoints {
@@ -950,6 +953,10 @@ func prepareGraphSnapshot(projectKey string, snapshot behaviorgraph.Record, requ
 		return output.Refs[i].OwnerID < output.Refs[j].OwnerID
 	})
 	return output, nil
+}
+
+func withinSnapshotRecordBudget(records, refs int) bool {
+	return records > 0 && records <= maxSnapshotRecords && refs >= 0 && refs <= maxSnapshotRecords
 }
 
 func graphIntegerIsTwo(value any) bool {

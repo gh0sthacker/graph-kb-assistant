@@ -133,10 +133,15 @@ older audit entries describe their own historical snapshots.
   observation and card identities remain stable.
 - The active graph was not replaced. No durable production cutover command or
   rollback journal currently coordinates SQLite replacement with the Neo4j
-  snapshot, and the expanded graph is materially larger. Build and verify
-  that cutover before applying the occurrence-complete projection. Current
-  captures therefore still use the prior collapsed representation. Stage 3
-  remains `PARTIAL`; multipart occurrences, route-family grouping,
+  snapshot, and the expanded graph is materially larger. The Neo4j snapshot
+  record-count ceiling is now 300,000 so it can cover the measured 227,626
+  records with headroom; the 256 MiB aggregate serialized-payload ceiling is
+  unchanged. This is a bounded serializer/read-back limit change only: preparing
+  that actual snapshot, Neo4j transaction capacity, outbox/import-marker
+  reconciliation, cutover and rollback have not been verified. Build and
+  verify that cutover before applying the occurrence-complete projection.
+  Current captures therefore still use the prior collapsed representation.
+  Stage 3 remains `PARTIAL`; multipart occurrences, route-family grouping,
   actor/session/object context and flow annotations remain outstanding.
 - The bounded read API, shadow-path checks, full Go test suite, race suite,
   `go vet ./...`, and `git diff --check` passed. The shadow check is a local
