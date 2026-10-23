@@ -39,10 +39,11 @@ older audit entries describe their own historical snapshots.
   measurements on an already-running process, not cold-start or full analytical
   slice benchmarks. The proposed 2-second focused-view p95 was met for these
   two shapes; Stage 2 remains `PARTIAL` for source coverage and other gaps.
-- The private application KB snapshot validated: 14,300 documents and 16,961
-  FTS5 chunks across five populated source families, with `PARTIAL` coverage.
-  NVD remains partial and ExploitDB remains blocked pending dataset-terms
-  review; KB expansion stays deferred by the approved architecture.
+- The application KB remains `PARTIAL`. A newer local read-only audit found
+  degraded semantic-index freshness and an active background reindex; exact
+  snapshot and integrity counts are recorded below. NVD remains partial and
+  ExploitDB remains blocked pending dataset-terms review; the source corpus
+  has not been expanded.
 - `./scripts/run-hermes mcp test bb_assistant` connects over local stdio and
   discovers the 9-tool read-only allowlist. The current private Hermes profile
   has mode 0600; it contains no model/provider selection. Model-backed analysis
@@ -123,12 +124,17 @@ older audit entries describe their own historical snapshots.
   entities (107,137 parameters) and 112,753 assertions, compared with 25,064
   entities (20,069 parameters) and 25,685 assertions in the active graph.
   The temporary SQLite graph was 655,867,904 bytes versus 135,913,472 bytes
-  for the active graph. One old non-parameter entity was absent and four new
-  non-parameter entities appeared; their identity delta has not been
-  reconciled.
-- The active graph was not replaced. The occurrence-complete projection is
-  materially larger and still has an unresolved non-parameter identity delta;
-  investigate both before planning a production rebuild or Neo4j sync. Current
+  for the active graph. A follow-up request-only identity audit reconciled the
+  five non-parameter ID changes: one old `POST /` endpoint had exactly four
+  linked captures whose recovered request lines point to separate
+  `/…/export/…` paths. The old history summary had recorded all four as `/`;
+  the new endpoint paths retain only source-keyed opaque segment aliases. The
+  four new endpoint IDs therefore correct route attribution; capture,
+  observation and card identities remain stable.
+- The active graph was not replaced. No durable production cutover command or
+  rollback journal currently coordinates SQLite replacement with the Neo4j
+  snapshot, and the expanded graph is materially larger. Build and verify
+  that cutover before applying the occurrence-complete projection. Current
   captures therefore still use the prior collapsed representation. Stage 3
   remains `PARTIAL`; multipart occurrences, route-family grouping,
   actor/session/object context and flow annotations remain outstanding.
@@ -136,6 +142,26 @@ older audit entries describe their own historical snapshots.
   `go vet ./...`, and `git diff --check` passed. The shadow check is a local
   feasibility result, not a Caido completeness or browser/JavaScript coverage
   result.
+
+## KB read-only audit (2026-10-23)
+
+- The local fallback `tools/kb-mcp/query-kb.sh stats` reported a semantic index
+  of 9,878 files and 64,549 chunks/vectors. Only 2,463 files and 33,181
+  chunks/vectors match the current semantic index version and source hashes;
+  `semantic_degraded=true`, with 7,415 legacy/incomplete file rows. There are
+  no orphan chunks/vectors or missing vectors in the committed snapshot, but
+  integrity is not `ok` because those legacy rows lack current hashes/version.
+- The lexical FTS tier is available in hybrid mode and reports 15,438 files
+  and 67,991 passages; its last recorded refresh was 2026-10-13. Empty search
+  results still cannot establish absence. The MCP `kb_stats` call did not
+  return within roughly one minute, so the configured local CLI fallback was
+  used; it returned after about one minute with a Pydantic warning.
+- At measurement time a background indexer already held the KB writer lock
+  and the database WAL timestamp was advancing. No second reindex was started.
+  These statistics describe the last committed snapshot, not the eventual
+  result of that in-progress job. Re-run `kb_stats` after the writer releases
+  its lock and validate the updated source hashes before claiming KB readiness.
+  KB coverage remains `PARTIAL`.
 
 This repository is an early public alpha. The following boundaries are deliberate and should remain visible in documentation and user-facing output:
 
