@@ -77,6 +77,31 @@ func TestReadCaptureMessageForGraphRebuildIsAuthenticatedAndBounded(t *testing.T
 		t.Fatal("full historical request did not match its authenticated fixture")
 	}
 	clear(full.Data)
+	if got, want := vaultCiphertextSize(int64(len(request))), int64(len(request)+len(vaultMagic)+12+16); got != want {
+		t.Fatalf("vault ciphertext bound = %d, want %d", got, want)
+	}
+	var requestVaultRef string
+	if err := readonly.Database.DB().QueryRowContext(ctx,
+		"SELECT request_vault_ref FROM capture_revisions WHERE revision_id=(SELECT current_revision_id FROM captures WHERE request_id=?)",
+		requestID,
+	).Scan(&requestVaultRef); err != nil {
+		t.Fatalf("load request vault reference: %v", err)
+	}
+	requestVaultPath := filepath.Join(readonly.VaultDirectory, requestVaultRef)
+	file, err := os.OpenFile(requestVaultPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open request vault object: %v", err)
+	}
+	if _, err := file.Write(bytes.Repeat([]byte("x"), 2<<20)); err != nil {
+		_ = file.Close()
+		t.Fatalf("append oversized ciphertext fixture: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close oversized ciphertext fixture: %v", err)
+	}
+	if _, err := ReadCaptureMessageForGraphRebuild(ctx, readonly, requestID, "request"); err == nil {
+		t.Fatal("full graph-rebuild read accepted ciphertext larger than the indexed message plus AEAD overhead")
+	}
 
 	if _, err := ReadCaptureMessageForGraphRebuild(ctx, readonly, requestID, "response"); err == nil {
 		t.Fatal("full graph-rebuild read accepted a response over its 1 MiB bound")

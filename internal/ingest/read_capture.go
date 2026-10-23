@@ -148,6 +148,13 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 		fileInfo.Mode().Perm()&0o077 != 0 || fileInfo.Mode().Perm()&0o600 != 0o600 || fileInfo.Size() > maxPageBytes+64 {
 		return CaptureRange{}, errors.New("raw capture vault object is not a private regular file")
 	}
+	readLimit := int64(maxPageBytes + 64)
+	if fullMessage {
+		readLimit = vaultCiphertextSize(size.Int64)
+		if readLimit < 0 || fileInfo.Size() != readLimit {
+			return CaptureRange{}, errors.New("historical capture ciphertext size does not match its indexed message size")
+		}
+	}
 	key, err := readVaultKey()
 	if err != nil {
 		return CaptureRange{}, errors.New("encrypted capture vault key is unavailable")
@@ -156,7 +163,7 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 	if err := ctx.Err(); err != nil {
 		return CaptureRange{}, errors.New("raw capture read was interrupted")
 	}
-	encoded, err := readPrivateFile(path, maxPageBytes+64)
+	encoded, err := readPrivateFile(path, readLimit)
 	if err != nil {
 		return CaptureRange{}, errors.New("raw capture vault object could not be read")
 	}
@@ -193,6 +200,13 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 		ResponseTruncated: nullableStoredBool(row.responseTruncated),
 		WireFidelity:      defaultString(fidelity.String, "unknown"),
 	}, nil
+}
+
+func vaultCiphertextSize(plaintextSize int64) int64 {
+	if plaintextSize < 0 {
+		return -1
+	}
+	return plaintextSize + int64(len(vaultMagic)+12+16)
 }
 
 func nullableStoredBool(value sql.NullInt64) *bool {

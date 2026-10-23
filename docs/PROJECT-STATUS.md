@@ -143,18 +143,23 @@ older audit entries describe their own historical snapshots.
   Current captures therefore still use the prior collapsed representation.
   Stage 3 remains `PARTIAL`; multipart occurrences, route-family grouping,
   actor/session/object context and flow annotations remain outstanding.
-- The bounded read API, shadow-path checks, full Go test suite, race suite,
-  `go vet ./...`, and `git diff --check` passed. The shadow check is a local
-  feasibility result, not a Caido completeness or browser/JavaScript coverage
-  result.
+- The graph-rebuild message reader now verifies encrypted-file size against
+  the indexed plaintext size plus the fixed AES-GCM envelope before reading;
+  the per-message plaintext cap remains 1 MiB. Aggregate capture, byte and
+  time budgets still need to be enforced by a durable rebuild coordinator. A
+  fixture regression covers an oversized ciphertext object. The bounded read
+  API, shadow-path checks, full Go test suite, race suite, `go vet ./...`, and
+  `git diff --check` passed at their recorded checkpoints. The shadow check is
+  a local feasibility result, not a Caido completeness or browser/JavaScript
+  coverage result.
 
 ## KB read-only audit (2026-10-23)
 
 - The local fallback `tools/kb-mcp/query-kb.sh stats` reported a semantic index
-  of 9,878 files and 64,549 chunks/vectors. Only 2,463 files and 33,181
+  of 9,878 files and 65,969 chunks/vectors. Only 2,535 files and 34,621
   chunks/vectors match the current semantic index version and source hashes;
-  `semantic_degraded=true`, with 7,415 legacy/incomplete file rows. There are
-  no orphan chunks/vectors or missing vectors in the committed snapshot, but
+  `semantic_degraded=true`, with 7,343 legacy/incomplete file rows. There are
+  no orphan chunks/vectors or missing vectors in this committed snapshot, but
   integrity is not `ok` because those legacy rows lack current hashes/version.
 - The lexical FTS tier is available in hybrid mode and reports 15,438 files
   and 67,991 passages; its last recorded refresh was 2026-10-13. Empty search
@@ -162,11 +167,14 @@ older audit entries describe their own historical snapshots.
   return within roughly one minute, so the configured local CLI fallback was
   used; it returned after about one minute with a Pydantic warning.
 - At measurement time a background indexer already held the KB writer lock
-  and the database WAL timestamp was advancing. No second reindex was started.
-  These statistics describe the last committed snapshot, not the eventual
-  result of that in-progress job. Re-run `kb_stats` after the writer releases
-  its lock and validate the updated source hashes before claiming KB readiness.
-  KB coverage remains `PARTIAL`.
+  and the database/WAL timestamps were advancing. During this continuation the
+  compatible semantic count grew from 2,463 files / 33,181 vectors to 2,535 /
+  34,621. The MCP `kb_stats` call timed out after 300 seconds; the local CLI
+  fallback returned a consistent committed snapshot after about 78 seconds
+  with the existing Pydantic warning. No second reindex was started. These
+  statistics do not represent the eventual result of the in-progress job.
+  Re-run `kb_stats` after the writer releases its lock and validate updated
+  source hashes before claiming KB readiness. KB coverage remains `PARTIAL`.
 
 This repository is an early public alpha. The following boundaries are deliberate and should remain visible in documentation and user-facing output:
 
