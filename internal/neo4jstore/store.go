@@ -137,6 +137,8 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		"CREATE CONSTRAINT graph_project_identity IF NOT EXISTS FOR (p:GraphProject) REQUIRE p.project_key IS UNIQUE",
 		"CREATE INDEX graph_record_project_type IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.record_type)",
 		"CREATE INDEX graph_record_project_kind IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.kind)",
+		"CREATE INDEX graph_record_project_card_endpoint IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.card_endpoint_id)",
+		"CREATE INDEX graph_record_project_card_capture IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.card_capture_id)",
 	} {
 		result, err := session.Run(ctx, query, nil)
 		if err != nil {
@@ -150,12 +152,14 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 }
 
 type preparedRecord struct {
-	ID          string
-	Type        string
-	Payload     string
-	PayloadHash string
-	Kind        string
-	Predicate   string
+	ID             string
+	Type           string
+	Payload        string
+	PayloadHash    string
+	Kind           string
+	Predicate      string
+	CardEndpointID string
+	CardCaptureID  string
 }
 
 type preparedRef struct {
@@ -215,7 +219,9 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 				    n.payload_json = row.payload_json,
 				    n.payload_sha256 = row.payload_sha256,
 				    n.kind = row.kind,
-				    n.predicate = row.predicate`,
+				    n.predicate = row.predicate,
+				    n.card_endpoint_id = row.card_endpoint_id,
+				    n.card_capture_id = row.card_capture_id`,
 				map[string]any{"project_key": projectKey, "rows": recordRows(prepared.Records[start:end])},
 			)
 			if runErr != nil {
@@ -654,7 +660,9 @@ func writePreparedGraph(ctx context.Context, tx neo4j.ManagedTransaction, projec
 			    n.payload_json = CASE WHEN row.record_type = 'entity' AND n.payload_json IS NOT NULL THEN n.payload_json ELSE row.payload_json END,
 			    n.payload_sha256 = CASE WHEN row.record_type = 'entity' AND n.payload_sha256 IS NOT NULL THEN n.payload_sha256 ELSE row.payload_sha256 END,
 			    n.kind = row.kind,
-			    n.predicate = row.predicate`,
+			    n.predicate = row.predicate,
+			    n.card_endpoint_id = row.card_endpoint_id,
+			    n.card_capture_id = row.card_capture_id`,
 			map[string]any{"project_key": projectKey, "rows": recordRows(prepared.Records[start:end])},
 		)
 		if runErr != nil {
@@ -829,6 +837,12 @@ func prepareGraphSnapshot(projectKey string, snapshot behaviorgraph.Record, requ
 		if value, ok := record["predicate"].(string); ok {
 			item.Predicate = value
 		}
+		if recordType == "card" {
+			if endpoint, ok := record["endpoint"].(map[string]any); ok {
+				item.CardEndpointID, _ = endpoint["id"].(string)
+			}
+			item.CardCaptureID, _ = record["capture_id"].(string)
+		}
 		output.Records = append(output.Records, item)
 		return id, nil
 	}
@@ -955,6 +969,7 @@ func recordRows(records []preparedRecord) []map[string]any {
 		rows = append(rows, map[string]any{
 			"record_id": record.ID, "record_type": record.Type, "payload_json": record.Payload,
 			"payload_sha256": record.PayloadHash, "kind": record.Kind, "predicate": record.Predicate,
+			"card_endpoint_id": record.CardEndpointID, "card_capture_id": record.CardCaptureID,
 		})
 	}
 	return rows

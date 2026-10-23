@@ -46,6 +46,37 @@ func TestPrepareSnapshotKeepsProjectScopedAssertionAndEvidenceLinks(t *testing.T
 	}
 }
 
+func TestPrepareSnapshotPromotesAnalysisCardLookupFields(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	snapshot := testSnapshot(projectKey)
+	endpointID := "endpoint-" + strings.Repeat("1", 64)
+	snapshot["cards"] = []behaviorgraph.Record{{
+		"id": "card-" + strings.Repeat("b", 64), "capture_id": "capture-239",
+		"endpoint": map[string]any{"id": endpointID},
+		"source_refs": []behaviorgraph.Record{{
+			"path": "/private/receipt.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.exchange",
+		}},
+	}}
+	prepared, err := prepareSnapshot(projectKey, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var card preparedRecord
+	for _, record := range prepared.Records {
+		if record.Type == "card" {
+			card = record
+			break
+		}
+	}
+	if card.CardEndpointID != endpointID || card.CardCaptureID != "capture-239" {
+		t.Fatalf("promoted card lookup keys = endpoint %q, capture %q", card.CardEndpointID, card.CardCaptureID)
+	}
+	rows := recordRows([]preparedRecord{card})
+	if len(rows) != 1 || rows[0]["card_endpoint_id"] != endpointID || rows[0]["card_capture_id"] != "capture-239" {
+		t.Fatalf("record row omitted card lookup properties: %#v", rows)
+	}
+}
+
 func TestPrepareOutboxBundleAllowsReferencesToEarlierBatches(t *testing.T) {
 	projectKey := strings.Repeat("a", 64)
 	snapshot := testSnapshot(projectKey)

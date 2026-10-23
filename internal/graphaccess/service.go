@@ -13,6 +13,7 @@ type neo4jGraphStore interface {
 	ReadProjectSnapshot(context.Context, string) (behaviorgraph.Record, error)
 	ReadProjectNeighborhood(context.Context, string, []string, int) (neo4jstore.Neighborhood, error)
 	ReadProjectNeighborhoodPage(context.Context, string, []string, int, *neo4jstore.NeighborhoodCursor) (neo4jstore.Neighborhood, error)
+	ReadProjectAnalyticalSlice(context.Context, string, []string, neo4jstore.AnalyticalSliceOptions) (neo4jstore.AnalyticalSlice, error)
 	Close(context.Context) error
 }
 

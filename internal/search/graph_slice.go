@@ -32,7 +32,23 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 	if err := validateGraphProjectStore(projectStore); err != nil {
 		return nil, err
 	}
-	reader, err := service.OpenReader(ctx, projectStore)
+	var reader graphaccess.Reader
+	var nativeSlice neo4jstore.AnalyticalSlice
+	backend := graphaccess.ConfiguredBackend()
+	var err error
+	switch backend {
+	case "sqlite":
+		reader, err = service.OpenReader(ctx, projectStore)
+	case "neo4j":
+		nativeSlice, err = service.ReadAnalyticalSlice(ctx, projectStore, seedIDs, neo4jstore.AnalyticalSliceOptions{
+			MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth,
+		})
+		if err == nil {
+			reader, err = behaviorgraph.OpenReaderFromSnapshot(ctx, nativeSlice.Snapshot, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
+		}
+	default:
+		return nil, errors.New("configured graph backend is unsupported")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -42,6 +58,46 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 	})
 	if err != nil {
 		return nil, err
+	}
+	if backend == "neo4j" {
+		slice["view"] = "analytical"
+		slice["coverage_state"] = "partial"
+		slice["incomplete"] = true
+		slice["project_snapshot_integrity"] = "not_assessed"
+		slice["integrity_scope"] = "selected_records"
+		slice["analysis_closure_scope"] = "bounded_frontier"
+		slice["analysis_closure_complete"] = false
+		slice["graph_generation"] = nativeSlice.Generation
+		slice["query_frontier_hops"] = nativeSlice.FrontierHops
+		slice["candidate_assertion_count"] = nativeSlice.CandidateAssertions
+		slice["candidate_assertion_limit_reached"] = nativeSlice.CandidateAssertionsTruncated
+		slice["analytical_frontier_node_limit_reached"] = nativeSlice.FrontierNodeLimitReached
+		slice["analytical_frontier_nodes_omitted"] = nativeSlice.FrontierNodesOmitted
+		slice["candidate_card_count"] = nativeSlice.CandidateCards
+		slice["candidate_card_limit_reached"] = nativeSlice.CandidateCardsTruncated
+		slice["provenance_truncated"] = nativeSlice.ProvenanceTruncated
+		slice["provenance_truncated_entity_ids"] = append([]string{}, nativeSlice.TruncatedEntityIDs...)
+		slice["entity_source_ref_limit"] = nativeSlice.EntitySourceRefLimit
+		if nativeSlice.CandidateAssertionsTruncated || nativeSlice.FrontierNodeLimitReached || nativeSlice.CandidateCardsTruncated || nativeSlice.ProvenanceTruncated {
+			slice["truncated"] = true
+		}
+		limitations, _ := slice["limitations"].([]string)
+		slice["limitations"] = append(limitations,
+			"Neo4j analytical reads load a bounded selected-query frontier; full-project integrity is not assessed.",
+			"Contradiction and evidence closure is limited to the loaded frontier and is not project-wide.",
+		)
+		if nativeSlice.CandidateAssertionsTruncated {
+			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j assertion candidate budget was reached; additional frontier records were not loaded by this analytical request.")
+		}
+		if nativeSlice.FrontierNodeLimitReached {
+			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analytical frontier node budget was reached; omitted nodes require a separate focused neighborhood request.")
+		}
+		if nativeSlice.CandidateCardsTruncated {
+			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analysis-card candidate budget was reached; additional cards were not loaded.")
+		}
+		if nativeSlice.ProvenanceTruncated {
+			slice["limitations"] = append(slice["limitations"].([]string), "Entity source references are deterministically sampled; the listed entities have incomplete provenance.")
+		}
 	}
 	return attachGraphProvenance(ctx, projectStore, slice)
 }

@@ -310,12 +310,26 @@ func (tx *neighborhoodProvenanceTx) Run(_ context.Context, query string, params 
 				rows = append(rows, row)
 			}
 		}
+	} else if perOwnerLimit, batched := params["limit_each"].(int); batched {
+		for _, owner := range params["owner_ids"].([]string) {
+			ownerRows := append([]*neo4j.Record(nil), tx.rows[owner]...)
+			sort.Slice(ownerRows, func(i, j int) bool { return fmt.Sprint(ownerRows[i].Values[1]) < fmt.Sprint(ownerRows[j].Values[1]) })
+			if len(ownerRows) > perOwnerLimit {
+				ownerRows = ownerRows[:perOwnerLimit]
+			}
+			rows = append(rows, ownerRows...)
+		}
 	} else {
 		for _, owner := range params["owner_ids"].([]string) {
 			rows = append(rows, tx.rows[owner]...)
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Values[1].(string) < rows[j].Values[1].(string) })
+	sort.Slice(rows, func(i, j int) bool {
+		if fmt.Sprint(rows[i].Values[0]) != fmt.Sprint(rows[j].Values[0]) {
+			return fmt.Sprint(rows[i].Values[0]) < fmt.Sprint(rows[j].Values[0])
+		}
+		return fmt.Sprint(rows[i].Values[1]) < fmt.Sprint(rows[j].Values[1])
+	})
 	if limit := params["limit"].(int); len(rows) > limit {
 		rows = rows[:limit]
 	}

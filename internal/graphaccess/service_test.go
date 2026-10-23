@@ -19,10 +19,14 @@ import (
 )
 
 type fakeNeo4jGraphStore struct {
-	closeCount atomic.Int32
+	closeCount          atomic.Int32
+	snapshotReads       atomic.Int32
+	analyticalSliceRead atomic.Int32
+	analyticalSlice     neo4jstore.AnalyticalSlice
 }
 
-func (*fakeNeo4jGraphStore) ReadProjectSnapshot(context.Context, string) (behaviorgraph.Record, error) {
+func (s *fakeNeo4jGraphStore) ReadProjectSnapshot(context.Context, string) (behaviorgraph.Record, error) {
+	s.snapshotReads.Add(1)
 	return behaviorgraph.Record{}, nil
 }
 
@@ -31,6 +35,11 @@ func (*fakeNeo4jGraphStore) ReadProjectNeighborhood(context.Context, string, []s
 }
 func (*fakeNeo4jGraphStore) ReadProjectNeighborhoodPage(context.Context, string, []string, int, *neo4jstore.NeighborhoodCursor) (neo4jstore.Neighborhood, error) {
 	return neo4jstore.Neighborhood{}, nil
+}
+
+func (s *fakeNeo4jGraphStore) ReadProjectAnalyticalSlice(context.Context, string, []string, neo4jstore.AnalyticalSliceOptions) (neo4jstore.AnalyticalSlice, error) {
+	s.analyticalSliceRead.Add(1)
+	return s.analyticalSlice, nil
 }
 
 func (s *fakeNeo4jGraphStore) Close(context.Context) error {
@@ -164,6 +173,41 @@ func TestSQLiteNeighborhoodReturnsTypedUnsupportedCursorError(t *testing.T) {
 	_, err = NewService().ReadNeighborhoodPage(context.Background(), selected, []string{"endpoint-" + strings.Repeat("b", 64)}, cursor)
 	if !errors.Is(err, ErrNeighborhoodCursorUnsupported) {
 		t.Fatalf("SQLite continuation error = %v, want typed unsupported error", err)
+	}
+}
+
+func TestReadAnalyticalSliceUsesBoundedNeo4jQueryWithoutSnapshotReader(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "neo4j")
+	t.Setenv("BB_ASSISTANT_NEO4J_PASSWORD", "test-password")
+	root := t.TempDir()
+	ref := project.CaidoProjectRef{InstanceID: "synthetic-instance", ProjectID: "analytical-slice-test"}
+	writable, err := store.CreateProject(context.Background(), ref, root)
+	if err != nil {
+		t.Fatalf("create synthetic project: %v", err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatalf("close synthetic project: %v", err)
+	}
+	selected, err := store.OpenProjectReadOnly(context.Background(), ref, root)
+	if err != nil {
+		t.Fatalf("open synthetic project read-only: %v", err)
+	}
+	defer selected.Close()
+	seed := graphFixtureID("endpoint", "analytical-seed")
+	backend := &fakeNeo4jGraphStore{analyticalSlice: neo4jstore.AnalyticalSlice{Generation: 7}}
+	service := newService(func(context.Context, neo4jstore.Config) (neo4jGraphStore, error) { return backend, nil })
+	defer service.Close(context.Background())
+	result, err := service.ReadAnalyticalSlice(context.Background(), selected, []string{seed}, neo4jstore.AnalyticalSliceOptions{
+		MaxNodes: 20, MaxEdges: 30, MaxDepth: 2,
+	})
+	if err != nil {
+		t.Fatalf("ReadAnalyticalSlice(): %v", err)
+	}
+	if result.Generation != 7 || backend.analyticalSliceRead.Load() != 1 {
+		t.Fatalf("bounded query result/call count = generation %d, reads %d", result.Generation, backend.analyticalSliceRead.Load())
+	}
+	if backend.snapshotReads.Load() != 0 {
+		t.Fatalf("bounded analytical query opened the full snapshot %d times", backend.snapshotReads.Load())
 	}
 }
 

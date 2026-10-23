@@ -12,6 +12,7 @@ import (
 const maxNeighborhoodSliceNodes = 100
 
 var ErrNeighborhoodCursorUnsupported = errors.New("configured graph backend does not support generation-pinned continuation")
+var ErrAnalyticalSliceBackendUnsupported = errors.New("configured graph backend does not support native analytical slices")
 
 // ReadNeighborhood is the interactive, one-hop graph view. Neo4j verifies and
 // loads only selected records and their dependencies; it makes no claim about
@@ -106,6 +107,30 @@ func (s *Service) ReadNeighborhoodPage(ctx context.Context, selected *store.Proj
 		applyNeighborhoodProvenanceCoverage(result, neighborhoodResult)
 	}
 	return NeighborhoodPage{Payload: result, Generation: generation, NextCursor: neighborhoodResult.NextCursor}, nil
+}
+
+// ReadAnalyticalSlice uses Neo4j's bounded selected-query path. It deliberately
+// does not fall back to the full snapshot reader when Neo4j is selected.
+func (s *Service) ReadAnalyticalSlice(ctx context.Context, selected *store.ProjectStore, seeds []string, options neo4jstore.AnalyticalSliceOptions) (neo4jstore.AnalyticalSlice, error) {
+	if err := s.checkOpen(); err != nil {
+		return neo4jstore.AnalyticalSlice{}, err
+	}
+	if selected == nil || selected.Database == nil || selected.Database.DB() == nil || !selected.Database.ReadOnly() || len(seeds) < 1 || len(seeds) > 80 {
+		return neo4jstore.AnalyticalSlice{}, errors.New("analytical graph slice requires one selected read-only project and 1-80 seeds")
+	}
+	switch ConfiguredBackend() {
+	case "sqlite":
+		return neo4jstore.AnalyticalSlice{}, ErrAnalyticalSliceBackendUnsupported
+	case "neo4j":
+		graphStore, release, err := s.acquireNeo4jStore(ctx)
+		if err != nil {
+			return neo4jstore.AnalyticalSlice{}, err
+		}
+		defer release()
+		return graphStore.ReadProjectAnalyticalSlice(ctx, selected.ProjectKey, seeds, options)
+	default:
+		return neo4jstore.AnalyticalSlice{}, errors.New("configured graph backend is unsupported")
+	}
 }
 
 func neighborhoodSliceOptions(seeds []string) behaviorgraph.SliceOptions {

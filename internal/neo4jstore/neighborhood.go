@@ -20,6 +20,7 @@ const (
 	maxNeighborhoodBytes      = 16 << 20
 	maxNeighborhoodRefs       = 20_000
 	maxNeighborhoodEntityRefs = 64
+	maxEntityProvenanceBatch  = 100
 )
 
 var neighborhoodIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
@@ -185,6 +186,10 @@ func decodeNeighborhoodRecord(id, kind, payload, checksum string) (neighborhoodR
 			!neighborhoodIDPattern.MatchString(subject) || !neighborhoodIDPattern.MatchString(object) || !predicateOK || !contextOK || !originOK || !evidenceOK {
 			return neighborhoodRecord{}, errors.New("Neo4j neighborhood assertion identity or type is inconsistent")
 		}
+	case "card":
+		if decoded["id"] != id || !strings.HasPrefix(id, "card-") {
+			return neighborhoodRecord{}, errors.New("Neo4j neighborhood analysis card identity is inconsistent")
+		}
 	case "source":
 		path, pathOK := decoded["path"].(string)
 		hash, hashOK := decoded["sha256"].(string)
@@ -294,7 +299,7 @@ func (r *neighborhoodRead) load(ctx context.Context, tx neo4j.ManagedTransaction
 		characterCount, sizeOK := characters.(int64)
 		checksumText, checksumOK := checksum.(string)
 		if !idOK || !wanted[idText] || selected[idText].kind != "" || !kindOK ||
-			(kindText != "entity" && kindText != "assertion") || !sizeOK || !checksumOK || !projectKeyPattern.MatchString(checksumText) {
+			(kindText != "entity" && kindText != "assertion" && kindText != "card") || !sizeOK || !checksumOK || !projectKeyPattern.MatchString(checksumText) {
 			return errors.New("Neo4j neighborhood record identity or type is inconsistent")
 		}
 		upperBound, err := neighborhoodPayloadUpperBound(characterCount, maxNeighborhoodBytes-r.bytes-reservedBytes)
@@ -500,6 +505,42 @@ func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction,
 	return output, nil
 }
 
+func (r *neighborhoodRead) closeAssertionDependencies(ctx context.Context, tx neo4j.ManagedTransaction, budget int) error {
+	for {
+		missingSet := make(map[string]bool)
+		assertions := 0
+		for _, record := range r.records {
+			if record.kind != "assertion" {
+				continue
+			}
+			assertions++
+			for _, key := range []string{"subject", "object"} {
+				id, ok := record.value[key].(string)
+				if !ok || !neighborhoodIDPattern.MatchString(id) {
+					return errors.New("Neo4j analytical assertion dependency is malformed")
+				}
+				if _, exists := r.records[id]; !exists {
+					missingSet[id] = true
+				}
+			}
+		}
+		if assertions > budget {
+			return errors.New("Neo4j analytical assertion dependencies exceed the edge budget")
+		}
+		if len(missingSet) == 0 {
+			return nil
+		}
+		missing := make([]string, 0, len(missingSet))
+		for id := range missingSet {
+			missing = append(missing, id)
+		}
+		sort.Strings(missing)
+		if err := r.load(ctx, tx, missing); err != nil {
+			return err
+		}
+	}
+}
+
 type neighborhoodCandidate struct {
 	id       string
 	priority int
@@ -571,7 +612,7 @@ func (r *neighborhoodRead) loadProvenance(ctx context.Context, tx neo4j.ManagedT
 	assertions, entities := make([]string, 0), make([]string, 0)
 	for _, id := range ids {
 		switch r.records[id].kind {
-		case "assertion":
+		case "assertion", "card":
 			assertions = append(assertions, id)
 		case "entity":
 			entities = append(entities, id)
@@ -581,20 +622,21 @@ func (r *neighborhoodRead) loadProvenance(ctx context.Context, tx neo4j.ManagedT
 	}
 	sort.Strings(assertions)
 	sort.Strings(entities)
-	// Assertion IDs include their complete source_refs. Reserve those before
+	// Assertions and cards keep complete source_refs. Reserve those before
 	// sampling entity refs, which do not participate in entity identity.
 	if err := r.loadAssertionProvenance(ctx, tx, assertions); err != nil {
 		return err
 	}
-	for index, id := range entities {
-		remaining := len(entities) - index
+	for offset := 0; offset < len(entities); offset += maxEntityProvenanceBatch {
+		end := min(offset+maxEntityProvenanceBatch, len(entities))
+		remaining := len(entities) - offset
 		limit := min(maxNeighborhoodEntityRefs, (maxNeighborhoodRefs-r.provenanceRows)/remaining-1)
 		if limit < 1 {
 			return errors.New("Neo4j neighborhood has no safe provenance budget for its entities")
 		}
 		byteBudget := (maxNeighborhoodBytes - r.bytes) / remaining
 		recordBudget := max(1, (maxNeighborhoodRecords-len(r.records))/remaining)
-		if err := r.loadEntityProvenance(ctx, tx, id, min(limit, recordBudget), byteBudget); err != nil {
+		if err := r.loadEntityProvenanceBatch(ctx, tx, entities[offset:end], min(limit, recordBudget), byteBudget); err != nil {
 			return err
 		}
 	}
@@ -732,30 +774,57 @@ func neighborhoodSourceKey(source behaviorgraph.Record) string {
 	return key.String()
 }
 
+// loadEntityProvenance retains the single-owner test seam while production
+// reads use loadEntityProvenanceBatch to avoid one Bolt round trip per entity.
 func (r *neighborhoodRead) loadEntityProvenance(ctx context.Context, tx neo4j.ManagedTransaction, id string, limit, byteBudget int) error {
-	// Select IDs and sizes before fetching payloads. A high-degree entity or an
-	// oversized optional source must not download past the cumulative byte cap.
+	return r.loadEntityProvenanceBatch(ctx, tx, []string{id}, limit, byteBudget)
+}
+
+func (r *neighborhoodRead) loadEntityProvenanceBatch(ctx context.Context, tx neo4j.ManagedTransaction, ids []string, limit, byteBudget int) error {
+	if len(ids) == 0 || len(ids) > maxEntityProvenanceBatch || limit < 1 || byteBudget < 0 {
+		return errors.New("Neo4j neighborhood entity provenance batch is invalid")
+	}
+	// Read source IDs and sizes for a bounded owner batch before fetching
+	// payloads. A high-degree entity or oversized source must not exceed the
+	// cumulative record and byte budgets.
 	result, err := tx.Run(ctx, `
 		UNWIND $owner_ids AS owner_id
-		MATCH (owner:GraphRecord {project_key: $project_key, record_id: owner_id, record_type: 'entity'})
-		OPTIONAL MATCH (owner)-[:EVIDENCED_BY {project_key: $project_key}]->(source:GraphRecord {project_key: $project_key, record_type: 'source'})
-		RETURN owner.record_id AS owner_id, source.record_id AS record_id, source.record_type AS record_type,
-		       size(source.payload_json) AS payload_char_count, source.payload_sha256 AS payload_sha256,
-		       EXISTS {
-		           MATCH (owner)-[other:EVIDENCED_BY]->(foreign)
-		           WHERE other.project_key IS NULL OR other.project_key <> $project_key
-		              OR foreign.project_key IS NULL OR foreign.project_key <> $project_key OR NOT foreign:GraphRecord
-		              OR foreign.record_type IS NULL OR foreign.record_type <> 'source'
-		       } AS invalid_links
-		ORDER BY source.record_id
-		LIMIT $limit`, map[string]any{"project_key": r.project, "owner_ids": []string{id}, "limit": limit + 1})
+		CALL {
+			WITH owner_id
+			MATCH (owner:GraphRecord {project_key: $project_key, record_id: owner_id, record_type: 'entity'})
+			OPTIONAL MATCH (owner)-[:EVIDENCED_BY {project_key: $project_key}]->(source:GraphRecord {project_key: $project_key, record_type: 'source'})
+			RETURN owner.record_id AS matched_owner_id, source.record_id AS record_id, source.record_type AS record_type,
+			       size(source.payload_json) AS payload_char_count, source.payload_sha256 AS payload_sha256,
+			       EXISTS {
+			           MATCH (owner)-[other:EVIDENCED_BY]->(foreign)
+			           WHERE other.project_key IS NULL OR other.project_key <> $project_key
+			              OR foreign.project_key IS NULL OR foreign.project_key <> $project_key OR NOT foreign:GraphRecord
+			              OR foreign.record_type IS NULL OR foreign.record_type <> 'source'
+			       } AS invalid_links
+			ORDER BY source.record_id
+			LIMIT $limit_each
+		}
+		RETURN matched_owner_id AS owner_id, record_id, record_type, payload_char_count, payload_sha256, invalid_links
+		ORDER BY owner_id, record_id
+		LIMIT $limit`, map[string]any{"project_key": r.project, "owner_ids": ids, "limit_each": limit + 1, "limit": len(ids)*(limit+1) + 1})
 	if err != nil {
 		return errors.New("Neo4j neighborhood entity provenance is unavailable")
 	}
-	selected, missing := make([]string, 0, limit), make([]string, 0, limit)
-	missingMeta := make(map[string]neighborhoodPayloadMeta, limit)
-	seen := make(map[string]bool, limit+1)
-	reservedBytes := 0
+	wanted := make(map[string]bool, len(ids))
+	seen := make(map[string]map[string]bool, len(ids))
+	selected := make(map[string][]string, len(ids))
+	reservedBytes := make(map[string]int, len(ids))
+	missingMeta := make(map[string]neighborhoodPayloadMeta)
+	for _, id := range ids {
+		owner, exists := r.records[id]
+		if !exists || owner.kind != "entity" || wanted[id] {
+			return errors.New("Neo4j neighborhood entity provenance owner is invalid")
+		}
+		wanted[id] = true
+		seen[id] = make(map[string]bool, limit+1)
+	}
+	rowLimit := len(ids) * (limit + 1)
+	rows := 0
 	for result.Next(ctx) {
 		row := result.Record()
 		owner, _ := row.Get("owner_id")
@@ -764,48 +833,70 @@ func (r *neighborhoodRead) loadEntityProvenance(ctx context.Context, tx neo4j.Ma
 		characters, _ := row.Get("payload_char_count")
 		checksum, _ := row.Get("payload_sha256")
 		invalid, _ := row.Get("invalid_links")
+		ownerText, ownerOK := owner.(string)
 		sourceText, sourceOK := sourceID.(string)
 		characterCount, sizeOK := characters.(int64)
 		checksumText, checksumOK := checksum.(string)
 		invalidBool, validBool := invalid.(bool)
 		r.provenanceRows++
-		if owner != id || !sourceOK || !neighborhoodIDPattern.MatchString(sourceText) || !strings.HasPrefix(sourceText, "source-") || kind != "source" ||
-			!sizeOK || characterCount < 2 || !checksumOK || !projectKeyPattern.MatchString(checksumText) || !validBool || invalidBool || seen[sourceText] || r.provenanceRows > maxNeighborhoodRefs {
+		rows++
+		ownerRecord, ownerExists := r.records[ownerText]
+		if !ownerOK || !wanted[ownerText] || !ownerExists || ownerRecord.kind != "entity" || !sourceOK ||
+			!neighborhoodIDPattern.MatchString(sourceText) || !strings.HasPrefix(sourceText, "source-") || kind != "source" ||
+			!sizeOK || characterCount < 2 || !checksumOK || !projectKeyPattern.MatchString(checksumText) || !validBool || invalidBool ||
+			seen[ownerText][sourceText] || r.provenanceRows > maxNeighborhoodRefs || rows > rowLimit {
 			return errors.New("Neo4j neighborhood entity provenance is malformed")
 		}
-		seen[sourceText] = true
-		if len(seen) > limit {
-			r.markEntityProvenanceTruncated(id)
+		seen[ownerText][sourceText] = true
+		if len(seen[ownerText]) > limit {
+			r.markEntityProvenanceTruncated(ownerText)
 			continue
 		}
 		if existing, ok := r.records[sourceText]; ok {
 			if existing.kind != "source" || existing.hash != checksumText {
 				return errors.New("Neo4j neighborhood source changed while it was being read")
 			}
+		} else if pending, ok := missingMeta[sourceText]; ok {
+			if pending.checksum != checksumText || pending.characterCount != characterCount || pending.kind != "source" {
+				return errors.New("Neo4j neighborhood source metadata is inconsistent")
+			}
 		} else {
 			// Neo4j size(string) counts Unicode characters; four bytes per
 			// character is a conservative UTF-8 bound before loading the payload.
-			if characterCount > int64((byteBudget-reservedBytes)/4) || len(r.records)+len(missing) >= maxNeighborhoodRecords {
-				r.markEntityProvenanceTruncated(id)
+			if characterCount > int64((byteBudget-reservedBytes[ownerText])/4) || len(r.records)+len(missingMeta) >= maxNeighborhoodRecords {
+				r.markEntityProvenanceTruncated(ownerText)
 				continue
 			}
-			reservedBytes += 4 * int(characterCount)
-			missing = append(missing, sourceText)
+			reservedBytes[ownerText] += 4 * int(characterCount)
 			missingMeta[sourceText] = neighborhoodPayloadMeta{kind: "source", checksum: checksumText, characterCount: characterCount}
 		}
-		selected = append(selected, sourceText)
+		selected[ownerText] = append(selected[ownerText], sourceText)
 	}
-	if result.Err() != nil || len(selected) == 0 {
+	if result.Err() != nil || rows > rowLimit || len(seen) != len(ids) {
 		return errors.New("Neo4j neighborhood entity provenance is incomplete")
 	}
+	missing := make([]string, 0, len(missingMeta))
+	for id := range missingMeta {
+		missing = append(missing, id)
+	}
+	sort.Strings(missing)
 	if err := r.loadSources(ctx, tx, missing, missingMeta); err != nil {
 		return err
 	}
-	refs := make([]behaviorgraph.Record, 0, len(selected))
-	for _, sourceID := range selected {
-		refs = append(refs, r.records[sourceID].value)
+	for _, ownerID := range ids {
+		refs := make([]behaviorgraph.Record, 0, len(selected[ownerID]))
+		for _, sourceID := range selected[ownerID] {
+			source, exists := r.records[sourceID]
+			if !exists || source.kind != "source" {
+				return errors.New("Neo4j neighborhood entity provenance source is missing")
+			}
+			refs = append(refs, source.value)
+		}
+		if len(refs) == 0 {
+			return errors.New("Neo4j neighborhood entity provenance is incomplete")
+		}
+		r.records[ownerID].value["source_refs"] = refs
 	}
-	r.records[id].value["source_refs"] = refs
 	return nil
 }
 
