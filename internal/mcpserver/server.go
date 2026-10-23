@@ -1028,6 +1028,7 @@ func toolCatalog(includeRaw bool) []toolSpec {
 				"seed_ids": map[string]any{
 					"type": "array", "items": stringSchema(maxGraphSeedIDBytes, map[string]any{
 						"minLength": 1, "pattern": `^[a-z][a-z0-9_]*-[a-f0-9]{64}$`,
+						"not": map[string]any{"pattern": `^(source|card)-`},
 					}),
 					"minItems": 1, "maxItems": 20, "uniqueItems": true,
 				},

@@ -92,7 +92,8 @@ func (t *Tools) graphNeighborhood(ctx context.Context, args graphNeighborhoodArg
 	}
 	seen := make(map[string]struct{}, len(args.SeedIDs))
 	for _, seed := range args.SeedIDs {
-		if strings.TrimSpace(seed) != seed || !graphNeighborhoodSeedPattern.MatchString(seed) || len(seed) > maxGraphSeedIDBytes {
+		if strings.TrimSpace(seed) != seed || !graphNeighborhoodSeedPattern.MatchString(seed) ||
+			strings.HasPrefix(seed, "source-") || strings.HasPrefix(seed, "card-") || len(seed) > maxGraphSeedIDBytes {
 			return nil, errors.New("graph neighborhood seed ID is malformed")
 		}
 		if _, exists := seen[seed]; exists {

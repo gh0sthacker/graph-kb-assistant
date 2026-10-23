@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,16 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 				},
 			},
 		},
+		map[string]any{
+			"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+			"params": map[string]any{
+				"name": "bb_graph_neighborhood",
+				"arguments": map[string]any{
+					"project_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					"seed_ids":    []string{"source-" + strings.Repeat("c", 64)},
+				},
+			},
+		},
 	)
 
 	listResult := responseForID(t, responses, "2").Result.(map[string]any)
@@ -114,6 +125,10 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 			if seedItemSchema["pattern"] != graphNeighborhoodSeedPattern.String() {
 				t.Errorf("graph neighborhood seed pattern %#v does not match runtime validation %q", seedItemSchema["pattern"], graphNeighborhoodSeedPattern.String())
 			}
+			forbiddenKinds, _ := seedItemSchema["not"].(map[string]any)
+			if forbiddenKinds["pattern"] != `^(source|card)-` {
+				t.Errorf("graph neighborhood schema permits non-seed record kinds: %#v", seedItemSchema)
+			}
 			required, _ := schema["required"].([]any)
 			if len(required) != 2 || required[0] != "project_key" || required[1] != "seed_ids" {
 				t.Errorf("graph neighborhood does not require project and seeds: %#v", schema["required"])
@@ -150,6 +165,7 @@ func TestServerAdvertisesBoundedReadOnlyToolContract(t *testing.T) {
 	for id, wantMessage := range map[string]string{
 		"5": "graph neighborhood seed ID is malformed",
 		"6": "graph neighborhood seed IDs must be unique",
+		"7": "graph neighborhood seed ID is malformed",
 	} {
 		result := responseForID(t, responses, id).Result.(map[string]any)
 		resultContent, _ := result["content"].([]any)
