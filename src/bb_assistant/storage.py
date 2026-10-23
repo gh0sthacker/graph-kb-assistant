@@ -936,8 +936,10 @@ class ProjectStore:
                     "SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?",
                     (revision_id,),
                 ).fetchone()
-                if registered_revision is None or tuple(registered_revision) != (
-                    exchange.ref.observation_id, "historical"
+                if (
+                    registered_revision is None
+                    or registered_revision["observation_id"] != exchange.ref.observation_id
+                    or registered_revision["source_kind"] not in {"historical", "live"}
                 ):
                     raise ValueError("Capture revision registry identity conflicts with the stored revision")
         return [

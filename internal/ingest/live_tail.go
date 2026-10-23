@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -56,19 +57,21 @@ type LiveTailCheckpoint struct {
 }
 
 type LiveTailResult struct {
-	ProjectKey     string  `json:"project_key"`
-	State          string  `json:"state"`
-	RequestsSeen   int     `json:"requests_seen"`
-	RequestsAdded  int     `json:"requests_added"`
-	PagesCompleted int     `json:"pages_completed"`
-	Watermark      *string `json:"watermark"`
-	CursorPending  bool    `json:"cursor_pending"`
-	LimitReached   bool    `json:"limit_reached"`
+	ProjectKey             string  `json:"project_key"`
+	State                  string  `json:"state"`
+	RequestsSeen           int     `json:"requests_seen"`
+	RequestsAdded          int     `json:"requests_added"`
+	ProjectionPendingPages int     `json:"projection_pending_pages"`
+	PagesCompleted         int     `json:"pages_completed"`
+	Watermark              *string `json:"watermark"`
+	CursorPending          bool    `json:"cursor_pending"`
+	LimitReached           bool    `json:"limit_reached"`
 }
 
 type LivePageResult struct {
-	RequestsAdded int
-	Checkpoint    LiveTailCheckpoint
+	RequestsAdded   int
+	ProjectionState string
+	Checkpoint      LiveTailCheckpoint
 }
 
 type liveProgressRow struct {
@@ -80,6 +83,7 @@ type preparedLiveCapture struct {
 	exchange           caido.HttpExchange
 	projection         behaviorgraph.ExchangeProjection
 	observationID      string
+	revisionID         string
 	graphObservationID string
 	bundle             behaviorgraph.Record
 	requestSignature   string
@@ -106,6 +110,7 @@ type LiveTailWriter struct {
 	selected    *store.ProjectStore
 	indexKey    []byte
 	responseKey []byte
+	projector   projectionExecutor
 }
 
 func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*LiveTailWriter, error) {
@@ -295,26 +300,23 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 	for _, item := range prepared {
 		bundles = append(bundles, item.bundle)
 	}
-	if len(bundles) > 0 {
-		if err := importGraphBundles(ctx, w.selected, bundles); err != nil {
-			return LivePageResult{}, err
-		}
-	}
 	conn, err := beginSelectedImmediate(ctx, w.selected)
 	if err != nil {
 		return LivePageResult{}, err
 	}
 	committed := false
 	defer func() {
-		if !committed {
+		if !committed && conn != nil {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
-		_ = conn.Close()
+		if conn != nil {
+			_ = conn.Close()
+		}
 	}()
 	if err := liveCheckpointMatches(ctx, conn, checkpoint); err != nil {
 		return LivePageResult{}, err
 	}
-	added, err := persistLiveCaptures(ctx, conn, w.selected, prepared)
+	added, accepted, err := persistLiveCaptures(ctx, conn, w.selected, prepared)
 	if err != nil {
 		return LivePageResult{}, err
 	}
@@ -336,7 +338,10 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 		return LivePageResult{}, err
 	}
 	committed = true
-	return LivePageResult{RequestsAdded: added, Checkpoint: updated}, nil
+	_ = conn.Close()
+	conn = nil
+	projectionState := w.projectAcceptedLive(ctx, accepted)
+	return LivePageResult{RequestsAdded: added, ProjectionState: projectionState, Checkpoint: updated}, nil
 }
 
 func (w *LiveTailWriter) MarkPartial(ctx context.Context, checkpoint LiveTailCheckpoint) error {
@@ -468,6 +473,9 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		}
 		result.RequestsSeen += len(metadata.Requests)
 		result.RequestsAdded += pageResult.RequestsAdded
+		if pageResult.ProjectionState == "pending" {
+			result.ProjectionPendingPages++
+		}
 		result.PagesCompleted++
 		checkpoint = pageResult.Checkpoint
 		result.State = checkpoint.State
@@ -537,8 +545,25 @@ func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]
 		if err != nil || !validDigest(requestURLKey) {
 			return nil, errors.New("live-tail URL key could not be built")
 		}
+		requestHash := sha256Hex(exchange.RequestRaw)
+		var responseHash *string
+		var responseSize *int
+		if exchange.HasResponse {
+			value := sha256Hex(exchange.ResponseRaw)
+			responseHash = &value
+			length := len(exchange.ResponseRaw)
+			responseSize = &length
+		}
+		revisionID, err := captureRevisionID(
+			observationID, requestHash, responseHash, len(exchange.RequestRaw), responseSize,
+			exchange.CapturedAt, exchange.RequestTruncated, exchange.ResponseTruncated,
+			exchange.RequestWireFidelity, exchange.ResponseWireFidelity,
+		)
+		if err != nil || !validDigest(revisionID) {
+			return nil, errors.New("live-tail capture revision identity could not be built")
+		}
 		item := preparedLiveCapture{
-			exchange: exchange, projection: projection, observationID: observationID,
+			exchange: exchange, projection: projection, observationID: observationID, revisionID: revisionID,
 			requestSignature: requestSignature, responseSignature: responseSignature, requestURLKey: requestURLKey,
 		}
 		source, err := writeLiveSourceReceipt(w.selected, item)
@@ -586,8 +611,14 @@ func writeLiveSourceReceipt(selected *store.ProjectStore, item preparedLiveCaptu
 	return behaviorgraph.Record{"path": path, "sha256": digest, "record_locator": "$"}, nil
 }
 
-func persistLiveCaptures(ctx context.Context, conn *sql.Conn, selected *store.ProjectStore, prepared []preparedLiveCapture) (int, error) {
+func persistLiveCaptures(
+	ctx context.Context,
+	conn *sql.Conn,
+	selected *store.ProjectStore,
+	prepared []preparedLiveCapture,
+) (int, []preparedLiveCapture, error) {
 	added := 0
+	accepted := make([]preparedLiveCapture, 0, len(prepared))
 	for _, item := range prepared {
 		var responseSize any
 		if item.exchange.HasResponse {
@@ -608,11 +639,11 @@ func persistLiveCaptures(ctx context.Context, conn *sql.Conn, selected *store.Pr
 			item.projection.ParseState,
 		)
 		if err != nil {
-			return 0, errors.New("live-tail capture index could not be written")
+			return 0, nil, errors.New("live-tail capture index could not be written")
 		}
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
-			return 0, errors.New("live-tail capture index result could not be checked")
+			return 0, nil, errors.New("live-tail capture index result could not be checked")
 		}
 		if rowsAffected == 1 {
 			if _, err := conn.ExecContext(ctx,
@@ -621,23 +652,107 @@ func persistLiveCaptures(ctx context.Context, conn *sql.Conn, selected *store.Pr
 				item.projection.Search.Route, strings.Join(item.projection.Search.FieldNames, " "),
 				strings.Join(item.projection.Search.HeaderNames, " "),
 			); err != nil {
-				return 0, errors.New("live-tail full-text index could not be written")
+				return 0, nil, errors.New("live-tail full-text index could not be written")
 			}
 			added++
-			continue
+		} else {
+			var existingObservation, existingGraph, existingSignature, existingURL string
+			var existingResponseSignature sql.NullString
+			err = conn.QueryRowContext(ctx,
+				`SELECT observation_id,graph_observation_id,request_signature,response_signature,request_url_key
+				 FROM live_capture_index WHERE caido_instance_id=? AND caido_project_id=? AND request_id=?`,
+				selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID,
+			).Scan(&existingObservation, &existingGraph, &existingSignature, &existingResponseSignature, &existingURL)
+			if err != nil || existingObservation != item.observationID || existingGraph != item.graphObservationID ||
+				existingSignature != item.requestSignature || !nullableStringEquals(existingResponseSignature, item.responseSignature) ||
+				existingURL != item.requestURLKey {
+				return 0, nil, errors.New("live-tail request identity conflicts with an existing project record")
+			}
 		}
-		var existingObservation, existingGraph, existingSignature, existingURL string
-		err = conn.QueryRowContext(ctx,
-			`SELECT observation_id,graph_observation_id,request_signature,request_url_key
-			 FROM live_capture_index WHERE caido_instance_id=? AND caido_project_id=? AND request_id=?`,
-			selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID,
-		).Scan(&existingObservation, &existingGraph, &existingSignature, &existingURL)
-		if err != nil || existingObservation != item.observationID || existingGraph != item.graphObservationID ||
-			existingSignature != item.requestSignature || existingURL != item.requestURLKey {
-			return 0, errors.New("live-tail request identity conflicts with an existing project record")
+		if _, err := conn.ExecContext(ctx,
+			`INSERT OR IGNORE INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at)
+			 VALUES(?,?,'live',?)`, item.revisionID, item.observationID, utcNow(),
+		); err != nil {
+			return 0, nil, errors.New("live-tail capture revision could not be registered")
+		}
+		var registeredObservation, sourceKind string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?", item.revisionID,
+		).Scan(&registeredObservation, &sourceKind); err != nil || registeredObservation != item.observationID ||
+			!validRegisteredRevisionSource(sourceKind) {
+			return 0, nil, errors.New("live-tail capture revision registry identity conflicts with the stored revision")
+		}
+		payload, err := json.Marshal(item.bundle)
+		if err != nil {
+			return 0, nil, errors.New("live-tail graph bundle could not be encoded")
+		}
+		bundleObservationID, err := behaviorgraph.ProjectionObservationID(payload, selected.ProjectKey, item.observationID)
+		if err != nil || bundleObservationID != item.graphObservationID {
+			return 0, nil, errors.New("live-tail graph observation does not match its capture revision")
+		}
+		if _, _, err := behaviorgraph.EnqueueProjectionJob(
+			ctx, conn, selected.ProjectKey, item.revisionID, item.observationID, payload, time.Now().UTC(),
+		); err != nil {
+			return 0, nil, errors.New("live-tail projection job could not be committed with its capture")
+		}
+		accepted = append(accepted, item)
+	}
+	return added, accepted, nil
+}
+
+func (w *LiveTailWriter) projectAcceptedLive(ctx context.Context, accepted []preparedLiveCapture) string {
+	if len(accepted) == 0 {
+		return "not_applicable"
+	}
+	bundles := make([]behaviorgraph.Record, 0, len(accepted))
+	for _, item := range accepted {
+		bundles = append(bundles, item.bundle)
+	}
+	projector := w.projector
+	if projector == nil {
+		projector = projectGraphBundles
+	}
+	materialized, neo4jReady, projectErr := projector(ctx, w.selected, bundles)
+	if !materialized || !neo4jReady || projectErr != nil {
+		return "pending"
+	}
+	conn, err := beginSelectedImmediate(ctx, w.selected)
+	if err != nil {
+		return "pending"
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		_ = conn.Close()
+	}()
+	for _, item := range accepted {
+		job, err := behaviorgraph.ProjectionJobByRevision(ctx, conn, w.selected.ProjectKey, item.revisionID)
+		if err != nil {
+			return "pending"
+		}
+		jobObservationID, err := behaviorgraph.ProjectionObservationID([]byte(job.PayloadJSON), w.selected.ProjectKey, item.observationID)
+		if err != nil || jobObservationID != item.graphObservationID {
+			return "pending"
+		}
+		var storedGraphObservationID string
+		if err := conn.QueryRowContext(ctx,
+			`SELECT graph_observation_id FROM live_capture_index
+			 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=? AND observation_id=?`,
+			w.selected.Project.InstanceID, w.selected.Project.ProjectID, item.exchange.Ref.RequestID, item.observationID,
+		).Scan(&storedGraphObservationID); err != nil || storedGraphObservationID != jobObservationID {
+			return "pending"
+		}
+		if err := behaviorgraph.MarkProjectionJobApplied(ctx, conn, w.selected.ProjectKey, item.revisionID, time.Now().UTC()); err != nil {
+			return "pending"
 		}
 	}
-	return added, nil
+	if err := commitImmediate(ctx, conn); err != nil {
+		return "pending"
+	}
+	committed = true
+	return "applied"
 }
 
 func validateLiveFetchedPage(page caido.HistoryPage, metadata caido.RequestMetadataPage, skipped map[string]struct{}, selected project.CaidoProjectRef) error {

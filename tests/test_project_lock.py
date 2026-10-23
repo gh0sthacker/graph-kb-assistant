@@ -317,6 +317,41 @@ def test_python_history_writer_registers_new_capture_revision(tmp_path):
     assert tuple(registered) == (exchange.ref.observation_id, "historical")
 
 
+def test_python_history_writer_accepts_revision_first_registered_by_live_tail(tmp_path):
+    import sqlite3
+
+    project = CaidoProjectRef("synthetic-instance", "python-cross-source-revision")
+    store = ProjectStore(project, root=tmp_path)
+    exchange = HttpExchange(
+        ref=CaidoExchangeRef(project, "request-1"),
+        captured_at="2026-10-23T12:00:00Z",
+        request_raw=b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+        response_raw=None,
+        method="GET",
+        scheme="http",
+        host="example.test",
+        port=80,
+        target="/",
+    )
+
+    first = store.save_exchange(exchange, key=bytes(32))
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            "UPDATE capture_revision_registry SET source_kind='live' WHERE revision_id=?",
+            (first["revision_id"],),
+        )
+
+    replay = store.save_exchange(exchange, key=bytes(32))
+
+    assert replay["revision_id"] == first["revision_id"]
+    with store.connect() as connection:
+        registered = connection.execute(
+            "SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?",
+            (first["revision_id"],),
+        ).fetchone()
+    assert tuple(registered) == (exchange.ref.observation_id, "live")
+
+
 def test_writable_project_store_rejects_unknown_schema_without_mutating_it(tmp_path):
     import sqlite3
 

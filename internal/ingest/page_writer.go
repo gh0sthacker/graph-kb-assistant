@@ -33,9 +33,12 @@ const (
 // PageWriter is bound to one registered project. It stores historical bytes,
 // structural metadata, and source-linked incomplete BehaviorGraph records.
 type PageWriter struct {
-	selected *store.ProjectStore
-	key      []byte
+	selected  *store.ProjectStore
+	key       []byte
+	projector projectionExecutor
 }
+
+type projectionExecutor func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error)
 
 // RunCheckpoint identifies the currently resumable historical sync run.
 type RunCheckpoint struct {
@@ -48,17 +51,18 @@ type RunCheckpoint struct {
 
 // PageResult contains structural accounting only. It never returns HTTP data.
 type PageResult struct {
-	ProjectKey    string      `json:"project_key"`
-	RunID         string      `json:"run_id"`
-	PageCount     int64       `json:"page_count"`
-	Stored        int         `json:"stored"`
-	Replayed      int         `json:"replayed"`
-	Revised       int         `json:"revised"`
-	CursorState   string      `json:"cursor_state"`
-	State         string      `json:"state"`
-	GraphMapping  string      `json:"graph_mapping"`
-	ReceiptSHA256 string      `json:"receipt_sha256"`
-	SourceRefs    []SourceRef `json:"source_refs"`
+	ProjectKey      string      `json:"project_key"`
+	RunID           string      `json:"run_id"`
+	PageCount       int64       `json:"page_count"`
+	Stored          int         `json:"stored"`
+	Replayed        int         `json:"replayed"`
+	Revised         int         `json:"revised"`
+	CursorState     string      `json:"cursor_state"`
+	State           string      `json:"state"`
+	GraphMapping    string      `json:"graph_mapping"`
+	ProjectionState string      `json:"projection_state"`
+	ReceiptSHA256   string      `json:"receipt_sha256"`
+	SourceRefs      []SourceRef `json:"source_refs"`
 }
 
 // SourceRef addresses one immutable per-record receipt. Page receipts are kept
@@ -312,10 +316,12 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 	}
 	committed := false
 	defer func() {
-		if !committed {
+		if !committed && conn != nil {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
-		_ = conn.Close()
+		if conn != nil {
+			_ = conn.Close()
+		}
 	}()
 	var currentCursor sql.NullString
 	var syncState, currentRunID sql.NullString
@@ -338,23 +344,21 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 		sameOptionalString(nullableStringPtr(currentCursor), input.Page.NextCursor) &&
 		pageRequestsCommitted(ctx, conn, input.RunID, prepared) &&
 		pageContentsMatch(ctx, conn, prepared) {
-		// Graph import is idempotent. Rewriting the capture-side mappings here
-		// also repairs a page whose graph import committed before a prior capture
-		// transaction failed, without advancing the cursor a second time.
-		if err := importGraphBundles(ctx, w.selected, bundles); err != nil {
-			return PageResult{}, err
-		}
-		if err := persistGraphMappings(ctx, conn, prepared, graphObservationIDs); err != nil {
+		if err := enqueueProjectionJobs(ctx, conn, w.selected, prepared, bundles, graphObservationIDs); err != nil {
 			return PageResult{}, err
 		}
 		if err := commitImmediate(ctx, conn); err != nil {
 			return PageResult{}, err
 		}
 		committed = true
+		_ = conn.Close()
+		conn = nil
+		graphMapping, projectionState := w.projectAcceptedPage(ctx, prepared, bundles, graphObservationIDs)
 		return PageResult{
 			ProjectKey: projectKey, RunID: input.RunID, PageCount: pageCount,
 			Replayed: len(prepared), CursorState: cursorState(nullableStringPtr(currentCursor), syncState.String), State: syncState.String,
-			GraphMapping: "mapped", ReceiptSHA256: receiptHash, SourceRefs: sourceRefs,
+			GraphMapping: graphMapping, ProjectionState: projectionState,
+			ReceiptSHA256: receiptHash, SourceRefs: sourceRefs,
 		}, nil
 	}
 	if cursorAlreadyCommitted {
@@ -382,10 +386,7 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 	if err != nil {
 		return PageResult{}, err
 	}
-	if err := importGraphBundles(ctx, w.selected, bundles); err != nil {
-		return PageResult{}, err
-	}
-	if err := persistGraphMappings(ctx, conn, prepared, graphObservationIDs); err != nil {
+	if err := enqueueProjectionJobs(ctx, conn, w.selected, prepared, bundles, graphObservationIDs); err != nil {
 		return PageResult{}, err
 	}
 	if _, err := conn.ExecContext(ctx, "INSERT INTO sync_run_cursor_digests(run_id,cursor_digest) VALUES(?,?)", input.RunID, cursorDigest); err != nil {
@@ -432,10 +433,14 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 		return PageResult{}, err
 	}
 	committed = true
+	_ = conn.Close()
+	conn = nil
+	graphMapping, projectionState := w.projectAcceptedPage(ctx, prepared, bundles, graphObservationIDs)
 	return PageResult{
 		ProjectKey: projectKey, RunID: input.RunID, PageCount: pageCount + 1,
 		Stored: counts.stored, Replayed: counts.replayed, Revised: counts.revised,
-		CursorState: cursorState(storedCursor, nextState), State: nextState, GraphMapping: "mapped",
+		CursorState: cursorState(storedCursor, nextState), State: nextState,
+		GraphMapping: graphMapping, ProjectionState: projectionState,
 		ReceiptSHA256: receiptHash, SourceRefs: sourceRefs,
 	}, nil
 }
@@ -550,29 +555,222 @@ func buildHistoricalBundles(projectKey string, rootKey []byte, prepared []prepar
 	return bundles, graphObservationIDs, nil
 }
 
+func enqueueProjectionJobs(
+	ctx context.Context,
+	conn *sql.Conn,
+	selected *store.ProjectStore,
+	prepared []preparedExchange,
+	bundles []behaviorgraph.Record,
+	graphObservationIDs []string,
+) error {
+	if conn == nil || selected == nil || len(prepared) == 0 || len(prepared) != len(bundles) ||
+		len(prepared) != len(graphObservationIDs) || len(prepared) > maxPageExchanges {
+		return errors.New("projection jobs do not match the accepted capture revisions")
+	}
+	for index, item := range prepared {
+		payload, err := json.Marshal(bundles[index])
+		if err != nil {
+			return errors.New("graph bundle could not be encoded for the projection ledger")
+		}
+		bundleObservationID, err := behaviorgraph.ProjectionObservationID(payload, selected.ProjectKey, item.observationID)
+		if err != nil || bundleObservationID != graphObservationIDs[index] {
+			return errors.New("graph bundle observation does not match the capture revision mapping")
+		}
+		if _, _, err := behaviorgraph.EnqueueProjectionJob(
+			ctx, conn, selected.ProjectKey, item.revisionID, item.observationID, payload, time.Now().UTC(),
+		); errors.Is(err, behaviorgraph.ErrProjectionJobConflict) {
+			canonical, graphObservationID, reuseErr := existingLiveProjectionForRevision(ctx, conn, selected, item)
+			if reuseErr != nil {
+				return errors.New("conflicting projection job is not a matching live revision")
+			}
+			bundles[index] = canonical
+			graphObservationIDs[index] = graphObservationID
+		} else if err != nil {
+			return errors.New("projection job could not be committed with its capture revision")
+		}
+		canonicalPayload, err := json.Marshal(bundles[index])
+		if err != nil {
+			return errors.New("canonical graph bundle could not be encoded")
+		}
+		canonicalObservationID, err := behaviorgraph.ProjectionObservationID(canonicalPayload, selected.ProjectKey, item.observationID)
+		if err != nil || canonicalObservationID != graphObservationIDs[index] {
+			return errors.New("canonical graph observation does not match the capture revision mapping")
+		}
+	}
+	return nil
+}
+
+func existingLiveProjectionForRevision(
+	ctx context.Context,
+	conn *sql.Conn,
+	selected *store.ProjectStore,
+	item preparedExchange,
+) (behaviorgraph.Record, string, error) {
+	var observationID, sourceKind, graphObservationID string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?", item.revisionID,
+	).Scan(&observationID, &sourceKind); err != nil || observationID != item.observationID || sourceKind != "live" {
+		return nil, "", errors.New("revision is not first registered by the live source")
+	}
+	if err := conn.QueryRowContext(ctx,
+		`SELECT graph_observation_id FROM live_capture_index
+		 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=? AND observation_id=?`,
+		selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID, item.observationID,
+	).Scan(&graphObservationID); err != nil || graphObservationID == "" {
+		return nil, "", errors.New("matching live capture mapping is unavailable")
+	}
+	job, err := behaviorgraph.ProjectionJobByRevision(ctx, conn, selected.ProjectKey, item.revisionID)
+	if err != nil {
+		return nil, "", err
+	}
+	var bundle behaviorgraph.Record
+	if err := json.Unmarshal([]byte(job.PayloadJSON), &bundle); err != nil || !hasProjectionObservation(bundle, graphObservationID, item.observationID, "live_capture") {
+		return nil, "", errors.New("stored job does not contain the matching live graph observation")
+	}
+	return bundle, graphObservationID, nil
+}
+
+func hasProjectionObservation(bundle behaviorgraph.Record, observationID, captureID, observationKind string) bool {
+	entities, ok := projectionRecords(bundle["entities"])
+	if !ok {
+		return false
+	}
+	for _, entity := range entities {
+		if entity["id"] != observationID || entity["kind"] != "observation" {
+			continue
+		}
+		data, ok := projectionRecord(entity["data"])
+		return ok && data["observation_kind"] == observationKind && data["capture_id"] == captureID
+	}
+	return false
+}
+
+func projectionRecords(value any) ([]behaviorgraph.Record, bool) {
+	switch records := value.(type) {
+	case []behaviorgraph.Record:
+		return records, true
+	case []any:
+		result := make([]behaviorgraph.Record, 0, len(records))
+		for _, value := range records {
+			record, ok := projectionRecord(value)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, record)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func projectionRecord(value any) (behaviorgraph.Record, bool) {
+	switch record := value.(type) {
+	case behaviorgraph.Record:
+		return record, true
+	case map[string]any:
+		return behaviorgraph.Record(record), true
+	default:
+		return nil, false
+	}
+}
+
+func (w *PageWriter) projectAcceptedPage(
+	ctx context.Context,
+	prepared []preparedExchange,
+	bundles []behaviorgraph.Record,
+	graphObservationIDs []string,
+) (string, string) {
+	projector := w.projector
+	if projector == nil {
+		projector = projectGraphBundles
+	}
+	materialized, neo4jReady, projectErr := projector(ctx, w.selected, bundles)
+	if !materialized {
+		return "pending", "pending"
+	}
+	if err := persistProjectionCompletion(ctx, w, prepared, graphObservationIDs, neo4jReady && projectErr == nil); err != nil {
+		return "pending", "pending"
+	}
+	if neo4jReady && projectErr == nil {
+		return "mapped", "applied"
+	}
+	return "mapped", "pending"
+}
+
+func persistProjectionCompletion(
+	ctx context.Context,
+	w *PageWriter,
+	prepared []preparedExchange,
+	graphObservationIDs []string,
+	acknowledge bool,
+) error {
+	if w == nil || len(prepared) == 0 || len(prepared) != len(graphObservationIDs) {
+		return errors.New("projected graph mappings do not match the accepted capture revisions")
+	}
+	conn, err := w.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		_ = conn.Close()
+	}()
+	for index, item := range prepared {
+		job, err := behaviorgraph.ProjectionJobByRevision(ctx, conn, w.selected.ProjectKey, item.revisionID)
+		if err != nil {
+			return errors.New("projection job could not be verified before mapping")
+		}
+		jobObservationID, err := behaviorgraph.ProjectionObservationID([]byte(job.PayloadJSON), w.selected.ProjectKey, item.observationID)
+		if err != nil || jobObservationID != graphObservationIDs[index] {
+			return errors.New("projection job observation does not match the graph mapping")
+		}
+	}
+	if err := persistGraphMappings(ctx, conn, prepared, graphObservationIDs); err != nil {
+		return err
+	}
+	if acknowledge {
+		for _, item := range prepared {
+			if err := behaviorgraph.MarkProjectionJobApplied(ctx, conn, w.selected.ProjectKey, item.revisionID, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+	}
+	if err := commitImmediate(ctx, conn); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func importGraphBundles(ctx context.Context, selected *store.ProjectStore, bundles []behaviorgraph.Record) error {
+	_, _, err := projectGraphBundles(ctx, selected, bundles)
+	return err
+}
+
+func projectGraphBundles(ctx context.Context, selected *store.ProjectStore, bundles []behaviorgraph.Record) (bool, bool, error) {
 	if selected == nil || len(bundles) == 0 || len(bundles) > maxPageExchanges {
-		return errors.New("historical graph batch is unavailable")
+		return false, false, errors.New("historical graph batch is unavailable")
 	}
 	if err := validateSelectedProject(selected); err != nil {
-		return err
+		return false, false, err
 	}
 	graphWriter, err := behaviorgraph.OpenWriter(ctx, selected)
 	if err != nil {
-		return errors.New("selected project graph writer could not be opened")
+		return false, false, errors.New("selected project graph writer could not be opened")
 	}
 	_, importErr := graphWriter.ImportBundles(ctx, bundles)
-	var syncErr error
-	if importErr == nil {
-		_, syncErr = graphsync.Drain(ctx, selected)
-	}
 	if importErr != nil {
-		return importErr
+		return false, false, importErr
 	}
+	syncResult, syncErr := graphsync.Drain(ctx, selected)
 	if syncErr != nil {
-		return syncErr
+		return true, false, syncErr
 	}
-	return nil
+	return true, syncResult.State == "ready" && syncResult.Pending == 0, nil
 }
 
 func persistGraphMappings(ctx context.Context, conn *sql.Conn, prepared []preparedExchange, graphObservationIDs []string) error {
@@ -800,7 +998,7 @@ func persistExchanges(ctx context.Context, conn *sql.Conn, selected *store.Proje
 		var registeredObservation, registeredSource string
 		if err := conn.QueryRowContext(ctx,
 			"SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?", item.revisionID,
-		).Scan(&registeredObservation, &registeredSource); err != nil || registeredObservation != observationID || registeredSource != "historical" {
+		).Scan(&registeredObservation, &registeredSource); err != nil || registeredObservation != observationID || !validRegisteredRevisionSource(registeredSource) {
 			return counts, errors.New("capture revision registry identity conflicts with the stored revision")
 		}
 		if err := verifyRevision(ctx, conn, item); err != nil {
@@ -839,6 +1037,10 @@ func persistExchanges(ctx context.Context, conn *sql.Conn, selected *store.Proje
 		}
 	}
 	return counts, nil
+}
+
+func validRegisteredRevisionSource(source string) bool {
+	return source == "historical" || source == "live"
 }
 
 type writeCounts struct{ stored, replayed, revised int }

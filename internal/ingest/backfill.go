@@ -28,15 +28,16 @@ type BackfillOptions struct {
 // BackfillResult is bounded accounting and checkpoint state. It contains no
 // request IDs, message data, credentials, or Caido cursors.
 type BackfillResult struct {
-	ProjectKey   string `json:"project_key"`
-	RunID        string `json:"run_id"`
-	PagesThisRun int    `json:"pages_this_run"`
-	PageCount    int64  `json:"page_count"`
-	Stored       int    `json:"stored"`
-	Replayed     int    `json:"replayed"`
-	Revised      int    `json:"revised"`
-	State        string `json:"state"`
-	CursorState  string `json:"cursor_state"`
+	ProjectKey             string `json:"project_key"`
+	RunID                  string `json:"run_id"`
+	PagesThisRun           int    `json:"pages_this_run"`
+	PageCount              int64  `json:"page_count"`
+	Stored                 int    `json:"stored"`
+	Replayed               int    `json:"replayed"`
+	Revised                int    `json:"revised"`
+	ProjectionPendingPages int    `json:"projection_pending_pages"`
+	State                  string `json:"state"`
+	CursorState            string `json:"cursor_state"`
 	// CoverageReconciled stays false because the read API provides no stable
 	// point-in-time inventory or expected history total to compare against.
 	CoverageReconciled bool   `json:"coverage_reconciled"`
@@ -46,7 +47,8 @@ type BackfillResult struct {
 
 // RunBackfill reads one explicitly selected Caido project page by page. The
 // source is read-only; the writer advances its durable cursor only after the
-// capture and BehaviorGraph page transactions have both succeeded.
+// capture and projection-job transaction have succeeded. Derived graph
+// projection lag is reported separately from source checkpoint state.
 func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWriter, selected project.CaidoProjectRef, options BackfillOptions) (BackfillResult, error) {
 	if source == nil || writer == nil {
 		return BackfillResult{}, errors.New("Caido backfill requires a read source and selected-project writer")
@@ -139,6 +141,9 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		result.Stored += pageResult.Stored
 		result.Replayed += pageResult.Replayed
 		result.Revised += pageResult.Revised
+		if pageResult.ProjectionState == "pending" {
+			result.ProjectionPendingPages++
+		}
 		result.State = pageResult.State
 		result.CursorState = pageResult.CursorState
 		if !page.HasMore {

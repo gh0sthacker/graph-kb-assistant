@@ -58,11 +58,11 @@ func TestProjectionJobEnqueueIsIdempotentAndSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	registerProjectionRevision(t, ctx, tx, revisionID, "observation-1", now)
-	first, inserted, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, minimalProjectionPayload(projectionTestProjectKey), now)
+	first, inserted, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-1", minimalProjectionPayload(projectionTestProjectKey, "observation-1"), now)
 	if err != nil || !inserted {
 		t.Fatalf("first enqueue: inserted=%v err=%v", inserted, err)
 	}
-	second, inserted, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, minimalProjectionPayload(projectionTestProjectKey), now.Add(time.Second))
+	second, inserted, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-1", minimalProjectionPayload(projectionTestProjectKey, "observation-1"), now.Add(time.Second))
 	if err != nil || inserted {
 		t.Fatalf("replayed enqueue: inserted=%v err=%v", inserted, err)
 	}
@@ -98,8 +98,8 @@ func TestProjectionJobConflictDoesNotReplaceAcceptedPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	registerProjectionRevision(t, ctx, tx, revisionID, "observation-2", now)
-	firstPayload := minimalProjectionPayload(projectionTestProjectKey)
-	first, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, firstPayload, now)
+	firstPayload := minimalProjectionPayload(projectionTestProjectKey, "observation-2")
+	first, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-2", firstPayload, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +110,8 @@ func TestProjectionJobConflictDoesNotReplaceAcceptedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	changedPayload := []byte(`{"schema_version":1,"program":"` + projectionTestProjectKey + `","sources":[{"path":"/tmp/other.jsonl","sha256":"` + strings.Repeat("a", 64) + `","record_locator":"line:2"}],"entities":[],"assertions":[],"cards":[]}`)
-	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, changedPayload, now); !errors.Is(err, ErrProjectionJobConflict) {
+	changedPayload := projectionPayloadWithMarker(projectionTestProjectKey, "observation-2", "changed")
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-2", changedPayload, now); !errors.Is(err, ErrProjectionJobConflict) {
 		_ = tx.Rollback()
 		t.Fatalf("expected revision payload conflict, got %v", err)
 	}
@@ -136,7 +136,7 @@ func TestProjectionJobEnqueueParticipatesInCallerTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	registerProjectionRevision(t, ctx, tx, revisionID, "observation-3", now)
-	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, minimalProjectionPayload(projectionTestProjectKey), now); err != nil {
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-3", minimalProjectionPayload(projectionTestProjectKey, "observation-3"), now); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Rollback(); err != nil {
@@ -162,10 +162,166 @@ func TestProjectionJobRequiresRegisteredSourceRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = EnqueueProjectionJob(context.Background(), tx, projectionTestProjectKey, strings.Repeat("9", 64), minimalProjectionPayload(projectionTestProjectKey), time.Now().UTC())
+	_, _, err = EnqueueProjectionJob(context.Background(), tx, projectionTestProjectKey, strings.Repeat("9", 64), "observation-missing", minimalProjectionPayload(projectionTestProjectKey, "observation-missing"), time.Now().UTC())
 	_ = tx.Rollback()
 	if !errors.Is(err, ErrProjectionRevisionMissing) {
 		t.Fatalf("expected unregistered source revision rejection, got %v", err)
+	}
+}
+
+func TestProjectionJobRequiresMatchingObservationIdentity(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("9", 64)
+	now := time.Now().UTC()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerProjectionRevision(t, ctx, tx, revisionID, "registered-observation", now)
+	_, _, err = EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "different-observation", minimalProjectionPayload(projectionTestProjectKey, "different-observation"), now)
+	_ = tx.Rollback()
+	if !errors.Is(err, ErrProjectionRevisionMismatch) {
+		t.Fatalf("revision enqueue mismatch error = %v, want %v", err, ErrProjectionRevisionMismatch)
+	}
+}
+
+func TestProjectionJobRequiresExactlyOneMatchingCaptureObservation(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "empty bundle",
+			payload: []byte(`{"schema_version":1,"program":"` + projectionTestProjectKey + `","sources":[],"entities":[],"assertions":[],"cards":[]}`),
+		},
+		{
+			name:    "different capture",
+			payload: minimalProjectionPayload(projectionTestProjectKey, "another-capture"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+			defer db.Close()
+			ctx := context.Background()
+			revisionID := strings.Repeat("8", 64)
+			now := time.Now().UTC()
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registerProjectionRevision(t, ctx, tx, revisionID, "registered-capture", now)
+			_, _, err = EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "registered-capture", test.payload, now)
+			_ = tx.Rollback()
+			if !errors.Is(err, ErrInvalidProjectionJob) {
+				t.Fatalf("enqueue accepted a projection without one matching capture observation: %v", err)
+			}
+		})
+	}
+}
+
+func TestStoredProjectionJobMustMatchRegisteredCapture(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("7", 64)
+	now := time.Now().UTC()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerProjectionRevision(t, ctx, tx, revisionID, "registered-capture", now)
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "registered-capture", minimalProjectionPayload(projectionTestProjectKey, "registered-capture"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongPayload := minimalProjectionPayload(projectionTestProjectKey, "different-capture")
+	digest := sha256.Sum256(wrongPayload)
+	if _, err := db.ExecContext(ctx,
+		"UPDATE projection_jobs SET payload_json=?,payload_sha256=? WHERE revision_id=?",
+		string(wrongPayload), hex.EncodeToString(digest[:]), revisionID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID); err == nil {
+		t.Fatal("stored job with a valid checksum but another capture was accepted")
+	}
+}
+
+func TestMarkProjectionJobAppliedAcknowledgesPendingAndIsIdempotent(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("d", 64)
+	now := time.Date(2026, 10, 23, 13, 0, 0, 0, time.UTC)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerProjectionRevision(t, ctx, tx, revisionID, "observation-ack", now)
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-ack", minimalProjectionPayload(projectionTestProjectKey, "observation-ack"), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		tx, err = db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID, now.Add(time.Minute)); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("acknowledgement attempt %d: %v", attempt+1, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != "applied" || !job.AppliedAt.Valid || job.AppliedAt.String != now.Add(time.Minute).Format(projectionTimestampLayout) {
+		t.Fatalf("acknowledged job state = %+v", job)
+	}
+}
+
+func TestMarkProjectionJobAppliedRejectsLeasedJob(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("c", 64)
+	now := time.Now().UTC()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerProjectionRevision(t, ctx, tx, revisionID, "observation-leased", now)
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, revisionID, "observation-leased", minimalProjectionPayload(projectionTestProjectKey, "observation-leased"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE projection_jobs SET state='leased',lease_token='lease',lease_until=? WHERE revision_id=?", now.Add(time.Minute).Format(projectionTimestampLayout), revisionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = MarkProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID, now.Add(2*time.Minute))
+	_ = tx.Rollback()
+	if !errors.Is(err, ErrProjectionJobNotPending) {
+		t.Fatalf("leased job acknowledgement error = %v, want %v", err, ErrProjectionJobNotPending)
 	}
 }
 
@@ -181,7 +337,7 @@ func TestProjectionJobProjectKeyMustMatchDatabaseMetadata(t *testing.T) {
 	}
 	registerProjectionRevision(t, ctx, tx, revisionID, "observation-project-isolation", now)
 	otherProjectKey := strings.Repeat("f", 64)
-	if _, _, err := EnqueueProjectionJob(ctx, tx, otherProjectKey, revisionID, minimalProjectionPayload(otherProjectKey), now); !errors.Is(err, ErrProjectionProjectMismatch) {
+	if _, _, err := EnqueueProjectionJob(ctx, tx, otherProjectKey, revisionID, "observation-project-isolation", minimalProjectionPayload(otherProjectKey, "observation-project-isolation"), now); !errors.Is(err, ErrProjectionProjectMismatch) {
 		_ = tx.Rollback()
 		t.Fatalf("enqueue accepted a project key that does not match database metadata: %v", err)
 	}
@@ -196,7 +352,7 @@ func TestProjectionJobProjectKeyMustMatchDatabaseMetadata(t *testing.T) {
 		t.Fatal("mismatched enqueue wrote a projection job")
 	}
 
-	payload := minimalProjectionPayload(otherProjectKey)
+	payload := minimalProjectionPayload(otherProjectKey, "observation-project-isolation")
 	checksum := sha256.Sum256(payload)
 	_, err = db.ExecContext(ctx,
 		`INSERT INTO projection_jobs(job_id,revision_id,payload_json,payload_sha256,state,attempt_count,
@@ -224,10 +380,10 @@ func TestProjectionJobTimestampsSortChronologically(t *testing.T) {
 	}
 	registerProjectionRevision(t, ctx, tx, laterRevision, "observation-4", base)
 	registerProjectionRevision(t, ctx, tx, earlierRevision, "observation-5", base)
-	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, laterRevision, minimalProjectionPayload(projectionTestProjectKey), base.Add(110*time.Millisecond)); err != nil {
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, laterRevision, "observation-4", minimalProjectionPayload(projectionTestProjectKey, "observation-4"), base.Add(110*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, earlierRevision, minimalProjectionPayload(projectionTestProjectKey), base.Add(100*time.Millisecond)); err != nil {
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, earlierRevision, "observation-5", minimalProjectionPayload(projectionTestProjectKey, "observation-5"), base.Add(100*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -245,8 +401,14 @@ func TestProjectionJobTimestampsSortChronologically(t *testing.T) {
 	}
 }
 
-func minimalProjectionPayload(project string) []byte {
-	return []byte(`{"schema_version":1,"program":"` + project + `","sources":[],"entities":[],"assertions":[],"cards":[]}`)
+func minimalProjectionPayload(project, captureID string) []byte {
+	return projectionPayloadWithMarker(project, captureID, "original")
+}
+
+func projectionPayloadWithMarker(project, captureID, marker string) []byte {
+	graphObservationID := sha256.Sum256([]byte(captureID + "\x00" + marker))
+	source := `{"path":"/tmp/projection-fixture.jsonl","sha256":"` + strings.Repeat("a", 64) + `","record_locator":"line:1"}`
+	return []byte(`{"schema_version":1,"program":"` + project + `","sources":[` + source + `],"entities":[{"id":"observation-` + hex.EncodeToString(graphObservationID[:]) + `","kind":"observation","data":{"capture_id":"` + captureID + `","program":"` + project + `","test_marker":"` + marker + `"},"source_refs":[` + source + `]}],"assertions":[],"cards":[]}`)
 }
 
 func registerProjectionRevision(t *testing.T, ctx context.Context, tx *sql.Tx, revisionID, observationID string, firstSeen time.Time) {

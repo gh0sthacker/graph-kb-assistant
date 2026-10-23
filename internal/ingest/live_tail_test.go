@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"bb-graph-assistant/internal/caido"
+	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/store"
 )
@@ -115,6 +116,147 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 		"fixture-query-marker", "fixture-header-marker", "fixture-request-body-marker", "fixture-response-body-marker",
 	} {
 		assertAbsentFromProjectFiles(t, projectStore.Directory, marker)
+	}
+}
+
+func TestRunLiveTailCommitsCaptureAndJobBeforeGraphProjectionFailure(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, writer := newLiveTailFixture(t)
+	status := 200
+	capturedAt := "2026-10-23T12:00:00Z"
+	requestID := "projection-failure-live-request"
+	exchange := caido.HttpExchange{
+		Ref:         caido.ExchangeRef{Project: selected, RequestID: requestID},
+		CapturedAt:  &capturedAt,
+		RequestRaw:  []byte("GET /health HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"),
+		ResponseRaw: []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok"),
+		HasResponse: true, Method: "GET", Scheme: "https", Host: "api.fixture.invalid",
+		Port: 443, Target: "https://api.fixture.invalid/health", ResponseStatus: &status,
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
+	}
+	retryExchange := exchange
+	retryExchange.RequestRaw = append([]byte(nil), exchange.RequestRaw...)
+	retryExchange.ResponseRaw = append([]byte(nil), exchange.ResponseRaw...)
+	source := &liveTailSourceFixture{
+		project: selected,
+		pages: []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{{
+			RequestID: requestID, Method: "GET", URL: exchange.Target, StatusCode: &status,
+		}}}},
+		exchanges: map[string]caido.HttpExchange{requestID: exchange},
+	}
+	projectorCalled := false
+	writer.projector = func(_ context.Context, _ *store.ProjectStore, _ []behaviorgraph.Record) (bool, bool, error) {
+		projectorCalled = true
+		var captures, jobs int
+		var checkpointState string
+		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM live_capture_index").Scan(&captures); err != nil {
+			t.Fatal(err)
+		}
+		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs").Scan(&jobs); err != nil {
+			t.Fatal(err)
+		}
+		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT state FROM live_sync_state WHERE source_key=?", liveTailSourceKey).Scan(&checkpointState); err != nil {
+			t.Fatal(err)
+		}
+		if captures != 1 || jobs != 1 || checkpointState != "idle" {
+			t.Fatalf("graph projection began before live acceptance committed: captures=%d jobs=%d checkpoint=%q", captures, jobs, checkpointState)
+		}
+		return false, false, errors.New("synthetic Neo4j outage")
+	}
+
+	result, err := RunLiveTail(ctx, source, writer, selected, LiveTailOptions{
+		PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10,
+	})
+	if err != nil {
+		t.Fatalf("durable live capture acceptance should survive projection failure: %v", err)
+	}
+	if !projectorCalled || result.State != "idle" || result.RequestsAdded != 1 || result.ProjectionPendingPages != 1 {
+		t.Fatalf("live result does not show accepted capture with pending projection: called=%v result=%+v", projectorCalled, result)
+	}
+	var pendingJobs int
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs WHERE state='pending'").Scan(&pendingJobs); err != nil {
+		t.Fatal(err)
+	}
+	if pendingJobs != 1 {
+		t.Fatalf("retryable live projection job count = %d, want 1", pendingJobs)
+	}
+
+	prepared, err := writer.prepareLiveCaptures([]caido.HttpExchange{retryExchange})
+	if err != nil {
+		t.Fatalf("prepare an idempotent live projection retry: %v", err)
+	}
+	writer.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+		return true, true, nil
+	}
+	if state := writer.projectAcceptedLive(ctx, prepared); state != "applied" {
+		var storedRevision, storedState string
+		if err := projectStore.Database.DB().QueryRowContext(ctx,
+			"SELECT revision_id,state FROM projection_jobs",
+		).Scan(&storedRevision, &storedState); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("ready live projection retry state = %q, want applied (revision=%s state=%s prepared=%s)", state, storedRevision, storedState, prepared[0].revisionID)
+	}
+	var appliedJobs int
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM projection_jobs WHERE state='applied'",
+	).Scan(&appliedJobs); err != nil {
+		t.Fatal(err)
+	}
+	if appliedJobs != 1 {
+		t.Fatalf("applied live projection job count = %d, want 1", appliedJobs)
+	}
+}
+
+func TestLiveProjectionAckRejectsGraphMappingChangedAfterAcceptance(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, writer := newLiveTailFixture(t)
+	status := 200
+	capturedAt := "2026-10-23T12:00:00Z"
+	requestID := "projection-mapping-live-request"
+	exchange := caido.HttpExchange{
+		Ref:         caido.ExchangeRef{Project: selected, RequestID: requestID},
+		CapturedAt:  &capturedAt,
+		RequestRaw:  []byte("GET /health HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"),
+		ResponseRaw: []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok"),
+		HasResponse: true, Method: "GET", Scheme: "https", Host: "api.fixture.invalid",
+		Port: 443, Target: "https://api.fixture.invalid/health", ResponseStatus: &status,
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
+	}
+	source := &liveTailSourceFixture{
+		project: selected,
+		pages: []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{{
+			RequestID: requestID, Method: "GET", URL: exchange.Target, StatusCode: &status,
+		}}}},
+		exchanges: map[string]caido.HttpExchange{requestID: exchange},
+	}
+	writer.projector = func(_ context.Context, selected *store.ProjectStore, _ []behaviorgraph.Record) (bool, bool, error) {
+		if _, err := selected.Database.DB().ExecContext(ctx,
+			"UPDATE live_capture_index SET graph_observation_id=? WHERE request_id=?",
+			"observation-"+strings.Repeat("f", 64), requestID,
+		); err != nil {
+			t.Fatalf("simulate a changed live graph mapping: %v", err)
+		}
+		return true, true, nil
+	}
+
+	result, err := RunLiveTail(ctx, source, writer, selected, LiveTailOptions{
+		PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10,
+	})
+	if err != nil {
+		t.Fatalf("RunLiveTail() error = %v", err)
+	}
+	if result.RequestsAdded != 1 || result.ProjectionPendingPages != 1 {
+		t.Fatalf("changed graph mapping should leave the projection pending: %+v", result)
+	}
+	var state string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT state FROM projection_jobs WHERE revision_id=(SELECT revision_id FROM live_capture_index WHERE request_id=?)", requestID,
+	).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "pending" {
+		t.Fatalf("projection job state = %q, want pending after live mapping mismatch", state)
 	}
 }
 
