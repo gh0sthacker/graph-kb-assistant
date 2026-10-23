@@ -6,7 +6,7 @@ const MIN_GRAPH_ZOOM = 0.35;
 const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant"];
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
-  graph: null, selectedEndpoint: null, selectedNode: null, graphFocus: false, loadingSurface: false,
+  graph: null, selectedEndpoint: null, selectedNode: null, focusedNodeId: null, graphFocus: false, loadingSurface: false,
   loadingGraph: false, hiddenKinds: new Set(OVERVIEW_HIDDEN_KINDS), routeScope: true, edgeLabelsVisible: true,
   renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
 };
@@ -152,6 +152,7 @@ function clearProjectView() {
   state.graph = null;
   state.selectedEndpoint = null;
   state.selectedNode = null;
+  state.focusedNodeId = null;
   elements.graphProject.textContent = "SELECT A PROJECT";
   elements.graphTitle.textContent = "Observed behavior relationships";
   elements.graphSubtitle.textContent = "Select an endpoint to open its graph neighborhood.";
@@ -170,6 +171,7 @@ async function selectProject(projectKey) {
   state.graph = null;
   state.selectedEndpoint = null;
   state.selectedNode = null;
+  state.focusedNodeId = null;
   elements.project.value = projectKey;
   const project = state.projects.find(item => item.project_key === projectKey);
   elements.graphProject.textContent = project ? (project.display_name || `CAIDO · ${short(project.project_id || projectKey, 18)}`).toUpperCase() : "LOCAL PROJECT";
@@ -301,6 +303,7 @@ function endpointKey(endpoint) { return [endpoint.host, endpoint.port, endpoint.
 async function openEndpoint(endpoint) {
   state.selectedEndpoint = endpoint;
   state.routeScope = true;
+  state.focusedNodeId = null;
   state.hiddenKinds = new Set(OVERVIEW_HIDDEN_KINDS);
   state.selectedNode = null;
   state.graph = null;
@@ -323,6 +326,7 @@ async function openEndpoint(endpoint) {
 
 async function loadGraph(seeds) {
   if (!state.projectKey || !Array.isArray(seeds) || !seeds.length) return;
+  state.focusedNodeId = null;
   state.loadingGraph = true;
   renderEmpty("Loading graph relationships", "Reading a bounded, read-only neighborhood of the selected nodes.");
   setStatus("Loading graph neighborhood", "loading");
@@ -360,7 +364,9 @@ function renderGraph(resetView = true) {
   const graph = state.graph || {};
   const allEntities = Array.isArray(graph.entities) ? graph.entities : [];
   const allAssertions = Array.isArray(graph.assertions) ? graph.assertions : [];
-  const scoped = state.routeScope ? selectedEndpointNeighborhood(allEntities, allAssertions) : null;
+  const scoped = state.focusedNodeId
+    ? BBGraphFocus.focusedNeighborhood(allEntities, allAssertions, state.focusedNodeId)
+    : state.routeScope ? selectedEndpointNeighborhood(allEntities, allAssertions) : null;
   const entities = scoped?.entities || allEntities;
   const assertions = scoped?.assertions || allAssertions;
   renderGraphFilters(entities);
@@ -377,7 +383,7 @@ function renderGraph(resetView = true) {
   const connectedIds = new Set();
   for (const edge of visibleAssertions) { connectedIds.add(edge.subject); connectedIds.add(edge.object); }
   const seedIds = new Set(state.graph?.seed_ids || []);
-  const renderedEntities = visible.filter(node => connectedIds.has(node.id) || seedIds.has(node.id) || isSelectedEndpointNode(node));
+  const renderedEntities = visible.filter(node => connectedIds.has(node.id) || seedIds.has(node.id) || node.id === state.focusedNodeId || isSelectedEndpointNode(node));
   const renderedIds = new Set(renderedEntities.map(node => node.id));
   const renderedAssertions = visibleAssertions.filter(edge => renderedIds.has(edge.subject) && renderedIds.has(edge.object));
   state.renderedEntities = renderedEntities;
@@ -390,16 +396,22 @@ function renderGraph(resetView = true) {
     elements.canvasEmpty.hidden = false;
     elements.emptyTitle.textContent = "Nodes are hidden by filters";
     elements.emptyCopy.textContent = "Enable a node type or choose “All nodes” to see relationships.";
-    elements.graphCounts.replaceChildren(countText(0, "shown"), el("b"), countText(entities.length, "in overview"));
-    elements.graphCounts.title = `The selected view contains ${entities.length} nodes and ${assertions.length} edges; the full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`;
+    const scopeLabel = state.focusedNodeId ? "near focus" : state.routeScope ? "in overview" : "in slice";
+    elements.graphCounts.replaceChildren(countText(0, "shown"), el("b"), countText(entities.length, scopeLabel));
+    elements.graphCounts.title = state.focusedNodeId
+      ? `Direct relationships of the selected node: ${entities.length} nodes and ${assertions.length} edges. The full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`
+      : `The selected view contains ${entities.length} nodes and ${assertions.length} edges; the full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`;
     renderInspectorEmpty();
     return;
   }
   elements.canvasEmpty.hidden = true;
-  elements.graphCounts.replaceChildren(countText(renderedEntities.length, "shown"), el("b"), countText(renderedAssertions.length, "edges"), el("b"), countText(entities.length, "in overview"));
-  elements.graphCounts.title = state.routeScope
-    ? `Selected route overview: ${renderedEntities.length} of ${entities.length} nodes. The full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`
-    : `Showing ${renderedEntities.length} of ${entities.length} nodes and ${renderedAssertions.length} of ${assertions.length} edges in this graph slice.`;
+  const scopeLabel = state.focusedNodeId ? "near focus" : state.routeScope ? "in overview" : "in slice";
+  elements.graphCounts.replaceChildren(countText(renderedEntities.length, "shown"), el("b"), countText(renderedAssertions.length, "edges"), el("b"), countText(entities.length, scopeLabel));
+  elements.graphCounts.title = state.focusedNodeId
+    ? `Direct relationships of the selected node: ${renderedEntities.length} of ${entities.length} nodes. The full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`
+    : state.routeScope
+      ? `Selected route overview: ${renderedEntities.length} of ${entities.length} nodes. The full traversal contains ${allEntities.length} nodes and ${allAssertions.length} edges.`
+      : `Showing ${renderedEntities.length} of ${entities.length} nodes and ${renderedAssertions.length} edges in this graph slice.`;
   elements.graphScene.replaceChildren();
   const layout = layoutGraph(renderedEntities, renderedAssertions);
   const edgeLayer = svgEl("g", { class: "edge-layer" });
@@ -449,11 +461,11 @@ function renderGraphFilters(entities, renderedEntities = state.renderedEntities)
   const showAll = elements.graphShowAll;
   if (overview) {
     overview.disabled = kinds.length === 0;
-    overview.setAttribute("aria-pressed", String(kinds.length > 0 && isOverviewView(kinds)));
+    overview.setAttribute("aria-pressed", String(!state.focusedNodeId && kinds.length > 0 && isOverviewView(kinds)));
   }
   if (showAll) {
     showAll.disabled = kinds.length === 0;
-    showAll.setAttribute("aria-pressed", String(kinds.length > 0 && kinds.every(kind => !state.hiddenKinds.has(kind))));
+    showAll.setAttribute("aria-pressed", String(!state.focusedNodeId && kinds.length > 0 && kinds.every(kind => !state.hiddenKinds.has(kind))));
   }
   for (const kind of kinds) {
     const count = counts.get(kind) || 0;
@@ -475,7 +487,10 @@ function renderGraphFilters(entities, renderedEntities = state.renderedEntities)
   }
   const hidden = kinds.filter(kind => state.hiddenKinds.has(kind));
   if (elements.graphFilterSummary) {
-    elements.graphFilterSummary.textContent = hidden.length
+    const focusedNode = state.focusedNodeId && state.graph?.entities?.find(node => node.id === state.focusedNodeId);
+    elements.graphFilterSummary.textContent = focusedNode
+      ? `Direct relationships · ${displayTitle(focusedNode)}`
+      : hidden.length
       ? `Hidden types: ${hidden.map(kind => filterLabels[kind] || nodeLabels[kind] || kind).join(", ")}`
       : "All types are shown";
   }
@@ -513,10 +528,25 @@ function normalizedRoute(value) {
 
 function selectGraphView(view) {
   state.routeScope = view === "overview";
+  state.focusedNodeId = null;
   state.hiddenKinds = new Set(view === "overview" ? OVERVIEW_HIDDEN_KINDS : []);
   renderGraph(true);
   const node = state.renderedEntities.find(isSelectedEndpointNode) || state.renderedEntities.find(item => (state.graph?.seed_ids || []).includes(item.id)) || state.renderedEntities[0];
   if (node) selectNode(node.id);
+  const label = state.routeScope ? "Endpoint overview" : "Full graph slice";
+  const partial = Boolean(state.graph?.incomplete || state.graph?.truncated);
+  setStatus(partial ? `${label} · coverage is partial` : label, "ready");
+}
+
+function focusOnNode(node) {
+  if (!state.graph || !state.graph.entities?.some(item => item.id === node.id)) return;
+  state.routeScope = false;
+  state.focusedNodeId = node.id;
+  state.hiddenKinds = new Set();
+  renderGraph(true);
+  selectNode(node.id);
+  const focused = BBGraphFocus.focusedNeighborhood(state.graph.entities || [], state.graph.assertions || [], node.id);
+  setStatus(`Focused on direct relationships · ${focused.entities.length} nodes`, "ready");
 }
 
 function selectedEndpointNeighborhood(entities, assertions) {
@@ -556,7 +586,7 @@ function layoutGraph(entities, assertions) {
   }
   const seedIds = (state.graph?.seed_ids || []).filter(id => ids.has(id));
   const selectedEndpoint = entities.find(isSelectedEndpointNode);
-  const root = seedIds[0] || selectedEndpoint?.id || entities[0]?.id;
+  const root = (state.focusedNodeId && ids.has(state.focusedNodeId) ? state.focusedNodeId : null) || seedIds[0] || selectedEndpoint?.id || entities[0]?.id;
   const distances = new Map([[root, 0]]), queue = [root];
   for (let i = 0; i < queue.length; i++) {
     for (const neighbor of neighbors.get(queue[i]) || []) {
@@ -671,10 +701,10 @@ function renderInspector(node) {
     elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Dynamic values are not stored in the graph; find the exact request in Caido using the linked capture's request ID."));
   }
   if (node.kind === "observation") renderProvenance(node);
-  const action = el("button", "detail-action", "Open relationships from this node →");
+  const action = el("button", "detail-action", "Focus on direct relationships →");
   action.type = "button";
   action.disabled = !/^[a-z][a-z0-9_]*-[a-f0-9]{64}$/.test(node.id || "");
-  action.addEventListener("click", () => { state.routeScope = false; void loadGraph([node.id]); });
+  action.addEventListener("click", () => focusOnNode(node));
   elements.inspector.append(action);
 }
 
