@@ -1,28 +1,57 @@
 # Project status and known limitations
 
-## Fresh local verification (2026-10-23, after `65452d6`)
+## Fresh local verification (2026-10-23, after `b4f460e`)
 
 This checkpoint supersedes earlier runtime claims below where they conflict;
 older audit entries describe their own historical snapshots.
 
-- Caido 0.58.3 is connected. The registered Juice Shop project exists, but the
-  current Caido project is `sperpravo`; no project switch or history query was
-  performed. Caido synchronization and compatibility are therefore not
-  confirmed by this checkpoint.
-- `neo4j-check` returned `state=ready`. It confirms connectivity only; graph
-  parity was not checked.
-- A fresh read-only `project-audit` refused to open the registered Juice Shop
-  database because `graph.sqlite3-wal` and `graph.sqlite3-shm` sidecars were
-  present. Their sizes were 0 and 32,768 bytes. The audit failed closed before
-  reading database contents; current schema compatibility and graph parity
-  remain unverified.
-- The private application KB snapshot validated successfully: snapshot
-  `d342e9df…ea23a3`, 14,300 documents, 16,961 chunks, source coverage
-  `PARTIAL`. Validation confirms snapshot integrity, not corpus completeness.
-- `./scripts/run-hermes mcp test bb_assistant` connected over local stdio and
-  discovered all 9 configured tools. The redacted `bb_get_capture` summary is
-  available; `bb_get_capture_raw` is absent. No model/provider is configured,
-  so model-backed analysis remains unverified.
+- The working Juice Shop capture database was migrated from schema v5 to v7
+  using the existing Python migration path under the exclusive project lock.
+  A private pre-migration backup outside the checkout was verified before the
+  change. Post-migration SQLite integrity passed and capture/search/revision/
+  graph-map counts remained stable. The zero-byte WAL and inactive SHM runtime
+  sidecars were removed only after confirming no process held the files.
+- `project-audit` now opens both stores successfully: capture schema v7 and
+  BehaviorGraph schema v2 are compatible. It reports `PARTIAL`: 1,369
+  captures, 1,369 search-indexed and graph-mapped, 414 complete parses and 955
+  partial parses. Request text fidelity is reconstructed for all 1,369;
+  response text is reconstructed for 1,332 and unknown for 37. The live index
+  is empty and no source-byte fidelity was established.
+- `neo4j-backfill --verify-only` reports `state=verified` with matching local
+  and Neo4j digest
+  `dc1b5523144061fd1deb0dfc19a536896bf355f7832c4a3b15b4d24f2c9388f8` and
+  matching counts (25,064 entities, 25,685 assertions, 1,369 cards and 1,369
+  sources). Its `source_sync_not_assessed` coverage remains separate from
+  graph parity.
+- Caido 0.58.3 lists the Juice Shop project as ready but inactive; `sperpravo`
+  is selected. No project switch or history call was made. Caido reconciliation
+  against Juice Shop therefore remains unverified; do not query the selected
+  unrelated project.
+- The loopback UI responds with HTTP 200. Its surface API reports 127 local
+  operations and 1,369 observations with `PARTIAL` coverage. ECC `benchmark`
+  measurements used the running x86_64 process (8 logical CPUs), graph
+  generation 21, and the local 1,369-observation dataset. For two operation
+  shapes, 100 sequential direct-view requests returned HTTP 200 and stable
+  payload sizes; p95 was 77.6 ms and 98.69 ms. Ten concurrent requests had
+  maximum latencies of 273.26 ms and 197.13 ms. The selected responses held 3
+  entities/2 assertions and 4 entities/3 assertions respectively, both with
+  `incomplete=true` and `truncated=false`. These are repeated direct-view API
+  measurements on an already-running process, not cold-start or full analytical
+  slice benchmarks. The proposed 2-second focused-view p95 was met for these
+  two shapes; Stage 2 remains `PARTIAL` for source coverage and other gaps.
+- The private application KB snapshot validated: 14,300 documents and 16,961
+  FTS5 chunks across five populated source families, with `PARTIAL` coverage.
+  NVD remains partial and ExploitDB remains blocked pending dataset-terms
+  review; KB expansion stays deferred by the approved architecture.
+- `./scripts/run-hermes mcp test bb_assistant` connects over local stdio and
+  discovers the 9-tool read-only allowlist. The current private Hermes profile
+  has mode 0600; it contains no model/provider selection. Model-backed analysis
+  remains unverified and no provider call was made.
+- Remaining material gaps: Caido history is not currently reconciled against
+  the inactive Juice Shop project; 955 captures have partial parsing, 37
+  response fidelities are unknown, browser walkthrough and JavaScript endpoint
+  coverage are absent, and live intake has no current records. Overall runtime
+  and source coverage therefore remain `PARTIAL`.
 
 ## Stage 2 operation catalog update (2026-10-23)
 
@@ -50,10 +79,11 @@ older audit entries describe their own historical snapshots.
   plus a temporary sort B-tree for operation order. Working-dataset latency and
   large-index behavior have not been measured; a reusable catalog generation
   or aggregate is follow-up work before claiming large-dataset performance.
-- Verification is synthetic and local. The working project database still
-  fails closed while SQLite sidecars are present, and Caido was not queried.
-  Operation-catalog runtime compatibility, Caido completeness, and focused-view
-  p95 remain unverified; Stage 2 stays `PARTIAL`.
+- The initial catalog verification for this commit was synthetic and local;
+  runtime compatibility and the working-dataset p95 were not yet checked at
+  that checkpoint. The fresh follow-up measurements and current database state
+  are recorded above. Caido history completeness remains unverified, so Stage
+  2 stays `PARTIAL`.
 
 This repository is an early public alpha. The following boundaries are deliberate and should remain visible in documentation and user-facing output:
 
