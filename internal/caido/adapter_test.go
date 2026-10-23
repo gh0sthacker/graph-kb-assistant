@@ -467,3 +467,26 @@ func TestFetchExchangePreservesDetailedResponseStatusOnMetadataMismatch(t *testi
 		t.Fatal("fetchExchange() did not retain the metadata mismatch state")
 	}
 }
+
+func TestFetchExchangeKeepsMissingDetailResponsePendingWhenMetadataHasStatus(t *testing.T) {
+	selected := ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
+	metadataStatus := 200
+	metadata := RequestMetadata{
+		RequestID: "fixture-request", Method: "GET", URL: "https://fixture.invalid/", StatusCode: &metadataStatus,
+	}
+	payload := map[string]any{
+		"request": map[string]any{
+			"firstLine":   "GET / HTTP/1.1",
+			"headers":     []any{map[string]any{"name": "Host", "value": "fixture.invalid"}},
+			"fingerprint": map[string]any{"kind": "empty", "bodySize": 0},
+		},
+	}
+
+	exchange, err := (&MCPReadSource{}).fetchExchange(selected, metadata, payload, bodyChunkBytes)
+	if err != nil {
+		t.Fatalf("fetchExchange() should preserve the incomplete exchange for a later refresh: %v", err)
+	}
+	if exchange.HasResponse || exchange.ResponseStatus != nil || !exchange.ResponseStatusMetadataMismatch {
+		t.Fatalf("incomplete exchange = %+v, want absent response marked inconsistent and pending", exchange)
+	}
+}

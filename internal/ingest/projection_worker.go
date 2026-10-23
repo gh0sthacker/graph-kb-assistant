@@ -212,11 +212,31 @@ func persistProjectionJobMapping(
 		return errors.New("projection source revision identity is unavailable")
 	}
 	if sourceKind == "live" {
-		var storedGraphObservationID string
+		var currentRevision sql.NullString
+		var currentGraphObservationID string
 		if err := conn.QueryRowContext(ctx,
-			"SELECT graph_observation_id FROM live_capture_index WHERE observation_id=?", observationID,
-		).Scan(&storedGraphObservationID); err != nil || storedGraphObservationID != graphObservationID {
-			return errors.New("live projection mapping does not match the accepted job")
+			"SELECT current_revision_id,graph_observation_id FROM live_capture_index WHERE observation_id=?", observationID,
+		).Scan(&currentRevision, &currentGraphObservationID); err != nil {
+			return errors.New("live projection source is unavailable")
+		}
+		if currentRevision.Valid && currentRevision.String == job.RevisionID && currentGraphObservationID != graphObservationID {
+			return errors.New("current live projection mapping does not match the accepted revision")
+		}
+		updatedAt := now.UTC().Format(projectionWorkerTimestampLayout)
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO live_graph_capture_revisions(revision_id,observation_id,graph_observation_id,updated_at)
+			 VALUES(?,?,?,?) ON CONFLICT(revision_id) DO NOTHING`,
+			job.RevisionID, observationID, graphObservationID, updatedAt,
+		); err != nil {
+			return errors.New("live revision graph mapping could not be stored")
+		}
+		var storedObservation, storedGraphObservationID string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT observation_id,graph_observation_id FROM live_graph_capture_revisions WHERE revision_id=?",
+			job.RevisionID,
+		).Scan(&storedObservation, &storedGraphObservationID); err != nil ||
+			storedObservation != observationID || storedGraphObservationID != graphObservationID {
+			return errors.New("live revision graph mapping conflicts with the accepted job")
 		}
 		return nil
 	}

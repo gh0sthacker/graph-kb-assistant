@@ -192,33 +192,60 @@ func captureProvenance(ctx context.Context, projectStore *store.ProjectStore, ob
 			return result, truncated, nil
 		}
 
-		liveArgs := make([]any, 0, len(batch)+3)
+		liveArgs := make([]any, 0, len(batch)*2+5)
+		for _, id := range batch {
+			liveArgs = append(liveArgs, id)
+		}
+		liveArgs = append(liveArgs, projectStore.Project.InstanceID, projectStore.Project.ProjectID)
 		for _, id := range batch {
 			liveArgs = append(liveArgs, id)
 		}
 		liveArgs = append(liveArgs, projectStore.Project.InstanceID, projectStore.Project.ProjectID, maxCaptureProvenanceRows-len(result)+1)
-		liveQuery := `SELECT observation_id,request_id,graph_observation_id,synced_at,
-		                     request_signature,response_signature,request_size,response_size,
-		                     parse_state,caido_instance_id,caido_project_id
-		              FROM live_capture_index WHERE graph_observation_id IN (` + placeholders + `)
-		                AND caido_instance_id=? AND caido_project_id=?
-		              ORDER BY synced_at,request_id LIMIT ?`
+		liveQuery := `SELECT r.graph_observation_id,
+	                     CASE WHEN r.legacy_mapping=1 THEN NULL ELSE r.revision_id END,
+	                     CASE WHEN r.legacy_mapping=1 THEN 'legacy' ELSE 'revision' END,
+	                     l.observation_id,l.request_id,
+	                     CASE WHEN r.graph_observation_id=l.graph_observation_id THEN l.synced_at ELSE r.updated_at END,
+		                     l.request_signature,
+	                     CASE WHEN r.graph_observation_id=l.graph_observation_id THEN l.response_signature ELSE NULL END,
+		                     l.request_size,
+	                     CASE WHEN r.graph_observation_id=l.graph_observation_id THEN l.response_size ELSE NULL END,
+	                     CASE WHEN r.graph_observation_id=l.graph_observation_id THEN l.parse_state ELSE 'unknown' END,
+		                     l.caido_instance_id,l.caido_project_id
+		              FROM live_graph_capture_revisions r
+		              JOIN live_capture_index l ON l.observation_id=r.observation_id
+		              WHERE r.graph_observation_id IN (` + placeholders + `)
+		                AND l.caido_instance_id=? AND l.caido_project_id=?
+		              UNION ALL
+		              SELECT l.graph_observation_id,l.current_revision_id,'current',l.observation_id,l.request_id,l.synced_at,
+		                     l.request_signature,l.response_signature,l.request_size,l.response_size,l.parse_state,
+		                     l.caido_instance_id,l.caido_project_id
+		              FROM live_capture_index l
+		              WHERE l.graph_observation_id IN (` + placeholders + `)
+		                AND l.caido_instance_id=? AND l.caido_project_id=?
+		                AND NOT EXISTS (SELECT 1 FROM live_graph_capture_revisions r
+		                                WHERE r.observation_id=l.observation_id
+		                                  AND r.graph_observation_id=l.graph_observation_id)
+		              ORDER BY 5,4 LIMIT ?`
 		liveRows, err := projectStore.Database.DB().QueryContext(ctx, liveQuery, liveArgs...)
 		if err != nil {
 			return nil, false, errors.New("live capture provenance could not be read")
 		}
 		for liveRows.Next() {
-			var observationID, requestID, graphID, syncedAt, requestSignature, parseState, instanceID, projectID string
+			var graphID, revisionMapping, observationID, requestID, syncedAt, requestSignature, parseState, instanceID, projectID string
+			var revisionID sql.NullString
 			var responseSignature sql.NullString
 			var requestSize int64
 			var responseSize sql.NullInt64
-			if err := liveRows.Scan(&observationID, &requestID, &graphID, &syncedAt, &requestSignature,
+			if err := liveRows.Scan(&graphID, &revisionID, &revisionMapping, &observationID, &requestID, &syncedAt, &requestSignature,
 				&responseSignature, &requestSize, &responseSize, &parseState, &instanceID, &projectID); err != nil {
 				_ = liveRows.Close()
 				return nil, false, errors.New("live capture provenance is malformed")
 			}
 			result = append(result, map[string]any{
-				"observation_id": observationID, "request_id": requestID, "graph_observation_id": graphID,
+				"observation_id": observationID, "revision_id": nullableString(revisionID),
+				"revision_mapping": revisionMapping,
+				"request_id":       requestID, "graph_observation_id": graphID,
 				"synced_at": syncedAt, "request_signature": requestSignature,
 				"response_signature": nullableString(responseSignature), "request_size": requestSize,
 				"response_size": nullableInt64(responseSize), "parse_state": parseState,

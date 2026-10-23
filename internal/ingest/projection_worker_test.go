@@ -2,7 +2,9 @@ package ingest
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +106,261 @@ func TestProjectionWorkerAcknowledgesOlderRevisionWithoutReplacingCurrentMapping
 	result, err = runProjectionWorkerOnce(ctx, projectStore, maintenance, options, projector, now.Add(2*time.Second))
 	if err != nil || result.State != "idle" {
 		t.Fatalf("empty projection queue: result=%+v err=%v", result, err)
+	}
+}
+
+func TestLiveTailRefreshesLateResponseAsNewRevisionAndKeepsOlderJobFenced(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, liveWriter := newLiveTailFixture(t)
+	requestID := "live-late-response-request"
+	responseStatus := 200
+	capturedAt := "2026-10-20T12:00:00Z"
+	requestRaw := []byte("GET /late HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n")
+	absent := caido.HttpExchange{
+		Ref:                  caido.ExchangeRef{Project: selected, RequestID: requestID},
+		CapturedAt:           &capturedAt,
+		RequestRaw:           requestRaw,
+		HasResponse:          false,
+		Method:               "GET",
+		Scheme:               "https",
+		Host:                 "api.fixture.invalid",
+		Port:                 443,
+		Target:               "https://api.fixture.invalid/late",
+		RequestWireFidelity:  "source_bytes",
+		ResponseWireFidelity: "unknown",
+	}
+	completed := cloneLiveFixtureExchange(absent)
+	completed.ResponseRaw = []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"late_response_field\":\"refresh-secret-marker\"}")
+	completed.HasResponse = true
+	completed.ResponseStatus = &responseStatus
+	completed.ResponseWireFidelity = "source_bytes"
+	oldCursor := "older-page"
+	source := &liveTailSourceFixture{
+		project: selected,
+		pages: []caido.RequestMetadataPage{
+			{Requests: []caido.RequestMetadata{{RequestID: requestID, Method: "GET", URL: absent.Target}}},
+			{Requests: []caido.RequestMetadata{{RequestID: requestID, Method: "GET", URL: absent.Target}}},
+		},
+		refreshPages: []caido.RequestMetadataPage{
+			{Requests: []caido.RequestMetadata{{RequestID: "unrelated-old-request", Method: "GET", URL: "https://api.fixture.invalid/other"}}, HasMore: true, NextCursor: &oldCursor},
+			{Requests: []caido.RequestMetadata{{RequestID: requestID, Method: "GET", URL: absent.Target, StatusCode: &responseStatus}}},
+		},
+		exchangeSnapshots: map[string][]caido.HttpExchange{requestID: {absent, completed}},
+	}
+	projectorCalls := 0
+	liveWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+		projectorCalls++
+		if projectorCalls == 1 {
+			return false, false, errors.New("synthetic initial projection interruption")
+		}
+		return true, true, nil
+	}
+	options := LiveTailOptions{PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
+
+	first, err := RunLiveTail(ctx, source, liveWriter, selected, options)
+	if err != nil || first.State != "idle" || first.RequestsAdded != 1 || first.ResponsesRefreshed != 0 || first.ResponseRefreshPages != 1 {
+		t.Fatalf("initial incomplete live capture = %+v err=%v", first, err)
+	}
+	var originalRevision string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id FROM live_capture_index WHERE request_id=?", requestID,
+	).Scan(&originalRevision); err != nil {
+		t.Fatal(err)
+	}
+	second, err := RunLiveTail(ctx, source, liveWriter, selected, options)
+	if err != nil || second.State != "idle" || second.RequestsAdded != 0 || second.ResponsesRefreshed != 1 || second.ResponseRefreshPages != 1 || second.ResponseRefreshPending {
+		t.Fatalf("late response refresh outside the moving creation window = %+v err=%v", second, err)
+	}
+	if len(source.refreshCursors) != 2 || source.refreshCursors[0] != "" || source.refreshCursors[1] != oldCursor {
+		t.Fatalf("durable response sweep cursors = %v, want initial page then %q", source.refreshCursors, oldCursor)
+	}
+	responseReplay := cloneLiveFixtureExchange(completed)
+	replay, err := liveWriter.WriteResponseRefreshPage(
+		ctx, nil,
+		caido.RequestMetadataPage{Requests: []caido.RequestMetadata{{RequestID: requestID, Method: "GET", URL: absent.Target, StatusCode: &responseStatus}}},
+		caido.HistoryPage{Exchanges: []caido.HttpExchange{responseReplay}},
+		map[string]struct{}{},
+	)
+	clearHistoryPage(&caido.HistoryPage{Exchanges: []caido.HttpExchange{responseReplay}})
+	if err != nil || replay.ResponsesRefreshed != 0 || replay.ProjectionState != "not_applicable" {
+		t.Fatalf("replaying the accepted response revision = %+v err=%v", replay, err)
+	}
+
+	var currentRevision, currentGraphID, responseFieldNames, ftsFields string
+	var responseSize int64
+	var captureCount, revisionCount, jobCount int
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id,graph_observation_id,response_size,field_names_json FROM live_capture_index WHERE request_id=?", requestID,
+	).Scan(&currentRevision, &currentGraphID, &responseSize, &responseFieldNames); err != nil {
+		t.Fatal(err)
+	}
+	if currentRevision == originalRevision || responseSize == 0 || !strings.Contains(responseFieldNames, "late_response_field") {
+		t.Fatalf("live capture did not advance to a response revision: rev=%q old=%q size=%d fields=%s", currentRevision, originalRevision, responseSize, responseFieldNames)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT fields FROM live_capture_fts WHERE observation_id=(SELECT observation_id FROM live_capture_index WHERE request_id=?)", requestID,
+	).Scan(&ftsFields); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ftsFields, "late_response_field") {
+		t.Fatalf("live FTS row was not refreshed with response fields: %q", ftsFields)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM live_capture_index WHERE request_id=?", requestID,
+	).Scan(&captureCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM capture_revision_registry WHERE observation_id=(SELECT observation_id FROM live_capture_index WHERE request_id=?) AND source_kind='live'", requestID,
+	).Scan(&revisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM projection_jobs j JOIN capture_revision_registry r ON r.revision_id=j.revision_id
+		 WHERE r.observation_id=(SELECT observation_id FROM live_capture_index WHERE request_id=?)`, requestID,
+	).Scan(&jobCount); err != nil {
+		t.Fatal(err)
+	}
+	if captureCount != 1 || revisionCount != 2 || jobCount != 2 {
+		t.Fatalf("refresh duplicated the capture or lost immutable work: captures=%d revisions=%d jobs=%d", captureCount, revisionCount, jobCount)
+	}
+	var oldJobState, currentJobState string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT state FROM projection_jobs WHERE revision_id=?", originalRevision,
+	).Scan(&oldJobState); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT state FROM projection_jobs WHERE revision_id=?", currentRevision,
+	).Scan(&currentJobState); err != nil {
+		t.Fatal(err)
+	}
+	if oldJobState != "pending" || currentJobState != "applied" {
+		t.Fatalf("initial and current projection states = %q, %q, want pending/applied", oldJobState, currentJobState)
+	}
+
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance,
+		ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3},
+		func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+			return true, true, nil
+		},
+		time.Now().UTC().Add(time.Second),
+	)
+	if err != nil || workerResult.State != "applied" || workerResult.RevisionID != originalRevision {
+		t.Fatalf("older response-less projection job = %+v err=%v", workerResult, err)
+	}
+	var graphAfterOldAck string
+	var revisionMappings int
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT graph_observation_id FROM live_capture_index WHERE request_id=?", requestID,
+	).Scan(&graphAfterOldAck); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM live_graph_capture_revisions WHERE observation_id=(SELECT observation_id FROM live_capture_index WHERE request_id=?)", requestID,
+	).Scan(&revisionMappings); err != nil {
+		t.Fatal(err)
+	}
+	if graphAfterOldAck != currentGraphID || revisionMappings != 2 {
+		t.Fatalf("older job rewound current graph or lost revision mappings: graph=%s current=%s mappings=%d", graphAfterOldAck, currentGraphID, revisionMappings)
+	}
+
+	if len(source.fetchedExchanges) != 2 ||
+		!allBytesZero(source.fetchedExchanges[0].RequestRaw) ||
+		!allBytesZero(source.fetchedExchanges[1].RequestRaw) ||
+		!allBytesZero(source.fetchedExchanges[1].ResponseRaw) {
+		t.Fatal("live response refresh retained raw fixture bytes")
+	}
+	if entries, err := os.ReadDir(projectStore.VaultDirectory); err != nil || len(entries) != 0 {
+		t.Fatalf("live response refresh wrote raw vault files: entries=%d err=%v", len(entries), err)
+	}
+	assertAbsentFromProjectFiles(t, projectStore.Directory, "refresh-secret-marker")
+}
+
+func TestLiveResponseRefreshIdentityConflictRollsBackCursorAndCapture(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, liveWriter := newLiveTailFixture(t)
+	requestID := "live-refresh-conflicting-request"
+	capturedAt := "2026-10-20T12:00:00Z"
+	initial := caido.HttpExchange{
+		Ref:                  caido.ExchangeRef{Project: selected, RequestID: requestID},
+		CapturedAt:           &capturedAt,
+		RequestRaw:           []byte("GET /original HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"),
+		Method:               "GET",
+		Scheme:               "https",
+		Host:                 "api.fixture.invalid",
+		Port:                 443,
+		Target:               "https://api.fixture.invalid/original",
+		RequestWireFidelity:  "source_bytes",
+		ResponseWireFidelity: "unknown",
+	}
+	checkpoint, err := liveWriter.BeginCycle(ctx, time.Now().UTC(), 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+		return false, false, errors.New("synthetic projection interruption")
+	}
+	accepted, err := liveWriter.WritePage(ctx, checkpoint, caido.HistoryPage{Exchanges: []caido.HttpExchange{initial}})
+	if err != nil || accepted.RequestsAdded != 1 {
+		t.Fatalf("accept initial pending response: result=%+v err=%v", accepted, err)
+	}
+	responseStatus := 200
+	conflict := cloneLiveFixtureExchange(initial)
+	conflict.Target = "https://api.fixture.invalid/changed"
+	conflict.HasResponse = true
+	conflict.ResponseRaw = []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nchanged")
+	conflict.ResponseStatus = &responseStatus
+	conflict.ResponseWireFidelity = "source_bytes"
+	oldCursor := "refresh-cursor-must-not-advance"
+	if _, err := projectStore.Database.DB().ExecContext(ctx,
+		"UPDATE live_sync_state SET response_refresh_cursor=? WHERE source_key=?", oldCursor, liveTailSourceKey,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err = liveWriter.WriteResponseRefreshPage(ctx, &oldCursor,
+		caido.RequestMetadataPage{Requests: []caido.RequestMetadata{{
+			RequestID: requestID, Method: "GET", URL: conflict.Target, StatusCode: &responseStatus,
+		}}},
+		caido.HistoryPage{Exchanges: []caido.HttpExchange{conflict}}, map[string]struct{}{},
+	)
+	clear(conflict.RequestRaw)
+	clear(conflict.ResponseRaw)
+	if err == nil || !strings.Contains(err.Error(), "identity conflicts") {
+		t.Fatalf("changed request identity refresh error = %v, want identity conflict", err)
+	}
+	var storedCursor sql.NullString
+	var responseSize sql.NullInt64
+	var currentRevision string
+	var revisions, jobs int
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT response_refresh_cursor FROM live_sync_state WHERE source_key=?", liveTailSourceKey,
+	).Scan(&storedCursor); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT response_size,current_revision_id FROM live_capture_index WHERE request_id=?", requestID,
+	).Scan(&responseSize, &currentRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM capture_revision_registry WHERE observation_id=(SELECT observation_id FROM live_capture_index WHERE request_id=?)", requestID,
+	).Scan(&revisions); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM projection_jobs",
+	).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if !storedCursor.Valid || storedCursor.String != oldCursor || responseSize.Valid || currentRevision == "" || revisions != 1 || jobs != 1 {
+		t.Fatalf("conflicting refresh left partial state: cursor=%v response=%v current=%q revisions=%d jobs=%d",
+			storedCursor, responseSize, currentRevision, revisions, jobs)
 	}
 }
 

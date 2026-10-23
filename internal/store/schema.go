@@ -186,3 +186,21 @@ CREATE TABLE IF NOT EXISTS projection_jobs (
 CREATE INDEX IF NOT EXISTS projection_jobs_due_idx
   ON projection_jobs(state, next_attempt_at, sequence_id);
 `
+
+// schemaV7 adds a bounded, independent live-response refresh cursor and keeps
+// graph mappings for every accepted live revision. Python owns upgrades of
+// existing project databases; Go uses this complete schema for new projects.
+const schemaV7 = schemaV6 + `
+ALTER TABLE live_sync_state ADD COLUMN response_refresh_cursor TEXT;
+ALTER TABLE live_capture_index ADD COLUMN current_revision_id TEXT;
+CREATE TABLE IF NOT EXISTS live_graph_capture_revisions (
+  revision_id TEXT PRIMARY KEY REFERENCES capture_revision_registry(revision_id),
+  observation_id TEXT NOT NULL,
+  graph_observation_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  legacy_mapping INTEGER NOT NULL DEFAULT 0 CHECK (legacy_mapping IN (0,1)),
+  UNIQUE (observation_id, revision_id)
+);
+CREATE INDEX IF NOT EXISTS live_graph_revisions_observation_idx
+  ON live_graph_capture_revisions(observation_id, updated_at);
+`

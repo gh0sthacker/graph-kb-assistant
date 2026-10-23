@@ -61,6 +61,10 @@ type LiveTailResult struct {
 	State                  string  `json:"state"`
 	RequestsSeen           int     `json:"requests_seen"`
 	RequestsAdded          int     `json:"requests_added"`
+	ResponsesRefreshed     int     `json:"responses_refreshed"`
+	PendingResponses       int     `json:"pending_responses"`
+	ResponseRefreshPages   int     `json:"response_refresh_pages"`
+	ResponseRefreshPending bool    `json:"response_refresh_pending"`
 	ProjectionPendingPages int     `json:"projection_pending_pages"`
 	PagesCompleted         int     `json:"pages_completed"`
 	Watermark              *string `json:"watermark"`
@@ -69,13 +73,15 @@ type LiveTailResult struct {
 }
 
 type LivePageResult struct {
-	RequestsAdded   int
-	ProjectionState string
-	Checkpoint      LiveTailCheckpoint
+	RequestsAdded      int
+	ResponsesRefreshed int
+	ProjectionState    string
+	Checkpoint         LiveTailCheckpoint
 }
 
 type liveProgressRow struct {
 	watermark, windowSince, windowUntil, cursor, lastPolledAt sql.NullString
+	responseRefreshCursor                                     sql.NullString
 	state, updatedAt                                          string
 }
 
@@ -166,7 +172,9 @@ func (w *LiveTailWriter) BeginCycle(ctx context.Context, now time.Time, overlapS
 		if !committed {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
-		_ = conn.Close()
+		if conn != nil {
+			_ = conn.Close()
+		}
 	}()
 
 	progress, err := readLiveProgress(ctx, conn)
@@ -277,6 +285,94 @@ func (w *LiveTailWriter) KnownRequestIDs(ctx context.Context, requestIDs []strin
 	return known, nil
 }
 
+// PendingResponseRequestIDs returns live-owned captures whose response is
+// unknown. A zero response_size is a complete empty response; NULL means that
+// Caido has not supplied one. Historical captures are never upgraded here.
+func (w *LiveTailWriter) PendingResponseRequestIDs(ctx context.Context, requestIDs []string) (map[string]struct{}, error) {
+	if err := w.validateOpen(); err != nil {
+		return nil, err
+	}
+	if len(requestIDs) > 100 {
+		return nil, errors.New("pending response lookup exceeds the page limit")
+	}
+	pending := make(map[string]struct{}, len(requestIDs))
+	if len(requestIDs) == 0 {
+		return pending, nil
+	}
+	seen := make(map[string]struct{}, len(requestIDs))
+	for _, requestID := range requestIDs {
+		if err := (project.CaidoExchangeRef{Project: w.selected.Project, RequestID: requestID}).Validate(); err != nil {
+			return nil, errors.New("pending response lookup contains an invalid request ID")
+		}
+		if _, exists := seen[requestID]; exists {
+			return nil, errors.New("pending response lookup contains duplicate request IDs")
+		}
+		seen[requestID] = struct{}{}
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(requestIDs)), ",")
+	query := `SELECT l.request_id FROM live_capture_index l
+		WHERE l.caido_instance_id=? AND l.caido_project_id=? AND l.request_id IN (` + placeholders + `)
+		AND l.response_size IS NULL
+		AND NOT EXISTS (SELECT 1 FROM captures c WHERE c.caido_instance_id=l.caido_instance_id
+			AND c.caido_project_id=l.caido_project_id AND c.request_id=l.request_id)`
+	args := make([]any, 0, len(requestIDs)+2)
+	args = append(args, w.selected.Project.InstanceID, w.selected.Project.ProjectID)
+	for _, requestID := range requestIDs {
+		args = append(args, requestID)
+	}
+	rows, err := w.selected.Database.DB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, errors.New("pending response lookup failed")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var requestID string
+		if err := rows.Scan(&requestID); err != nil {
+			return nil, errors.New("pending response lookup result is malformed")
+		}
+		pending[requestID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("pending response lookup failed")
+	}
+	return pending, nil
+}
+
+func (w *LiveTailWriter) ResponseRefreshCursor(ctx context.Context) (*string, error) {
+	if err := w.validateOpen(); err != nil {
+		return nil, err
+	}
+	var cursor sql.NullString
+	err := w.selected.Database.DB().QueryRowContext(ctx,
+		"SELECT response_refresh_cursor FROM live_sync_state WHERE source_key=?", liveTailSourceKey,
+	).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errors.New("pending response refresh cursor could not be read")
+	}
+	return nullableStringPtr(cursor), nil
+}
+
+func (w *LiveTailWriter) PendingLiveResponseCount(ctx context.Context) (int, error) {
+	if err := w.validateOpen(); err != nil {
+		return 0, err
+	}
+	var count int
+	err := w.selected.Database.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM live_capture_index l WHERE l.caido_instance_id=? AND l.caido_project_id=?
+		 AND l.response_size IS NULL AND NOT EXISTS (SELECT 1 FROM captures c
+			WHERE c.caido_instance_id=l.caido_instance_id AND c.caido_project_id=l.caido_project_id
+			AND c.request_id=l.request_id)`,
+		w.selected.Project.InstanceID, w.selected.Project.ProjectID,
+	).Scan(&count)
+	if err != nil {
+		return 0, errors.New("pending live response count could not be read")
+	}
+	return count, nil
+}
+
 func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheckpoint, page caido.HistoryPage) (LivePageResult, error) {
 	if err := w.validateOpen(); err != nil {
 		return LivePageResult{}, err
@@ -316,7 +412,7 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 	if err := liveCheckpointMatches(ctx, conn, checkpoint); err != nil {
 		return LivePageResult{}, err
 	}
-	added, accepted, err := persistLiveCaptures(ctx, conn, w.selected, prepared)
+	added, refreshed, accepted, err := persistLiveCaptures(ctx, conn, w.selected, prepared)
 	if err != nil {
 		return LivePageResult{}, err
 	}
@@ -341,7 +437,80 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 	_ = conn.Close()
 	conn = nil
 	projectionState := w.projectAcceptedLive(ctx, accepted)
-	return LivePageResult{RequestsAdded: added, ProjectionState: projectionState, Checkpoint: updated}, nil
+	return LivePageResult{RequestsAdded: added, ResponsesRefreshed: refreshed, ProjectionState: projectionState, Checkpoint: updated}, nil
+}
+
+// WriteResponseRefreshPage accepts only the monotonic absent-to-present live
+// response transition and advances its independent metadata cursor atomically.
+func (w *LiveTailWriter) WriteResponseRefreshPage(
+	ctx context.Context,
+	previousCursor *string,
+	metadata caido.RequestMetadataPage,
+	page caido.HistoryPage,
+	skipped map[string]struct{},
+) (LivePageResult, error) {
+	if err := w.validateOpen(); err != nil {
+		return LivePageResult{}, err
+	}
+	if err := validateMetadataPage(metadata, w.selected.Project, 100, previousCursor); err != nil {
+		return LivePageResult{}, err
+	}
+	if err := validateLiveFetchedPage(page, metadata, skipped, w.selected.Project); err != nil {
+		return LivePageResult{}, err
+	}
+	prepared, err := w.prepareLiveCaptures(page.Exchanges)
+	if err != nil {
+		return LivePageResult{}, err
+	}
+	conn, err := beginSelectedImmediate(ctx, w.selected)
+	if err != nil {
+		return LivePageResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
+	var current sql.NullString
+	if err := conn.QueryRowContext(ctx,
+		"SELECT response_refresh_cursor FROM live_sync_state WHERE source_key=?", liveTailSourceKey,
+	).Scan(&current); err != nil || !nullableMatches(current, previousCursor) {
+		return LivePageResult{}, errors.New("pending response refresh cursor changed before this page could commit")
+	}
+	added, refreshed, accepted, err := persistLiveCaptures(ctx, conn, w.selected, prepared)
+	if err != nil {
+		return LivePageResult{}, err
+	}
+	var nextCursor any
+	if metadata.HasMore {
+		nextCursor = metadata.NextCursor
+	}
+	result, err := conn.ExecContext(ctx,
+		`UPDATE live_sync_state SET response_refresh_cursor=?,updated_at=?
+		 WHERE source_key=? AND response_refresh_cursor IS ?`,
+		nextCursor, utcNow(), liveTailSourceKey, previousCursor,
+	)
+	if err != nil {
+		return LivePageResult{}, errors.New("pending response refresh cursor could not be advanced")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return LivePageResult{}, errors.New("pending response refresh cursor changed before it could advance")
+	}
+	if err := commitImmediate(ctx, conn); err != nil {
+		return LivePageResult{}, err
+	}
+	committed = true
+	_ = conn.Close()
+	conn = nil
+	return LivePageResult{
+		RequestsAdded: added, ResponsesRefreshed: refreshed,
+		ProjectionState: w.projectAcceptedLive(ctx, accepted),
+	}, nil
 }
 
 func (w *LiveTailWriter) MarkPartial(ctx context.Context, checkpoint LiveTailCheckpoint) error {
@@ -424,6 +593,7 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		return LiveTailResult{}, err
 	}
 	result := LiveTailResult{ProjectKey: projectKey, State: checkpoint.State, Watermark: checkpoint.Watermark, CursorPending: checkpoint.Cursor != nil}
+	fetchedThisRun := make(map[string]struct{})
 	markPartial := func(cause error) (LiveTailResult, error) {
 		partialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -458,6 +628,11 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		if err != nil {
 			return markPartial(err)
 		}
+		for _, requestID := range requestIDs {
+			if _, alreadyStored := known[requestID]; !alreadyStored {
+				fetchedThisRun[requestID] = struct{}{}
+			}
+		}
 		page, err := source.FetchHistoryPage(selected, metadata, known, options.MaxBodyBytes)
 		if err != nil {
 			return markPartial(err)
@@ -482,10 +657,119 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		result.Watermark = checkpoint.Watermark
 		result.CursorPending = checkpoint.Cursor != nil
 		if checkpoint.State == "idle" {
-			return result, nil
+			return finishLiveTailResponseRefresh(ctx, source, writer, selected, options, fetchedThisRun, result)
 		}
 	}
 	result.LimitReached = checkpoint.State == "partial"
+	return finishLiveTailResponseRefresh(ctx, source, writer, selected, options, fetchedThisRun, result)
+}
+
+func finishLiveTailResponseRefresh(
+	ctx context.Context,
+	source caido.ReadSource,
+	writer *LiveTailWriter,
+	selected project.CaidoProjectRef,
+	options LiveTailOptions,
+	fetchedThisRun map[string]struct{},
+	result LiveTailResult,
+) (LiveTailResult, error) {
+	cursor, err := writer.ResponseRefreshCursor(ctx)
+	if err != nil {
+		result.State = "partial"
+		result.ResponseRefreshPending = true
+		return result, err
+	}
+	pendingCount, err := writer.PendingLiveResponseCount(ctx)
+	if err != nil {
+		result.State = "partial"
+		result.ResponseRefreshPending = true
+		return result, err
+	}
+	result.PendingResponses = pendingCount
+	result.ResponseRefreshPending = cursor != nil || pendingCount > 0
+	for result.ResponseRefreshPages < options.MaxPages {
+		if err := ctx.Err(); err != nil {
+			result.State = "partial"
+			result.ResponseRefreshPending = true
+			return result, errors.New("pending response refresh was interrupted")
+		}
+		metadata, err := source.ListRequestPage(selected, cursor, options.PageSize, nil)
+		if err != nil {
+			result.State = "partial"
+			result.ResponseRefreshPending = true
+			return result, err
+		}
+		if err := validateMetadataPage(metadata, selected, options.PageSize, cursor); err != nil {
+			result.State = "partial"
+			result.ResponseRefreshPending = true
+			return result, err
+		}
+		requestIDs := make([]string, len(metadata.Requests))
+		for index, request := range metadata.Requests {
+			requestIDs[index] = request.RequestID
+		}
+		pending, err := writer.PendingResponseRequestIDs(ctx, requestIDs)
+		if err != nil {
+			result.State = "partial"
+			result.ResponseRefreshPending = true
+			return result, err
+		}
+		skipped := make(map[string]struct{}, len(requestIDs))
+		for _, requestID := range requestIDs {
+			if _, isPending := pending[requestID]; !isPending {
+				skipped[requestID] = struct{}{}
+				continue
+			}
+			if _, fetched := fetchedThisRun[requestID]; fetched {
+				delete(pending, requestID)
+				skipped[requestID] = struct{}{}
+			}
+		}
+		page := caido.HistoryPage{NextCursor: cloneCursor(metadata.NextCursor), HasMore: metadata.HasMore}
+		if len(pending) != 0 {
+			page, err = source.FetchHistoryPage(selected, metadata, skipped, options.MaxBodyBytes)
+			if err != nil {
+				clearHistoryPage(&page)
+				result.State = "partial"
+				result.ResponseRefreshPending = true
+				return result, err
+			}
+		}
+		if err := validateLiveFetchedPage(page, metadata, skipped, selected); err != nil {
+			clearHistoryPage(&page)
+			result.State = "partial"
+			result.ResponseRefreshPending = true
+			return result, err
+		}
+		pageResult, pageErr := writer.WriteResponseRefreshPage(ctx, cursor, metadata, page, skipped)
+		clearHistoryPage(&page)
+		if pageErr != nil {
+			result.State = "partial"
+			result.ResponseRefreshPending = true
+			return result, pageErr
+		}
+		result.ResponseRefreshPages++
+		result.ResponsesRefreshed += pageResult.ResponsesRefreshed
+		if pageResult.ProjectionState == "pending" {
+			result.ProjectionPendingPages++
+		}
+		if metadata.HasMore {
+			cursor = cloneCursor(metadata.NextCursor)
+			result.ResponseRefreshPending = true
+		} else {
+			cursor = nil
+			result.ResponseRefreshPending = false
+			break
+		}
+	}
+	pendingCount, err = writer.PendingLiveResponseCount(ctx)
+	if err != nil {
+		result.State = "partial"
+		result.ResponseRefreshPending = true
+		return result, err
+	}
+	result.PendingResponses = pendingCount
+	result.ResponseRefreshPending = cursor != nil || pendingCount > 0
 	return result, nil
 }
 
@@ -518,6 +802,15 @@ func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]
 			return nil, errors.New("live-tail page exceeds the aggregate in-memory message budget")
 		}
 		totalBytes += size
+		if exchange.ResponseStatusMetadataMismatch && exchange.HasResponse {
+			// A disagreement means the response is not yet a stable revision. Keep
+			// the observation pending and discard these detail bytes after mapping.
+			exchange.HasResponse = false
+			exchange.ResponseRaw = nil
+			exchange.ResponseStatus = nil
+			exchange.ResponseTruncated = nil
+			exchange.ResponseWireFidelity = "unknown"
+		}
 		projection, err := behaviorgraph.ProjectExchange(exchange)
 		if err != nil || projection.ObservationID != observationID {
 			return nil, errors.New("live-tail structural projection could not be built")
@@ -616,88 +909,148 @@ func persistLiveCaptures(
 	conn *sql.Conn,
 	selected *store.ProjectStore,
 	prepared []preparedLiveCapture,
-) (int, []preparedLiveCapture, error) {
+) (int, int, []preparedLiveCapture, error) {
 	added := 0
+	refreshed := 0
 	accepted := make([]preparedLiveCapture, 0, len(prepared))
 	for _, item := range prepared {
-		var responseSize any
-		if item.exchange.HasResponse {
-			responseSize = len(item.exchange.ResponseRaw)
+		var existing struct {
+			observationID, graphObservationID, requestSignature, requestURLKey string
+			responseSignature                                                  sql.NullString
+			responseSize                                                       sql.NullInt64
 		}
-		result, err := conn.ExecContext(ctx,
-			`INSERT OR IGNORE INTO live_capture_index(observation_id,caido_instance_id,caido_project_id,request_id,
-			 graph_observation_id,synced_at,method,host,port,route,response_status,request_content_type,
-			 response_content_type,request_size,response_size,request_signature,response_signature,request_url_key,
-			 referer_url_key,redirect_url_key,field_names_json,header_names_json,parse_state)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?)`,
-			item.observationID, selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID,
-			item.graphObservationID, utcNow(), item.projection.Search.Method, item.projection.Search.Host,
-			item.projection.Search.Port, item.projection.Search.Route, item.projection.Search.ResponseStatus,
-			item.projection.Search.RequestContentType, item.projection.Search.ResponseContentType,
-			len(item.exchange.RequestRaw), responseSize, item.requestSignature, item.responseSignature,
-			item.requestURLKey, jsonString(item.projection.Search.FieldNames), jsonString(item.projection.Search.HeaderNames),
-			item.projection.ParseState,
-		)
-		if err != nil {
-			return 0, nil, errors.New("live-tail capture index could not be written")
+		err := conn.QueryRowContext(ctx,
+			`SELECT observation_id,graph_observation_id,request_signature,request_url_key,
+				response_signature,response_size FROM live_capture_index
+			 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=?`,
+			selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID,
+		).Scan(&existing.observationID, &existing.graphObservationID, &existing.requestSignature,
+			&existing.requestURLKey, &existing.responseSignature, &existing.responseSize)
+		newCapture := errors.Is(err, sql.ErrNoRows)
+		if err != nil && !newCapture {
+			return 0, 0, nil, errors.New("live-tail existing capture identity could not be read")
 		}
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			return 0, nil, errors.New("live-tail capture index result could not be checked")
+		if !newCapture && (existing.observationID != item.observationID ||
+			existing.requestSignature != item.requestSignature || existing.requestURLKey != item.requestURLKey) {
+			return 0, 0, nil, errors.New("live-tail request identity conflicts with an existing project record")
 		}
-		if rowsAffected == 1 {
+		acceptedRevision := newCapture
+		if newCapture {
+			var responseSize any
+			if item.exchange.HasResponse {
+				responseSize = len(item.exchange.ResponseRaw)
+			}
+			if _, err := conn.ExecContext(ctx,
+				`INSERT INTO live_capture_index(observation_id,caido_instance_id,caido_project_id,request_id,
+				 graph_observation_id,synced_at,method,host,port,route,response_status,request_content_type,
+				 response_content_type,request_size,response_size,request_signature,response_signature,request_url_key,
+				 referer_url_key,redirect_url_key,field_names_json,header_names_json,parse_state,current_revision_id)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?)`,
+				item.observationID, selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID,
+				item.graphObservationID, utcNow(), item.projection.Search.Method, item.projection.Search.Host,
+				item.projection.Search.Port, item.projection.Search.Route, item.projection.Search.ResponseStatus,
+				item.projection.Search.RequestContentType, item.projection.Search.ResponseContentType,
+				len(item.exchange.RequestRaw), responseSize, item.requestSignature, item.responseSignature,
+				item.requestURLKey, jsonString(item.projection.Search.FieldNames), jsonString(item.projection.Search.HeaderNames),
+				item.projection.ParseState, item.revisionID,
+			); err != nil {
+				return 0, 0, nil, errors.New("live-tail capture index could not be written")
+			}
 			if _, err := conn.ExecContext(ctx,
 				`INSERT INTO live_capture_fts(observation_id,method,host,route,fields,headers) VALUES(?,?,?,?,?,?)`,
 				item.observationID, item.projection.Search.Method, item.projection.Search.Host,
 				item.projection.Search.Route, strings.Join(item.projection.Search.FieldNames, " "),
 				strings.Join(item.projection.Search.HeaderNames, " "),
 			); err != nil {
-				return 0, nil, errors.New("live-tail full-text index could not be written")
+				return 0, 0, nil, errors.New("live-tail full-text index could not be written")
 			}
 			added++
-		} else {
-			var existingObservation, existingGraph, existingSignature, existingURL string
-			var existingResponseSignature sql.NullString
-			err = conn.QueryRowContext(ctx,
-				`SELECT observation_id,graph_observation_id,request_signature,response_signature,request_url_key
-				 FROM live_capture_index WHERE caido_instance_id=? AND caido_project_id=? AND request_id=?`,
-				selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID,
-			).Scan(&existingObservation, &existingGraph, &existingSignature, &existingResponseSignature, &existingURL)
-			if err != nil || existingObservation != item.observationID || existingGraph != item.graphObservationID ||
-				existingSignature != item.requestSignature || !nullableStringEquals(existingResponseSignature, item.responseSignature) ||
-				existingURL != item.requestURLKey {
-				return 0, nil, errors.New("live-tail request identity conflicts with an existing project record")
+		} else if item.exchange.HasResponse {
+			if item.exchange.ResponseStatusMetadataMismatch {
+				// Inconsistent Caido status metadata remains pending until a later pass.
+				continue
 			}
+			if existing.responseSize.Valid {
+				if existing.responseSignature.Valid && item.responseSignature != nil &&
+					existing.responseSignature.String == *item.responseSignature &&
+					existing.responseSize.Int64 == int64(len(item.exchange.ResponseRaw)) &&
+					existing.graphObservationID == item.graphObservationID {
+					continue
+				}
+				return 0, 0, nil, errors.New("live-tail completed response conflicts with an existing revision")
+			}
+			if existing.responseSignature.Valid || item.responseSignature == nil {
+				return 0, 0, nil, errors.New("live-tail response lifecycle metadata is inconsistent")
+			}
+			result, err := conn.ExecContext(ctx,
+				`UPDATE live_capture_index SET graph_observation_id=?,synced_at=?,response_status=?,
+				 response_content_type=?,response_size=?,response_signature=?,field_names_json=?,
+				 header_names_json=?,parse_state=?,current_revision_id=?
+				 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=? AND observation_id=?
+				 AND request_signature=? AND request_url_key=? AND response_size IS NULL AND response_signature IS NULL`,
+				item.graphObservationID, utcNow(), item.projection.Search.ResponseStatus,
+				item.projection.Search.ResponseContentType, len(item.exchange.ResponseRaw), item.responseSignature,
+				jsonString(item.projection.Search.FieldNames), jsonString(item.projection.Search.HeaderNames),
+				item.projection.ParseState, item.revisionID, selected.Project.InstanceID,
+				selected.Project.ProjectID, item.exchange.Ref.RequestID, item.observationID,
+				item.requestSignature, item.requestURLKey,
+			)
+			if err != nil {
+				return 0, 0, nil, errors.New("live-tail response revision could not be accepted")
+			}
+			rows, err := result.RowsAffected()
+			if err != nil || rows != 1 {
+				return 0, 0, nil, errors.New("live-tail response changed before its revision could be accepted")
+			}
+			if _, err := conn.ExecContext(ctx, "DELETE FROM live_capture_fts WHERE observation_id=?", item.observationID); err != nil {
+				return 0, 0, nil, errors.New("live-tail full-text row could not be refreshed")
+			}
+			if _, err := conn.ExecContext(ctx,
+				`INSERT INTO live_capture_fts(observation_id,method,host,route,fields,headers) VALUES(?,?,?,?,?,?)`,
+				item.observationID, item.projection.Search.Method, item.projection.Search.Host,
+				item.projection.Search.Route, strings.Join(item.projection.Search.FieldNames, " "),
+				strings.Join(item.projection.Search.HeaderNames, " "),
+			); err != nil {
+				return 0, 0, nil, errors.New("live-tail full-text row could not be refreshed")
+			}
+			refreshed++
+			acceptedRevision = true
+		} else {
+			// No response is still pending, or the response is already complete.
+			continue
+		}
+		if !acceptedRevision {
+			continue
 		}
 		if _, err := conn.ExecContext(ctx,
 			`INSERT OR IGNORE INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at)
 			 VALUES(?,?,'live',?)`, item.revisionID, item.observationID, utcNow(),
 		); err != nil {
-			return 0, nil, errors.New("live-tail capture revision could not be registered")
+			return 0, 0, nil, errors.New("live-tail capture revision could not be registered")
 		}
 		var registeredObservation, sourceKind string
 		if err := conn.QueryRowContext(ctx,
 			"SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?", item.revisionID,
 		).Scan(&registeredObservation, &sourceKind); err != nil || registeredObservation != item.observationID ||
 			!validRegisteredRevisionSource(sourceKind) {
-			return 0, nil, errors.New("live-tail capture revision registry identity conflicts with the stored revision")
+			return 0, 0, nil, errors.New("live-tail capture revision registry identity conflicts with the stored revision")
 		}
 		payload, err := json.Marshal(item.bundle)
 		if err != nil {
-			return 0, nil, errors.New("live-tail graph bundle could not be encoded")
+			return 0, 0, nil, errors.New("live-tail graph bundle could not be encoded")
 		}
 		bundleObservationID, err := behaviorgraph.ProjectionObservationID(payload, selected.ProjectKey, item.observationID)
 		if err != nil || bundleObservationID != item.graphObservationID {
-			return 0, nil, errors.New("live-tail graph observation does not match its capture revision")
+			return 0, 0, nil, errors.New("live-tail graph observation does not match its capture revision")
 		}
 		if _, _, err := behaviorgraph.EnqueueProjectionJob(
 			ctx, conn, selected.ProjectKey, item.revisionID, item.observationID, payload, time.Now().UTC(),
 		); err != nil {
-			return 0, nil, errors.New("live-tail projection job could not be committed with its capture")
+			return 0, 0, nil, errors.New("live-tail projection job could not be committed with its capture")
 		}
 		accepted = append(accepted, item)
 	}
-	return added, accepted, nil
+	return added, refreshed, accepted, nil
 }
 
 func (w *LiveTailWriter) projectAcceptedLive(ctx context.Context, accepted []preparedLiveCapture) string {
@@ -736,12 +1089,7 @@ func (w *LiveTailWriter) projectAcceptedLive(ctx context.Context, accepted []pre
 		if err != nil || jobObservationID != item.graphObservationID {
 			return "pending"
 		}
-		var storedGraphObservationID string
-		if err := conn.QueryRowContext(ctx,
-			`SELECT graph_observation_id FROM live_capture_index
-			 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=? AND observation_id=?`,
-			w.selected.Project.InstanceID, w.selected.Project.ProjectID, item.exchange.Ref.RequestID, item.observationID,
-		).Scan(&storedGraphObservationID); err != nil || storedGraphObservationID != jobObservationID {
+		if err := persistProjectionJobMapping(ctx, conn, job, jobObservationID, time.Now().UTC()); err != nil {
 			return "pending"
 		}
 		if err := behaviorgraph.MarkProjectionJobApplied(ctx, conn, w.selected.ProjectKey, item.revisionID, time.Now().UTC()); err != nil {
@@ -863,9 +1211,9 @@ func beginSelectedImmediate(ctx context.Context, selected *store.ProjectStore) (
 func readLiveProgress(ctx context.Context, conn *sql.Conn) (*liveProgressRow, error) {
 	var row liveProgressRow
 	err := conn.QueryRowContext(ctx,
-		`SELECT watermark,window_since,window_until,cursor,state,last_polled_at,updated_at
+		`SELECT watermark,window_since,window_until,cursor,state,last_polled_at,updated_at,response_refresh_cursor
 		 FROM live_sync_state WHERE source_key=?`, liveTailSourceKey,
-	).Scan(&row.watermark, &row.windowSince, &row.windowUntil, &row.cursor, &row.state, &row.lastPolledAt, &row.updatedAt)
+	).Scan(&row.watermark, &row.windowSince, &row.windowUntil, &row.cursor, &row.state, &row.lastPolledAt, &row.updatedAt, &row.responseRefreshCursor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

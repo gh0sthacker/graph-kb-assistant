@@ -840,8 +840,6 @@ func (s *MCPReadSource) fetchExchange(project ProjectRef, metadata RequestMetada
 		if !valid {
 			return HttpExchange{}, sanitized("Caido response has an unsupported shape")
 		}
-	} else if metadata.StatusCode != nil {
-		return HttpExchange{}, sanitized("Caido response is missing despite response status metadata")
 	}
 	method := metadata.Method
 	requestLine, err := parseRequestLine(request["firstLine"], method)
@@ -864,13 +862,14 @@ func (s *MCPReadSource) fetchExchange(project ProjectRef, metadata RequestMetada
 	var responseHeaders [][2]string
 	var responseSize int
 	var responseStatus *int
-	responseStatusMetadataMismatch := false
+	responseStatusMetadataMismatch := response == nil && metadata.StatusCode != nil
 	if response != nil {
 		responseLine, responseStatus, err = parseResponseLine(response["firstLine"])
 		if err != nil {
 			return HttpExchange{}, err
 		}
-		responseStatusMetadataMismatch = metadata.StatusCode != nil && *responseStatus != *metadata.StatusCode
+		responseStatusMetadataMismatch = responseStatusMetadataMismatch ||
+			metadata.StatusCode != nil && *responseStatus != *metadata.StatusCode
 		responseHeaders, err = parseHeaders(response["headers"])
 		if err != nil {
 			return HttpExchange{}, sanitized("Caido response headers are invalid: " + err.Error())

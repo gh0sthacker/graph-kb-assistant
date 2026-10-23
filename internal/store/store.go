@@ -17,7 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7
 
 var ErrUnsupportedSchema = errors.New("unsupported graph database schema")
 
@@ -136,6 +136,7 @@ func (s *Store) validate(ctx context.Context) error {
 		"captures", "capture_revisions", "capture_search", "live_capture_index",
 		"live_sync_state", "sync_state", "graph_capture_map",
 		"capture_revision_registry", "projection_jobs",
+		"live_graph_capture_revisions",
 	} {
 		var found int
 		err := s.db.QueryRowContext(ctx,

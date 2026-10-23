@@ -24,7 +24,7 @@ type ProjectStore struct {
 	Database            *Store
 }
 
-// OpenProjectReadOnly opens an existing v6 project store without creating
+// OpenProjectReadOnly opens an existing v7 project store without creating
 // directories, registering a project, or changing SQLite state.
 func OpenProjectReadOnly(ctx context.Context, ref project.CaidoProjectRef, dataRoot string) (*ProjectStore, error) {
 	return openProject(ctx, ref, dataRoot, true, nil)
@@ -46,7 +46,7 @@ func OpenProjectReadOnlyUnderMaintenance(
 	return openProject(ctx, ref, dataRoot, true, maintenance)
 }
 
-// OpenProjectForWrite opens an existing v6 database. It does not migrate or
+// OpenProjectForWrite opens an existing v7 database. It does not migrate or
 // initialize the database; use a shadow copy until parity has been established.
 func OpenProjectForWrite(ctx context.Context, ref project.CaidoProjectRef, dataRoot string) (*ProjectStore, error) {
 	return openProject(ctx, ref, dataRoot, false, nil)
@@ -78,7 +78,7 @@ func ProjectDirectory(ref project.CaidoProjectRef, dataRoot string) (string, err
 	return directory, nil
 }
 
-// CreateProject creates a new project namespace and version-6 SQLite database.
+// CreateProject creates a new project namespace and version-7 SQLite database.
 // It refuses to overwrite any existing namespace and does not touch Caido.
 func CreateProject(ctx context.Context, ref project.CaidoProjectRef, dataRoot string) (*ProjectStore, error) {
 	if err := ref.Validate(); err != nil {
@@ -219,7 +219,7 @@ func initializeEmptyDatabase(ctx context.Context, path, projectKey string) error
 	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
 		return errors.New("new project database could not set durable writes")
 	}
-	for _, statement := range strings.Split(schemaV6, ";") {
+	for _, statement := range strings.Split(schemaV7, ";") {
 		statement = strings.TrimSpace(statement)
 		if statement == "" {
 			continue

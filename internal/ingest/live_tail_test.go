@@ -49,16 +49,19 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 		}}}},
 		exchanges: map[string]caido.HttpExchange{requestID: exchange},
 	}
-	options := LiveTailOptions{PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
+	options := LiveTailOptions{PageSize: 1, MaxPages: 4, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
 
 	first, err := RunLiveTail(ctx, source, writer, selected, options)
 	if err != nil {
 		t.Fatalf("first RunLiveTail() error = %v", err)
 	}
-	if first.State != "idle" || first.RequestsSeen != 1 || first.RequestsAdded != 1 || first.PagesCompleted != 1 || first.CursorPending || first.LimitReached {
+	if first.State != "idle" || first.RequestsSeen != 1 || first.RequestsAdded != 1 || first.PagesCompleted != 1 || first.CursorPending || first.LimitReached || first.ResponseRefreshPending {
 		t.Fatalf("first RunLiveTail() result = %+v, want one imported request and an idle checkpoint", first)
 	}
-	if !allBytesZero(requestRaw) || !allBytesZero(responseRaw) {
+	if source.refreshCalls != 1 {
+		t.Fatalf("terminal response refresh pages = %d, want the sweep to stop after its terminal page", source.refreshCalls)
+	}
+	if len(source.fetchedExchanges) != 1 || !allBytesZero(source.fetchedExchanges[0].RequestRaw) || !allBytesZero(source.fetchedExchanges[0].ResponseRaw) {
 		t.Fatal("RunLiveTail() retained raw request or response bytes after processing")
 	}
 
@@ -66,8 +69,11 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second RunLiveTail() error = %v", err)
 	}
-	if second.State != "idle" || second.RequestsSeen != 1 || second.RequestsAdded != 0 || second.PagesCompleted != 1 {
+	if second.State != "idle" || second.RequestsSeen != 1 || second.RequestsAdded != 0 || second.PagesCompleted != 1 || second.ResponseRefreshPending {
 		t.Fatalf("second RunLiveTail() result = %+v, want an idle deduplicated page", second)
+	}
+	if source.refreshCalls != 2 {
+		t.Fatalf("response refresh pages after second cycle = %d, want one terminal page per cycle", source.refreshCalls)
 	}
 	if source.fetchCalls != 2 || source.skippedCounts[1] != 1 {
 		t.Fatalf("detail fetches = %d, skipped IDs on replay = %d; want 2 fetches and 1 skipped ID", source.fetchCalls, source.skippedCounts[1])
@@ -338,7 +344,7 @@ func TestRunLiveTailResumesFromCommittedCursor(t *testing.T) {
 	if len(source.httpqlFilters) != 2 || source.httpqlFilters[0] != source.httpqlFilters[1] {
 		t.Fatalf("resumed live-tail time filter changed: %v", source.httpqlFilters)
 	}
-	if !allBytesZero(firstRequestRaw) || !allBytesZero(secondRequestRaw) {
+	if len(source.fetchedExchanges) != 2 || !allBytesZero(source.fetchedExchanges[0].RequestRaw) || !allBytesZero(source.fetchedExchanges[1].RequestRaw) {
 		t.Fatal("resumed RunLiveTail() retained raw request bytes after processing")
 	}
 	var count int
@@ -363,15 +369,21 @@ func TestRunLiveTailResumesFromCommittedCursor(t *testing.T) {
 }
 
 type liveTailSourceFixture struct {
-	project       project.CaidoProjectRef
-	pages         []caido.RequestMetadataPage
-	exchanges     map[string]caido.HttpExchange
-	pageErr       error
-	pageCalls     int
-	fetchCalls    int
-	cursors       []string
-	httpqlFilters []string
-	skippedCounts []int
+	project           project.CaidoProjectRef
+	pages             []caido.RequestMetadataPage
+	refreshPages      []caido.RequestMetadataPage
+	exchanges         map[string]caido.HttpExchange
+	exchangeSnapshots map[string][]caido.HttpExchange
+	snapshotCalls     map[string]int
+	fetchedExchanges  []caido.HttpExchange
+	pageErr           error
+	pageCalls         int
+	refreshCalls      int
+	fetchCalls        int
+	cursors           []string
+	refreshCursors    []string
+	httpqlFilters     []string
+	skippedCounts     []int
 }
 
 func (s *liveTailSourceFixture) ListProjects() ([]caido.ProjectRef, error) {
@@ -379,7 +391,7 @@ func (s *liveTailSourceFixture) ListProjects() ([]caido.ProjectRef, error) {
 }
 
 func (s *liveTailSourceFixture) ListRequestPage(selected project.CaidoProjectRef, cursor *string, _ int, httpql *string) (caido.RequestMetadataPage, error) {
-	if !selected.SameProject(s.project) || httpql == nil || !strings.Contains(*httpql, "req.created_at.gt:") {
+	if !selected.SameProject(s.project) {
 		return caido.RequestMetadataPage{}, errors.New("fixture received an invalid project or live-tail time filter")
 	}
 	if s.pageErr != nil {
@@ -389,8 +401,21 @@ func (s *liveTailSourceFixture) ListRequestPage(selected project.CaidoProjectRef
 	if cursor != nil {
 		cursorValue = *cursor
 	}
+	if httpql == nil {
+		s.refreshCursors = append(s.refreshCursors, cursorValue)
+		if s.refreshCalls >= len(s.refreshPages) {
+			s.refreshCalls++
+			return caido.RequestMetadataPage{}, nil
+		}
+		page := s.refreshPages[s.refreshCalls]
+		s.refreshCalls++
+		return page, nil
+	}
 	s.cursors = append(s.cursors, cursorValue)
 	s.httpqlFilters = append(s.httpqlFilters, *httpql)
+	if !strings.Contains(*httpql, "req.created_at.gt:") {
+		return caido.RequestMetadataPage{}, errors.New("fixture received an invalid live-tail time filter")
+	}
 	if s.pageCalls >= len(s.pages) {
 		return caido.RequestMetadataPage{}, errors.New("fixture has no metadata page for the requested cursor")
 	}
@@ -410,13 +435,53 @@ func (s *liveTailSourceFixture) FetchHistoryPage(selected project.CaidoProjectRe
 		if _, skip := skipIDs[request.RequestID]; skip {
 			continue
 		}
+		if snapshots := s.exchangeSnapshots[request.RequestID]; len(snapshots) != 0 {
+			if s.snapshotCalls == nil {
+				s.snapshotCalls = make(map[string]int)
+			}
+			index := s.snapshotCalls[request.RequestID]
+			if index >= len(snapshots) {
+				index = len(snapshots) - 1
+			}
+			s.snapshotCalls[request.RequestID]++
+			exchange := cloneLiveFixtureExchange(snapshots[index])
+			s.fetchedExchanges = append(s.fetchedExchanges, exchange)
+			exchanges = append(exchanges, exchange)
+			continue
+		}
 		exchange, ok := s.exchanges[request.RequestID]
 		if !ok {
 			return caido.HistoryPage{}, errors.New("fixture metadata identity has no exchange")
 		}
+		exchange = cloneLiveFixtureExchange(exchange)
+		s.fetchedExchanges = append(s.fetchedExchanges, exchange)
 		exchanges = append(exchanges, exchange)
 	}
 	return caido.HistoryPage{Exchanges: exchanges, NextCursor: page.NextCursor, HasMore: page.HasMore}, nil
+}
+
+func cloneLiveFixtureExchange(exchange caido.HttpExchange) caido.HttpExchange {
+	exchange.RequestRaw = append([]byte(nil), exchange.RequestRaw...)
+	if exchange.ResponseRaw != nil {
+		exchange.ResponseRaw = append([]byte{}, exchange.ResponseRaw...)
+	}
+	if exchange.CapturedAt != nil {
+		value := *exchange.CapturedAt
+		exchange.CapturedAt = &value
+	}
+	if exchange.ResponseStatus != nil {
+		value := *exchange.ResponseStatus
+		exchange.ResponseStatus = &value
+	}
+	if exchange.RequestTruncated != nil {
+		value := *exchange.RequestTruncated
+		exchange.RequestTruncated = &value
+	}
+	if exchange.ResponseTruncated != nil {
+		value := *exchange.ResponseTruncated
+		exchange.ResponseTruncated = &value
+	}
+	return exchange
 }
 
 func (s *liveTailSourceFixture) GetExchange(caido.ExchangeRef) (*caido.HttpExchange, error) {

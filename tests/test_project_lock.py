@@ -272,7 +272,7 @@ def test_writable_project_store_migrates_v5_projection_job_ledger(tmp_path):
 
     upgraded = ProjectStore(project, root=tmp_path)
     with upgraded.connect() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
         columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(projection_jobs)").fetchall()
         }
@@ -290,6 +290,186 @@ def test_writable_project_store_migrates_v5_projection_job_ledger(tmp_path):
         "next_attempt_at",
     } <= columns
     assert tuple(revision) == ("obs-v5", "historical")
+
+
+def test_writable_project_store_migrates_v6_live_response_refresh_state(tmp_path):
+    import sqlite3
+
+    project = CaidoProjectRef("synthetic-instance", "live-refresh-v6-migration")
+    old_store = ProjectStore(project, root=tmp_path)
+    observation_id = "a" * 64
+    revision_id = "b" * 64
+    old_store.save_live_graph_captures([{
+        "observation_id": observation_id,
+        "request_id": "request-live-v6",
+        "graph_observation_id": "observation-" + "c" * 64,
+        "synced_at": "2026-10-23T12:00:00Z",
+        "request_signature": "d" * 64,
+        "response_signature": None,
+        "request_size": 12,
+        "response_size": None,
+        "request_url_key": "e" * 64,
+        "parse_state": "partial",
+        "search_record": {
+            "method": "GET", "host": "fixture.invalid", "port": 443,
+            "route": "/pending", "response_status": None,
+            "request_content_type": "", "response_content_type": "",
+            "field_names": [], "header_names": [],
+        },
+    }])
+    with old_store.connect() as connection:
+        initial_mapping = connection.execute(
+            "SELECT observation_id,graph_observation_id,legacy_mapping "
+            "FROM live_graph_capture_revisions WHERE observation_id=?",
+            (observation_id,),
+        ).fetchone()
+    assert tuple(initial_mapping) == (observation_id, "observation-" + "c" * 64, 1)
+    with sqlite3.connect(old_store.db_path) as connection:
+        connection.execute("DROP TABLE live_graph_capture_revisions")
+        connection.execute("DELETE FROM capture_revision_registry")
+        connection.execute(
+            "INSERT INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at) "
+            "VALUES(?,?,'live',?)",
+            (revision_id, observation_id, "2026-10-23T12:00:00Z"),
+        )
+        connection.execute("ALTER TABLE live_capture_index DROP COLUMN current_revision_id")
+        connection.execute("ALTER TABLE live_sync_state DROP COLUMN response_refresh_cursor")
+        connection.execute("PRAGMA user_version = 6")
+
+    upgraded = ProjectStore(project, root=tmp_path)
+    with upgraded.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
+        live_columns = {row["name"] for row in connection.execute("PRAGMA table_info(live_capture_index)")}
+        progress_columns = {row["name"] for row in connection.execute("PRAGMA table_info(live_sync_state)")}
+        current_revision = connection.execute(
+            "SELECT current_revision_id FROM live_capture_index WHERE observation_id=?", (observation_id,)
+        ).fetchone()[0]
+        graph_mapping = connection.execute(
+            "SELECT revision_id,observation_id,graph_observation_id FROM live_graph_capture_revisions "
+            "WHERE observation_id=?",
+            (observation_id,),
+        ).fetchone()
+        revision_table = connection.execute(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='live_graph_capture_revisions'"
+        ).fetchone()[0]
+    assert "current_revision_id" in live_columns
+    assert "response_refresh_cursor" in progress_columns
+    assert current_revision == revision_id
+    assert tuple(graph_mapping) == (revision_id, observation_id, "observation-" + "c" * 64)
+    assert revision_table == 1
+
+
+def test_writable_project_store_preserves_unversioned_live_graph_mapping(tmp_path):
+    import sqlite3
+
+    project = CaidoProjectRef("synthetic-instance", "legacy-live-graph-migration")
+    old_store = ProjectStore(project, root=tmp_path)
+    observation_id = "a" * 64
+    graph_observation_id = "observation-" + "c" * 64
+    old_store.save_live_graph_captures([{
+        "observation_id": observation_id,
+        "request_id": "request-live-legacy",
+        "graph_observation_id": graph_observation_id,
+        "synced_at": "2026-10-23T12:00:00Z",
+        "request_signature": "d" * 64,
+        "response_signature": None,
+        "request_size": 12,
+        "response_size": None,
+        "request_url_key": "e" * 64,
+        "parse_state": "partial",
+        "search_record": {
+            "method": "GET", "host": "fixture.invalid", "port": 443,
+            "route": "/legacy", "response_status": None,
+            "request_content_type": "", "response_content_type": "",
+            "field_names": [], "header_names": [],
+        },
+    }])
+    with old_store.connect() as connection:
+        initial_mapping = connection.execute(
+            "SELECT observation_id,graph_observation_id,legacy_mapping "
+            "FROM live_graph_capture_revisions WHERE observation_id=?",
+            (observation_id,),
+        ).fetchone()
+    assert tuple(initial_mapping) == (observation_id, graph_observation_id, 1)
+    with sqlite3.connect(old_store.db_path) as connection:
+        connection.execute("ALTER TABLE live_capture_index DROP COLUMN current_revision_id")
+        connection.execute("ALTER TABLE live_sync_state DROP COLUMN response_refresh_cursor")
+        connection.execute("DROP TABLE live_graph_capture_revisions")
+        connection.execute("DELETE FROM capture_revision_registry")
+        connection.execute("PRAGMA user_version = 5")
+
+    upgraded = ProjectStore(project, root=tmp_path)
+    with upgraded.connect() as connection:
+        live_revision = connection.execute(
+            "SELECT current_revision_id FROM live_capture_index WHERE observation_id=?", (observation_id,)
+        ).fetchone()[0]
+        mapping = connection.execute(
+            "SELECT revision_id,observation_id,graph_observation_id,legacy_mapping "
+            "FROM live_graph_capture_revisions WHERE observation_id=?",
+            (observation_id,),
+        ).fetchone()
+        registered = connection.execute(
+            "SELECT source_kind,observation_id FROM capture_revision_registry WHERE revision_id=?",
+            (mapping[0],),
+        ).fetchone()
+    assert live_revision is None
+    assert tuple(mapping[1:]) == (observation_id, graph_observation_id, 1)
+    assert len(mapping[0]) == 64
+    assert tuple(registered) == ("live", observation_id)
+
+
+def test_python_live_writer_records_marked_graph_provenance(tmp_path):
+    project = CaidoProjectRef("synthetic-instance", "python-live-graph-provenance")
+    store = ProjectStore(project, root=tmp_path)
+    observation_id = "a" * 64
+    graph_observation_id = "observation-" + "c" * 64
+
+    record = {
+        "observation_id": observation_id,
+        "request_id": "request-live-python",
+        "graph_observation_id": graph_observation_id,
+        "synced_at": "2026-10-23T12:00:00Z",
+        "request_signature": "d" * 64,
+        "response_signature": None,
+        "request_size": 12,
+        "response_size": None,
+        "request_url_key": "e" * 64,
+        "parse_state": "partial",
+        "search_record": {
+            "method": "GET", "host": "fixture.invalid", "port": 443,
+            "route": "/python-live", "response_status": None,
+            "request_content_type": "", "response_content_type": "",
+            "field_names": [], "header_names": [],
+        },
+    }
+    inserted = store.save_live_graph_captures([record])
+    assert store.save_live_graph_captures([record]) == 0
+
+    conflicting_record = dict(record)
+    conflicting_record["observation_id"] = "f" * 64
+    conflicting_record["graph_observation_id"] = "observation-" + "e" * 64
+    rollback_record = dict(record)
+    rollback_record["observation_id"] = "b" * 64
+    rollback_record["request_id"] = "request-live-rollback"
+    rollback_record["graph_observation_id"] = "observation-" + "f" * 64
+    with pytest.raises(RuntimeError, match="identity conflicts"):
+        store.save_live_graph_captures([rollback_record, conflicting_record])
+
+    with store.connect() as connection:
+        row = connection.execute(
+            "SELECT r.revision_id,r.observation_id,r.graph_observation_id,r.legacy_mapping,"
+            "g.source_kind FROM live_graph_capture_revisions r "
+            "JOIN capture_revision_registry g ON g.revision_id=r.revision_id "
+            "WHERE r.observation_id=?",
+            (observation_id,),
+        ).fetchone()
+        live_count = connection.execute("SELECT count(*) FROM live_capture_index").fetchone()[0]
+        mapping_count = connection.execute("SELECT count(*) FROM live_graph_capture_revisions").fetchone()[0]
+    assert inserted == 1
+    assert tuple(row[1:]) == (observation_id, graph_observation_id, 1, "live")
+    assert len(row[0]) == 64
+    assert live_count == 1
+    assert mapping_count == 1
 
 
 def test_python_history_writer_registers_new_capture_revision(tmp_path):

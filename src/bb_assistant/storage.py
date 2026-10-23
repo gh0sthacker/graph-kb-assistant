@@ -24,7 +24,7 @@ from .registry import register_project
 
 _MAGIC = b"BBA1"
 _HEX64 = re.compile(r"^[a-f0-9]{64}$")
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS project_meta (
@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS live_sync_state (
   window_since TEXT,
   window_until TEXT,
   cursor TEXT,
+  response_refresh_cursor TEXT,
   state TEXT NOT NULL CHECK (state IN ('new','running','partial','idle','failed')),
   last_polled_at TEXT,
   updated_at TEXT NOT NULL
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS live_capture_index (
   field_names_json TEXT NOT NULL,
   header_names_json TEXT NOT NULL,
   parse_state TEXT NOT NULL CHECK (parse_state IN ('complete','partial')),
+  current_revision_id TEXT,
   UNIQUE (caido_instance_id, caido_project_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS live_capture_host_idx ON live_capture_index(host);
@@ -203,6 +205,16 @@ CREATE TABLE IF NOT EXISTS projection_jobs (
 );
 CREATE INDEX IF NOT EXISTS projection_jobs_due_idx
   ON projection_jobs(state, next_attempt_at, sequence_id);
+CREATE TABLE IF NOT EXISTS live_graph_capture_revisions (
+  revision_id TEXT PRIMARY KEY REFERENCES capture_revision_registry(revision_id),
+  observation_id TEXT NOT NULL,
+  graph_observation_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  legacy_mapping INTEGER NOT NULL DEFAULT 0 CHECK (legacy_mapping IN (0,1)),
+  UNIQUE (observation_id, revision_id)
+);
+CREATE INDEX IF NOT EXISTS live_graph_revisions_observation_idx
+  ON live_graph_capture_revisions(observation_id, updated_at);
 """
 
 
@@ -210,6 +222,19 @@ def _utc_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _legacy_live_graph_revision_id(
+    instance_id: str,
+    project_id: str,
+    request_id: str,
+    observation_id: str,
+    graph_observation_id: str,
+) -> str:
+    identity = "\0".join((
+        "live-graph-legacy-v1", instance_id, project_id, request_id, observation_id, graph_observation_id,
+    )).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
 
 
 def decode_vault_key(value: str | None = None) -> bytes:
@@ -347,7 +372,7 @@ class ProjectStore:
     def _initialize(self) -> None:
         with self.connect() as connection:
             current_version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if current_version not in (0, 1, 2, 3, 4, 5, _SCHEMA_VERSION):
+            if current_version not in (0, 1, 2, 3, 4, 5, 6, _SCHEMA_VERSION):
                 raise RuntimeError(f"Unsupported project database schema version {current_version}")
             connection.executescript(_SCHEMA)
             connection.execute("PRAGMA journal_mode = WAL")
@@ -367,6 +392,66 @@ class ProjectStore:
                 }
                 if live_columns and "window_until" not in live_columns:
                     connection.execute("ALTER TABLE live_sync_state ADD COLUMN window_until TEXT")
+                if live_columns and "response_refresh_cursor" not in live_columns:
+                    connection.execute("ALTER TABLE live_sync_state ADD COLUMN response_refresh_cursor TEXT")
+                live_index_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(live_capture_index)").fetchall()
+                }
+                if live_index_columns and "current_revision_id" not in live_index_columns:
+                    connection.execute("ALTER TABLE live_capture_index ADD COLUMN current_revision_id TEXT")
+                connection.execute(
+                    "UPDATE live_capture_index SET current_revision_id=("
+                    "SELECT revision_id FROM capture_revision_registry r "
+                    "WHERE r.observation_id=live_capture_index.observation_id AND r.source_kind='live' "
+                    "ORDER BY first_seen_at DESC,revision_id LIMIT 1) "
+                    "WHERE current_revision_id IS NULL"
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO live_graph_capture_revisions "
+                    "(revision_id,observation_id,graph_observation_id,updated_at) "
+                    "SELECT l.current_revision_id,l.observation_id,l.graph_observation_id,l.synced_at "
+                    "FROM live_capture_index l JOIN capture_revision_registry r "
+                    "ON r.revision_id=l.current_revision_id AND r.observation_id=l.observation_id "
+                    "AND r.source_kind='live' "
+                    "WHERE l.current_revision_id IS NOT NULL AND l.graph_observation_id IS NOT NULL"
+                )
+                legacy_live_rows = connection.execute(
+                    "SELECT observation_id,caido_instance_id,caido_project_id,request_id,graph_observation_id,synced_at "
+                    "FROM live_capture_index WHERE current_revision_id IS NULL AND graph_observation_id IS NOT NULL"
+                ).fetchall()
+                for row in legacy_live_rows:
+                    legacy_revision_id = _legacy_live_graph_revision_id(
+                        row["caido_instance_id"], row["caido_project_id"], row["request_id"],
+                        row["observation_id"], row["graph_observation_id"],
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO capture_revision_registry "
+                        "(revision_id,observation_id,source_kind,first_seen_at) VALUES(?,?,'live',?)",
+                        (legacy_revision_id, row["observation_id"], row["synced_at"]),
+                    )
+                    registered = connection.execute(
+                        "SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?",
+                        (legacy_revision_id,),
+                    ).fetchone()
+                    if registered is None or (registered["observation_id"], registered["source_kind"]) != (
+                        row["observation_id"], "live"
+                    ):
+                        raise RuntimeError("Legacy live graph revision identity conflicts with the registry")
+                    connection.execute(
+                        "INSERT OR IGNORE INTO live_graph_capture_revisions "
+                        "(revision_id,observation_id,graph_observation_id,updated_at,legacy_mapping) "
+                        "VALUES(?,?,?,?,1)",
+                        (legacy_revision_id, row["observation_id"], row["graph_observation_id"], row["synced_at"]),
+                    )
+                    mapping = connection.execute(
+                        "SELECT observation_id,graph_observation_id,legacy_mapping "
+                        "FROM live_graph_capture_revisions WHERE revision_id=?",
+                        (legacy_revision_id,),
+                    ).fetchone()
+                    if mapping is None or (
+                        mapping["observation_id"], mapping["graph_observation_id"], mapping["legacy_mapping"]
+                    ) != (row["observation_id"], row["graph_observation_id"], 1):
+                        raise RuntimeError("Legacy live graph mapping conflicts with the revision registry")
                 capture_columns = {
                     row["name"] for row in connection.execute("PRAGMA table_info(captures)").fetchall()
                 }
@@ -581,7 +666,55 @@ class ProjectStore:
                         json.dumps(header_names, separators=(",", ":")), record["parse_state"],
                     ),
                 )
+                if not result.rowcount:
+                    conflicts = connection.execute(
+                        "SELECT observation_id,request_id,graph_observation_id FROM live_capture_index "
+                        "WHERE observation_id=? OR (caido_instance_id=? AND caido_project_id=? AND request_id=?)",
+                        (
+                            record["observation_id"], self.project.instance_id, self.project.project_id,
+                            record["request_id"],
+                        ),
+                    ).fetchall()
+                    if len(conflicts) != 1 or tuple(conflicts[0]) != (
+                        record["observation_id"], record["request_id"], record["graph_observation_id"],
+                    ):
+                        raise RuntimeError("Live graph capture identity conflicts with existing request metadata")
                 if result.rowcount:
+                    legacy_revision_id = _legacy_live_graph_revision_id(
+                        self.project.instance_id, self.project.project_id, record["request_id"],
+                        record["observation_id"], record["graph_observation_id"],
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO capture_revision_registry "
+                        "(revision_id,observation_id,source_kind,first_seen_at) VALUES(?,?,'live',?)",
+                        (legacy_revision_id, record["observation_id"], record["synced_at"]),
+                    )
+                    registered = connection.execute(
+                        "SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?",
+                        (legacy_revision_id,),
+                    ).fetchone()
+                    if registered is None or (registered["observation_id"], registered["source_kind"]) != (
+                        record["observation_id"], "live"
+                    ):
+                        raise RuntimeError("Legacy live graph revision identity conflicts with the registry")
+                    connection.execute(
+                        "INSERT OR IGNORE INTO live_graph_capture_revisions "
+                        "(revision_id,observation_id,graph_observation_id,updated_at,legacy_mapping) "
+                        "VALUES(?,?,?,?,1)",
+                        (
+                            legacy_revision_id, record["observation_id"], record["graph_observation_id"],
+                            record["synced_at"],
+                        ),
+                    )
+                    mapping = connection.execute(
+                        "SELECT observation_id,graph_observation_id,legacy_mapping "
+                        "FROM live_graph_capture_revisions WHERE revision_id=?",
+                        (legacy_revision_id,),
+                    ).fetchone()
+                    if mapping is None or (
+                        mapping["observation_id"], mapping["graph_observation_id"], mapping["legacy_mapping"]
+                    ) != (record["observation_id"], record["graph_observation_id"], 1):
+                        raise RuntimeError("Legacy live graph mapping conflicts with the revision registry")
                     fields_text = " ".join(str(value) for value in field_names)
                     headers_text = " ".join(str(value) for value in header_names)
                     connection.execute(
