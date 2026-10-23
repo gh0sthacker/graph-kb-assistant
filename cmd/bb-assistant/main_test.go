@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
 )
 
@@ -208,6 +211,129 @@ func TestProjectionWorkerCLIReportsEmptyQueueAsJSON(t *testing.T) {
 	_ = readEnd.Close()
 	if output.ProjectKey != key || !output.Idle || output.Processed != 0 || len(output.Jobs) != 1 || output.Jobs[0].State != "idle" {
 		t.Fatalf("unexpected projection-worker output: %+v", output)
+	}
+}
+
+func TestProjectionWorkerCLIRejectsInvalidPollIntervalBeforeRegistryAccess(t *testing.T) {
+	key := strings.Repeat("a", 64)
+	for _, interval := range []string{"99ms", "10m1s"} {
+		err := runProjectionWorker([]string{"--project-key", key, "--poll-interval", interval})
+		if err == nil {
+			t.Errorf("projection-worker accepted out-of-range poll interval %s", interval)
+		}
+	}
+}
+
+func TestWaitProjectionWorkerPollStopsWhenContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitProjectionWorkerPoll(ctx, time.Hour) {
+		t.Fatal("projection-worker poll continued after cancellation")
+	}
+}
+
+func TestIsWatchLeaseContentionOnlyRetriesLockWaitFailures(t *testing.T) {
+	ctx := context.Background()
+	for _, err := range []error{context.DeadlineExceeded, projectlock.ErrWaitTimeout} {
+		if !isWatchLeaseContention(true, ctx, err) {
+			t.Errorf("watch worker did not recognize lock contention %v", err)
+		}
+	}
+	if isWatchLeaseContention(true, ctx, errors.New("project database is invalid")) {
+		t.Fatal("watch worker treated a permanent project error as lock contention")
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if isWatchLeaseContention(true, cancelled, context.DeadlineExceeded) {
+		t.Fatal("watch worker retried lock contention after shutdown")
+	}
+}
+
+func TestProjectionWorkerWatchRetriesProjectLockAndStopsOnCancellation(t *testing.T) {
+	ctx := context.Background()
+	dataRoot := filepath.Join(t.TempDir(), "private-data")
+	ref := project.CaidoProjectRef{InstanceID: "projection-watch", ProjectID: "lock-retry"}
+	projectStore, err := store.CreateProject(ctx, ref, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectDirectory := projectStore.Directory
+	if err := projectStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	busy := make(chan struct{}, 1)
+	result := make(chan error, 1)
+	go func() {
+		lock, err := acquireProjectionWorkerMaintenance(ctx, projectDirectory, true, 100*time.Millisecond, time.Minute, func() {
+			select {
+			case busy <- struct{}{}:
+			default:
+			}
+		})
+		if lock != nil {
+			_ = lock.Close()
+		}
+		result <- err
+	}()
+	select {
+	case <-busy:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch worker did not observe the held project lock")
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("watch worker did not acquire the released project lock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch worker did not retry after the project lock was released")
+	}
+
+	held, err = projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancelBusy := make(chan struct{}, 1)
+	cancelResult := make(chan error, 1)
+	go func() {
+		lock, err := acquireProjectionWorkerMaintenance(cancelCtx, projectDirectory, true, 100*time.Millisecond, time.Minute, func() {
+			select {
+			case cancelBusy <- struct{}{}:
+			default:
+			}
+		})
+		if lock != nil {
+			_ = lock.Close()
+		}
+		cancelResult <- err
+	}()
+	select {
+	case <-cancelBusy:
+	case <-time.After(2 * time.Second):
+		_ = held.Close()
+		t.Fatal("watch worker did not enter its cancellable lock wait")
+	}
+	cancel()
+	select {
+	case err := <-cancelResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("watch lock wait cancellation error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch worker did not stop after cancellation")
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

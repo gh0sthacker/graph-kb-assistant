@@ -116,7 +116,6 @@ type LiveTailWriter struct {
 	selected    *store.ProjectStore
 	indexKey    []byte
 	responseKey []byte
-	projector   projectionExecutor
 }
 
 func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*LiveTailWriter, error) {
@@ -436,7 +435,11 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 	committed = true
 	_ = conn.Close()
 	conn = nil
-	projectionState := w.projectAcceptedLive(ctx, accepted)
+	revisionIDs := make([]string, len(accepted))
+	for index, item := range accepted {
+		revisionIDs[index] = item.revisionID
+	}
+	_, projectionState := projectionStatusForRevisions(ctx, w.selected, revisionIDs)
 	return LivePageResult{RequestsAdded: added, ResponsesRefreshed: refreshed, ProjectionState: projectionState, Checkpoint: updated}, nil
 }
 
@@ -507,10 +510,12 @@ func (w *LiveTailWriter) WriteResponseRefreshPage(
 	committed = true
 	_ = conn.Close()
 	conn = nil
-	return LivePageResult{
-		RequestsAdded: added, ResponsesRefreshed: refreshed,
-		ProjectionState: w.projectAcceptedLive(ctx, accepted),
-	}, nil
+	revisionIDs := make([]string, len(accepted))
+	for index, item := range accepted {
+		revisionIDs[index] = item.revisionID
+	}
+	_, projectionState := projectionStatusForRevisions(ctx, w.selected, revisionIDs)
+	return LivePageResult{RequestsAdded: added, ResponsesRefreshed: refreshed, ProjectionState: projectionState}, nil
 }
 
 func (w *LiveTailWriter) MarkPartial(ctx context.Context, checkpoint LiveTailCheckpoint) error {
@@ -1051,56 +1056,6 @@ func persistLiveCaptures(
 		accepted = append(accepted, item)
 	}
 	return added, refreshed, accepted, nil
-}
-
-func (w *LiveTailWriter) projectAcceptedLive(ctx context.Context, accepted []preparedLiveCapture) string {
-	if len(accepted) == 0 {
-		return "not_applicable"
-	}
-	bundles := make([]behaviorgraph.Record, 0, len(accepted))
-	for _, item := range accepted {
-		bundles = append(bundles, item.bundle)
-	}
-	projector := w.projector
-	if projector == nil {
-		projector = projectGraphBundles
-	}
-	materialized, neo4jReady, projectErr := projector(ctx, w.selected, bundles)
-	if !materialized || !neo4jReady || projectErr != nil {
-		return "pending"
-	}
-	conn, err := beginSelectedImmediate(ctx, w.selected)
-	if err != nil {
-		return "pending"
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-		_ = conn.Close()
-	}()
-	for _, item := range accepted {
-		job, err := behaviorgraph.ProjectionJobByRevision(ctx, conn, w.selected.ProjectKey, item.revisionID)
-		if err != nil {
-			return "pending"
-		}
-		jobObservationID, err := behaviorgraph.ProjectionObservationID([]byte(job.PayloadJSON), w.selected.ProjectKey, item.observationID)
-		if err != nil || jobObservationID != item.graphObservationID {
-			return "pending"
-		}
-		if err := persistProjectionJobMapping(ctx, conn, job, jobObservationID, time.Now().UTC()); err != nil {
-			return "pending"
-		}
-		if err := behaviorgraph.MarkProjectionJobApplied(ctx, conn, w.selected.ProjectKey, item.revisionID, time.Now().UTC()); err != nil {
-			return "pending"
-		}
-	}
-	if err := commitImmediate(ctx, conn); err != nil {
-		return "pending"
-	}
-	committed = true
-	return "applied"
 }
 
 func validateLiveFetchedPage(page caido.HistoryPage, metadata caido.RequestMetadataPage, skipped map[string]struct{}, selected project.CaidoProjectRef) error {

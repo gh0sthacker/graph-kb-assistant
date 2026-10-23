@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
 )
 
@@ -114,6 +116,20 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	if checkpointState != "idle" {
 		t.Fatalf("checkpoint state = %q, want idle", checkpointState)
 	}
+	if _, err := os.Stat(projectStore.BehaviorGraphPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("live intake materialized the graph before the worker: err=%v", err)
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, ProjectionWorkerOptions{}, materializeLocalProjection, time.Now().UTC())
+	if closeErr := maintenance.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil || workerResult.State != "applied" {
+		t.Fatalf("local projection worker = %+v err=%v", workerResult, err)
+	}
 	if _, err := os.Stat(projectStore.BehaviorGraphPath); err != nil {
 		t.Fatalf("BehaviorGraph was not created: %v", err)
 	}
@@ -125,7 +141,7 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	}
 }
 
-func TestRunLiveTailCommitsCaptureAndJobBeforeGraphProjectionFailure(t *testing.T) {
+func TestRunLiveTailReturnsPendingWithoutSynchronousProjection(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, writer := newLiveTailFixture(t)
 	status := 200
@@ -140,9 +156,6 @@ func TestRunLiveTailCommitsCaptureAndJobBeforeGraphProjectionFailure(t *testing.
 		Port: 443, Target: "https://api.fixture.invalid/health", ResponseStatus: &status,
 		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
 	}
-	retryExchange := exchange
-	retryExchange.RequestRaw = append([]byte(nil), exchange.RequestRaw...)
-	retryExchange.ResponseRaw = append([]byte(nil), exchange.ResponseRaw...)
 	source := &liveTailSourceFixture{
 		project: selected,
 		pages: []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{{
@@ -150,58 +163,36 @@ func TestRunLiveTailCommitsCaptureAndJobBeforeGraphProjectionFailure(t *testing.
 		}}}},
 		exchanges: map[string]caido.HttpExchange{requestID: exchange},
 	}
-	projectorCalled := false
-	writer.projector = func(_ context.Context, _ *store.ProjectStore, _ []behaviorgraph.Record) (bool, bool, error) {
-		projectorCalled = true
-		var captures, jobs int
-		var checkpointState string
-		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM live_capture_index").Scan(&captures); err != nil {
-			t.Fatal(err)
-		}
-		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs").Scan(&jobs); err != nil {
-			t.Fatal(err)
-		}
-		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT state FROM live_sync_state WHERE source_key=?", liveTailSourceKey).Scan(&checkpointState); err != nil {
-			t.Fatal(err)
-		}
-		if captures != 1 || jobs != 1 || checkpointState != "idle" {
-			t.Fatalf("graph projection began before live acceptance committed: captures=%d jobs=%d checkpoint=%q", captures, jobs, checkpointState)
-		}
-		return false, false, errors.New("synthetic Neo4j outage")
-	}
-
 	result, err := RunLiveTail(ctx, source, writer, selected, LiveTailOptions{
 		PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10,
 	})
 	if err != nil {
-		t.Fatalf("durable live capture acceptance should survive projection failure: %v", err)
+		t.Fatalf("durable live capture acceptance failed: %v", err)
 	}
-	if !projectorCalled || result.State != "idle" || result.RequestsAdded != 1 || result.ProjectionPendingPages != 1 {
-		t.Fatalf("live result does not show accepted capture with pending projection: called=%v result=%+v", projectorCalled, result)
+	if result.State != "idle" || result.RequestsAdded != 1 || result.ProjectionPendingPages != 1 {
+		t.Fatalf("live result does not show accepted capture with pending projection: %+v", result)
 	}
-	var pendingJobs int
+	var pendingJobs, graphMappings int
 	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs WHERE state='pending'").Scan(&pendingJobs); err != nil {
 		t.Fatal(err)
 	}
-	if pendingJobs != 1 {
-		t.Fatalf("retryable live projection job count = %d, want 1", pendingJobs)
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM graph_capture_map").Scan(&graphMappings); err != nil {
+		t.Fatal(err)
+	}
+	if pendingJobs != 1 || graphMappings != 0 {
+		t.Fatalf("live intake did not leave projection queued: pending_jobs=%d graph_mappings=%d", pendingJobs, graphMappings)
 	}
 
-	prepared, err := writer.prepareLiveCaptures([]caido.HttpExchange{retryExchange})
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
 	if err != nil {
-		t.Fatalf("prepare an idempotent live projection retry: %v", err)
+		t.Fatal(err)
 	}
-	writer.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+	defer maintenance.Close()
+	workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, ProjectionWorkerOptions{}, func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
 		return true, true, nil
-	}
-	if state := writer.projectAcceptedLive(ctx, prepared); state != "applied" {
-		var storedRevision, storedState string
-		if err := projectStore.Database.DB().QueryRowContext(ctx,
-			"SELECT revision_id,state FROM projection_jobs",
-		).Scan(&storedRevision, &storedState); err != nil {
-			t.Fatal(err)
-		}
-		t.Fatalf("ready live projection retry state = %q, want applied (revision=%s state=%s prepared=%s)", state, storedRevision, storedState, prepared[0].revisionID)
+	}, time.Now().UTC())
+	if err != nil || workerResult.State != "applied" {
+		t.Fatalf("background projection worker result = %+v err=%v", workerResult, err)
 	}
 	var appliedJobs int
 	if err := projectStore.Database.DB().QueryRowContext(ctx,
@@ -214,7 +205,7 @@ func TestRunLiveTailCommitsCaptureAndJobBeforeGraphProjectionFailure(t *testing.
 	}
 }
 
-func TestLiveProjectionAckRejectsGraphMappingChangedAfterAcceptance(t *testing.T) {
+func TestProjectionWorkerAckRejectsGraphMappingChangedAfterAcceptance(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, writer := newLiveTailFixture(t)
 	status := 200
@@ -236,16 +227,6 @@ func TestLiveProjectionAckRejectsGraphMappingChangedAfterAcceptance(t *testing.T
 		}}}},
 		exchanges: map[string]caido.HttpExchange{requestID: exchange},
 	}
-	writer.projector = func(_ context.Context, selected *store.ProjectStore, _ []behaviorgraph.Record) (bool, bool, error) {
-		if _, err := selected.Database.DB().ExecContext(ctx,
-			"UPDATE live_capture_index SET graph_observation_id=? WHERE request_id=?",
-			"observation-"+strings.Repeat("f", 64), requestID,
-		); err != nil {
-			t.Fatalf("simulate a changed live graph mapping: %v", err)
-		}
-		return true, true, nil
-	}
-
 	result, err := RunLiveTail(ctx, source, writer, selected, LiveTailOptions{
 		PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10,
 	})
@@ -254,6 +235,23 @@ func TestLiveProjectionAckRejectsGraphMappingChangedAfterAcceptance(t *testing.T
 	}
 	if result.RequestsAdded != 1 || result.ProjectionPendingPages != 1 {
 		t.Fatalf("changed graph mapping should leave the projection pending: %+v", result)
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, ProjectionWorkerOptions{}, func(_ context.Context, selected *store.ProjectStore, _ []behaviorgraph.Record) (bool, bool, error) {
+		if _, err := selected.Database.DB().ExecContext(ctx,
+			"UPDATE live_capture_index SET graph_observation_id=? WHERE request_id=?",
+			"observation-"+strings.Repeat("f", 64), requestID,
+		); err != nil {
+			t.Fatalf("simulate a changed live graph mapping: %v", err)
+		}
+		return true, true, nil
+	}, time.Now().UTC())
+	if err != nil || workerResult.State != "pending" || workerResult.ErrorCode != "mapping_invalid" {
+		t.Fatalf("mapping mismatch should reject worker acknowledgment: result=%+v err=%v", workerResult, err)
 	}
 	var state string
 	if err := projectStore.Database.DB().QueryRowContext(ctx,

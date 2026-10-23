@@ -40,7 +40,47 @@ const (
 )
 
 func isWatchLeaseContention(watch bool, parent context.Context, err error) bool {
-	return watch && parent != nil && parent.Err() == nil && errors.Is(err, context.DeadlineExceeded)
+	return watch && parent != nil && parent.Err() == nil &&
+		(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, projectlock.ErrWaitTimeout))
+}
+
+func acquireProjectionWorkerMaintenance(
+	ctx context.Context,
+	projectDirectory string,
+	watch bool,
+	pollInterval time.Duration,
+	leaseDuration time.Duration,
+	onBusy func(),
+) (*projectlock.Lock, error) {
+	if ctx == nil || projectDirectory == "" || leaseDuration <= time.Second || (watch && pollInterval <= 0) {
+		return nil, errors.New("projection worker lock options are invalid")
+	}
+	lockWait := leaseDuration - time.Second
+	if watch {
+		if pollInterval < lockWait {
+			lockWait = pollInterval
+		}
+		if projectlock.DefaultWaitTimeout < lockWait {
+			lockWait = projectlock.DefaultWaitTimeout
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lockCtx, cancelLock := context.WithTimeout(ctx, lockWait)
+		maintenance, err := projectlock.Acquire(lockCtx, projectDirectory)
+		cancelLock()
+		if err == nil {
+			return maintenance, nil
+		}
+		if !isWatchLeaseContention(watch, ctx, err) {
+			return nil, err
+		}
+		if onBusy != nil {
+			onBusy()
+		}
+	}
 }
 
 func main() {
@@ -350,17 +390,20 @@ func runProjectionWorker(args []string) error {
 	var selectedKeys stringListFlag
 	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
 	root := flags.String("data-root", "", "private assistant data root")
-	maxJobs := flags.Int("max-jobs", 10, "maximum projection jobs to process in this invocation (1-100)")
+	maxJobs := flags.Int("max-jobs", 10, "maximum projection jobs per drain batch (1-100)")
 	leaseDuration := flags.Duration("lease-duration", 10*time.Minute, "lease and per-job execution limit (30s-30m)")
 	maxAttempts := flags.Int("max-attempts", 8, "maximum delivery attempts before dead-lettering (1-100)")
+	watch := flags.Bool("watch", false, "continue polling the durable queue until interrupted")
+	pollInterval := flags.Duration("poll-interval", time.Second, "delay between queue polls in --watch mode (100ms-10m)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
-		return errors.New("usage: bb-assistant projection-worker --project-key <sha256> [--max-jobs 10] [--lease-duration 10m] [--max-attempts 8] [--data-root path]")
+		return errors.New("usage: bb-assistant projection-worker --project-key <sha256> [--max-jobs 10] [--lease-duration 10m] [--max-attempts 8] [--watch --poll-interval 1s] [--data-root path]")
 	}
 	if *maxJobs < 1 || *maxJobs > 100 || *leaseDuration < 30*time.Second ||
-		*leaseDuration > 30*time.Minute || *maxAttempts < 1 || *maxAttempts > 100 {
+		*leaseDuration > 30*time.Minute || *maxAttempts < 1 || *maxAttempts > 100 ||
+		*pollInterval < 100*time.Millisecond || *pollInterval > 10*time.Minute {
 		return errors.New("projection worker limits are invalid")
 	}
 	refs, err := project.LoadProjectRefsReadOnly(*root)
@@ -389,53 +432,99 @@ func runProjectionWorker(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	output := projectionWorkerDrainOutput{ProjectKey: selectedKeys[0], Jobs: make([]ingest.ProjectionWorkerResult, 0, *maxJobs)}
-	for index := 0; index < *maxJobs; index++ {
-		localCtx, cancel := context.WithTimeout(ctx, *leaseDuration-time.Second)
-		result, runErr := func() (ingest.ProjectionWorkerResult, error) {
-			maintenance, lockErr := projectlock.Acquire(localCtx, projectDirectory)
-			if lockErr != nil {
-				return ingest.ProjectionWorkerResult{}, lockErr
-			}
-			defer maintenance.Close()
-			selectedStore, openErr := store.OpenProjectForWrite(localCtx, *selected, *root)
-			if openErr != nil {
-				return ingest.ProjectionWorkerResult{}, openErr
-			}
-			defer selectedStore.Close()
-			return ingest.RunProjectionWorkerOnce(localCtx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{
-				LeaseDuration: *leaseDuration, MaxAttempts: *maxAttempts,
+
+drain:
+	for {
+		batchProcessed := 0
+		for index := 0; index < *maxJobs; index++ {
+			maintenance, lockErr := acquireProjectionWorkerMaintenance(ctx, projectDirectory, *watch, *pollInterval, *leaseDuration, func() {
+				_, _ = fmt.Fprintln(os.Stderr, `{"event":"projection_worker","state":"project_busy"}`)
 			})
-		}()
-		cancel()
-		if runErr != nil {
-			if ctx.Err() != nil {
-				break
+			if lockErr != nil {
+				if ctx.Err() != nil {
+					break drain
+				}
+				return lockErr
 			}
-			return runErr
+			localCtx, cancel := context.WithTimeout(ctx, *leaseDuration-time.Second)
+			result, runErr := func() (ingest.ProjectionWorkerResult, error) {
+				defer maintenance.Close()
+				selectedStore, openErr := store.OpenProjectForWrite(localCtx, *selected, *root)
+				if openErr != nil {
+					return ingest.ProjectionWorkerResult{}, openErr
+				}
+				defer selectedStore.Close()
+				return ingest.RunProjectionWorkerOnce(localCtx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{
+					LeaseDuration: *leaseDuration, MaxAttempts: *maxAttempts,
+				})
+			}()
+			cancel()
+			if runErr != nil {
+				if ctx.Err() != nil {
+					break drain
+				}
+				return runErr
+			}
+			if *watch {
+				writeProjectionWorkerEvent(result)
+			} else {
+				output.Jobs = append(output.Jobs, result)
+			}
+			if result.State == "backend_disabled" {
+				output.BackendDisabled = true
+				break drain
+			}
+			if result.State == "idle" {
+				output.Idle = true
+				if !*watch || !waitProjectionWorkerPoll(ctx, *pollInterval) {
+					break drain
+				}
+				continue drain
+			}
+			output.Idle = false
+			output.Processed++
+			batchProcessed++
+			switch result.State {
+			case "applied":
+				output.Applied++
+			case "pending":
+				output.Retried++
+			case "dead_letter":
+				output.DeadLetter++
+			}
 		}
-		output.Jobs = append(output.Jobs, result)
-		if result.State == "backend_disabled" {
-			output.BackendDisabled = true
-			break
+		if !*watch || ctx.Err() != nil {
+			break drain
 		}
-		if result.State == "idle" {
-			output.Idle = true
-			break
-		}
-		output.Processed++
-		switch result.State {
-		case "applied":
-			output.Applied++
-		case "pending":
-			output.Retried++
-		case "dead_letter":
-			output.DeadLetter++
+		if batchProcessed >= *maxJobs && !waitProjectionWorkerPoll(ctx, *pollInterval) {
+			break drain
 		}
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
 		return errors.New("projection worker result could not be written")
 	}
 	return nil
+}
+
+func waitProjectionWorkerPoll(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func writeProjectionWorkerEvent(result ingest.ProjectionWorkerResult) {
+	event := struct {
+		Event        string `json:"event"`
+		State        string `json:"state"`
+		AttemptCount int    `json:"attempt_count,omitempty"`
+		ErrorCode    string `json:"error_code,omitempty"`
+	}{Event: "projection_worker", State: result.State, AttemptCount: result.AttemptCount, ErrorCode: result.ErrorCode}
+	_ = json.NewEncoder(os.Stderr).Encode(event)
 }
 
 func reconcileCaidoHistory(args []string) error {

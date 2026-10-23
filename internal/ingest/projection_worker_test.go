@@ -3,8 +3,8 @@ package ingest
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,10 +24,6 @@ func TestProjectionWorkerAcknowledgesOlderRevisionWithoutReplacingCurrentMapping
 		t.Fatal(err)
 	}
 	t.Cleanup(pageWriter.Close)
-	pageWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic graph projection interruption")
-	}
-
 	requestID := "projection-worker-revision-request"
 	first := projectionWorkerExchange(selected, requestID, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nfirst")
 	second := projectionWorkerExchange(selected, requestID, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nsecond")
@@ -109,6 +105,76 @@ func TestProjectionWorkerAcknowledgesOlderRevisionWithoutReplacingCurrentMapping
 	}
 }
 
+func TestProjectionWorkerRecoversAcceptedJobAfterProjectReopen(t *testing.T) {
+	ctx := context.Background()
+	selected, originalStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, originalStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := writePendingHistoryRevision(ctx, pageWriter,
+		projectionWorkerExchange(selected, "projection-worker-restart-request", ""))
+	if err != nil || result.ProjectionState != "pending" || result.GraphMapping != "pending" {
+		t.Fatalf("accept job before restart: result=%+v err=%v", result, err)
+	}
+	var revisionID, checkpointState string
+	if err := originalStore.Database.DB().QueryRowContext(ctx,
+		"SELECT revision_id FROM projection_jobs WHERE state='pending'",
+	).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := originalStore.Database.DB().QueryRowContext(ctx,
+		"SELECT state FROM sync_state WHERE source_key=?", sourceKey,
+	).Scan(&checkpointState); err != nil || checkpointState != "done" {
+		t.Fatalf("committed historical checkpoint = %q err=%v", checkpointState, err)
+	}
+	projectDirectory := originalStore.Directory
+	dataRoot := filepath.Dir(filepath.Dir(projectDirectory))
+	pageWriter.Close()
+	if err := originalStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	reopened, err := store.OpenProjectForWrite(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	workerResult, err := runProjectionWorkerOnce(ctx, reopened, maintenance,
+		ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3},
+		func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+			return true, true, nil
+		}, time.Now().UTC())
+	if err != nil || workerResult.State != "applied" || workerResult.RevisionID != revisionID {
+		t.Fatalf("recover durable job after reopen: result=%+v err=%v", workerResult, err)
+	}
+	job, err := behaviorgraph.ProjectionJobByRevision(ctx, reopened.Database.DB(), reopened.ProjectKey, revisionID)
+	if err != nil || job.State != "applied" {
+		t.Fatalf("reopened projection job = %+v err=%v", job, err)
+	}
+	var graphMappings int
+	if err := reopened.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM graph_capture_map WHERE revision_id=?", revisionID,
+	).Scan(&graphMappings); err != nil || graphMappings != 1 {
+		t.Fatalf("recovered graph mapping count = %d err=%v, want 1", graphMappings, err)
+	}
+	reopenedWriter, err := OpenPageWriter(ctx, reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopenedWriter.Close()
+	replay, err := writePendingHistoryRevision(ctx, reopenedWriter,
+		projectionWorkerExchange(selected, "projection-worker-restart-request", ""))
+	if err != nil || replay.ProjectionState != "applied" || replay.GraphMapping != "mapped" || replay.Replayed != 1 {
+		t.Fatalf("replay after worker acknowledgment = %+v err=%v", replay, err)
+	}
+}
+
 func TestLiveTailRefreshesLateResponseAsNewRevisionAndKeepsOlderJobFenced(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, liveWriter := newLiveTailFixture(t)
@@ -146,14 +212,6 @@ func TestLiveTailRefreshesLateResponseAsNewRevisionAndKeepsOlderJobFenced(t *tes
 			{Requests: []caido.RequestMetadata{{RequestID: requestID, Method: "GET", URL: absent.Target, StatusCode: &responseStatus}}},
 		},
 		exchangeSnapshots: map[string][]caido.HttpExchange{requestID: {absent, completed}},
-	}
-	projectorCalls := 0
-	liveWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		projectorCalls++
-		if projectorCalls == 1 {
-			return false, false, errors.New("synthetic initial projection interruption")
-		}
-		return true, true, nil
 	}
 	options := LiveTailOptions{PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
 
@@ -235,8 +293,8 @@ func TestLiveTailRefreshesLateResponseAsNewRevisionAndKeepsOlderJobFenced(t *tes
 	).Scan(&currentJobState); err != nil {
 		t.Fatal(err)
 	}
-	if oldJobState != "pending" || currentJobState != "applied" {
-		t.Fatalf("initial and current projection states = %q, %q, want pending/applied", oldJobState, currentJobState)
+	if oldJobState != "pending" || currentJobState != "pending" {
+		t.Fatalf("initial and current projection states = %q, %q, want pending/pending before worker", oldJobState, currentJobState)
 	}
 
 	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
@@ -244,15 +302,18 @@ func TestLiveTailRefreshesLateResponseAsNewRevisionAndKeepsOlderJobFenced(t *tes
 		t.Fatal(err)
 	}
 	defer maintenance.Close()
-	workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance,
-		ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3},
-		func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-			return true, true, nil
-		},
-		time.Now().UTC().Add(time.Second),
-	)
-	if err != nil || workerResult.State != "applied" || workerResult.RevisionID != originalRevision {
-		t.Fatalf("older response-less projection job = %+v err=%v", workerResult, err)
+	workerProjection := func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+		return true, true, nil
+	}
+	workerNow := time.Now().UTC().Add(time.Second)
+	for _, wantRevision := range []string{originalRevision, currentRevision} {
+		workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance,
+			ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3}, workerProjection, workerNow,
+		)
+		if err != nil || workerResult.State != "applied" || workerResult.RevisionID != wantRevision {
+			t.Fatalf("projection job %s = %+v err=%v", wantRevision, workerResult, err)
+		}
+		workerNow = workerNow.Add(time.Second)
 	}
 	var graphAfterOldAck string
 	var revisionMappings int
@@ -302,9 +363,6 @@ func TestLiveResponseRefreshIdentityConflictRollsBackCursorAndCapture(t *testing
 	checkpoint, err := liveWriter.BeginCycle(ctx, time.Now().UTC(), 90)
 	if err != nil {
 		t.Fatal(err)
-	}
-	liveWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic projection interruption")
 	}
 	accepted, err := liveWriter.WritePage(ctx, checkpoint, caido.HistoryPage{Exchanges: []caido.HttpExchange{initial}})
 	if err != nil || accepted.RequestsAdded != 1 {
@@ -372,9 +430,6 @@ func TestProjectionWorkerRetriesUnavailableNeo4jAndHonorsBackoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pageWriter.Close)
-	pageWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic Neo4j outage")
-	}
 	if _, err := writePendingHistoryRevision(ctx, pageWriter,
 		projectionWorkerExchange(selected, "projection-worker-retry-request", "")); err != nil {
 		t.Fatalf("accept pending history revision: %v", err)
@@ -429,9 +484,6 @@ func TestProjectionWorkerRetriesUnavailableNeo4jAndHonorsBackoff(t *testing.T) {
 func TestProjectionWorkerValidatesLiveCaptureMappingBeforeAcknowledging(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, liveWriter := newLiveTailFixture(t)
-	liveWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic graph projection interruption")
-	}
 	status := 200
 	capturedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	requestID := "projection-worker-live-request"
@@ -528,9 +580,6 @@ func TestProjectionWorkerDoesNotLeaseJobsWhenBackendIsDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pageWriter.Close)
-	pageWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic projection interruption")
-	}
 	if _, err := writePendingHistoryRevision(ctx, pageWriter,
 		projectionWorkerExchange(selected, "projection-worker-disabled-backend", "")); err != nil {
 		t.Fatalf("accept synthetic pending job: %v", err)
@@ -588,6 +637,17 @@ func writePendingHistoryRevision(ctx context.Context, writer *PageWriter, exchan
 		RunID: checkpoint.RunID,
 		Page:  caido.HistoryPage{Exchanges: []caido.HttpExchange{exchange}},
 	})
+}
+
+func materializeLocalProjection(ctx context.Context, selected *store.ProjectStore, bundles []behaviorgraph.Record) (bool, bool, error) {
+	graphWriter, err := behaviorgraph.OpenWriter(ctx, selected)
+	if err != nil {
+		return false, false, err
+	}
+	if _, err := graphWriter.ImportBundles(ctx, bundles); err != nil {
+		return false, false, err
+	}
+	return true, true, nil
 }
 
 func projectionWorkerExchange(selected project.CaidoProjectRef, requestID, response string) caido.HttpExchange {

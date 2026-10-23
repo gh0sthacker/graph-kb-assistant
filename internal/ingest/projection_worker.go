@@ -24,6 +24,8 @@ const (
 	maxProjectionRetryDelay         = 15 * time.Minute
 )
 
+type projectionExecutor func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error)
+
 type ProjectionWorkerOptions struct {
 	LeaseDuration time.Duration
 	MaxAttempts   int
@@ -37,6 +39,29 @@ type ProjectionWorkerResult struct {
 	AttemptCount int    `json:"attempt_count,omitempty"`
 	NextAttempt  string `json:"next_attempt_at,omitempty"`
 	ErrorCode    string `json:"error_code,omitempty"`
+}
+
+// projectionStatusForRevisions reads only the durable queue state after intake
+// commits. It never runs a graph projector; unacknowledged revisions remain
+// visibly pending until the independent worker records their mappings.
+func projectionStatusForRevisions(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	revisionIDs []string,
+) (graphMapping, projectionState string) {
+	if len(revisionIDs) == 0 {
+		return "not_applicable", "not_applicable"
+	}
+	if ctx == nil || selected == nil || selected.Database == nil {
+		return "pending", "pending"
+	}
+	for _, revisionID := range revisionIDs {
+		job, err := behaviorgraph.ProjectionJobByRevision(ctx, selected.Database.DB(), selected.ProjectKey, revisionID)
+		if err != nil || job.State != "applied" {
+			return "pending", "pending"
+		}
+	}
+	return "mapped", "applied"
 }
 
 // RunProjectionWorkerOnce claims and processes at most one durable projection
@@ -238,6 +263,9 @@ func persistProjectionJobMapping(
 			storedObservation != observationID || storedGraphObservationID != graphObservationID {
 			return errors.New("live revision graph mapping conflicts with the accepted job")
 		}
+		if err := persistHistoricalProjectionMappingIfPresent(ctx, conn, observationID, job.RevisionID, graphObservationID, updatedAt); err != nil {
+			return err
+		}
 		return nil
 	}
 	if sourceKind != "historical" {
@@ -272,6 +300,51 @@ func persistProjectionJobMapping(
 			observationID, job.RevisionID, graphObservationID, updatedAt,
 		); err != nil {
 			return errors.New("current graph mapping could not be stored")
+		}
+	}
+	return nil
+}
+
+func persistHistoricalProjectionMappingIfPresent(
+	ctx context.Context,
+	conn *sql.Conn,
+	observationID string,
+	revisionID string,
+	graphObservationID string,
+	updatedAt string,
+) error {
+	var currentRevision sql.NullString
+	err := conn.QueryRowContext(ctx,
+		`SELECT c.current_revision_id FROM captures c
+		 JOIN capture_revisions r ON r.observation_id=c.observation_id
+		 WHERE c.observation_id=? AND r.revision_id=?`, observationID, revisionID,
+	).Scan(&currentRevision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("historical replay revision could not be checked")
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO graph_capture_revisions(revision_id,graph_observation_id,updated_at) VALUES(?,?,?)
+		 ON CONFLICT(revision_id) DO NOTHING`, revisionID, graphObservationID, updatedAt,
+	); err != nil {
+		return errors.New("historical revision graph mapping could not be stored")
+	}
+	var storedGraphObservationID string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT graph_observation_id FROM graph_capture_revisions WHERE revision_id=?", revisionID,
+	).Scan(&storedGraphObservationID); err != nil || storedGraphObservationID != graphObservationID {
+		return errors.New("historical revision graph mapping conflicts with the accepted job")
+	}
+	if currentRevision.Valid && currentRevision.String == revisionID {
+		if _, err := conn.ExecContext(ctx,
+			`INSERT INTO graph_capture_map(observation_id,revision_id,graph_observation_id,updated_at) VALUES(?,?,?,?)
+			 ON CONFLICT(observation_id) DO UPDATE SET revision_id=excluded.revision_id,
+			 graph_observation_id=excluded.graph_observation_id,updated_at=excluded.updated_at`,
+			observationID, revisionID, graphObservationID, updatedAt,
+		); err != nil {
+			return errors.New("historical current graph mapping could not be stored")
 		}
 	}
 	return nil

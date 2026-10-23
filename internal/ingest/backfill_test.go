@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
+	"bb-graph-assistant/internal/search"
 	"bb-graph-assistant/internal/store"
 )
 
@@ -22,10 +25,6 @@ func TestRunBackfillTerminalCursorDoesNotClaimCoverageReconciled(t *testing.T) {
 		t.Fatalf("OpenPageWriter() error = %v", err)
 	}
 	t.Cleanup(pageWriter.Close)
-	pageWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic Neo4j outage")
-	}
-
 	requestID := "synthetic-history-request"
 	target := "https://api.fixture.invalid/api/items"
 	metadata := caido.RequestMetadataPage{Requests: []caido.RequestMetadata{{
@@ -84,10 +83,6 @@ func TestRunBackfillReportsProgressOnlyAfterDurablePageAcceptance(t *testing.T) 
 		t.Fatalf("OpenPageWriter() error = %v", err)
 	}
 	t.Cleanup(pageWriter.Close)
-	pageWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic projection pending")
-	}
-
 	const requestID = "sensitive-request-id"
 	const rawRequest = "GET /private-path HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"
 	target := "https://api.fixture.invalid/private-path"
@@ -163,7 +158,7 @@ func TestDurationMillisecondsPreservesSubMillisecondTotals(t *testing.T) {
 	}
 }
 
-func TestWritePageCommitsCaptureCheckpointAndProjectionJobBeforeGraphFailure(t *testing.T) {
+func TestWritePageReturnsPendingWithoutSynchronousProjection(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)
 	pageWriter, err := OpenPageWriter(ctx, projectStore)
@@ -187,26 +182,6 @@ func TestWritePageCommitsCaptureCheckpointAndProjectionJobBeforeGraphFailure(t *
 		ResponseWireFidelity: "unknown",
 	}
 
-	projectorCalled := false
-	pageWriter.projector = func(_ context.Context, _ *store.ProjectStore, _ []behaviorgraph.Record) (bool, bool, error) {
-		projectorCalled = true
-		var captures, jobs int
-		var state string
-		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM captures").Scan(&captures); err != nil {
-			t.Fatal(err)
-		}
-		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs").Scan(&jobs); err != nil {
-			t.Fatal(err)
-		}
-		if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT state FROM sync_state WHERE source_key=?", sourceKey).Scan(&state); err != nil {
-			t.Fatal(err)
-		}
-		if captures != 1 || jobs != 1 || state != "done" {
-			t.Fatalf("graph projection began before acceptance committed: captures=%d jobs=%d checkpoint=%q", captures, jobs, state)
-		}
-		return true, false, errors.New("synthetic Neo4j outage after local materialization")
-	}
-
 	result, err := pageWriter.WritePage(ctx, HistoryPageInput{
 		RunID: checkpoint.RunID,
 		Page:  caido.HistoryPage{Exchanges: []caido.HttpExchange{exchange}},
@@ -214,8 +189,8 @@ func TestWritePageCommitsCaptureCheckpointAndProjectionJobBeforeGraphFailure(t *
 	if err != nil {
 		t.Fatalf("durable capture acceptance should survive projection failure: %v", err)
 	}
-	if !projectorCalled || result.ProjectionState != "pending" || result.GraphMapping != "mapped" || result.State != "done" {
-		t.Fatalf("page result does not show accepted source with pending projection: called=%v result=%+v", projectorCalled, result)
+	if result.ProjectionState != "pending" || result.GraphMapping != "pending" || result.State != "done" {
+		t.Fatalf("page result does not show accepted source with deferred projection: %+v", result)
 	}
 	var captureRows, pendingJobs, graphMappings int
 	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM captures").Scan(&captureRows); err != nil {
@@ -227,22 +202,19 @@ func TestWritePageCommitsCaptureCheckpointAndProjectionJobBeforeGraphFailure(t *
 	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM graph_capture_map").Scan(&graphMappings); err != nil {
 		t.Fatal(err)
 	}
-	if captureRows != 1 || pendingJobs != 1 || graphMappings != 1 {
-		t.Fatalf("accepted data, local mapping, or retryable projection job missing: captures=%d mappings=%d pending_jobs=%d", captureRows, graphMappings, pendingJobs)
+	if captureRows != 1 || pendingJobs != 1 || graphMappings != 0 {
+		t.Fatalf("accepted data or deferred projection state is wrong: captures=%d mappings=%d pending_jobs=%d", captureRows, graphMappings, pendingJobs)
 	}
 
-	pageWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return true, true, nil
-	}
 	replayed, err := pageWriter.WritePage(ctx, HistoryPageInput{
 		RunID: checkpoint.RunID,
 		Page:  caido.HistoryPage{Exchanges: []caido.HttpExchange{exchange}},
 	})
 	if err != nil {
-		t.Fatalf("replaying a committed page should retry its pending projection: %v", err)
+		t.Fatalf("replaying a committed page should preserve its pending projection: %v", err)
 	}
-	if replayed.ProjectionState != "applied" || replayed.GraphMapping != "mapped" || replayed.Replayed != 1 {
-		t.Fatalf("projection retry result = %+v", replayed)
+	if replayed.ProjectionState != "pending" || replayed.GraphMapping != "pending" || replayed.Replayed != 1 {
+		t.Fatalf("projection replay result = %+v", replayed)
 	}
 	var appliedJobs int
 	if err := projectStore.Database.DB().QueryRowContext(ctx,
@@ -250,8 +222,8 @@ func TestWritePageCommitsCaptureCheckpointAndProjectionJobBeforeGraphFailure(t *
 	).Scan(&appliedJobs); err != nil {
 		t.Fatal(err)
 	}
-	if appliedJobs != 1 {
-		t.Fatalf("applied projection job count = %d, want 1", appliedJobs)
+	if appliedJobs != 0 {
+		t.Fatalf("intake acknowledged %d projection jobs, want none", appliedJobs)
 	}
 }
 
@@ -274,9 +246,6 @@ func TestWritePageAcceptsRevisionFirstRegisteredByLiveTail(t *testing.T) {
 		ResponseStatus:       &status,
 		RequestWireFidelity:  "source_bytes",
 		ResponseWireFidelity: "source_bytes",
-	}
-	liveWriter.projector = func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
-		return false, false, errors.New("synthetic projection outage")
 	}
 	liveCheckpoint, err := liveWriter.BeginCycle(ctx, time.Date(2026, 10, 23, 12, 1, 0, 0, time.UTC), 90)
 	if err != nil {
@@ -307,16 +276,6 @@ func TestWritePageAcceptsRevisionFirstRegisteredByLiveTail(t *testing.T) {
 		t.Fatalf("OpenPageWriter() error = %v", err)
 	}
 	t.Cleanup(pageWriter.Close)
-	captureID, err := exchange.Ref.ObservationID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pageWriter.projector = func(_ context.Context, _ *store.ProjectStore, bundles []behaviorgraph.Record) (bool, bool, error) {
-		if len(bundles) != 1 || !hasProjectionObservation(bundles[0], liveGraphID, captureID, "live_capture") {
-			t.Fatalf("historical import did not reuse the canonical live projection: %#v", bundles)
-		}
-		return true, false, errors.New("synthetic Neo4j outage after local materialization")
-	}
 	checkpoint, err := pageWriter.BeginRun(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -331,19 +290,150 @@ func TestWritePageAcceptsRevisionFirstRegisteredByLiveTail(t *testing.T) {
 	if result.ProjectionState != "pending" {
 		t.Fatalf("projection state = %q, want pending", result.ProjectionState)
 	}
-	var sourceKind, graphMappedID, liveJobPayload string
+	var sourceKind, graphMappedID string
 	if err := projectStore.Database.DB().QueryRowContext(ctx,
-		`SELECT r.source_kind,m.graph_observation_id,j.payload_json FROM capture_revision_registry r
-		 JOIN graph_capture_map m ON m.revision_id=r.revision_id
-		 JOIN projection_jobs j ON j.revision_id=r.revision_id WHERE r.revision_id=?`, revisionID,
-	).Scan(&sourceKind, &graphMappedID, &liveJobPayload); err != nil {
+		`SELECT r.source_kind,l.graph_observation_id FROM capture_revision_registry r
+		 JOIN live_capture_index l ON l.observation_id=r.observation_id
+		 WHERE r.revision_id=?`, revisionID,
+	).Scan(&sourceKind, &graphMappedID); err != nil {
+		t.Fatal(err)
+	}
+	historicalJob, err := behaviorgraph.ProjectionJobByRevision(ctx, projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if sourceKind != "live" {
 		t.Fatalf("first-seen source provenance = %q, want live", sourceKind)
 	}
-	if graphMappedID != liveGraphID || liveJobPayload != liveJob.PayloadJSON {
-		t.Fatalf("cross-source replay changed canonical projection: graph=%q want=%q payload_changed=%v", graphMappedID, liveGraphID, liveJobPayload != liveJob.PayloadJSON)
+	if graphMappedID != liveGraphID || historicalJob.PayloadJSON != liveJob.PayloadJSON {
+		t.Fatalf("cross-source replay changed canonical projection: graph=%q want=%q payload_changed=%v", graphMappedID, liveGraphID, historicalJob.PayloadJSON != liveJob.PayloadJSON)
+	}
+	var historicalMappings int
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM graph_capture_map WHERE revision_id=?", revisionID,
+	).Scan(&historicalMappings); err != nil || historicalMappings != 0 {
+		t.Fatalf("historical mapping before projection = %d err=%v, want 0", historicalMappings, err)
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, ProjectionWorkerOptions{}, materializeLocalProjection, time.Now().UTC())
+	if closeErr := maintenance.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil || workerResult.State != "applied" || workerResult.RevisionID != revisionID {
+		t.Fatalf("cross-source projection worker = %+v err=%v", workerResult, err)
+	}
+	var historicalGraphID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT graph_observation_id FROM graph_capture_map WHERE revision_id=?", revisionID,
+	).Scan(&historicalGraphID); err != nil || historicalGraphID != liveGraphID {
+		t.Fatalf("historical graph mapping = %q err=%v, want %q", historicalGraphID, err, liveGraphID)
+	}
+	dataRoot := filepath.Dir(filepath.Dir(projectStore.Directory))
+	pageWriter.Close()
+	liveWriter.Close()
+	if err := projectStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readStore, err := store.OpenProjectReadOnly(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = readStore.Close() })
+	detail, err := search.ReadCaptureDetail(ctx, readStore, exchange.Ref.RequestID)
+	if err != nil || detail.GraphObservationID == nil || *detail.GraphObservationID != liveGraphID {
+		t.Fatalf("historical capture detail graph mapping = %+v err=%v, want %q", detail.GraphObservationID, err, liveGraphID)
+	}
+	catalog, err := search.ReadSurfaceCatalog(ctx, readStore, search.SurfaceCatalogRequest{Limit: 10})
+	if err != nil || len(catalog.Operations) != 1 || catalog.Operations[0].GraphMappedObservationCount != 1 {
+		t.Fatalf("cross-source surface mapping = %+v err=%v, want one mapped capture", catalog.Operations, err)
+	}
+}
+
+func TestHistoricalReplayLinksProjectionAlreadyAppliedFromLiveTail(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, liveWriter := newLiveTailFixture(t)
+	status := 200
+	capturedAt := "2026-10-23T12:00:00Z"
+	exchange := caido.HttpExchange{
+		Ref:                  caido.ExchangeRef{Project: selected, RequestID: "live-applied-before-history"},
+		CapturedAt:           &capturedAt,
+		RequestRaw:           []byte("GET /health HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"),
+		ResponseRaw:          []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok"),
+		HasResponse:          true,
+		Method:               "GET",
+		Scheme:               "https",
+		Host:                 "api.fixture.invalid",
+		Port:                 443,
+		Target:               "https://api.fixture.invalid/health",
+		ResponseStatus:       &status,
+		RequestWireFidelity:  "source_bytes",
+		ResponseWireFidelity: "source_bytes",
+	}
+	liveCheckpoint, err := liveWriter.BeginCycle(ctx, time.Date(2026, 10, 23, 12, 1, 0, 0, time.UTC), 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := liveWriter.WritePage(ctx, liveCheckpoint, caido.HistoryPage{Exchanges: []caido.HttpExchange{exchange}}); err != nil {
+		t.Fatalf("seed live capture: %v", err)
+	}
+	var revisionID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		`SELECT revision_id FROM capture_revision_registry WHERE observation_id=(
+		 SELECT observation_id FROM live_capture_index WHERE request_id=?)`, exchange.Ref.RequestID,
+	).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerResult, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, ProjectionWorkerOptions{}, materializeLocalProjection, time.Now().UTC())
+	if closeErr := maintenance.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil || workerResult.State != "applied" || workerResult.RevisionID != revisionID {
+		t.Fatalf("live projection before history = %+v err=%v", workerResult, err)
+	}
+
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pageWriter.Close()
+	checkpoint, err := pageWriter.BeginRun(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := pageWriter.WritePage(ctx, HistoryPageInput{
+		RunID: checkpoint.RunID,
+		Page:  caido.HistoryPage{Exchanges: []caido.HttpExchange{exchange}},
+	})
+	if err != nil || replayed.ProjectionState != "applied" || replayed.GraphMapping != "mapped" {
+		t.Fatalf("history replay after live projection = %+v err=%v", replayed, err)
+	}
+	var graphObservationID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT graph_observation_id FROM graph_capture_map WHERE revision_id=?", revisionID,
+	).Scan(&graphObservationID); err != nil {
+		t.Fatalf("historical map after applied live replay: %v", err)
+	}
+	dataRoot := filepath.Dir(filepath.Dir(projectStore.Directory))
+	pageWriter.Close()
+	liveWriter.Close()
+	if err := projectStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readStore, err := store.OpenProjectReadOnly(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = readStore.Close() })
+	detail, err := search.ReadCaptureDetail(ctx, readStore, exchange.Ref.RequestID)
+	if err != nil || detail.GraphObservationID == nil || *detail.GraphObservationID != graphObservationID {
+		t.Fatalf("historical detail after applied live replay = %+v err=%v", detail.GraphObservationID, err)
 	}
 }
 

@@ -28,8 +28,8 @@ type BackfillOptions struct {
 
 // BackfillProgress contains page-level operational counts and timings only.
 // It deliberately excludes cursors, request IDs, and message contents.
-// Durations are cumulative; graph projection is included in page processing,
-// so those values are a total and its breakdown rather than additive phases.
+// Intake timings exclude asynchronous graph projection; the projection duration
+// is zero here because the separate worker owns that work.
 type BackfillProgress struct {
 	PagesThisRun              int     `json:"pages_this_run"`
 	PageCount                 int64   `json:"page_count"`
@@ -112,7 +112,7 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		CoverageNote: "Caido provided no stable snapshot token or expected history total to reconcile completeness; the cursor reports enumeration progress only.",
 	}
 	cursor := checkpoint.Cursor
-	var metadataDuration, detailDuration, pageProcessingDuration, graphProjectionDuration time.Duration
+	var metadataDuration, detailDuration, pageProcessingDuration time.Duration
 
 	markPartial := func(cause error) (BackfillResult, error) {
 		partialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -170,8 +170,6 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		if err != nil {
 			return markPartial(err)
 		}
-		graphProjectionDuration += pageResult.graphProjectionDuration
-		result.GraphProjectionDurationMS = durationMilliseconds(graphProjectionDuration)
 		result.PagesThisRun++
 		result.PageCount = pageResult.PageCount
 		result.Stored += pageResult.Stored
