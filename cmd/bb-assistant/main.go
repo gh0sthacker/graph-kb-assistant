@@ -437,6 +437,7 @@ func runProjectionWorker(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	output := projectionWorkerDrainOutput{ProjectKey: selectedKeys[0], Jobs: make([]ingest.ProjectionWorkerResult, 0, *maxJobs)}
+	workerRunner := ingest.NewProjectionWorkerRunner()
 
 drain:
 	for {
@@ -456,7 +457,7 @@ drain:
 				return nil, openErr
 			}
 			defer selectedStore.Close()
-			return ingest.RunProjectionWorkerBatchWithProgress(ctx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{
+			return workerRunner.RunBatch(ctx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{
 				LeaseDuration: *leaseDuration, MaxAttempts: *maxAttempts,
 			}, *maxJobs, func(result ingest.ProjectionWorkerResult) {
 				if *watch {

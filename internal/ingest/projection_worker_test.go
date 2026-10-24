@@ -176,6 +176,58 @@ func TestProjectionWorkerBatchReportsProgressBeforeStartingNextJob(t *testing.T)
 	}
 }
 
+func TestProjectionWorkerRunnerReusesWriterAcrossIndependentBatches(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	for _, requestID := range []string{"projection-worker-runner-a", "projection-worker-runner-b"} {
+		if _, err := writePendingHistoryRevision(ctx, pageWriter,
+			projectionWorkerExchange(selected, requestID, "")); err != nil {
+			t.Fatalf("accept pending revision %s: %v", requestID, err)
+		}
+	}
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "neo4j")
+	runner := NewProjectionWorkerRunner()
+	openCalls := 0
+	runner.executor.openWriter = func(openCtx context.Context, selected *store.ProjectStore) (*behaviorgraph.Writer, error) {
+		openCalls++
+		return behaviorgraph.OpenWriter(openCtx, selected)
+	}
+	runner.executor.projectBundles = func(context.Context, *store.ProjectStore, *behaviorgraph.Writer, []behaviorgraph.Record) (bool, bool, int64, int64, error) {
+		return true, true, 1, 1, nil
+	}
+	options := ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3}
+
+	firstLease, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstBatch, firstErr := runner.RunBatch(ctx, projectStore, firstLease, options, 1, nil)
+	if closeErr := firstLease.Close(); closeErr != nil {
+		t.Fatalf("release first batch lease: %v", closeErr)
+	}
+	if firstErr != nil || len(firstBatch) != 1 || firstBatch[0].State != "applied" {
+		t.Fatalf("run first worker batch: results=%+v err=%v", firstBatch, firstErr)
+	}
+
+	secondLease, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondLease.Close()
+	secondBatch, secondErr := runner.RunBatch(ctx, projectStore, secondLease, options, 1, nil)
+	if secondErr != nil || len(secondBatch) != 1 || secondBatch[0].State != "applied" {
+		t.Fatalf("run second worker batch: results=%+v err=%v", secondBatch, secondErr)
+	}
+	if openCalls != 1 || firstBatch[0].GraphWriterOpenDurationMS < 0 || secondBatch[0].GraphWriterOpenDurationMS != 0 {
+		t.Fatalf("runner did not keep one path-bound writer across batches: open_calls=%d first=%+v second=%+v", openCalls, firstBatch[0], secondBatch[0])
+	}
+}
+
 func TestProjectionWorkerAcknowledgesOlderRevisionWithoutReplacingCurrentMapping(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)

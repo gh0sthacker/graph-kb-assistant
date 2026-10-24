@@ -1,5 +1,31 @@
 # Project status and known limitations
 
+## ECC watch-runner writer reuse and bounded runtime check (2026-10-24 05:46Z) — PARTIAL
+
+- The CLI now owns one `ProjectionWorkerRunner` for the lifetime of a drain or
+  watch invocation. It binds to one project key and storage directory, serializes
+  calls, and keeps the path-only graph writer while releasing and reacquiring
+  the project maintenance lease between watch batches. No SQLite connection or
+  transaction is retained across batches; each graph import still validates
+  the selected schema. A synthetic regression test runs two one-job batches
+  under separate leases and confirms only one writer open.
+- A bounded runtime watch run (`--max-jobs 1 --poll-interval 100ms`) applied
+  four consecutive jobs on attempt 1. The first opened the graph writer in
+  136,337 ms; the next three reported 0 ms open time and projection totals of
+  400 ms, 414 ms and 6,108 ms. The process was interrupted after those four
+  results. Post-run status confirmed zero leased jobs; the watch command's
+  `go run` wrapper returned exit 1 on Ctrl-C after printing its summary.
+- Full `TMPDIR=/var/tmp go test -count=1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
+  `TMPDIR=/var/tmp go test -race -count=1 ./internal/ingest
+  ./cmd/bb-assistant`, and `git diff --check` passed. The regression test was
+  first run red before the runner API was added, then passed.
+- Fresh status at 2026-10-24 05:46:33Z reports schema v7/v2 compatible; 1,400
+  captures, 1,369 mapped, 31 unmapped, 1,374 pending projection jobs, 26
+  applied, zero leased and zero dead-lettered. `neo4j-check` returned `ready`.
+  Overall coverage remains `PARTIAL`; history reconciliation and
+  browser/JavaScript/source coverage are still incomplete. Caido remained on
+  `sperpravo`; no project switch or request-body read occurred.
+
 ## ECC projection-batch correction and runtime check (2026-10-24 05:32Z) — PARTIAL
 
 - ECC review found that the worker CLI applied one deadline to the entire

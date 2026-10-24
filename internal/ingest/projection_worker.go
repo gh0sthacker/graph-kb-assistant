@@ -7,7 +7,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
@@ -25,6 +27,7 @@ const (
 )
 
 type projectionExecutor func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error)
+type graphBundleProjector func(context.Context, *store.ProjectStore, *behaviorgraph.Writer, []behaviorgraph.Record) (bool, bool, int64, int64, error)
 
 type ProjectionWorkerOptions struct {
 	LeaseDuration time.Duration
@@ -55,16 +58,17 @@ type projectionPhaseDurations struct {
 }
 
 type cachedProjectionExecutor struct {
-	writer     *behaviorgraph.Writer
-	openWriter func(context.Context, *store.ProjectStore) (*behaviorgraph.Writer, error)
-	phases     projectionPhaseDurations
+	writer         *behaviorgraph.Writer
+	openWriter     func(context.Context, *store.ProjectStore) (*behaviorgraph.Writer, error)
+	projectBundles graphBundleProjector
+	phases         projectionPhaseDurations
 }
 
 func newCachedProjectionExecutor(openWriter func(context.Context, *store.ProjectStore) (*behaviorgraph.Writer, error)) *cachedProjectionExecutor {
 	if openWriter == nil {
 		openWriter = behaviorgraph.OpenWriter
 	}
-	return &cachedProjectionExecutor{openWriter: openWriter}
+	return &cachedProjectionExecutor{openWriter: openWriter, projectBundles: projectGraphBundlesWithWriterTimings}
 }
 
 func (executor *cachedProjectionExecutor) project(
@@ -72,7 +76,7 @@ func (executor *cachedProjectionExecutor) project(
 	selected *store.ProjectStore,
 	bundles []behaviorgraph.Record,
 ) (bool, bool, error) {
-	if executor == nil || executor.openWriter == nil {
+	if executor == nil || executor.openWriter == nil || executor.projectBundles == nil {
 		return false, false, errors.New("projection writer executor is unavailable")
 	}
 	executor.phases = projectionPhaseDurations{}
@@ -85,7 +89,7 @@ func (executor *cachedProjectionExecutor) project(
 		}
 		executor.writer = writer
 	}
-	materialized, neo4jReady, graphImportMS, neo4jSyncMS, err := projectGraphBundlesWithWriterTimings(ctx, selected, executor.writer, bundles)
+	materialized, neo4jReady, graphImportMS, neo4jSyncMS, err := executor.projectBundles(ctx, selected, executor.writer, bundles)
 	executor.phases.GraphImportMS = graphImportMS
 	executor.phases.Neo4jSyncMS = neo4jSyncMS
 	return materialized, neo4jReady, err
@@ -154,8 +158,40 @@ func RunProjectionWorkerBatchWithProgress(
 	maxJobs int,
 	onProgress func(ProjectionWorkerResult),
 ) ([]ProjectionWorkerResult, error) {
+	return NewProjectionWorkerRunner().RunBatch(ctx, selected, maintenance, options, maxJobs, onProgress)
+}
+
+// ProjectionWorkerRunner reuses its path-bound graph writer across drain
+// batches for one project. The writer holds no database connection; each
+// batch still requires its own exclusive maintenance lease, and each import
+// revalidates the selected graph schema before writing.
+type ProjectionWorkerRunner struct {
+	mu               sync.Mutex
+	projectKey       string
+	projectDirectory string
+	executor         *cachedProjectionExecutor
+}
+
+func NewProjectionWorkerRunner() *ProjectionWorkerRunner {
+	return &ProjectionWorkerRunner{executor: newCachedProjectionExecutor(nil)}
+}
+
+// RunBatch processes at most maxJobs under the supplied project maintenance
+// lease. Calls are serialized. A progress callback runs synchronously and
+// must not re-enter this runner.
+func (runner *ProjectionWorkerRunner) RunBatch(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	maintenance *projectlock.Lock,
+	options ProjectionWorkerOptions,
+	maxJobs int,
+	onProgress func(ProjectionWorkerResult),
+) ([]ProjectionWorkerResult, error) {
 	if maxJobs < 1 || maxJobs > 100 {
 		return nil, errors.New("projection worker batch size is invalid")
+	}
+	if runner == nil {
+		return nil, errors.New("projection worker runner is unavailable")
 	}
 	if ctx == nil || selected == nil || maintenance == nil || !maintenance.CoversExclusiveDirectory(selected.Directory) {
 		return nil, errors.New("projection worker requires the matching project maintenance lease")
@@ -170,8 +206,22 @@ func RunProjectionWorkerBatchWithProgress(
 		}
 		return []ProjectionWorkerResult{result}, nil
 	}
-	executor := newCachedProjectionExecutor(nil)
-	return runProjectionWorkerBatchWithProgress(ctx, selected, maintenance, options, maxJobs, executor.project, &executor.phases, onProgress)
+	projectDirectory, err := filepath.Abs(selected.Directory)
+	if err != nil || filepath.Clean(projectDirectory) != projectDirectory {
+		return nil, errors.New("projection worker project directory is invalid")
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.projectKey == "" {
+		runner.projectKey = selected.ProjectKey
+		runner.projectDirectory = projectDirectory
+	} else if runner.projectKey != selected.ProjectKey || runner.projectDirectory != projectDirectory {
+		return nil, errors.New("projection worker runner is bound to a different selected project")
+	}
+	if runner.executor == nil {
+		runner.executor = newCachedProjectionExecutor(nil)
+	}
+	return runProjectionWorkerBatchWithProgress(ctx, selected, maintenance, options, maxJobs, runner.executor.project, &runner.executor.phases, onProgress)
 }
 
 func runProjectionWorkerBatch(
