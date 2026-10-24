@@ -1,5 +1,31 @@
 # Project status and known limitations
 
+## Stage 6 graph backlog runtime attempt (2026-10-23) — PARTIAL
+
+- After the earlier status snapshot, the bounded projection worker applied 2
+  jobs, moving the queue from 15 to 17 applied. The batch was stopped after
+  measuring very low throughput; current status reports 1,382 pending, 1
+  expired lease, and 17 applied. No worker process is active. The expired job
+  remains recoverable by the next worker invocation.
+- A read-only `projection-reconcile` confirmed identical local and Neo4j
+  snapshot digests (`6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`).
+  Its ten-minute limit expired after 109 jobs / 54,401,457 payload bytes; all
+  109 conflicted with the current snapshot, with no exact matches, missing
+  records, or invalid jobs in that scanned prefix. It did not apply anything,
+  and the rest of the queue remains unclassified by this run. The queue cannot
+  be called reconciled from these results.
+- The tested worker batch took about 13 minutes to apply 2 jobs, which is too
+  little throughput for a bulk drain. Code inspection shows that each job opens
+  and fully validates BehaviorGraph for import and opens it again for targeted
+  outbox synchronization; outbox pages can reopen it further. Profiling has
+  not yet isolated the time spent in each stage. Optimize reuse while preserving
+  per-job leases and acknowledgments, then measure with synthetic data before
+  retrying a larger runtime batch.
+- The final read-only status passed structural compatibility: schema v7/v2,
+  1,400 captures, 1,369 mapped, 31 unmapped, and partial history coverage. No
+  Caido import, body read, graph snapshot replacement, or reconciliation ack
+  occurred in this attempt.
+
 ## Stage 6 maintenance barrier and current runtime recheck (2026-10-23) — PARTIAL
 
 - ECC-guided TDD reproduced a consultation write succeeding while the project
