@@ -99,6 +99,7 @@ func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
 	gotNames := make([]string, 0, len(listedTools))
 	neighborhoodAdvertised := false
 	sliceContinuationAdvertised := false
+	sliceProvenanceDescribed := false
 	surfaceCatalogAdvertised := false
 	for _, value := range listedTools {
 		spec, ok := value.(map[string]any)
@@ -152,6 +153,11 @@ func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
 		}
 		if name == "bb_graph_slice" {
 			sliceContinuationAdvertised = true
+			description, _ := spec["description"].(string)
+			sliceProvenanceDescribed = strings.Contains(description, "provenance branches") && strings.Contains(description, "provenance cursor caps")
+			if !sliceProvenanceDescribed {
+				t.Errorf("full graph continuation does not describe resumable provenance and its cap: %q", description)
+			}
 			properties, _ := schema["properties"].(map[string]any)
 			cursor, _ := properties["cursor"].(map[string]any)
 			if cursor["type"] != "string" || cursor["minLength"] != float64(43) || cursor["maxLength"] != float64(43) || cursor["pattern"] != `^[A-Za-z0-9_-]{43}$` {
@@ -182,7 +188,7 @@ func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
 	if len(listedTools) != len(wantNames) || len(gotNames) != len(wantNames) {
 		t.Fatalf("advertised %d tools %v; want exactly %d %v", len(listedTools), gotNames, len(wantNames), wantNames)
 	}
-	if !sliceContinuationAdvertised || !surfaceCatalogAdvertised {
+	if !sliceContinuationAdvertised || !sliceProvenanceDescribed || !surfaceCatalogAdvertised {
 		t.Fatal("bounded full graph or surface catalog continuation was not advertised")
 	}
 	for i := range wantNames {

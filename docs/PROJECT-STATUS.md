@@ -1568,9 +1568,11 @@ This repository is an early public alpha. The following boundaries are deliberat
   `internal/graph` package tests, `go vet` for those packages, and
   `git diff --check` passed. Runtime queue health, Neo4j delivery, and Caido
   coverage remain `PARTIAL`.
-- Next local acceptance: verify full graph continuation through the HTTP/MCP
-  entry points and on exact-boundary synthetic fixtures. Focused-view
-  performance on the working dataset still requires a permitted runtime check.
+- Next local acceptance: execute the opt-in multi-page provenance continuation
+  against a disposable Neo4j database with enough temporary storage, then
+  verify the full HTTP/MCP cursor round trip and exact-boundary behavior.
+  Focused-view performance on the working dataset still requires a permitted
+  runtime check.
 
 ## Entity provenance continuation (2026-10-24) — PARTIAL
 
@@ -1592,5 +1594,11 @@ This repository is an early public alpha. The following boundaries are deliberat
 - Caido and the working project database were not accessed for this code
   slice. Runtime graph performance, HTTP/MCP continuation, Caido completeness,
   and KB coverage remain `PARTIAL`.
+- The HTTP graph handler preserves provenance continuation flags, owner IDs,
+  branches, and opaque cursors; the MCP `bb_graph_slice` description now
+  documents resumable provenance branches and explicit cursor caps. Targeted
+  appquery, MCP contract, and HTTP handler tests passed. These verify adapter
+  contracts only; an end-to-end cursor round trip still needs the disposable
+  Neo4j acceptance run.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.

@@ -933,7 +933,7 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		},
 		{
 			Name: "bb_graph_slice", Title: "Read a bounded behavior graph slice",
-			Description: "Read a bounded slice from one explicitly selected local project's BehaviorGraph with capture provenance, source hashes, integrity, and coverage gaps. If next_cursor is returned, pass it back with the same project, seed_ids, and budgets to continue rendered omitted assertion branches in the pinned Neo4j generation. Native candidate limits remain partial. Local receipt paths and unsafe source locators are redacted; endpoint routes are preserved. Captured relationships do not prove causality, vulnerability, or impact.",
+			Description: "Read a bounded slice from one explicitly selected local project's BehaviorGraph with capture provenance, source hashes, integrity, and coverage gaps. If next_cursor is returned, pass it back with the same project, seed_ids, and budgets to continue rendered omissions and resumable assertion, frontier, analysis-card, and provenance branches in the pinned Neo4j generation. Queue and provenance cursor caps remain explicitly partial. Local receipt paths and unsafe source locators are redacted; endpoint routes are preserved. Captured relationships do not prove causality, vulnerability, or impact.",
 			InputSchema: objectSchema(map[string]any{
 				"project_key": projectString,
 				"seed_ids":    map[string]any{"type": "array", "items": stringSchema(maxGraphSeedIDBytes, map[string]any{"minLength": 1}), "minItems": 1, "maxItems": maxGraphSeedIDs},

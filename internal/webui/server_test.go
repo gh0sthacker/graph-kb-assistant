@@ -493,6 +493,34 @@ func TestGraphHandlerPassesContinuationCursorToTypedQuery(t *testing.T) {
 	}
 }
 
+func TestGraphHandlerPreservesProvenanceContinuationPayload(t *testing.T) {
+	owner := "endpoint-" + strings.Repeat("c", 64)
+	api := &explorerAPIFixture{graphPayload: map[string]any{
+		"next_cursor": "opaque-cursor", "provenance_truncated": true,
+		"provenance_cursor_truncated": false, "provenance_truncated_entity_ids": []string{owner},
+		"missing_branches": []map[string]any{{"frontier_id": owner, "reason": "analytical_provenance_limit"}},
+	}}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet,
+		"http://127.0.0.1/api/graph?view=full&project_key="+strings.Repeat("a", 64)+"&seed="+owner, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d: %s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode graph payload: %v", err)
+	}
+	if payload["next_cursor"] != "opaque-cursor" || payload["provenance_truncated"] != true ||
+		payload["provenance_cursor_truncated"] != false || payload["provenance_truncated_entity_ids"] == nil || payload["missing_branches"] == nil {
+		t.Fatalf("HTTP graph response lost provenance continuation fields: %#v", payload)
+	}
+}
+
 func TestSurfaceHandlerPassesServerSideFilterAndOpaqueCursor(t *testing.T) {
 	api := &explorerAPIFixture{}
 	handler, err := NewHandler(api)

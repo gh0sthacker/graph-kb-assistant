@@ -289,7 +289,7 @@ func TestGraphPayloadGenerationAndNativeCandidateLimits(t *testing.T) {
 	}
 	for _, flag := range []string{
 		"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached",
-		"candidate_card_limit_reached", "provenance_truncated", "source_integrity_budget_exceeded",
+		"candidate_card_limit_reached", "provenance_truncated", "provenance_cursor_truncated", "source_integrity_budget_exceeded",
 	} {
 		if !graphCandidateLimitReached(map[string]any{flag: true}) {
 			t.Errorf("candidate limit flag %q was ignored", flag)
