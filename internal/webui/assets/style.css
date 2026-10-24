@@ -90,3 +90,4 @@
 .evidence-unavailable{font:8px/1.5 var(--mono);color:#a28e76}
 @media(max-width:600px){.evidence-dialog{width:calc(100vw - 16px);max-height:96vh}.evidence-heading{padding:15px}.evidence-warning{margin:10px 15px}.evidence-controls,.evidence-meta{padding-left:15px;padding-right:15px}.evidence-content,.evidence-compare-content{margin:0 15px;max-height:60vh;font-size:10px}.evidence-packet-controls{margin-left:15px;margin-right:15px}.evidence-packet-fields{grid-template-columns:1fr 1fr}.evidence-packet-fields button{grid-column:1/-1}.evidence-foot{padding-left:15px;padding-right:15px}}
 .detail-kind.kind-operation i{background:#83b5e8!important}
+.context-label-item>summary{cursor:pointer;color:#d3ded6}.context-label-item>summary:focus-visible{outline:2px solid #83b5e8;outline-offset:2px}.context-label-references{display:grid;gap:3px;margin:7px 0 0;padding-inline-start:22px;color:#9eaea3}

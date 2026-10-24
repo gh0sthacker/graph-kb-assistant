@@ -56,7 +56,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, saveOperationAlias, renderInspector, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, saveOperationAlias, renderInspector, renderConsultationContext, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -144,6 +144,28 @@ test("operation alias save is scoped to the selected project and refreshes the d
   assert.equal(app.state.operationAliases.get(operation.id).alias, "Account profile");
   assert.equal(app.displayTitle(operation), "Account profile");
   assert.equal(button.disabled, false);
+});
+
+test("consultation labels expose the exact evidence items they annotate without showing opaque IDs", () => {
+  const app = createApp();
+  app.renderConsultationContext({
+    evidence_references: [
+      { evidence_reference_id: "opaque-a", evidence_index: 0, side: "request", request_id: "239" },
+      { evidence_reference_id: "opaque-b", evidence_index: 1, side: "response", request_id: "240" },
+    ],
+    context_annotations: [{
+      kind: "actor", label: "actor-a", evidence_reference_ids: ["opaque-b", "opaque-a", "opaque-a", "opaque-missing"],
+    }],
+  }, false);
+
+  const item = app.elements.consultationContextList.children[0];
+  const text = [item.children[0].textContent, ...item.children[1].children.map(child => child.textContent)].join(" ");
+  assert.match(text, /actor: actor-a/);
+  assert.match(text, /Evidence 1 · request · Caido 239/);
+  assert.match(text, /Evidence 2 · response · Caido 240/);
+  assert.match(text, /1 unresolved/);
+  assert.match(text, /1 evidence reference could not be resolved/);
+  assert.doesNotMatch(text, /opaque-[ab]/);
 });
 
 test("local evidence viewer pins the exact historical revision and keeps HTTP bytes out of normal graph navigation", async () => {

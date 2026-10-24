@@ -1,5 +1,17 @@
 # Project status and known limitations
 
+## Stage 3 context annotation traceability (2026-10-24) — PARTIAL
+
+- Saved actor/session/object/flow labels in the consultation review now expand
+  to show the exact evidence number, HTTP side, and Caido request ID attached
+  to each label. Unresolvable references are called out; opaque reference IDs
+  and raw HTTP bytes are not rendered.
+- Synthetic UI tests cover reference ordering, unknown IDs, duplicate reference
+  IDs, and ensure the display helper returns only safe metadata. Project data,
+  graph, Caido history, and queues were not changed by this code slice.
+- Coverage remains `PARTIAL`: the UI makes analyst-provided context auditable,
+  but it does not establish actor identity, ownership, or causality.
+
 ## Stage 3 historical operation backfill preview (2026-10-24) — PARTIAL
 
 - Added `graph-operation-backfill-preview`, a read-only CLI preview for legacy

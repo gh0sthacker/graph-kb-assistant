@@ -545,8 +545,27 @@ function renderConsultationContext(review, accepted) {
   }
   const annotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
   for (const annotation of annotations) {
-    const count = Array.isArray(annotation.evidence_reference_ids) ? annotation.evidence_reference_ids.length : 0;
-    elements.consultationContextList.append(el("div", "context-label-item", `${annotation.kind}: ${annotation.label} · ${count} evidence item${count === 1 ? "" : "s"} · analyst-provided`));
+    const selectedIDs = Array.isArray(annotation.evidence_reference_ids)
+      ? [...new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0))]
+      : [];
+    const selectedCount = selectedIDs.length;
+    const references = BBGraphFocus.contextAnnotationEvidenceReferences(annotation, review.evidence_references || []);
+    const unresolvedCount = Math.max(0, selectedCount - references.length);
+    const item = el("details", "context-label-item");
+    item.append(el("summary", "", `${annotation.kind}: ${annotation.label} · ${references.length} linked evidence item${references.length === 1 ? "" : "s"}${unresolvedCount ? ` · ${unresolvedCount} unresolved` : ""} · analyst-provided`));
+    const referenceList = el("ul", "context-label-references");
+    if (references.length) {
+      for (const reference of references) {
+        referenceList.append(el("li", "", `Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido ${reference.requestId}`));
+      }
+    }
+    if (unresolvedCount) {
+      referenceList.append(el("li", "", `${unresolvedCount} evidence reference${unresolvedCount === 1 ? "" : "s"} could not be resolved.`));
+    } else if (!references.length) {
+      referenceList.append(el("li", "", "Evidence links are unavailable for this label."));
+    }
+    item.append(referenceList);
+    elements.consultationContextList.append(item);
   }
   if (!annotations.length) elements.consultationContextList.append(el("div", "context-label-item", "No analyst context labels yet."));
   elements.consultationContextKind.disabled = accepted;

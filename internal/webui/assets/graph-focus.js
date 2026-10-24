@@ -120,6 +120,22 @@
     return typeof alias === "string" && alias.trim() ? alias.trim() : "";
   }
 
+  function contextAnnotationEvidenceReferences(annotation, evidenceReferences) {
+    if (!annotation || !Array.isArray(annotation.evidence_reference_ids) || !Array.isArray(evidenceReferences)) return [];
+    const selected = new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0));
+    return evidenceReferences
+      .filter(reference => selected.has(reference?.evidence_reference_id) &&
+        Number.isInteger(reference?.evidence_index) && reference.evidence_index >= 0 &&
+        (reference.side === "request" || reference.side === "response") &&
+        reference.request_id !== undefined && reference.request_id !== null && String(reference.request_id).length > 0)
+      .sort((left, right) => left.evidence_index - right.evidence_index)
+      .map(reference => ({
+        evidenceIndex: reference.evidence_index,
+        side: reference.side,
+        requestId: String(reference.request_id),
+      }));
+  }
+
   function withObservationParseState(node, provenance) {
     if (!node || node.kind !== "observation") return node;
     const data = node.data && typeof node.data === "object" ? node.data : {};
@@ -131,7 +147,7 @@
     return { ...node, data: { ...data, parse_state: source?.parse_state || "unknown" } };
   }
 
-  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, routeFamilyUncertainty, withObservationParseState };
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, contextAnnotationEvidenceReferences, routeFamilyUncertainty, withObservationParseState };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);

@@ -7,6 +7,7 @@ const {
   focusedNeighborhood,
   focusedTransform,
   layeredGridLayout,
+  contextAnnotationEvidenceReferences,
   observationNotes,
   operationAliasFor,
   withObservationParseState,
@@ -46,6 +47,20 @@ test("operation aliases are display-only and apply only to operation nodes", () 
   assert.equal(operationAliasFor({ id: "operation-abc", kind: "operation" }, aliases), "Account settings");
   assert.equal(operationAliasFor({ id: "endpoint-abc", kind: "endpoint" }, aliases), "");
   assert.equal(operationAliasFor({ id: "operation-missing", kind: "operation" }, aliases), "");
+});
+
+test("context labels resolve to exact evidence references without exposing extra fields", () => {
+  const references = contextAnnotationEvidenceReferences({
+    evidence_reference_ids: ["ref-b", "missing", "ref-a", "ref-b"],
+  }, [
+    { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "239", raw: "secret" },
+    { evidence_reference_id: "ref-b", evidence_index: 1, side: "response", request_id: "240", raw: "secret" },
+  ]);
+
+  assert.deepEqual(references, [
+    { evidenceIndex: 0, side: "request", requestId: "239" },
+    { evidenceIndex: 1, side: "response", requestId: "240" },
+  ]);
 });
 
 test("desktop workspace keeps the graph viewport inside the browser window", () => {
