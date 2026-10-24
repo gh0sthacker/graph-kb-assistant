@@ -54,9 +54,12 @@ loop remain `PARTIAL`.
   index version is null and last semantic index is 2026-10-07. Lexical search
   is available with 15,438 files and 67,991 passages; its last refresh was
   2026-10-13. The incremental `kb_reindex(force=false)` call timed out after
-  300 seconds. During that call the KB database grew and a later stats snapshot
-  showed 116 more compatible files, but completion and queue status are
-  unconfirmed. KB readiness remains `PARTIAL`.
+  300 seconds. The KB database grew and the later stats snapshot showed 116
+  more compatible files. A live indexer still holds the exclusive index lock
+  with four worker connections to the configured Ollama endpoint; `/api/tags`
+  returned HTTP 200. A duplicate local start was rejected by the lock before
+  changing data. Completion is unconfirmed: `last_index` remains 2026-10-07 and
+  `index_version` is null. KB readiness remains `PARTIAL`.
 - `./scripts/run-hermes mcp test bb_assistant` passed and discovered the
   nine-tool read-only local MCP allowlist. The private Hermes profile is mode
   0600 and has no provider/model selection. A model-backed analysis and
