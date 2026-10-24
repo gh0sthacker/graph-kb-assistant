@@ -18,7 +18,9 @@ loop remain `PARTIAL`.
   selected project's `/api/surface` API. The surface catalog reports 131 local
   operations, `coverage_state=partial`, and a continuation cursor. This
   confirms the current local catalog can be served; it does not establish full
-  Caido coverage or complete browser/JavaScript mapping.
+  Caido coverage or complete browser/JavaScript mapping. A direct graph query
+  for one sampled seed returned 3 entities, 2 assertions, and 1 source; its
+  slice is `incomplete=true` with 2 omitted edges and `truncated=false`.
 - A read-only `neo4j-backfill --verify-only`, rerun after reconciliation,
   reports `verified`: local and Neo4j snapshot digests both equal
   `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`, with
