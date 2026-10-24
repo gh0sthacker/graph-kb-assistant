@@ -48,18 +48,18 @@ loop remain `PARTIAL`.
   selected project is the unrelated `sperpravo` project. No project switch,
   request enumeration, body read, replay, or target traffic was performed.
   Caido reconciliation remains unverified.
-- The local KB fallback reports 15,536 semantic files and 76,962 vectors;
-  14,254 files and 59,981 vectors are compatible. Semantic integrity remains
-  degraded (`ok=false`) with 1,282 wrong-version and unhashed rows; the stored
-  index version is null and last semantic index is 2026-10-07. Lexical search
-  is available with 15,438 files and 67,991 passages; its last refresh was
-  2026-10-13. The incremental `kb_reindex(force=false)` call timed out after
-  300 seconds. The KB database grew and the later stats snapshot showed 116
-  more compatible files. A live indexer still holds the exclusive index lock
-  with four worker connections to the configured Ollama endpoint; `/api/tags`
+- The latest local KB fallback snapshot reports 15,536 semantic files and
+  77,296 vectors; 14,389 files and 60,824 vectors are compatible. Semantic
+  integrity remains degraded (`ok=false`) with 1,147 wrong-version and
+  unhashed rows; the stored index version is null and last semantic index is
+  2026-10-07. Lexical search is available with 15,438 files and 67,991
+  passages; its last refresh was 2026-10-13. The incremental
+  `kb_reindex(force=false)` call timed out after 300 seconds, but the KB
+  database continues to grow and compatible-file counts rose by 135 since the
+  prior snapshot. A live indexer still holds the exclusive index lock with
+  four worker connections to the configured Ollama endpoint; `/api/tags`
   returned HTTP 200. A duplicate local start was rejected by the lock before
-  changing data. Completion is unconfirmed: `last_index` remains 2026-10-07 and
-  `index_version` is null. KB readiness remains `PARTIAL`.
+  changing data. Completion is unconfirmed; KB readiness remains `PARTIAL`.
 - `./scripts/run-hermes mcp test bb_assistant` passed and discovered the
   nine-tool read-only local MCP allowlist. The private Hermes profile is mode
   0600 and has no provider/model selection. A model-backed analysis and
