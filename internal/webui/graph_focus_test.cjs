@@ -9,7 +9,29 @@ const {
   layeredGridLayout,
   observationNotes,
   withObservationParseState,
+  routeFamilyUncertainty,
 } = require("./assets/graph-focus.js");
+
+test("routeFamilyUncertainty explains that masked segments are unresolved", () => {
+  const result = routeFamilyUncertainty("/api/{value}/search/{value}");
+
+  assert.deepEqual(result, {
+    maskedSegments: 2,
+    message: "2 masked path segments are unresolved. Each could be a variable value or an unrecognized static route word; this grouping does not confirm parameter behavior.",
+  });
+});
+
+test("routeFamilyUncertainty keeps heuristic caveat when no segments are masked", () => {
+  const result = routeFamilyUncertainty("/api/products/search");
+
+  assert.equal(result.maskedSegments, 0);
+  assert.match(result.message, /grouping still uses a static-word vocabulary/i);
+});
+
+test("routeFamilyUncertainty rejects missing route-family values", () => {
+  assert.equal(routeFamilyUncertainty(undefined), null);
+  assert.equal(routeFamilyUncertainty(42), null);
+});
 
 test("desktop workspace keeps the graph viewport inside the browser window", () => {
   const css = fs.readFileSync(path.join(__dirname, "assets", "style.css"), "utf8");

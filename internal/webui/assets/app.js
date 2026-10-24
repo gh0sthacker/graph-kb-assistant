@@ -1318,7 +1318,7 @@ function displaySubtitle(node) {
   const data = node.data || {};
   if (node.kind === "observation") return data.observed_at && data.observed_at !== "unknown" ? data.observed_at : "Capture time unavailable";
   if (node.kind === "endpoint") return (data.query_names || []).slice(0, 4).join(" · ") || "Route template · values masked";
-  if (node.kind === "operation") return `${data.route_family_version || "unversioned"} · grouped route family`;
+  if (node.kind === "operation") return `${data.route_family_version || "unversioned"} · heuristic route family`;
   if (node.kind === "parameter") return [data.type, data.location].filter(Boolean).join(" · ") || "Structural field";
   if (node.kind === "request_variant" || node.kind === "response_variant") {
     const headers = Array.isArray(data.header_metadata) ? data.header_metadata.length : 0;
@@ -1372,6 +1372,15 @@ function renderInspector(node) {
       const detail = el("div", "detail-explainer");
       detail.append(el("strong", "", explanation.title), el("span", "", explanation.body));
       elements.inspector.append(detail);
+    }
+  }
+  if (node.kind === "operation") {
+    const uncertainty = BBGraphFocus.routeFamilyUncertainty(node.data?.route_family);
+    if (uncertainty) {
+      const note = el("div", "detail-explainer");
+      note.append(el("strong", "", `Route-family grouping · ${uncertainty.maskedSegments} masked`));
+      note.append(el("span", "", uncertainty.message));
+      elements.inspector.append(note);
     }
   }
   if (rows.length) {

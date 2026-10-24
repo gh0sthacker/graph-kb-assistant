@@ -102,6 +102,15 @@
     return notes;
   }
 
+  function routeFamilyUncertainty(routeFamily) {
+    if (typeof routeFamily !== "string") return null;
+    const maskedSegments = routeFamily.split("/").filter(segment => segment === "{value}").length;
+    const message = maskedSegments > 0
+      ? `${maskedSegments} masked path segment${maskedSegments === 1 ? " is" : "s are"} unresolved. Each could be a variable value or an unrecognized static route word; this grouping does not confirm parameter behavior.`
+      : "No masked path segments are present. Grouping still uses a static-word vocabulary, so route families are heuristic.";
+    return { maskedSegments, message };
+  }
+
   function withObservationParseState(node, provenance) {
     if (!node || node.kind !== "observation") return node;
     const data = node.data && typeof node.data === "object" ? node.data : {};
@@ -113,7 +122,7 @@
     return { ...node, data: { ...data, parse_state: source?.parse_state || "unknown" } };
   }
 
-  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, withObservationParseState };
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, routeFamilyUncertainty, withObservationParseState };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);
