@@ -1,5 +1,18 @@
 # Project status and known limitations
 
+## Stage 2 bounded analysis cards in the direct view (2026-10-24) — PARTIAL
+
+- The Neo4j one-hop query now loads up to 24 matching analysis cards in the
+  same generation-pinned read. It closes referenced endpoint and provenance
+  dependencies, reports when the candidate cap was reached, and the inspector
+  shows parse state, known-effect metadata, hypothesis count, and bounded
+  missing-evidence notes for the selected capture/endpoint.
+- Added an opt-in Neo4j integration assertion for card selection and a UI
+  identity-resolution test. The opt-in Neo4j test was not run here; actual
+  Neo4j query behavior and existing project data remain unverified. Go package
+  tests and JavaScript tests are the available synthetic evidence. Stage 2
+  remains `PARTIAL`.
+
 ## Stage 6 synthetic live restart/replay and Go service templates (2026-10-24) — PARTIAL
 
 - Extended live-tail coverage to commit one metadata page, close the store and

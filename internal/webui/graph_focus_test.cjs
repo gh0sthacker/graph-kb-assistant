@@ -10,6 +10,7 @@ const {
   contextAnnotationEvidenceReferences,
   observationNotes,
   operationAliasFor,
+  analysisCardsForNode,
   withObservationParseState,
   routeFamilyUncertainty,
 } = require("./assets/graph-focus.js");
@@ -205,6 +206,20 @@ test("observation inspector uses parse state from the matching current capture p
   assert.equal(enriched.data.analysis_state, "incomplete");
   assert.equal(node.data.parse_state, undefined, "the graph node remains unchanged");
   assert.equal(withObservationParseState(node, [provenance[0]]).data.parse_state, "unknown");
+});
+
+test("analysis cards resolve to an observation by exact card or capture identity", () => {
+  const node = { id: "observation-a", kind: "observation", data: { card_id: "card-a", capture_id: "capture-a" } };
+  const cards = [
+    { id: "card-c", capture_id: "capture-c", endpoint: { id: "endpoint-a" } },
+    { id: "card-b", capture_id: "capture-a", endpoint: { id: "endpoint-b" } },
+    { id: "card-a", capture_id: "capture-other", endpoint: { id: "endpoint-c" } },
+    { id: "card-b", capture_id: "capture-a", endpoint: { id: "endpoint-b" } },
+  ];
+
+  assert.deepEqual(analysisCardsForNode(node, cards).map(card => card.id), ["card-a", "card-b"]);
+  assert.deepEqual(analysisCardsForNode({ id: "endpoint-a", kind: "endpoint" }, cards).map(card => card.id), ["card-c"]);
+  assert.deepEqual(analysisCardsForNode({ id: "parameter-a", kind: "parameter" }, cards), []);
 });
 
 test("layeredGridLayout wraps a high-degree layer into a bounded grid", () => {

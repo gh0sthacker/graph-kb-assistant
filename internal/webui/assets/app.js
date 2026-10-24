@@ -1588,6 +1588,7 @@ function renderInspector(node) {
   }
   if (node.kind === "operation") renderOperationAliasEditor(node);
   if (node.kind === "observation") renderProvenance(node);
+  renderAnalysisCards(node);
   const center = el("button", "detail-action", "Center and zoom to node");
   center.type = "button";
   center.disabled = !state.layoutPositions.has(node.id);
@@ -1601,6 +1602,45 @@ function renderInspector(node) {
   action.addEventListener("click", () => { void focusOnNode(node); });
   elements.inspector.append(action);
   elements.inspector.append(el("p", "detail-help", "Loads this node and its immediate connections. Use Back to return to the previous graph."));
+}
+
+function renderAnalysisCards(node) {
+  const cards = BBGraphFocus.analysisCardsForNode(node, state.graph?.cards);
+  const candidatesTruncated = Boolean(state.graph?.analysis_card_candidates_truncated);
+  if (!cards.length && !candidatesTruncated) return;
+  const section = el("section", "detail-section");
+  section.append(el("div", "detail-section-title", `Analysis cards · ${cards.length}`));
+  if (!cards.length) {
+    section.append(el("p", "detail-help", "The bounded graph query omitted additional matching cards; none of the loaded cards is attached to this node."));
+  }
+  const shown = cards.slice(0, 8);
+  for (const card of shown) {
+    const item = el("div", "provenance-item");
+    item.append(el("b", "", `${card.analysis_state || "unknown analysis state"} · ${card.id}`));
+    const requestParse = card.request_analysis?.parse_state || "unknown";
+    const responseParse = card.response_analysis?.parse_state || "unknown";
+    const responseStatus = card.response_analysis?.status;
+    const effect = card.business_action?.known_effect || "unknown";
+    const hypotheses = Array.isArray(card.hypotheses) ? card.hypotheses.length : 0;
+    const missing = Array.isArray(card.missing_evidence) ? card.missing_evidence.filter(value => typeof value === "string") : [];
+    item.append(el("span", "", `Request parse · ${requestParse} · Response parse · ${responseParse}${responseStatus ? ` · HTTP ${responseStatus}` : ""}`));
+    item.append(el("span", "", `Known effect · ${boundedInspectorText(effect, 160)} · Hypotheses · ${hypotheses}`));
+    for (const detail of missing.slice(0, 3)) {
+      item.append(el("span", "", `Missing evidence · ${boundedInspectorText(detail, 240)}`));
+    }
+    if (missing.length > 3) item.append(el("span", "", `and ${missing.length - 3} more missing-evidence notes`));
+    section.append(item);
+  }
+  if (cards.length > shown.length || candidatesTruncated) {
+    section.append(el("p", "detail-help", "The view is bounded. Narrow the graph selection or open the full analytical slice for additional cards."));
+  }
+  section.append(el("p", "detail-help", "Analysis cards summarize available parsing and context. They do not confirm a vulnerability or impact."));
+  elements.inspector.append(section);
+}
+
+function boundedInspectorText(value, maxLength) {
+  const text = typeof value === "string" ? value : String(value ?? "");
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
 }
 
 function renderOperationAliasEditor(node) {

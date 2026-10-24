@@ -110,6 +110,32 @@ func TestNeo4jAnalyticalSliceReadsBoundedClosureWithoutProjectSnapshot(t *testin
 	if got := len(slice["cards"].([]behaviorgraph.Record)); got != 1 {
 		t.Fatalf("analysis slice returned %d cards, want 1 card attached to the selected endpoint", got)
 	}
+
+	interactive, err := store.ReadProjectNeighborhood(ctx, project, []string{seed}, 30)
+	if err != nil {
+		t.Fatalf("read interactive neighborhood with analysis cards: %v", err)
+	}
+	interactiveCards, ok := interactive.Snapshot["cards"].([]behaviorgraph.Record)
+	if !ok || len(interactiveCards) != 2 || interactive.AnalysisCardCandidatesTruncated {
+		t.Fatalf("interactive neighborhood omitted or truncated the bounded matching cards: %+v", interactive)
+	}
+	interactiveReader, err := behaviorgraph.OpenReaderFromSnapshot(ctx, interactive.Snapshot, project, t.TempDir())
+	if err != nil {
+		t.Fatalf("open interactive snapshot with cards: %v", err)
+	}
+	defer interactiveReader.Close()
+	interactiveSlice, err := interactiveReader.Slice(ctx, behaviorgraph.SliceOptions{SeedIDs: []string{seed}, MaxNodes: 30, MaxEdges: 30, MaxDepth: 1})
+	if err != nil {
+		t.Fatalf("slice interactive snapshot with cards: %v", err)
+	}
+	if got := len(interactiveSlice["cards"].([]behaviorgraph.Record)); got != 1 {
+		t.Fatalf("interactive slice returned %d cards, want the selected endpoint's card", got)
+	}
+	interactiveCard := interactiveSlice["cards"].([]behaviorgraph.Record)[0]
+	if interactiveCard["id"] != cardID {
+		t.Fatalf("interactive slice attached an unrelated analysis card: %#v", interactiveCard)
+	}
+
 	conflictingEvidence := slice["conflicting_evidence"].([]string)
 	contradictionID := contradiction["id"].(string)
 	foundContradiction := false

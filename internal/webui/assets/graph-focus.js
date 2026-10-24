@@ -173,7 +173,27 @@
     return { ...node, data: { ...data, parse_state: source?.parse_state || "unknown" } };
   }
 
-  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, contextAnnotationEvidenceReferences, routeFamilyUncertainty, withObservationParseState };
+  function analysisCardsForNode(node, cards) {
+    if (!node || typeof node !== "object" || !Array.isArray(cards)) return [];
+    const data = node.data && typeof node.data === "object" ? node.data : {};
+    const cardID = typeof data.card_id === "string" ? data.card_id : "";
+    const captureID = typeof data.capture_id === "string" ? data.capture_id : "";
+    const seen = new Set();
+    return cards
+      .filter(card => card && typeof card.id === "string" && (
+        (cardID && card.id === cardID) ||
+        (captureID && card.capture_id === captureID) ||
+        (node.kind === "endpoint" && card.endpoint?.id === node.id)
+      ))
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .filter(card => {
+        if (seen.has(card.id)) return false;
+        seen.add(card.id);
+        return true;
+      });
+  }
+
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, analysisCardsForNode, contextAnnotationEvidenceReferences, routeFamilyUncertainty, withObservationParseState };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);

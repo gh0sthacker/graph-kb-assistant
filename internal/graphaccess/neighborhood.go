@@ -87,13 +87,15 @@ func (s *Service) ReadNeighborhoodPage(ctx context.Context, selected *store.Proj
 	result["view"] = "direct"
 	result["coverage_state"] = "partial"
 	result["incomplete"] = true
-	result["analysis_cards_loaded"] = backend == "sqlite"
+	result["analysis_cards_loaded"] = true
 	result["project_snapshot_integrity"] = "not_assessed"
 	result["integrity_scope"] = "selected_records"
 	result["neighborhood_candidate_limit_reached"] = candidateLimit
 	if backend == "neo4j" {
 		result["graph_generation"] = generation
 		result["candidate_count_at_least"] = candidates
+		result["analysis_card_candidates_loaded"] = neighborhoodResult.AnalysisCardCandidates
+		result["analysis_card_candidates_truncated"] = neighborhoodResult.AnalysisCardCandidatesTruncated
 	}
 	if candidateLimit {
 		result["truncated"] = true
@@ -103,7 +105,9 @@ func (s *Service) ReadNeighborhoodPage(ctx context.Context, selected *store.Proj
 		"Interactive view loads direct neighbors only; expand a selected node to continue.",
 		"Selected records are validated; full-project integrity and global evidence closure are not assessed in this view.")
 	if backend == "neo4j" {
-		result["limitations"] = append(result["limitations"].([]string), "Analysis cards are not loaded in the interactive Neo4j view; use the full slice for evidence analysis.")
+		if neighborhoodResult.AnalysisCardCandidatesTruncated {
+			result["limitations"] = append(result["limitations"].([]string), "The interactive view loaded the first bounded set of matching analysis cards; use a narrower selection or full analytical slice for remaining cards.")
+		}
 		applyNeighborhoodProvenanceCoverage(result, neighborhoodResult)
 	}
 	return NeighborhoodPage{Payload: result, Generation: generation, NextCursor: neighborhoodResult.NextCursor}, nil

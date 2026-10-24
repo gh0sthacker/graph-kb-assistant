@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	maxNeighborhoodRecords    = 10_000
-	maxNeighborhoodBytes      = 16 << 20
-	maxNeighborhoodRefs       = 20_000
-	maxNeighborhoodEntityRefs = 64
-	maxEntityProvenanceBatch  = 100
+	maxNeighborhoodRecords       = 10_000
+	maxNeighborhoodBytes         = 16 << 20
+	maxNeighborhoodRefs          = 20_000
+	maxNeighborhoodEntityRefs    = 64
+	maxEntityProvenanceBatch     = 100
+	maxNeighborhoodAnalysisCards = 24
 )
 
 var neighborhoodIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
@@ -48,8 +49,10 @@ type Neighborhood struct {
 	TruncatedEntityIDs []string
 	// EntitySourceRefLimit is the per-entity ceiling; shared byte/record/ref
 	// budgets can reduce an entity's sample further.
-	EntitySourceRefLimit int
-	NextCursor           *NeighborhoodCursor
+	EntitySourceRefLimit            int
+	AnalysisCardCandidates          int
+	AnalysisCardCandidatesTruncated bool
+	NextCursor                      *NeighborhoodCursor
 }
 
 // ReadProjectNeighborhood reads seeds and their incident assertions using
@@ -471,29 +474,50 @@ func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction,
 	if err := read.checkTopology(ctx, tx, assertionIDs); err != nil {
 		return Neighborhood{}, err
 	}
+	cardIDs, cardsTruncated, err := readAnalyticalCardCandidates(ctx, tx, project, read, ownerIDs, maxNeighborhoodAnalysisCards)
+	if err != nil {
+		return Neighborhood{}, err
+	}
+	output.AnalysisCardCandidates = len(cardIDs)
+	output.AnalysisCardCandidatesTruncated = cardsTruncated
+	if err := read.load(ctx, tx, cardIDs); err != nil {
+		return Neighborhood{}, err
+	}
+	if err := read.closeCardEndpointDependencies(ctx, tx, maxNeighborhoodAnalysisCards); err != nil {
+		return Neighborhood{}, err
+	}
+	ownerIDs = ownerIDs[:0]
+	for id, record := range read.records {
+		if record.kind == "entity" || record.kind == "assertion" || record.kind == "card" {
+			ownerIDs = append(ownerIDs, id)
+		}
+	}
+	sort.Strings(ownerIDs)
 	if err := read.loadProvenance(ctx, tx, ownerIDs); err != nil {
 		return Neighborhood{}, err
 	}
 	output.TruncatedEntityIDs = read.truncatedEntityIDs()
 	output.ProvenanceTruncated = len(output.TruncatedEntityIDs) != 0
 	output.EntitySourceRefLimit = maxNeighborhoodEntityRefs
-	entities, assertions, sources := make([]behaviorgraph.Record, 0), make([]behaviorgraph.Record, 0), make([]behaviorgraph.Record, 0)
+	entities, assertions, cards, sources := make([]behaviorgraph.Record, 0), make([]behaviorgraph.Record, 0), make([]behaviorgraph.Record, 0), make([]behaviorgraph.Record, 0)
 	for _, record := range read.records {
 		switch record.kind {
 		case "entity":
 			entities = append(entities, record.value)
 		case "assertion":
 			assertions = append(assertions, record.value)
+		case "card":
+			cards = append(cards, record.value)
 		case "source":
 			sources = append(sources, record.value)
 		}
 	}
-	for _, values := range [][]behaviorgraph.Record{entities, assertions, sources} {
+	for _, values := range [][]behaviorgraph.Record{entities, assertions, cards, sources} {
 		sort.Slice(values, func(i, j int) bool { return recordSortKey(values[i]) < recordSortKey(values[j]) })
 	}
 	output.Snapshot = behaviorgraph.Record{
 		"schema_version": json.Number("2"), "program": project,
-		"sources": sources, "entities": entities, "assertions": assertions, "cards": []behaviorgraph.Record{},
+		"sources": sources, "entities": entities, "assertions": assertions, "cards": cards,
 	}
 	if behaviorgraph.ValidatePublicData(output.Snapshot) != nil {
 		return Neighborhood{}, errors.New("Neo4j neighborhood contains unsafe metadata")
