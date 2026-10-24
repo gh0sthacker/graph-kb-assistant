@@ -549,14 +549,30 @@ function renderConsultationContext(review, accepted) {
       ? [...new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0))]
       : [];
     const selectedCount = selectedIDs.length;
-    const references = BBGraphFocus.contextAnnotationEvidenceReferences(annotation, review.evidence_references || []);
+    const references = BBGraphFocus.contextAnnotationEvidenceReferences(
+      annotation, review.evidence_references || [], review.evidence,
+    );
     const unresolvedCount = Math.max(0, selectedCount - references.length);
     const item = el("details", "context-label-item");
     item.append(el("summary", "", `${annotation.kind}: ${annotation.label} · ${references.length} linked evidence item${references.length === 1 ? "" : "s"}${unresolvedCount ? ` · ${unresolvedCount} unresolved` : ""} · analyst-provided`));
     const referenceList = el("ul", "context-label-references");
     if (references.length) {
       for (const reference of references) {
-        referenceList.append(el("li", "", `Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido ${reference.requestId}`));
+        const row = el("li", "context-label-reference");
+        const span = reference.spanStart !== null && reference.spanEnd !== null
+          ? ` · bytes [${reference.spanStart}, ${reference.spanEnd})`
+          : " · byte span unknown";
+        row.append(el("div", "", `Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido ${reference.requestId}${span}`));
+        if (reference.available) {
+          const excerpt = el("pre", "context-evidence-excerpt", reference.excerpt || "The selected redacted excerpt is empty.");
+          excerpt.tabIndex = 0;
+          excerpt.setAttribute("aria-label", `Redacted excerpt from evidence ${reference.evidenceIndex + 1}`);
+          row.append(excerpt);
+          if (reference.excerptTruncated) row.append(el("div", "", "Displayed preview is capped at 4 KiB."));
+        } else {
+          row.append(el("div", "", "The selected excerpt is unavailable in the saved evidence packet."));
+        }
+        referenceList.append(row);
       }
     }
     if (unresolvedCount) {

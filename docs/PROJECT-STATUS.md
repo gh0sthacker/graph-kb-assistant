@@ -1,5 +1,18 @@
 # Project status and known limitations
 
+## Stage 3/4 annotated evidence preview (2026-10-24) — PARTIAL
+
+- Expanding an actor/session/object/flow label now shows the exact byte span
+  and the redacted excerpt from the saved evidence packet for each linked
+  reference. The excerpt is displayed only when request ID, revision, side,
+  and span all match; unavailable or mismatched packet evidence stays hidden.
+  Rendering is bounded to 4 KiB of UTF-8 text and uses text nodes.
+- Synthetic UI tests cover source binding, unavailable and mismatched evidence,
+  duplicate references, redaction-only display, and the UTF-8 cap. This slice
+  does not inspect the working project, open raw message bodies, change graph
+  data, or verify a Hermes run. Stage 3/4 runtime and overall coverage remain
+  `PARTIAL`.
+
 ## Stage 3 context annotation traceability (2026-10-24) — PARTIAL
 
 - Saved actor/session/object/flow labels in the consultation review now expand

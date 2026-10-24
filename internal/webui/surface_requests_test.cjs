@@ -150,19 +150,28 @@ test("consultation labels expose the exact evidence items they annotate without 
   const app = createApp();
   app.renderConsultationContext({
     evidence_references: [
-      { evidence_reference_id: "opaque-a", evidence_index: 0, side: "request", request_id: "239" },
-      { evidence_reference_id: "opaque-b", evidence_index: 1, side: "response", request_id: "240" },
+      { evidence_reference_id: "opaque-a", evidence_index: 0, side: "request", request_id: "239", revision_id: "rev-a", span_start: 4, span_end: 20 },
+      { evidence_reference_id: "opaque-b", evidence_index: 1, side: "response", request_id: "240", revision_id: "rev-b", span_start: 8, span_end: 22 },
     ],
+    evidence: { evidence: [
+      { request_id: "239", revision_id: "rev-a", side: "request", span_start: 4, span_end: 20, available: true, excerpt: "GET /profile?id=[REDACTED]" },
+      { request_id: "240", revision_id: "rev-b", side: "response", span_start: 8, span_end: 22, available: true, excerpt: "{\"id\":\"[REDACTED]\"}" },
+    ] },
     context_annotations: [{
       kind: "actor", label: "actor-a", evidence_reference_ids: ["opaque-b", "opaque-a", "opaque-a", "opaque-missing"],
     }],
   }, false);
 
   const item = app.elements.consultationContextList.children[0];
-  const text = [item.children[0].textContent, ...item.children[1].children.map(child => child.textContent)].join(" ");
+  const textFrom = value => [value.textContent, ...(value.children || []).map(textFrom)].join(" ");
+  const text = textFrom(item);
   assert.match(text, /actor: actor-a/);
   assert.match(text, /Evidence 1 · request · Caido 239/);
   assert.match(text, /Evidence 2 · response · Caido 240/);
+  assert.match(text, /bytes \[4, 20\)/);
+  assert.match(text, /GET \/profile\?id=\[REDACTED\]/);
+  assert.match(text, /bytes \[8, 22\)/);
+  assert.match(text, /\{"id":"\[REDACTED\]"\}/);
   assert.match(text, /1 unresolved/);
   assert.match(text, /1 evidence reference could not be resolved/);
   assert.doesNotMatch(text, /opaque-[ab]/);

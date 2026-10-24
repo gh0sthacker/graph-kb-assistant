@@ -120,20 +120,46 @@
     return typeof alias === "string" && alias.trim() ? alias.trim() : "";
   }
 
-  function contextAnnotationEvidenceReferences(annotation, evidenceReferences) {
+  function contextAnnotationEvidenceReferences(annotation, evidenceReferences, evidencePacket) {
     if (!annotation || !Array.isArray(annotation.evidence_reference_ids) || !Array.isArray(evidenceReferences)) return [];
     const selected = new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0));
+    const packetRows = Array.isArray(evidencePacket?.evidence) ? evidencePacket.evidence : [];
     return evidenceReferences
       .filter(reference => selected.has(reference?.evidence_reference_id) &&
         Number.isInteger(reference?.evidence_index) && reference.evidence_index >= 0 &&
         (reference.side === "request" || reference.side === "response") &&
         reference.request_id !== undefined && reference.request_id !== null && String(reference.request_id).length > 0)
       .sort((left, right) => left.evidence_index - right.evidence_index)
-      .map(reference => ({
-        evidenceIndex: reference.evidence_index,
-        side: reference.side,
-        requestId: String(reference.request_id),
-      }));
+      .map(reference => {
+        const packetEvidence = packetRows[reference.evidence_index];
+        const exactPacketMatch = packetEvidence &&
+          packetEvidence.request_id === reference.request_id &&
+          packetEvidence.revision_id === reference.revision_id &&
+          packetEvidence.side === reference.side &&
+          packetEvidence.span_start === reference.span_start &&
+          packetEvidence.span_end === reference.span_end;
+        const available = exactPacketMatch && packetEvidence.available === true;
+        const rawExcerpt = available && typeof packetEvidence.excerpt === "string" ? packetEvidence.excerpt : "";
+        let excerpt = "";
+        let excerptBytes = 0;
+        const encoder = new TextEncoder();
+        for (const character of rawExcerpt) {
+          const characterBytes = encoder.encode(character).length;
+          if (excerptBytes + characterBytes > 4096) break;
+          excerpt += character;
+          excerptBytes += characterBytes;
+        }
+        return {
+          evidenceIndex: reference.evidence_index,
+          side: reference.side,
+          requestId: String(reference.request_id),
+          spanStart: Number.isSafeInteger(reference.span_start) && reference.span_start >= 0 ? reference.span_start : null,
+          spanEnd: Number.isSafeInteger(reference.span_end) && reference.span_end >= reference.span_start ? reference.span_end : null,
+          available: Boolean(available),
+          excerpt,
+          excerptTruncated: excerpt.length < rawExcerpt.length,
+        };
+      });
   }
 
   function withObservationParseState(node, provenance) {

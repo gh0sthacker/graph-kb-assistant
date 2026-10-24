@@ -49,18 +49,69 @@ test("operation aliases are display-only and apply only to operation nodes", () 
   assert.equal(operationAliasFor({ id: "operation-missing", kind: "operation" }, aliases), "");
 });
 
-test("context labels resolve to exact evidence references without exposing extra fields", () => {
+test("context labels resolve to exact evidence references and bounded redacted excerpts", () => {
   const references = contextAnnotationEvidenceReferences({
     evidence_reference_ids: ["ref-b", "missing", "ref-a", "ref-b"],
   }, [
-    { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "239", raw: "secret" },
-    { evidence_reference_id: "ref-b", evidence_index: 1, side: "response", request_id: "240", raw: "secret" },
-  ]);
+    { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "239", revision_id: "rev-a", span_start: 4, span_end: 20, raw: "secret" },
+    { evidence_reference_id: "ref-b", evidence_index: 1, side: "response", request_id: "240", revision_id: "rev-b", span_start: 8, span_end: 22, raw: "secret" },
+  ], {
+    evidence: [
+      { request_id: "239", revision_id: "rev-a", side: "request", span_start: 4, span_end: 20, available: true, excerpt: "GET /items?id=[REDACTED]" },
+      { request_id: "240", revision_id: "rev-b", side: "response", span_start: 8, span_end: 22, available: true, excerpt: "{\"id\":\"[REDACTED]\"}" },
+    ],
+  });
 
   assert.deepEqual(references, [
-    { evidenceIndex: 0, side: "request", requestId: "239" },
-    { evidenceIndex: 1, side: "response", requestId: "240" },
+    { evidenceIndex: 0, side: "request", requestId: "239", spanStart: 4, spanEnd: 20, available: true, excerpt: "GET /items?id=[REDACTED]", excerptTruncated: false },
+    { evidenceIndex: 1, side: "response", requestId: "240", spanStart: 8, spanEnd: 22, available: true, excerpt: "{\"id\":\"[REDACTED]\"}", excerptTruncated: false },
   ]);
+  assert.equal(JSON.stringify(references).includes("secret"), false, "raw input fields must not be returned");
+});
+
+test("context evidence excerpt refuses unavailable spans and caps malformed long previews", () => {
+  const references = contextAnnotationEvidenceReferences({ evidence_reference_ids: ["ref-a", "ref-b"] }, [
+    { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "1", revision_id: "rev-a", span_start: 0, span_end: 9 },
+    { evidence_reference_id: "ref-b", evidence_index: 1, side: "response", request_id: "2", revision_id: "rev-b", span_start: 1, span_end: 8 },
+  ], {
+    evidence: [
+      { request_id: "1", revision_id: "rev-a", side: "request", span_start: 0, span_end: 9, available: false, excerpt: "must not be exposed" },
+      { request_id: "2", revision_id: "rev-b", side: "response", span_start: 1, span_end: 8, available: true, excerpt: "x".repeat(5000) },
+    ],
+  });
+
+  assert.equal(references[0].available, false);
+  assert.equal(references[0].excerpt, "");
+  assert.equal(references[1].excerpt.length, 4096);
+  assert.equal(references[1].excerptTruncated, true);
+});
+
+test("context excerpt is hidden when packet evidence does not match the exact revision and span", () => {
+  const references = contextAnnotationEvidenceReferences({ evidence_reference_ids: ["ref-a", "ref-b"] }, [
+    { evidence_reference_id: "ref-a", evidence_index: 0, side: "response", request_id: "9", revision_id: "rev-a", span_start: 4, span_end: 12 },
+    { evidence_reference_id: "ref-b", evidence_index: 1, side: "response", request_id: "10", revision_id: "rev-b", span_start: 4, span_end: 12 },
+  ], {
+    evidence: [
+      { request_id: "9", revision_id: "rev-other", side: "response", span_start: 4, span_end: 12, available: true, excerpt: "wrong revision" },
+      { request_id: "10", revision_id: "rev-b", side: "response", span_start: 4, span_end: 13, available: true, excerpt: "wrong span" },
+    ],
+  });
+
+  assert.equal(references[0].available, false);
+  assert.equal(references[0].excerpt, "");
+  assert.equal(references[1].available, false);
+  assert.equal(references[1].excerpt, "");
+});
+
+test("context excerpt display cap is measured in UTF-8 bytes", () => {
+  const [reference] = contextAnnotationEvidenceReferences({ evidence_reference_ids: ["ref-a"] }, [
+    { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "1", revision_id: "rev-a", span_start: 0, span_end: 5000 },
+  ], {
+    evidence: [{ request_id: "1", revision_id: "rev-a", side: "request", span_start: 0, span_end: 5000, available: true, excerpt: "é".repeat(5000) }],
+  });
+
+  assert.equal(new TextEncoder().encode(reference.excerpt).length, 4096);
+  assert.equal(reference.excerptTruncated, true);
 });
 
 test("desktop workspace keeps the graph viewport inside the browser window", () => {
