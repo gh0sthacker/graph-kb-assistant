@@ -476,6 +476,22 @@ func TestProjectionWorkerCLIReportsEmptyQueueAsJSON(t *testing.T) {
 	}
 }
 
+func TestProjectionWorkerCLIAccountsCompletedResultsFromInterruptedBatch(t *testing.T) {
+	output := projectionWorkerDrainOutput{Jobs: make([]ingest.ProjectionWorkerResult, 0)}
+	results := []ingest.ProjectionWorkerResult{
+		{State: "applied"},
+		{State: "pending", ErrorCode: "worker_interrupted"},
+		{State: "dead_letter", ErrorCode: "invalid_job"},
+		{State: "error"},
+	}
+
+	batchIdle := recordProjectionWorkerResults(&output, results, true)
+	if batchIdle || output.Processed != 4 || output.Applied != 1 || output.Retried != 1 ||
+		output.DeadLetter != 1 || output.Failed != 1 || len(output.Jobs) != 0 {
+		t.Fatalf("partial watch batch was not accounted for: idle=%t output=%+v", batchIdle, output)
+	}
+}
+
 func TestProjectionWorkerCLIRejectsInvalidPollIntervalBeforeRegistryAccess(t *testing.T) {
 	key := strings.Repeat("a", 64)
 	for _, interval := range []string{"99ms", "10m1s"} {

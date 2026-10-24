@@ -384,9 +384,45 @@ type projectionWorkerDrainOutput struct {
 	Applied         int                             `json:"applied"`
 	Retried         int                             `json:"retried"`
 	DeadLetter      int                             `json:"dead_letter"`
+	Failed          int                             `json:"failed"`
 	Idle            bool                            `json:"idle"`
 	BackendDisabled bool                            `json:"backend_disabled"`
 	Jobs            []ingest.ProjectionWorkerResult `json:"jobs"`
+}
+
+func recordProjectionWorkerResults(
+	output *projectionWorkerDrainOutput,
+	results []ingest.ProjectionWorkerResult,
+	watch bool,
+) bool {
+	batchIdle := false
+	for _, result := range results {
+		if !watch {
+			output.Jobs = append(output.Jobs, result)
+		}
+		if result.State == "backend_disabled" {
+			output.BackendDisabled = true
+			break
+		}
+		if result.State == "idle" {
+			output.Idle = true
+			batchIdle = true
+			continue
+		}
+		output.Idle = false
+		output.Processed++
+		switch result.State {
+		case "applied":
+			output.Applied++
+		case "pending":
+			output.Retried++
+		case "dead_letter":
+			output.DeadLetter++
+		case "error":
+			output.Failed++
+		}
+	}
+	return batchIdle
 }
 
 func runProjectionWorker(args []string) error {
@@ -465,36 +501,12 @@ drain:
 				}
 			})
 		}()
+		batchIdle := recordProjectionWorkerResults(&output, results, *watch)
 		if runErr != nil {
 			if ctx.Err() != nil {
 				break drain
 			}
 			return runErr
-		}
-		batchIdle := false
-		for _, result := range results {
-			if !*watch {
-				output.Jobs = append(output.Jobs, result)
-			}
-			if result.State == "backend_disabled" {
-				output.BackendDisabled = true
-				break
-			}
-			if result.State == "idle" {
-				output.Idle = true
-				batchIdle = true
-				continue
-			}
-			output.Idle = false
-			output.Processed++
-			switch result.State {
-			case "applied":
-				output.Applied++
-			case "pending":
-				output.Retried++
-			case "dead_letter":
-				output.DeadLetter++
-			}
 		}
 		if output.BackendDisabled {
 			break drain

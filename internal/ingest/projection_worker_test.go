@@ -101,6 +101,30 @@ func TestProjectionWorkerBatchReusesProjectorForEveryClaimedJob(t *testing.T) {
 	}
 }
 
+func TestProjectionWorkerBatchDoesNotReportUnclaimedShutdownAsJobError(t *testing.T) {
+	_, projectStore, _ := newLiveTailFixture(t)
+	maintenance, err := projectlock.Acquire(context.Background(), projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	progress := make([]ProjectionWorkerResult, 0, 1)
+	results, err := runProjectionWorkerBatchWithProgress(ctx, projectStore, maintenance,
+		ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 1}, 1,
+		func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+			t.Fatal("projector ran without a successfully claimed job")
+			return false, false, nil
+		}, nil, func(result ProjectionWorkerResult) {
+			progress = append(progress, result)
+		})
+	if err == nil || ctx.Err() == nil || len(results) != 0 || len(progress) != 0 {
+		t.Fatalf("shutdown before a claim: results=%+v progress=%+v err=%v; want no synthetic job error", results, progress, err)
+	}
+}
+
 func TestProjectionWorkerBatchReportsProgressBeforeStartingNextJob(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)

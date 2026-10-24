@@ -261,6 +261,12 @@ func runProjectionWorkerBatchWithProgress(
 			result.GraphImportDurationMS = phases.GraphImportMS
 			result.Neo4jSyncDurationMS = phases.Neo4jSyncMS
 		}
+		if err != nil && ctx.Err() != nil && result.State == "" && result.JobID == "" {
+			// Shutdown before claiming a job is a normal watch-loop exit, not a
+			// failed delivery. Preserve completed results and suppress a synthetic
+			// error event for an operation that never claimed work.
+			return results, err
+		}
 		if err != nil && result.State == "" {
 			result.State = "error"
 		}
