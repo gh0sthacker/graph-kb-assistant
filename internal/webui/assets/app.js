@@ -71,7 +71,7 @@ const relationLabels = {
   contains: "contains",
   precedes: "precedes",
 };
-const MASKED_PATH_HELP = "Dynamic path segments are masked because they can contain identifiers or secrets. Raw HTTP values remain in Caido.";
+const MASKED_PATH_HELP = "Graph route labels hide dynamic values so IDs and secrets do not become graph data. To inspect one saved request's exact path, open its linked capture with Open stored HTTP; live-only records remain in Caido.";
 const kindColors = { observation: "#83c8cf", endpoint: "#e0b56b", parameter: "#b8a3da", asset: "#b2d88a" };
 
 function el(tag, className, text) {
@@ -1397,7 +1397,7 @@ function renderInspector(node) {
     section.append(tags); elements.inspector.append(section);
   }
   if (node.kind === "endpoint") {
-    elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Dynamic values are not stored in the graph; find the exact request in Caido using the linked capture's request ID."));
+    elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Select a linked historical capture and choose Open stored HTTP to inspect its exact path in the local evidence view. Live-only records remain in Caido."));
   }
   if (node.kind === "observation") renderProvenance(node);
   const action = el("button", "detail-action", "Load direct relationships →");

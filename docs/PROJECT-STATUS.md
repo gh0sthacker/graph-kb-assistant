@@ -1,6 +1,6 @@
 # Project status and known limitations
 
-## Local application and Hermes runtime check (2026-10-24 09:24Z) — PARTIAL
+## Local application and Hermes runtime check (2026-10-24 09:26Z) — PARTIAL
 
 - The Go web UI was restarted at `http://127.0.0.1:8765/` through the updated
   launcher; `/` returned HTTP 200. A read-only Neo4j check returned `ready`.
@@ -16,6 +16,11 @@
   guidance make the existing exact-message preview usable when that key
   decrypts the selected local revision. The running UI was restarted to load
   the file. No real capture body was opened during this check.
+- Route-mask help now explains that the graph omits dynamic path values and
+  points to the explicit local **Open stored HTTP** action for historical
+  captures; the inspector no longer implies that only Caido can show them.
+  The UI was restarted after the copy change. This documents the safe
+  inspection path; the exact local vault bytes were not opened in this check.
 - A 20-minute local projection-worker run applied 612 jobs. Its JSON progress
   contained all 612 successful deliveries, matching the durable applied-count
   increase, while the summary showed only 600 because the final partial batch
@@ -38,9 +43,10 @@
 - `PYTHONPATH=src python3 -m pytest -q tests/test_runtime_launcher.py`
   (4 passed), `bash -n scripts/bb-assistant`, the UI HTTP smoke check,
   `./scripts/run-hermes mcp test bb_assistant` (15 tools), and
-  `git diff --check` passed. Runtime state is still `PARTIAL`: 448 projections
-  remain queued, 31 captures are unmapped, and browser/JavaScript application
-  coverage and model-backed consultation remain unverified.
+  `node --test internal/webui/*_test.cjs` (25 passed), and `git diff --check`
+  passed. Runtime state is still `PARTIAL`: 448 projections remain queued, 31
+  captures are unmapped, and browser/JavaScript application coverage and
+  model-backed consultation remain unverified.
 
 ## ECC graph audit correction and projection runtime (2026-10-24 08:21Z) — PARTIAL
 
