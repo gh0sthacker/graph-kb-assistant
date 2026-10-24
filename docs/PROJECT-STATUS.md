@@ -1,5 +1,30 @@
 # Project status and known limitations
 
+## Fresh local runtime acceptance (2026-10-24) — PARTIAL
+
+- Reconciled the selected Juice Shop Caido history against the local index for
+  `192.168.1.149:3000`: 355 IDs matched, with zero Caido-only, local-only,
+  duplicate, or unclassified IDs; the terminal cursor was reached in four
+  pages. Caido was restored to `sperpravo` and the selection was verified.
+  Since the source has no stable snapshot token, history coverage remains
+  `PARTIAL`. No request/response bodies were read and no target requests were
+  sent.
+- The running web UI returned HTTP 200 for projects, surface, and direct graph
+  reads on the registered Juice Shop project. The surface read covered 1,400
+  observations and 131 operations. A one-seed direct view returned three
+  entities and two edges at graph generation 1375, with `truncated=false` and
+  `coverage_state=partial`. Across 10 repeated requests, latency was 114 ms
+  minimum, 166 ms median, 261 ms p95, and 442 ms maximum. This was a small
+  mixed warm-cache smoke sample on Linux x86_64, 8 vCPU, and 15.3 GiB RAM; it
+  is not a broad performance benchmark or complete graph validation.
+- `./scripts/run-hermes mcp test bb_assistant` connected over stdio and
+  discovered all 15 managed tools. No model request was made; the real
+  model-backed analysis loop remains `PARTIAL` until provider selection and
+  data-boundary review.
+- A fresh read-only KB `stats` attempt did not return within 95 seconds while
+  checking current source hashes and was interrupted. It made no index or
+  configuration changes; current KB coverage was not revalidated.
+
 ## Stage 5 injectable synthetic analyst adapter (2026-10-24) — PARTIAL
 
 - The MCP consultation lifecycle fixture now injects an explicit model-boundary
