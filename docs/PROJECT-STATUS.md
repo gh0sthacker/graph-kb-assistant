@@ -1,5 +1,41 @@
 # Project status and known limitations
 
+## Local application and Hermes runtime check (2026-10-24 09:17Z) — PARTIAL
+
+- The Go web UI is running at `http://127.0.0.1:8765/`. The landing page and
+  `/api/projects` returned HTTP 200. The Juice Shop surface query returned
+  paginated operations for `192.168.1.149:3000`; a direct graph query returned
+  three entities and two assertions with `incomplete=true`. This verifies the
+  local HTTP-to-Neo4j read path for one focused selection, not full graph or
+  Caido coverage.
+- Fresh Go status at 09:10:34Z reported capture schema v7 and BehaviorGraph
+  schema v2 compatible, 1,400 captures, 1,369 graph-mapped, 31 unmapped, and
+  queue counts of 448 pending, 0 leased, 952 applied and 0 dead-lettered.
+  `neo4j-check` returned `ready`; overall coverage remains `PARTIAL`.
+- A 20-minute local projection-worker run applied 612 jobs. Its JSON progress
+  contained all 612 successful deliveries, matching the durable applied-count
+  increase, while the summary showed only 600 because the final partial batch
+  was dropped when shutdown interrupted the next claim. The CLI now accounts
+  for completed partial-batch results before handling cancellation and does
+  not emit an error result when shutdown occurs before a job is claimed. ECC
+  regression tests cover both cases.
+- The installed Hermes profile passed `./scripts/run-hermes mcp test
+  bb_assistant` and discovered all 15 allowlisted tools. Hermes reports model
+  unset, provider `Auto`, with GitHub Copilot available; no model call or real
+  capture-content transfer was performed. The web graph and Hermes MCP are
+  verified as separate local entry points; the model-backed consultation
+  cycle is not yet runtime-verified.
+- Caido remains on `sperpravo`; the local Juice Shop project is not selected.
+  No Caido request was fetched, no project was switched, and no target traffic
+  was sent. Metadata reconciliation of Juice Shop is pending explicit approval
+  to switch temporarily, so Caido synchronization remains unverified.
+- `TMPDIR=/var/tmp go test -count=1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
+  all 25 Node web-state tests, and `git diff --check` passed. The Node test
+  sandbox now provides the browser Web Crypto API used by the shipped client.
+  Runtime state is still `PARTIAL`: 448 projections remain queued, 31 captures
+  are unmapped, the Caido snapshot is unreconciled, and browser/JavaScript
+  application coverage is absent.
+
 ## ECC graph audit correction and projection runtime (2026-10-24 08:21Z) — PARTIAL
 
 - A regression fixture reproduced a false `incompatible` result when a valid
