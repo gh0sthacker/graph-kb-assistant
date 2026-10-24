@@ -16,7 +16,7 @@ const state = {
   renderedEntities: [], renderedAssertions: [], layoutPositions: new Map(), zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
   evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
-  evidencePacketPreview: null, consultation: null, consultationCreateKey: "", contextAnnotationKey: "",
+  evidencePacketPreview: null, consultation: null, consultationCreateKey: "", contextAnnotationKey: "", consultationResumeRequestId: 0,
 };
 
 const elements = {
@@ -43,6 +43,8 @@ const elements = {
   evidencePacketSelectionList: $("#evidence-packet-selection-list"), evidencePacketClear: $("#evidence-packet-clear"),
   evidencePacketPreview: $("#evidence-packet-preview"), evidencePacketContent: $("#evidence-packet-content"),
   consultationCreate: $("#consultation-create"), consultationCopyID: $("#consultation-copy-id"), consultationStatus: $("#consultation-status"),
+  consultationResumeID: $("#consultation-resume-id"), consultationResume: $("#consultation-resume"),
+  consultationOpen: $("#consultation-open"),
   consultationReview: $("#consultation-review"), consultationReviewContent: $("#consultation-review-content"),
   consultationContext: $("#consultation-context"), consultationContextKind: $("#consultation-context-kind"),
   consultationContextLabel: $("#consultation-context-label"), consultationContextEvidence: $("#consultation-context-evidence"),
@@ -418,6 +420,7 @@ async function saveOperationAlias(node, input, button) {
 }
 
 function resetConsultationUI(message) {
+  state.consultationResumeRequestId++;
   state.consultation = null;
   state.consultationCreateKey = "";
   state.contextAnnotationKey = "";
@@ -434,6 +437,19 @@ function resetConsultationUI(message) {
   elements.consultationCopyID.hidden = true;
   elements.consultationCreate.disabled = true;
   elements.consultationCreate.textContent = "Save session for review";
+  updateConsultationResumeControl();
+}
+
+function updateConsultationResumeControl() {
+  elements.consultationOpen.disabled = !state.projectKey;
+  elements.consultationResume.disabled = !state.projectKey || !elements.consultationResumeID.value.trim();
+}
+
+function openConsultationResume() {
+  if (!state.projectKey) return;
+  state.evidenceTrigger = elements.consultationOpen;
+  if (!elements.evidenceDialog.open) elements.evidenceDialog.showModal();
+  elements.consultationResumeID.focus();
 }
 
 function addCurrentEvidenceSpan() {
@@ -519,33 +535,78 @@ async function createOrReviewConsultation() {
       });
       if (state.evidencePacketPreview !== preview || state.projectKey !== preview.projectKey) return;
       state.consultation = { id: created.consultation_id, version: created.version, accepted: false, reviewLoaded: false, acceptKey: newIdempotencyKey() };
+      elements.consultationResumeID.value = created.consultation_id;
+      updateConsultationResumeControl();
     }
     const session = state.consultation;
     const query = new URLSearchParams({ project_key: preview.projectKey, session_id: session.id });
     const review = await getJSON(`/api/consultation/review?${query}`);
     if (state.evidencePacketPreview !== preview || state.projectKey !== preview.projectKey || state.consultation !== session) return;
-    session.version = review.version;
-    session.accepted = Boolean(review.review_accepted);
-    session.reviewLoaded = true;
-    session.contextAnnotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
-    elements.consultationContextLabel.value = "";
-    elements.consultationReviewContent.textContent = JSON.stringify({
-      consultation_id: review.consultation_id, version: review.version,
-      question: review.question, evidence: review.evidence, context_annotations: review.context_annotations || [],
-    }, null, 2);
-    renderConsultationContext(review, session.accepted);
-    elements.consultationReview.hidden = false;
-    elements.consultationAccept.hidden = session.accepted;
-    elements.consultationAccept.disabled = session.accepted;
-    elements.consultationCopyID.hidden = false;
-    elements.consultationStatus.textContent = session.accepted
-      ? `Accepted · consultation ${session.id} · Hermes can now resume this session.`
-      : `Saved locally · consultation ${session.id} · Hermes cannot read this packet until you accept it below.`;
-    updateEvidencePacketControl();
+    displayConsultationReview(review, session);
   } catch (error) {
     elements.consultationStatus.textContent = `Could not load the saved review: ${error.message}`;
     elements.consultationCreate.disabled = false;
     if (state.consultation) elements.consultationCreate.textContent = "Reload saved review";
+  }
+}
+
+function displayConsultationReview(review, session) {
+  session.version = review.version;
+  session.accepted = Boolean(review.review_accepted);
+  session.reviewLoaded = true;
+  session.contextAnnotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
+  elements.consultationContextLabel.value = "";
+  elements.consultationReviewContent.textContent = JSON.stringify({
+    consultation_id: review.consultation_id, version: review.version,
+    question: review.question, evidence: review.evidence, context_annotations: review.context_annotations || [],
+  }, null, 2);
+  renderConsultationContext(review, session.accepted);
+  elements.consultationReview.hidden = false;
+  elements.consultationAccept.hidden = session.accepted;
+  elements.consultationAccept.disabled = session.accepted;
+  elements.consultationCopyID.hidden = false;
+  elements.consultationStatus.textContent = session.accepted
+    ? `Accepted · consultation ${session.id} · Hermes can now resume this session.`
+    : `Saved locally · consultation ${session.id} · Hermes cannot read this packet until you accept it below.`;
+  updateEvidencePacketControl();
+}
+
+async function resumeConsultationByID() {
+  const projectKey = state.projectKey;
+  const sessionID = elements.consultationResumeID.value.trim();
+  if (!projectKey || !sessionID) return;
+  resetConsultationUI("Loading the saved consultation for operator review…");
+  const requestID = ++state.consultationResumeRequestId;
+  elements.consultationResume.disabled = true;
+  try {
+    const query = new URLSearchParams({ project_key: projectKey, session_id: sessionID });
+    const review = await getJSON(`/api/consultation/review?${query}`);
+    if (requestID !== state.consultationResumeRequestId || state.projectKey !== projectKey ||
+        elements.consultationResumeID.value.trim() !== sessionID) return;
+    if (review.consultation_id !== sessionID) throw new Error("The saved review did not match that consultation ID.");
+    const preview = { projectKey, question: review.question, selections: [] };
+    const session = {
+      id: review.consultation_id, version: review.version, accepted: Boolean(review.review_accepted),
+      reviewLoaded: true, acceptKey: newIdempotencyKey(), contextAnnotations: [],
+    };
+    state.evidencePacketPreview = preview;
+    state.consultation = session;
+    state.consultationCreateKey = "";
+    elements.consultationResumeID.value = session.id;
+    updateConsultationResumeControl();
+    displayConsultationReview(review, session);
+    elements.consultationStatus.textContent = session.accepted
+      ? `Accepted · consultation ${session.id} reopened · Hermes can resume this session.`
+      : `Saved locally · consultation ${session.id} reopened · review it before allowing Hermes access.`;
+  } catch (error) {
+    if (requestID !== state.consultationResumeRequestId || state.projectKey !== projectKey ||
+        elements.consultationResumeID.value.trim() !== sessionID) return;
+    elements.consultationStatus.textContent = `Could not resume this consultation: ${error.message}`;
+    elements.consultationReview.hidden = true;
+  } finally {
+    if (requestID === state.consultationResumeRequestId && state.projectKey === projectKey) {
+      elements.consultationResume.disabled = !elements.consultationResumeID.value.trim();
+    }
   }
 }
 
@@ -875,6 +936,8 @@ function clearProjectView() {
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = "";
+  elements.consultationResumeID.value = "";
+  updateConsultationResumeControl();
   state.operationAliasRequestId++;
   state.operationAliases = new Map();
   state.projectCursor = null;
@@ -907,6 +970,8 @@ async function selectProject(projectKey) {
     state.evidencePacketDraft = { projectKey, question: "", selections: [] };
     clearEvidence();
     state.comparisonBaseline = null;
+    elements.consultationResumeID.value = "";
+    updateConsultationResumeControl();
   }
   resetSurfaceRequest();
   resetGraphNavigation();
@@ -1921,6 +1986,12 @@ elements.evidencePacketAdd.addEventListener("click", addCurrentEvidenceSpan);
 elements.evidencePacketClear.addEventListener("click", clearEvidencePacketDraft);
 elements.evidencePacketPreview.addEventListener("click", () => { void previewEvidencePacket(); });
 elements.consultationCreate.addEventListener("click", () => { void createOrReviewConsultation(); });
+elements.consultationResumeID.addEventListener("input", () => {
+  state.consultationResumeRequestId++;
+  updateConsultationResumeControl();
+});
+elements.consultationResume.addEventListener("click", () => { void resumeConsultationByID(); });
+elements.consultationOpen.addEventListener("click", openConsultationResume);
 elements.consultationAccept.addEventListener("click", () => { void acceptConsultationReview(); });
 elements.consultationContextKind.addEventListener("change", () => {
   elements.consultationContextLabel.placeholder = `${elements.consultationContextKind.value.replaceAll("_", "-")}-a`;

@@ -56,7 +56,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, saveOperationAlias, renderInspector, renderConsultationContext, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -74,6 +74,103 @@ function page(host, extra = {}) {
 }
 
 function snapshot(value) { return JSON.parse(JSON.stringify(value)); }
+
+test("saved-consultation entry point opens the review panel without selecting another capture", () => {
+  const app = createApp();
+  app.elements.consultationOpen.listeners.click();
+  assert.equal(app.elements.evidenceDialog.open, false);
+  app.state.projectKey = "a".repeat(64);
+  app.elements.consultationOpen.listeners.click();
+  assert.equal(app.elements.evidenceDialog.open, true);
+  assert.equal(app.elements.consultationResumeID.focused, true);
+});
+
+test("saved consultation resumes by ID after the original evidence selection is gone", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  app.elements.consultationResumeID.value = "saved-session-123";
+
+  const resuming = app.resumeConsultationByID();
+  const request = app.requests.at(-1);
+  assert.equal(request.method, "GET");
+  assert.equal(request.url.pathname, "/api/consultation/review");
+  assert.equal(request.url.searchParams.get("project_key"), app.state.projectKey);
+  assert.equal(request.url.searchParams.get("session_id"), "saved-session-123");
+  request.resolve({
+    consultation_id: "saved-session-123", version: 4, review_accepted: true,
+    question: "Compare the saved synthetic requests.", evidence: { evidence: [] },
+    evidence_references: [], context_annotations: [],
+  });
+  await resuming;
+
+  assert.equal(app.state.consultation.id, "saved-session-123");
+  assert.equal(app.state.consultation.version, 4);
+  assert.equal(app.state.consultation.accepted, true);
+  assert.equal(app.state.evidencePacketPreview.projectKey, app.state.projectKey);
+  assert.equal(app.elements.consultationReview.hidden, false);
+  assert.match(app.elements.consultationReviewContent.textContent, /Compare the saved synthetic requests/);
+  assert.equal(app.elements.consultationAccept.hidden, true);
+});
+
+test("resuming an unaccepted consultation keeps the explicit Hermes review gate", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  app.elements.consultationResumeID.value = "pending-session-456";
+  const resuming = app.resumeConsultationByID();
+  app.requests.at(-1).resolve({
+    consultation_id: "pending-session-456", version: 2, review_accepted: false,
+    question: "Review before access.", evidence: { evidence: [] },
+    evidence_references: [], context_annotations: [],
+  });
+  await resuming;
+
+  assert.equal(app.state.consultation.accepted, false);
+  assert.equal(app.elements.consultationAccept.hidden, false);
+  assert.equal(app.elements.consultationAccept.disabled, false);
+  assert.match(app.elements.consultationStatus.textContent, /review it before allowing Hermes access/);
+});
+
+test("a late consultation resume cannot overwrite a different project", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  app.elements.consultationResumeID.value = "saved-session-123";
+  app.elements.consultationReview.hidden = true;
+
+  const resuming = app.resumeConsultationByID();
+  const request = app.requests.at(-1);
+  app.state.projectKey = "b".repeat(64);
+  request.resolve({
+    consultation_id: "saved-session-123", version: 1, review_accepted: false,
+    question: "Old project", evidence: {}, evidence_references: [],
+  });
+  await resuming;
+
+  assert.equal(app.state.consultation, null);
+  assert.equal(app.state.evidencePacketPreview, null);
+  assert.equal(app.elements.consultationReview.hidden, true);
+});
+
+test("changing the consultation ID invalidates an older pending resume", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  app.elements.consultationResumeID.value = "session-a";
+  app.elements.consultationReview.hidden = true;
+
+  const resuming = app.resumeConsultationByID();
+  const request = app.requests.at(-1);
+  app.elements.consultationResumeID.value = "session-b";
+  app.elements.consultationResumeID.listeners.input();
+  request.resolve({
+    consultation_id: "session-a", version: 1, review_accepted: false,
+    question: "Stale session", evidence: {}, evidence_references: [],
+  });
+  await resuming;
+
+  assert.equal(app.state.consultation, null);
+  assert.equal(app.state.evidencePacketPreview, null);
+  assert.equal(app.elements.consultationReview.hidden, true);
+  assert.equal(app.elements.consultationResume.disabled, false);
+});
 
 test("graph continuation merges distinct rows, deduplicates overlaps, and keeps cursor provenance", () => {
   const app = createApp();

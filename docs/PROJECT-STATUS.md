@@ -24,6 +24,25 @@
   annotations, efficient Neo4j correlation lookup, UI navigation, and complete
   application-map coverage remain unfinished; Stage 3 stays `PARTIAL`.
 
+## Stage 5 local UI resume after reload — PARTIAL
+
+- The consultation panel can reopen a saved session from its ID after the
+  evidence selection that created it is gone. A persistent top-bar action
+  opens the operator review panel, scopes the lookup to the currently selected
+  project, and restores the saved version, redacted packet, context labels and
+  review/acceptance state. The ID remains available after the dialog closes;
+  changing projects clears it.
+- A late resume response cannot replace state after the selected project has
+  changed. Open sessions remain unaccepted and keep the explicit Hermes review
+  gate; accepted sessions reopen as accepted. Session contents continue to be
+  loaded through the existing local operator-review endpoint.
+- Synthetic verification: `node --check internal/webui/assets/app.js`, all 33
+  `surface_requests_test.cjs` cases, and `TMPDIR=/var/tmp go test -count=1
+  ./internal/webui` passed. The JavaScript transport is mocked; no running
+  application, project data, Caido, graph database, KB or model was accessed.
+- Stage 5 remains `PARTIAL`: Hermes/provider selection, actual browser-level
+  verification and model/data-boundary review are not part of this slice.
+
 ## Stage 4 synthetic HTTP evidence acceptance (2026-10-24) — PARTIAL
 
 - A new end-to-end synthetic fixture writes two encrypted HTTP exchanges into
