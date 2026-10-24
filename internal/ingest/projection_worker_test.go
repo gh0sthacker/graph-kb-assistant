@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,165 @@ import (
 	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
 )
+
+func TestProjectionWorkerReportsStageDurations(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	if _, err := writePendingHistoryRevision(ctx, pageWriter,
+		projectionWorkerExchange(selected, "projection-worker-stage-timing", "")); err != nil {
+		t.Fatalf("accept pending history revision: %v", err)
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+
+	result, err := runProjectionWorkerOnce(ctx, projectStore, maintenance,
+		ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3},
+		func(_ context.Context, _ *store.ProjectStore, _ []behaviorgraph.Record) (bool, bool, error) {
+			time.Sleep(25 * time.Millisecond)
+			return true, true, nil
+		}, time.Now().UTC())
+	if err != nil || result.State != "applied" {
+		t.Fatalf("run projection worker: result=%+v err=%v", result, err)
+	}
+	if result.ClaimDurationMS < 0 || result.DecodeDurationMS < 0 ||
+		result.ProjectionDurationMS < 20 || result.AckDurationMS < 0 {
+		t.Fatalf("projection worker stage durations are missing or inaccurate: %+v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal projection diagnostics: %v", err)
+	}
+	for _, key := range []string{"claim_duration_ms", "decode_duration_ms", "projection_duration_ms", "graph_writer_open_duration_ms", "graph_import_duration_ms", "neo4j_sync_duration_ms", "ack_duration_ms"} {
+		if !strings.Contains(string(encoded), `"`+key+`"`) {
+			t.Fatalf("worker JSON omits %q: %s", key, encoded)
+		}
+	}
+}
+
+func TestProjectionWorkerBatchReusesProjectorForEveryClaimedJob(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	for _, requestID := range []string{"projection-worker-batch-a", "projection-worker-batch-b"} {
+		if _, err := writePendingHistoryRevision(ctx, pageWriter,
+			projectionWorkerExchange(selected, requestID, "")); err != nil {
+			t.Fatalf("accept pending revision %s: %v", requestID, err)
+		}
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	openCalls := 0
+	executor := newCachedProjectionExecutor(func(openCtx context.Context, selected *store.ProjectStore) (*behaviorgraph.Writer, error) {
+		openCalls++
+		return behaviorgraph.OpenWriter(openCtx, selected)
+	})
+	results, err := runProjectionWorkerBatch(ctx, projectStore, maintenance,
+		ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3}, 2, executor.project, &executor.phases)
+	if err != nil || len(results) != 2 || openCalls != 1 {
+		t.Fatalf("run two-job worker batch: results=%+v writer_open_calls=%d err=%v", results, openCalls, err)
+	}
+	for _, result := range results {
+		if result.State != "pending" {
+			t.Fatalf("disabled Neo4j should leave each job retryable: %+v", result)
+		}
+	}
+	if results[0].GraphImportDurationMS < 0 || results[1].GraphImportDurationMS < 0 ||
+		results[1].GraphWriterOpenDurationMS != 0 {
+		t.Fatalf("batch stage timings do not show writer reuse: first=%+v second=%+v", results[0], results[1])
+	}
+}
+
+func TestProjectionWorkerBatchReportsProgressBeforeStartingNextJob(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	for _, requestID := range []string{"projection-worker-progress-a", "projection-worker-progress-b"} {
+		if _, err := writePendingHistoryRevision(ctx, pageWriter,
+			projectionWorkerExchange(selected, requestID, "")); err != nil {
+			t.Fatalf("accept pending revision %s: %v", requestID, err)
+		}
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+
+	callbackResults := make(chan ProjectionWorkerResult, 2)
+	firstCallbackPaused := make(chan struct{})
+	resumeAfterCallback := make(chan struct{})
+	secondProjectionStarted := make(chan struct{})
+	resumeSecondProjection := make(chan struct{})
+	type batchResult struct {
+		results []ProjectionWorkerResult
+		err     error
+	}
+	finished := make(chan batchResult, 1)
+	projectCalls := 0
+	callbackCalls := 0
+	go func() {
+		results, runErr := runProjectionWorkerBatchWithProgress(ctx, projectStore, maintenance,
+			ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3}, 2,
+			func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+				projectCalls++
+				if projectCalls == 2 {
+					close(secondProjectionStarted)
+					<-resumeSecondProjection
+				}
+				return false, false, nil
+			}, nil, func(result ProjectionWorkerResult) {
+				callbackCalls++
+				callbackResults <- result
+				if callbackCalls == 1 {
+					close(firstCallbackPaused)
+					<-resumeAfterCallback
+				}
+			})
+		finished <- batchResult{results: results, err: runErr}
+	}()
+
+	firstProgress := <-callbackResults
+	<-firstCallbackPaused
+	if firstProgress.State != "pending" || firstProgress.JobID == "" {
+		t.Fatalf("first progress event lacks the completed job: %+v", firstProgress)
+	}
+	select {
+	case <-secondProjectionStarted:
+		t.Fatal("worker started the next projection before reporting the first result")
+	default:
+	}
+	close(resumeAfterCallback)
+	<-secondProjectionStarted
+	close(resumeSecondProjection)
+	batch := <-finished
+	secondProgress := <-callbackResults
+	if batch.err != nil || len(batch.results) != 2 || callbackCalls != 2 {
+		t.Fatalf("worker batch did not finish with two progress events: results=%+v callbacks=%d err=%v", batch.results, callbackCalls, batch.err)
+	}
+	if secondProgress.State != "pending" || secondProgress.JobID == firstProgress.JobID {
+		t.Fatalf("second progress event does not describe the next job: first=%+v second=%+v", firstProgress, secondProgress)
+	}
+}
 
 func TestProjectionWorkerAcknowledgesOlderRevisionWithoutReplacingCurrentMapping(t *testing.T) {
 	ctx := context.Background()
@@ -144,9 +304,13 @@ func TestProjectGraphBundlesWithWriterRetainsOutboxPendingWhenNeo4jIsDisabled(t 
 	if err != nil {
 		t.Fatalf("open one validated graph writer: %v", err)
 	}
-	materialized, neo4jReady, err := projectGraphBundlesWithWriter(ctx, projectStore, graphWriter, []behaviorgraph.Record{bundle})
+	projectionStarted := time.Now()
+	materialized, neo4jReady, graphImportMS, neo4jSyncMS, err := projectGraphBundlesWithWriterTimings(ctx, projectStore, graphWriter, []behaviorgraph.Record{bundle})
 	if err != nil || !materialized || neo4jReady {
 		t.Fatalf("materialize through supplied graph writer: materialized=%t neo4j_ready=%t err=%v", materialized, neo4jReady, err)
+	}
+	if graphImportMS < 0 || neo4jSyncMS < 0 || graphImportMS+neo4jSyncMS > time.Since(projectionStarted).Milliseconds()+2 {
+		t.Fatalf("graph projection phase timings are inconsistent: import=%dms neo4j_sync=%dms", graphImportMS, neo4jSyncMS)
 	}
 	pending, err := graphWriter.PendingOutbox(ctx, 10)
 	if err != nil || len(pending) != 1 {

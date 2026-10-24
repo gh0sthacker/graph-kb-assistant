@@ -440,55 +440,52 @@ func runProjectionWorker(args []string) error {
 
 drain:
 	for {
-		batchProcessed := 0
-		for index := 0; index < *maxJobs; index++ {
-			maintenance, lockErr := acquireProjectionWorkerMaintenance(ctx, projectDirectory, *watch, *pollInterval, *leaseDuration, func() {
-				_, _ = fmt.Fprintln(os.Stderr, `{"event":"projection_worker","state":"project_busy"}`)
+		maintenance, lockErr := acquireProjectionWorkerMaintenance(ctx, projectDirectory, *watch, *pollInterval, *leaseDuration, func() {
+			_, _ = fmt.Fprintln(os.Stderr, `{"event":"projection_worker","state":"project_busy"}`)
+		})
+		if lockErr != nil {
+			if ctx.Err() != nil {
+				break drain
+			}
+			return lockErr
+		}
+		results, runErr := func() ([]ingest.ProjectionWorkerResult, error) {
+			defer maintenance.Close()
+			selectedStore, openErr := store.OpenProjectForWrite(ctx, *selected, *root)
+			if openErr != nil {
+				return nil, openErr
+			}
+			defer selectedStore.Close()
+			return ingest.RunProjectionWorkerBatchWithProgress(ctx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{
+				LeaseDuration: *leaseDuration, MaxAttempts: *maxAttempts,
+			}, *maxJobs, func(result ingest.ProjectionWorkerResult) {
+				if *watch {
+					writeProjectionWorkerEvent(result)
+				}
 			})
-			if lockErr != nil {
-				if ctx.Err() != nil {
-					break drain
-				}
-				return lockErr
+		}()
+		if runErr != nil {
+			if ctx.Err() != nil {
+				break drain
 			}
-			localCtx, cancel := context.WithTimeout(ctx, *leaseDuration-time.Second)
-			result, runErr := func() (ingest.ProjectionWorkerResult, error) {
-				defer maintenance.Close()
-				selectedStore, openErr := store.OpenProjectForWrite(localCtx, *selected, *root)
-				if openErr != nil {
-					return ingest.ProjectionWorkerResult{}, openErr
-				}
-				defer selectedStore.Close()
-				return ingest.RunProjectionWorkerOnce(localCtx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{
-					LeaseDuration: *leaseDuration, MaxAttempts: *maxAttempts,
-				})
-			}()
-			cancel()
-			if runErr != nil {
-				if ctx.Err() != nil {
-					break drain
-				}
-				return runErr
-			}
-			if *watch {
-				writeProjectionWorkerEvent(result)
-			} else {
+			return runErr
+		}
+		batchIdle := false
+		for _, result := range results {
+			if !*watch {
 				output.Jobs = append(output.Jobs, result)
 			}
 			if result.State == "backend_disabled" {
 				output.BackendDisabled = true
-				break drain
+				break
 			}
 			if result.State == "idle" {
 				output.Idle = true
-				if !*watch || !waitProjectionWorkerPoll(ctx, *pollInterval) {
-					break drain
-				}
-				continue drain
+				batchIdle = true
+				continue
 			}
 			output.Idle = false
 			output.Processed++
-			batchProcessed++
 			switch result.State {
 			case "applied":
 				output.Applied++
@@ -498,10 +495,16 @@ drain:
 				output.DeadLetter++
 			}
 		}
-		if !*watch || ctx.Err() != nil {
+		if output.BackendDisabled {
 			break drain
 		}
-		if batchProcessed >= *maxJobs && !waitProjectionWorkerPoll(ctx, *pollInterval) {
+		if batchIdle {
+			if !*watch || !waitProjectionWorkerPoll(ctx, *pollInterval) {
+				break drain
+			}
+			continue drain
+		}
+		if !*watch || ctx.Err() != nil || !waitProjectionWorkerPoll(ctx, *pollInterval) {
 			break drain
 		}
 	}
@@ -635,11 +638,30 @@ func waitProjectionWorkerPoll(ctx context.Context, interval time.Duration) bool 
 
 func writeProjectionWorkerEvent(result ingest.ProjectionWorkerResult) {
 	event := struct {
-		Event        string `json:"event"`
-		State        string `json:"state"`
-		AttemptCount int    `json:"attempt_count,omitempty"`
-		ErrorCode    string `json:"error_code,omitempty"`
-	}{Event: "projection_worker", State: result.State, AttemptCount: result.AttemptCount, ErrorCode: result.ErrorCode}
+		Event                     string `json:"event"`
+		State                     string `json:"state"`
+		AttemptCount              int    `json:"attempt_count,omitempty"`
+		ErrorCode                 string `json:"error_code,omitempty"`
+		ClaimDurationMS           int64  `json:"claim_duration_ms"`
+		DecodeDurationMS          int64  `json:"decode_duration_ms"`
+		ProjectionDurationMS      int64  `json:"projection_duration_ms"`
+		GraphWriterOpenDurationMS int64  `json:"graph_writer_open_duration_ms"`
+		GraphImportDurationMS     int64  `json:"graph_import_duration_ms"`
+		Neo4jSyncDurationMS       int64  `json:"neo4j_sync_duration_ms"`
+		AckDurationMS             int64  `json:"ack_duration_ms"`
+	}{
+		Event:                     "projection_worker",
+		State:                     result.State,
+		AttemptCount:              result.AttemptCount,
+		ErrorCode:                 result.ErrorCode,
+		ClaimDurationMS:           result.ClaimDurationMS,
+		DecodeDurationMS:          result.DecodeDurationMS,
+		ProjectionDurationMS:      result.ProjectionDurationMS,
+		GraphWriterOpenDurationMS: result.GraphWriterOpenDurationMS,
+		GraphImportDurationMS:     result.GraphImportDurationMS,
+		Neo4jSyncDurationMS:       result.Neo4jSyncDurationMS,
+		AckDurationMS:             result.AckDurationMS,
+	}
 	_ = json.NewEncoder(os.Stderr).Encode(event)
 }
 

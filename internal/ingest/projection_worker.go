@@ -32,13 +32,63 @@ type ProjectionWorkerOptions struct {
 }
 
 type ProjectionWorkerResult struct {
-	ProjectKey   string `json:"project_key"`
-	State        string `json:"state"`
-	JobID        string `json:"job_id,omitempty"`
-	RevisionID   string `json:"revision_id,omitempty"`
-	AttemptCount int    `json:"attempt_count,omitempty"`
-	NextAttempt  string `json:"next_attempt_at,omitempty"`
-	ErrorCode    string `json:"error_code,omitempty"`
+	ProjectKey                string `json:"project_key"`
+	State                     string `json:"state"`
+	JobID                     string `json:"job_id,omitempty"`
+	RevisionID                string `json:"revision_id,omitempty"`
+	AttemptCount              int    `json:"attempt_count,omitempty"`
+	NextAttempt               string `json:"next_attempt_at,omitempty"`
+	ErrorCode                 string `json:"error_code,omitempty"`
+	ClaimDurationMS           int64  `json:"claim_duration_ms"`
+	DecodeDurationMS          int64  `json:"decode_duration_ms"`
+	ProjectionDurationMS      int64  `json:"projection_duration_ms"`
+	GraphWriterOpenDurationMS int64  `json:"graph_writer_open_duration_ms"`
+	GraphImportDurationMS     int64  `json:"graph_import_duration_ms"`
+	Neo4jSyncDurationMS       int64  `json:"neo4j_sync_duration_ms"`
+	AckDurationMS             int64  `json:"ack_duration_ms"`
+}
+
+type projectionPhaseDurations struct {
+	GraphWriterOpenMS int64
+	GraphImportMS     int64
+	Neo4jSyncMS       int64
+}
+
+type cachedProjectionExecutor struct {
+	writer     *behaviorgraph.Writer
+	openWriter func(context.Context, *store.ProjectStore) (*behaviorgraph.Writer, error)
+	phases     projectionPhaseDurations
+}
+
+func newCachedProjectionExecutor(openWriter func(context.Context, *store.ProjectStore) (*behaviorgraph.Writer, error)) *cachedProjectionExecutor {
+	if openWriter == nil {
+		openWriter = behaviorgraph.OpenWriter
+	}
+	return &cachedProjectionExecutor{openWriter: openWriter}
+}
+
+func (executor *cachedProjectionExecutor) project(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	bundles []behaviorgraph.Record,
+) (bool, bool, error) {
+	if executor == nil || executor.openWriter == nil {
+		return false, false, errors.New("projection writer executor is unavailable")
+	}
+	executor.phases = projectionPhaseDurations{}
+	if executor.writer == nil {
+		started := time.Now()
+		writer, err := executor.openWriter(ctx, selected)
+		executor.phases.GraphWriterOpenMS = time.Since(started).Milliseconds()
+		if err != nil {
+			return false, false, err
+		}
+		executor.writer = writer
+	}
+	materialized, neo4jReady, graphImportMS, neo4jSyncMS, err := projectGraphBundlesWithWriterTimings(ctx, selected, executor.writer, bundles)
+	executor.phases.GraphImportMS = graphImportMS
+	executor.phases.Neo4jSyncMS = neo4jSyncMS
+	return materialized, neo4jReady, err
 }
 
 // projectionStatusForRevisions reads only the durable queue state after intake
@@ -73,16 +123,108 @@ func RunProjectionWorkerOnce(
 	maintenance *projectlock.Lock,
 	options ProjectionWorkerOptions,
 ) (ProjectionWorkerResult, error) {
-	if ctx == nil || selected == nil || maintenance == nil || !maintenance.CoversExclusiveDirectory(selected.Directory) {
-		return ProjectionWorkerResult{}, errors.New("projection worker requires the matching project maintenance lease")
-	}
-	if err := validateSelectedProject(selected); err != nil {
+	results, err := RunProjectionWorkerBatch(ctx, selected, maintenance, options, 1)
+	if len(results) == 0 {
 		return ProjectionWorkerResult{}, err
 	}
-	if graphaccess.ConfiguredBackend() != "neo4j" {
-		return ProjectionWorkerResult{ProjectKey: selected.ProjectKey, State: "backend_disabled"}, nil
+	return results[0], err
+}
+
+// RunProjectionWorkerBatch processes at most maxJobs under the caller's
+// project maintenance lease. Each revision keeps its own claim and
+// acknowledgment, while one validated graph writer is reused for the batch.
+func RunProjectionWorkerBatch(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	maintenance *projectlock.Lock,
+	options ProjectionWorkerOptions,
+	maxJobs int,
+) ([]ProjectionWorkerResult, error) {
+	return RunProjectionWorkerBatchWithProgress(ctx, selected, maintenance, options, maxJobs, nil)
+}
+
+// RunProjectionWorkerBatchWithProgress reports each completed delivery before
+// claiming the next job. The callback must not retain mutable state from the
+// worker result.
+func RunProjectionWorkerBatchWithProgress(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	maintenance *projectlock.Lock,
+	options ProjectionWorkerOptions,
+	maxJobs int,
+	onProgress func(ProjectionWorkerResult),
+) ([]ProjectionWorkerResult, error) {
+	if maxJobs < 1 || maxJobs > 100 {
+		return nil, errors.New("projection worker batch size is invalid")
 	}
-	return runProjectionWorkerOnce(ctx, selected, maintenance, options, projectGraphBundles, time.Now().UTC())
+	if ctx == nil || selected == nil || maintenance == nil || !maintenance.CoversExclusiveDirectory(selected.Directory) {
+		return nil, errors.New("projection worker requires the matching project maintenance lease")
+	}
+	if err := validateSelectedProject(selected); err != nil {
+		return nil, err
+	}
+	if graphaccess.ConfiguredBackend() != "neo4j" {
+		result := ProjectionWorkerResult{ProjectKey: selected.ProjectKey, State: "backend_disabled"}
+		if onProgress != nil {
+			onProgress(result)
+		}
+		return []ProjectionWorkerResult{result}, nil
+	}
+	executor := newCachedProjectionExecutor(nil)
+	return runProjectionWorkerBatchWithProgress(ctx, selected, maintenance, options, maxJobs, executor.project, &executor.phases, onProgress)
+}
+
+func runProjectionWorkerBatch(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	maintenance *projectlock.Lock,
+	options ProjectionWorkerOptions,
+	maxJobs int,
+	projector projectionExecutor,
+	phases *projectionPhaseDurations,
+) ([]ProjectionWorkerResult, error) {
+	return runProjectionWorkerBatchWithProgress(ctx, selected, maintenance, options, maxJobs, projector, phases, nil)
+}
+
+func runProjectionWorkerBatchWithProgress(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	maintenance *projectlock.Lock,
+	options ProjectionWorkerOptions,
+	maxJobs int,
+	projector projectionExecutor,
+	phases *projectionPhaseDurations,
+	onProgress func(ProjectionWorkerResult),
+) ([]ProjectionWorkerResult, error) {
+	if maxJobs < 1 || maxJobs > 100 || projector == nil {
+		return nil, errors.New("projection worker batch limits are invalid")
+	}
+	results := make([]ProjectionWorkerResult, 0, maxJobs)
+	for range maxJobs {
+		if phases != nil {
+			*phases = projectionPhaseDurations{}
+		}
+		result, err := runProjectionWorkerOnce(ctx, selected, maintenance, options, projector, time.Now().UTC())
+		if phases != nil {
+			result.GraphWriterOpenDurationMS = phases.GraphWriterOpenMS
+			result.GraphImportDurationMS = phases.GraphImportMS
+			result.Neo4jSyncDurationMS = phases.Neo4jSyncMS
+		}
+		if err != nil && result.State == "" {
+			result.State = "error"
+		}
+		results = append(results, result)
+		if onProgress != nil {
+			onProgress(result)
+		}
+		if err != nil {
+			return results, err
+		}
+		if result.State == "idle" {
+			break
+		}
+	}
+	return results, nil
 }
 
 func runProjectionWorkerOnce(
@@ -112,6 +254,7 @@ func runProjectionWorkerOnce(
 	}
 	result := ProjectionWorkerResult{ProjectKey: selected.ProjectKey}
 
+	claimStarted := time.Now()
 	claimConn, err := beginSelectedImmediate(ctx, selected)
 	if err != nil {
 		return ProjectionWorkerResult{}, err
@@ -128,6 +271,7 @@ func runProjectionWorkerOnce(
 		return ProjectionWorkerResult{}, err
 	}
 	_ = claimConn.Close()
+	result.ClaimDurationMS = time.Since(claimStarted).Milliseconds()
 	if !found {
 		result.State = "idle"
 		return result, nil
@@ -145,14 +289,20 @@ func runProjectionWorkerOnce(
 	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, options.LeaseDuration-time.Second)
 	defer cancelDelivery()
 
+	decodeStarted := time.Now()
 	var bundle behaviorgraph.Record
 	if err := json.Unmarshal([]byte(job.PayloadJSON), &bundle); err != nil || bundle == nil {
+		result.DecodeDurationMS = time.Since(decodeStarted).Milliseconds()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "invalid_job", result)
 	}
 	if _, err := behaviorgraph.ProjectionObservationID([]byte(job.PayloadJSON), selected.ProjectKey, job.ObservationID); err != nil {
+		result.DecodeDurationMS = time.Since(decodeStarted).Milliseconds()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "invalid_job", result)
 	}
+	result.DecodeDurationMS = time.Since(decodeStarted).Milliseconds()
+	projectionStarted := time.Now()
 	materialized, neo4jReady, projectionErr := projector(deliveryCtx, selected, []behaviorgraph.Record{bundle})
+	result.ProjectionDurationMS = time.Since(projectionStarted).Milliseconds()
 	if err := deliveryCtx.Err(); err != nil {
 		return result, err
 	}
@@ -164,8 +314,11 @@ func runProjectionWorkerOnce(
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, code, result)
 	}
 
+	ackStarted := time.Now()
+	finishAckTiming := func() { result.AckDurationMS = time.Since(ackStarted).Milliseconds() }
 	ackConn, err := beginSelectedImmediate(deliveryCtx, selected)
 	if err != nil {
+		finishAckTiming()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "mapping_unavailable", result)
 	}
 	committed := false
@@ -185,11 +338,13 @@ func runProjectionWorkerOnce(
 	}()
 	current, err := behaviorgraph.ProjectionJobByRevision(deliveryCtx, ackConn, selected.ProjectKey, job.RevisionID)
 	if err != nil || !sameProjectionLease(current, job) {
+		finishAckTiming()
 		releaseAckConn()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "projection_fence_mismatch", result)
 	}
 	graphObservationID, err := behaviorgraph.ProjectionObservationID([]byte(current.PayloadJSON), selected.ProjectKey, current.ObservationID)
 	if err != nil {
+		finishAckTiming()
 		releaseAckConn()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "invalid_job", result)
 	}
@@ -198,20 +353,24 @@ func runProjectionWorkerOnce(
 		appliedAt = now
 	}
 	if err := persistProjectionJobMapping(deliveryCtx, ackConn, current, graphObservationID, appliedAt); err != nil {
+		finishAckTiming()
 		releaseAckConn()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "mapping_invalid", result)
 	}
 	if err := behaviorgraph.MarkLeasedProjectionJobApplied(
 		deliveryCtx, ackConn, selected.ProjectKey, current.RevisionID, job.LeaseToken.String, job.PayloadSHA256, appliedAt,
 	); err != nil {
+		finishAckTiming()
 		releaseAckConn()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "projection_fence_mismatch", result)
 	}
 	if err := commitImmediate(deliveryCtx, ackConn); err != nil {
+		finishAckTiming()
 		releaseAckConn()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "ack_unavailable", result)
 	}
 	committed = true
+	finishAckTiming()
 	result.State = "applied"
 	return result, nil
 }

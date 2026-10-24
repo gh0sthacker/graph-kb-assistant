@@ -1,5 +1,43 @@
 # Project status and known limitations
 
+## ECC projection-batch correction and runtime check (2026-10-24 05:32Z) — PARTIAL
+
+- ECC review found that the worker CLI applied one deadline to the entire
+  `--max-jobs` batch even though the flag is a per-job lease/execution limit.
+  The CLI now passes the shutdown context through and lets each delivery keep
+  its own lease-bounded projection context. A review also found that watch-mode
+  events were buffered until the batch ended and could be lost on a later job
+  error. Watch mode now emits each completed job immediately and includes the
+  stage timings; regression coverage verifies the callback fires before the
+  next projection starts.
+- A worker batch opens and validates one BehaviorGraph writer lazily, then
+  reuses it for each job while the exclusive project maintenance lease is
+  held. Per-job claim, payload digest, lease token, mapping transaction and
+  acknowledgment remain independent. The two-job runtime batch applied both
+  jobs on attempt 1. Job one spent 141,827 ms opening the graph writer, then
+  67 ms importing and 806 ms syncing Neo4j; job two reused the writer (0 ms
+  open), importing in 54 ms and syncing Neo4j in 304 ms. Projection totals were
+  142,702 ms and 359 ms respectively. Imports and Neo4j syncs are still issued
+  per job rather than coalesced.
+- Full `TMPDIR=/var/tmp go test -count=1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
+  and `TMPDIR=/var/tmp go test -race -count=1 ./internal/ingest
+  ./cmd/bb-assistant` passed. Targeted progress/timing tests and
+  `git diff --check` also passed.
+- Fresh status at 2026-10-24 05:32:23Z reports capture schema v7 and
+  BehaviorGraph schema v2 compatible; 1,400 captures, 1,369 mapped, 31
+  unmapped, 1,378 pending projection jobs, 22 applied, zero leased, and zero
+  dead-lettered. `neo4j-check` returned `ready`. Overall status remains
+  `PARTIAL`; history is unreconciled and browser/JavaScript/source coverage is
+  incomplete.
+- Caido 0.58.3 still has Juice Shop `READY`, but `sperpravo` is the selected
+  project. No project switch, request enumeration or body fetch occurred. The
+  latest completed global KB audit remains the 04:55Z check: 15,517 compatible
+  files and 68,878 chunks/vectors with structural integrity `OK`, while source
+  and vector content validation and corpus completeness remain unverified. The
+  local immutable snapshot was validated at 04:55Z with 14,300 documents and
+  16,961 chunks, but its source coverage remains `PARTIAL`. No KB reindex or
+  source change was started.
+
 ## Caido whole-project and exact-scope reconciliation (2026-10-24) — PARTIAL
 
 - Installed the pinned Caido MCP v4.3.0 binary in user-local app data after its

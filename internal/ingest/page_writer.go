@@ -716,22 +716,36 @@ func projectGraphBundlesWithWriter(
 	graphWriter *behaviorgraph.Writer,
 	bundles []behaviorgraph.Record,
 ) (bool, bool, error) {
+	materialized, neo4jReady, _, _, err := projectGraphBundlesWithWriterTimings(ctx, selected, graphWriter, bundles)
+	return materialized, neo4jReady, err
+}
+
+func projectGraphBundlesWithWriterTimings(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	graphWriter *behaviorgraph.Writer,
+	bundles []behaviorgraph.Record,
+) (materialized bool, neo4jReady bool, graphImportDurationMS int64, neo4jSyncDurationMS int64, err error) {
 	if selected == nil || graphWriter == nil || !graphWriter.MatchesProjectStore(selected) ||
 		len(bundles) == 0 || len(bundles) > maxPageExchanges {
-		return false, false, errors.New("historical graph batch is unavailable")
+		return false, false, 0, 0, errors.New("historical graph batch is unavailable")
 	}
 	if err := validateSelectedProject(selected); err != nil {
-		return false, false, err
+		return false, false, 0, 0, err
 	}
+	graphImportStarted := time.Now()
 	importResult, importErr := graphWriter.ImportBundles(ctx, bundles)
+	graphImportDurationMS = time.Since(graphImportStarted).Milliseconds()
 	if importErr != nil {
-		return false, false, importErr
+		return false, false, graphImportDurationMS, 0, importErr
 	}
+	neo4jSyncStarted := time.Now()
 	syncResult, syncErr := graphsync.DrainUntilBundleAppliedWithWriter(ctx, selected, graphWriter, importResult.BundleID)
+	neo4jSyncDurationMS = time.Since(neo4jSyncStarted).Milliseconds()
 	if syncErr != nil {
-		return true, false, syncErr
+		return true, false, graphImportDurationMS, neo4jSyncDurationMS, syncErr
 	}
-	return true, syncResult.State == "ready", nil
+	return true, syncResult.State == "ready", graphImportDurationMS, neo4jSyncDurationMS, nil
 }
 
 // MarkPartial keeps a committed cursor resumable after a source interruption.
