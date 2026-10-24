@@ -12,20 +12,23 @@ import (
 )
 
 const (
-	maxAnalyticalCandidateAssertions = 1_000
-	maxAnalyticalCandidateCards      = 200
-	maxAnalyticalFrontierNodes       = 128
-	maxAnalyticalFrontierCursorSeeds = 5_000
-	analyticalClosureHops            = 2
+	maxAnalyticalCandidateAssertions  = 1_000
+	maxAnalyticalExcludedAssertions   = 10_000
+	maxAnalyticalCandidateCards       = 200
+	maxAnalyticalFrontierNodes        = 128
+	maxAnalyticalFrontierCursorSeeds  = 5_000
+	maxAnalyticalAssertionCursorSeeds = 5_000
+	analyticalClosureHops             = 2
 )
 
 // AnalyticalSliceOptions bounds the local candidate graph loaded for one
 // analysis slice. The shared graph Reader applies the requested node, edge,
 // and depth budgets after the bounded candidates are validated.
 type AnalyticalSliceOptions struct {
-	MaxNodes int
-	MaxEdges int
-	MaxDepth int
+	MaxNodes             int
+	MaxEdges             int
+	MaxDepth             int
+	ExcludedAssertionIDs []string
 }
 
 // AnalyticalSlice is a selected-query projection, not a whole-project
@@ -37,6 +40,8 @@ type AnalyticalSlice struct {
 	// CandidateAssertions is the assertion count materialized into the bounded snapshot.
 	CandidateAssertions          int
 	CandidateAssertionsTruncated bool
+	CandidateAssertionIDsOmitted []string
+	AssertionSeedsTruncated      bool
 	CandidateCards               int
 	CandidateCardsTruncated      bool
 	FrontierHops                 int
@@ -55,6 +60,10 @@ type AnalyticalSlice struct {
 // global contradiction or project integrity.
 func (s *Store) ReadProjectAnalyticalSlice(ctx context.Context, projectKey string, seedIDs []string, options AnalyticalSliceOptions) (AnalyticalSlice, error) {
 	seeds, err := analyticalSliceSeeds(projectKey, seedIDs, options)
+	if err != nil {
+		return AnalyticalSlice{}, err
+	}
+	options.ExcludedAssertionIDs, err = analyticalExcludedAssertionIDs(options.ExcludedAssertionIDs)
 	if err != nil {
 		return AnalyticalSlice{}, err
 	}
@@ -100,6 +109,23 @@ func analyticalSliceSeeds(projectKey string, ids []string, options AnalyticalSli
 	return seeds, nil
 }
 
+func analyticalExcludedAssertionIDs(ids []string) ([]string, error) {
+	if len(ids) > maxAnalyticalExcludedAssertions {
+		return nil, errors.New("Neo4j analytical assertion exclusion list exceeds its limit")
+	}
+	seen := make(map[string]bool, len(ids))
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !neighborhoodIDPattern.MatchString(id) || !strings.HasPrefix(id, "assertion-") || seen[id] {
+			return nil, errors.New("Neo4j analytical assertion exclusion identity is invalid")
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
 func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransaction, project string, seeds []string, options AnalyticalSliceOptions) (AnalyticalSlice, error) {
 	generation, err := neighborhoodGeneration(ctx, tx, project)
 	if err != nil {
@@ -110,7 +136,10 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 		return AnalyticalSlice{}, err
 	}
 
-	seenAssertions := make(map[string]bool)
+	seenAssertions := make(map[string]bool, len(options.ExcludedAssertionIDs)+len(seeds))
+	for _, id := range options.ExcludedAssertionIDs {
+		seenAssertions[id] = true
+	}
 	for _, seed := range seeds {
 		if strings.HasPrefix(seed, "assertion-") {
 			seenAssertions[seed] = true
@@ -122,17 +151,33 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 		seenFrontier[id] = true
 	}
 	result := AnalyticalSlice{Generation: generation, FrontierHops: options.MaxDepth + analyticalClosureHops}
+	assertionSeeds := make(map[string]bool)
+	for id, record := range read.records {
+		if record.kind == "assertion" {
+			assertionSeeds[id] = true
+		}
+	}
 	for hop := 0; hop < result.FrontierHops; hop++ {
 		if len(frontier) == 0 {
 			break
 		}
-		remaining := maxAnalyticalCandidateAssertions - len(seenAssertions)
-		candidates, truncated, err := readAnalyticalAssertionCandidates(ctx, tx, project, frontier, seenAssertions, remaining)
+		remaining := maxAnalyticalCandidateAssertions - len(assertionSeeds)
+		remaining = max(0, remaining)
+		candidates, omittedCandidates, truncated, err := readAnalyticalAssertionCandidates(ctx, tx, project, frontier, seenAssertions, remaining)
 		if err != nil {
 			return AnalyticalSlice{}, err
 		}
 		for _, id := range candidates {
 			seenAssertions[id] = true
+		}
+		if len(omittedCandidates) > 0 {
+			remainingSeeds := maxAnalyticalAssertionCursorSeeds - len(result.CandidateAssertionIDsOmitted)
+			if remainingSeeds > 0 {
+				result.CandidateAssertionIDsOmitted = append(result.CandidateAssertionIDsOmitted, omittedCandidates[:min(len(omittedCandidates), remainingSeeds)]...)
+			}
+			if len(omittedCandidates) > remainingSeeds {
+				result.AssertionSeedsTruncated = true
+			}
 		}
 		if truncated {
 			result.CandidateAssertionsTruncated = true
@@ -142,6 +187,12 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 		}
 		if err := read.closeAssertionDependencies(ctx, tx, maxAnalyticalCandidateAssertions); err != nil {
 			return AnalyticalSlice{}, err
+		}
+		for id, record := range read.records {
+			if record.kind == "assertion" {
+				assertionSeeds[id] = true
+				seenAssertions[id] = true
+			}
 		}
 		if truncated {
 			break
@@ -254,16 +305,16 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 	return result, nil
 }
 
-func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTransaction, project string, frontier []string, seen map[string]bool, remaining int) ([]string, bool, error) {
+func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTransaction, project string, frontier []string, seen map[string]bool, remaining int) ([]string, []string, bool, error) {
 	if remaining < 0 {
-		return nil, false, errors.New("Neo4j analytical assertion budget is invalid")
+		return nil, nil, false, errors.New("Neo4j analytical assertion budget is invalid")
 	}
 	if len(frontier) == 0 {
-		return []string{}, false, nil
+		return []string{}, []string{}, false, nil
 	}
 	perNodePageSize, err := analyticalAssertionShare(remaining, len(frontier))
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	// An assertion may touch the same entity in both endpoint roles. Probe up
 	// to two rows per unique candidate so those duplicate roles do not consume
@@ -287,7 +338,7 @@ func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTran
 		"per_node_limit": perNodeProbeLimit, "limit": rowLimit + 1,
 	})
 	if err != nil {
-		return nil, false, errors.New("Neo4j analytical assertion frontier is unavailable")
+		return nil, nil, false, errors.New("Neo4j analytical assertion frontier is unavailable")
 	}
 	frontierSet := make(map[string]bool, len(frontier))
 	for _, id := range frontier {
@@ -303,15 +354,16 @@ func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTran
 		rows++
 		if !frontierOK || !frontierSet[frontierID] || !assertionOK || !neighborhoodIDPattern.MatchString(assertionID) ||
 			!strings.HasPrefix(assertionID, "assertion-") || rows > rowLimit {
-			return nil, false, errors.New("Neo4j analytical assertion candidate is malformed")
+			return nil, nil, false, errors.New("Neo4j analytical assertion candidate is malformed")
 		}
 		byFrontier[frontierID] = append(byFrontier[frontierID], assertionID)
 	}
 	if result.Err() != nil {
-		return nil, false, errors.New("Neo4j analytical assertion frontier could not be read")
+		return nil, nil, false, errors.New("Neo4j analytical assertion frontier could not be read")
 	}
 	truncated := false
 	ids := make([]string, 0, min(rowLimit, remaining+1))
+	omittedIDs := make([]string, 0, len(frontier))
 	for _, frontierID := range frontier {
 		candidates := byFrontier[frontierID]
 		localUnique := make([]string, 0, len(candidates))
@@ -323,6 +375,7 @@ func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTran
 		candidates = localUnique
 		if len(candidates) > perNodePageSize {
 			truncated = true
+			omittedIDs = append(omittedIDs, candidates[perNodePageSize:]...)
 			candidates = candidates[:perNodePageSize]
 		}
 		ids = append(ids, candidates...)
@@ -334,8 +387,19 @@ func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTran
 			unique = append(unique, id)
 		}
 	}
-	page, pageTruncated, err := analyticalCandidatePage(unique, remaining)
-	return page, truncated || pageTruncated, err
+	page, pageOmitted, pageTruncated, err := analyticalCandidatePage(unique, remaining)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	omittedIDs = append(omittedIDs, pageOmitted...)
+	sort.Strings(omittedIDs)
+	omittedUnique := omittedIDs[:0]
+	for _, id := range omittedIDs {
+		if len(omittedUnique) == 0 || omittedUnique[len(omittedUnique)-1] != id {
+			omittedUnique = append(omittedUnique, id)
+		}
+	}
+	return page, omittedUnique, truncated || pageTruncated, nil
 }
 
 // analyticalAssertionShare spreads the remaining global assertion budget
@@ -365,14 +429,14 @@ func analyticalFrontierPage(ids []string, limit int) ([]string, []string) {
 	return ids[:limit], ids[limit:]
 }
 
-func analyticalCandidatePage(ids []string, remaining int) ([]string, bool, error) {
+func analyticalCandidatePage(ids []string, remaining int) ([]string, []string, bool, error) {
 	if remaining < 0 {
-		return nil, false, errors.New("Neo4j analytical assertion budget is invalid")
+		return nil, nil, false, errors.New("Neo4j analytical assertion budget is invalid")
 	}
 	if len(ids) > remaining {
-		return ids[:remaining], true, nil
+		return ids[:remaining], ids[remaining:], true, nil
 	}
-	return ids, false, nil
+	return ids, []string{}, false, nil
 }
 
 func (r *neighborhoodRead) closeCardEndpointDependencies(ctx context.Context, tx neo4j.ManagedTransaction, budget int) error {

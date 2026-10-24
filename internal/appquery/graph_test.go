@@ -246,12 +246,14 @@ func TestGraphCursorRejectsMalformedAndAcceptsBoundedFullViewRequests(t *testing
 func TestFullContinuationBranchSeedsIncludeResumableNativeOmissions(t *testing.T) {
 	assertionA := "assertion-" + strings.Repeat("a", 64)
 	assertionB := "assertion-" + strings.Repeat("b", 64)
+	assertionC := "assertion-" + strings.Repeat("c", 64)
 	frontier := "endpoint-" + strings.Repeat("c", 64)
 	payload := map[string]any{
 		"missing_branches": []behaviorgraph.Record{
 			{"assertion_id": assertionB, "reason": "max_edges"},
 			{"assertion_id": assertionA, "reason": "max_nodes"},
 			{"assertion_id": assertionB, "reason": "mandatory_evidence_branch_omitted"},
+			{"assertion_id": assertionC, "reason": "analytical_assertion_candidate_limit"},
 			{"assertion_id": "assertion-" + strings.Repeat("d", 64), "reason": "max_depth"},
 			{"assertion_id": "endpoint-" + strings.Repeat("d", 64), "reason": "max_edges"},
 			{"frontier_id": frontier, "reason": "analytical_frontier_node_limit"},
@@ -259,8 +261,8 @@ func TestFullContinuationBranchSeedsIncludeResumableNativeOmissions(t *testing.T
 		},
 	}
 	got := fullContinuationBranchSeeds(payload)
-	if len(got) != 3 || got[0] != assertionA || got[1] != assertionB || got[2] != frontier {
-		t.Fatalf("resumable branch IDs = %v, want sorted assertions and native frontier seed %v", got, []string{assertionA, assertionB, frontier})
+	if len(got) != 4 || got[0] != assertionA || got[1] != assertionB || got[2] != assertionC || got[3] != frontier {
+		t.Fatalf("resumable branch IDs = %v, want sorted assertion and frontier seeds", got)
 	}
 }
 

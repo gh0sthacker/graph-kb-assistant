@@ -218,12 +218,17 @@ func TestAnalyticalContinuationTruncationRecomputesResolvedRendererOmissions(t *
 	if analyticalContinuationTruncated(current, prior, nil) {
 		t.Fatal("resolved renderer omissions remained truncated from an earlier page")
 	}
-	for _, key := range []string{
-		"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached",
-		"candidate_card_limit_reached", "provenance_truncated",
-	} {
+	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached"} {
+		if analyticalContinuationTruncated(current, map[string]any{key: true}, nil) {
+			t.Errorf("resolved native continuation limit %q remained set from an earlier page", key)
+		}
+		if !analyticalContinuationTruncated(current, nil, map[string]any{key: true}) {
+			t.Errorf("current native continuation limit %q was lost", key)
+		}
+	}
+	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_limit_reached", "provenance_truncated"} {
 		if !analyticalContinuationTruncated(current, map[string]any{key: true}, nil) {
-			t.Errorf("persistent native limit %q was lost", key)
+			t.Errorf("unpaged or exclusion limit %q was lost", key)
 		}
 	}
 	for _, key := range []string{
@@ -255,6 +260,20 @@ func TestMergeContinuationBranchesKeepsNativeFrontierSeeds(t *testing.T) {
 	}
 	if !seen[assertion] || !seen[endpoint] {
 		t.Fatalf("merged continuation seeds = %#v", branches)
+	}
+}
+
+func TestContinuationExcludedAssertionIDsAreSortedAndDeduplicated(t *testing.T) {
+	first := "assertion-" + strings.Repeat("a", 64)
+	second := "assertion-" + strings.Repeat("b", 64)
+	ids, truncated, err := continuationExcludedAssertionIDs([]any{
+		map[string]any{"id": second},
+		map[string]any{"id": first},
+		map[string]any{"id": second},
+		map[string]any{"id": "endpoint-" + strings.Repeat("c", 64)},
+	})
+	if err != nil || truncated || len(ids) != 2 || ids[0] != first || ids[1] != second {
+		t.Fatalf("continuation assertion exclusions = %v, truncated=%t, err=%v", ids, truncated, err)
 	}
 }
 

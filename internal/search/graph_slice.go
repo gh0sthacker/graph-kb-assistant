@@ -20,6 +20,7 @@ import (
 )
 
 const maxCaptureProvenanceRows = 1_000
+const maxContinuationExcludedAssertionIDs = 10_000
 
 var ErrAnalyticalGenerationChanged = errors.New("Neo4j graph generation changed during analytical continuation")
 
@@ -32,6 +33,10 @@ func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs [
 // GraphSliceWithService runs the shared graph query through a process-owned
 // graph access service.
 func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any) (map[string]any, error) {
+	return graphSliceWithExcludedAssertions(ctx, service, projectStore, seedIDs, maxNodes, maxEdges, maxDepth, selectedContext, nil)
+}
+
+func graphSliceWithExcludedAssertions(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any, excludedAssertionIDs []string) (map[string]any, error) {
 	if err := validateGraphProjectStore(projectStore); err != nil {
 		return nil, err
 	}
@@ -44,7 +49,7 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 		reader, err = service.OpenReader(ctx, projectStore)
 	case "neo4j":
 		nativeSlice, err = service.ReadAnalyticalSlice(ctx, projectStore, seedIDs, neo4jstore.AnalyticalSliceOptions{
-			MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth,
+			MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth, ExcludedAssertionIDs: excludedAssertionIDs,
 		})
 		if err == nil {
 			reader, err = behaviorgraph.OpenReaderFromSnapshot(ctx, nativeSlice.Snapshot, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
@@ -74,6 +79,18 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 		slice["query_frontier_hops"] = nativeSlice.FrontierHops
 		slice["candidate_assertion_count"] = nativeSlice.CandidateAssertions
 		slice["candidate_assertion_limit_reached"] = nativeSlice.CandidateAssertionsTruncated
+		if len(nativeSlice.CandidateAssertionIDsOmitted) > 0 {
+			branches, _ := slice["missing_branches"].([]behaviorgraph.Record)
+			for _, id := range nativeSlice.CandidateAssertionIDsOmitted {
+				branches = append(branches, behaviorgraph.Record{
+					"assertion_id": id, "reason": "analytical_assertion_candidate_limit",
+				})
+			}
+			slice["missing_branches"] = branches
+		}
+		if nativeSlice.AssertionSeedsTruncated {
+			slice["missing_branches_truncated"] = true
+		}
 		slice["analytical_frontier_node_limit_reached"] = nativeSlice.FrontierNodeLimitReached
 		slice["analytical_frontier_nodes_omitted"] = nativeSlice.FrontierNodesOmitted
 		if len(nativeSlice.FrontierNodeIDsOmitted) > 0 {
@@ -102,7 +119,7 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 			"Contradiction and evidence closure is limited to the loaded frontier and is not project-wide.",
 		)
 		if nativeSlice.CandidateAssertionsTruncated {
-			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j assertion candidate budget was reached; additional frontier records were not loaded by this analytical request.")
+			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j global assertion candidate budget was reached; omitted assertion IDs are available through generation-pinned continuation when the bounded queue permits.")
 		}
 		if nativeSlice.FrontierNodeLimitReached {
 			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analytical frontier node budget was reached; omitted node branches are available through generation-pinned graph continuation when the bounded queue permits.")
@@ -136,9 +153,20 @@ func ContinueGraphSliceWithService(
 	if generationFromGraphPayload(accumulated) < 1 {
 		return nil, errors.New("analytical graph continuation has no pinned generation")
 	}
-	nextPage, err := GraphSliceWithService(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, selectedContext)
+	excludedAssertionIDs, excludedTruncated, err := continuationExcludedAssertionIDs(accumulated["assertions"])
 	if err != nil {
 		return nil, err
+	}
+	nextPage, err := graphSliceWithExcludedAssertions(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, selectedContext, excludedAssertionIDs)
+	if err != nil {
+		return nil, err
+	}
+	if excludedTruncated {
+		nextPage["candidate_assertion_exclusion_truncated"] = true
+		nextPage["truncated"] = true
+		limitations := graphStringList(nextPage["limitations"])
+		limitations = append(limitations, "Continuation excluded at most 10,000 previously loaded assertions; larger accumulated views may revisit candidates.")
+		nextPage["limitations"] = uniqueStrings(limitations)
 	}
 	if generationFromGraphPayload(nextPage) != generationFromGraphPayload(accumulated) {
 		return nil, ErrAnalyticalGenerationChanged
@@ -172,8 +200,9 @@ func ContinueGraphSliceWithService(
 	slice["query_frontier_hops"] = maxIntValue(accumulated["query_frontier_hops"], nextPage["query_frontier_hops"])
 	slice["candidate_assertion_count"] = counts["assertions"]
 	slice["candidate_card_count"] = counts["cards"]
-	slice["candidate_assertion_limit_reached"] = anyGraphFlag(accumulated, nextPage, "candidate_assertion_limit_reached")
-	slice["analytical_frontier_node_limit_reached"] = anyGraphFlag(accumulated, nextPage, "analytical_frontier_node_limit_reached")
+	slice["candidate_assertion_limit_reached"] = graphPayloadFlag(nextPage, "candidate_assertion_limit_reached")
+	slice["candidate_assertion_exclusion_truncated"] = anyGraphFlag(accumulated, nextPage, "candidate_assertion_exclusion_truncated")
+	slice["analytical_frontier_node_limit_reached"] = graphPayloadFlag(nextPage, "analytical_frontier_node_limit_reached")
 	slice["candidate_card_limit_reached"] = anyGraphFlag(accumulated, nextPage, "candidate_card_limit_reached")
 	slice["provenance_truncated"] = anyGraphFlag(accumulated, nextPage, "provenance_truncated")
 	branches, branchesTruncated := mergeContinuationBranches(slice["missing_branches"], nextPage["missing_branches"])
@@ -182,8 +211,9 @@ func ContinueGraphSliceWithService(
 		graphPayloadFlag(nextPage, "missing_branches_truncated") {
 		slice["missing_branches_truncated"] = true
 	}
-	// These are native read limits. Keep them across pages even when the
-	// renderer's earlier omissions are resolved by the larger cumulative slice.
+	// Renderer omissions may resolve as the cumulative slice grows. Assertion
+	// and frontier flags describe the newest native page; card/provenance limits
+	// remain sticky because this continuation does not page those candidates.
 	slice["truncated"] = analyticalContinuationTruncated(slice, accumulated, nextPage)
 	truncatedIDs := append(graphStringList(accumulated["provenance_truncated_entity_ids"]), graphStringList(nextPage["provenance_truncated_entity_ids"])...)
 	slice["provenance_truncated_entity_ids"] = uniqueStrings(truncatedIDs)
@@ -250,6 +280,31 @@ func graphBranchSeedID(branch behaviorgraph.Record) string {
 	return id
 }
 
+func continuationExcludedAssertionIDs(value any) ([]string, bool, error) {
+	records, ok := graphRecordList(value)
+	if !ok {
+		return nil, false, errors.New("analytical graph continuation assertion list is malformed")
+	}
+	seen := make(map[string]bool, len(records))
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		id, ok := record["id"].(string)
+		if !ok || !strings.HasPrefix(id, "assertion-") {
+			continue
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	truncated := len(ids) > maxContinuationExcludedAssertionIDs
+	if truncated {
+		ids = ids[:maxContinuationExcludedAssertionIDs]
+	}
+	return ids, truncated, nil
+}
+
 func analyticalContinuationTruncated(current, accumulated, nextPage map[string]any) bool {
 	if graphPayloadFlag(current, "truncated") ||
 		graphPayloadFlag(current, "missing_branches_truncated") ||
@@ -258,10 +313,12 @@ func analyticalContinuationTruncated(current, accumulated, nextPage map[string]a
 		graphPayloadFlag(current, "source_integrity_budget_exceeded") {
 		return true
 	}
-	for _, key := range []string{
-		"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached",
-		"candidate_card_limit_reached", "provenance_truncated",
-	} {
+	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached"} {
+		if graphPayloadFlag(nextPage, key) {
+			return true
+		}
+	}
+	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_limit_reached", "provenance_truncated"} {
 		if anyGraphFlag(accumulated, nextPage, key) {
 			return true
 		}

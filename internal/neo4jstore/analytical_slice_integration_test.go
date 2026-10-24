@@ -155,21 +155,21 @@ func TestAnalyticalCandidatePageTruncatesOnlyWhenAnotherCandidateExists(t *testi
 	for i := range ids {
 		ids[i] = analyticalFixtureID("assertion", fmt.Sprintf("candidate-%d", i))
 	}
-	page, truncated, err := analyticalCandidatePage(ids, maxAnalyticalCandidateAssertions)
-	if err != nil || truncated || len(page) != maxAnalyticalCandidateAssertions {
-		t.Fatalf("exact candidate limit was reported as truncated: len=%d truncated=%t err=%v", len(page), truncated, err)
+	page, omitted, truncated, err := analyticalCandidatePage(ids, maxAnalyticalCandidateAssertions)
+	if err != nil || truncated || len(page) != maxAnalyticalCandidateAssertions || len(omitted) != 0 {
+		t.Fatalf("exact candidate limit was reported as truncated: len=%d omitted=%d truncated=%t err=%v", len(page), len(omitted), truncated, err)
 	}
-	page, truncated, err = analyticalCandidatePage(nil, 0)
-	if err != nil || truncated || len(page) != 0 {
-		t.Fatalf("empty probe at exhausted budget was reported as truncated: len=%d truncated=%t err=%v", len(page), truncated, err)
+	page, omitted, truncated, err = analyticalCandidatePage(nil, 0)
+	if err != nil || truncated || len(page) != 0 || len(omitted) != 0 {
+		t.Fatalf("empty probe at exhausted budget was reported as truncated: len=%d omitted=%d truncated=%t err=%v", len(page), len(omitted), truncated, err)
 	}
-	page, truncated, err = analyticalCandidatePage([]string{"assertion-extra"}, 0)
-	if err != nil || !truncated || len(page) != 0 {
-		t.Fatalf("extra candidate at exhausted budget was not reported as truncated: len=%d truncated=%t err=%v", len(page), truncated, err)
+	page, omitted, truncated, err = analyticalCandidatePage([]string{"assertion-extra"}, 0)
+	if err != nil || !truncated || len(page) != 0 || len(omitted) != 1 || omitted[0] != "assertion-extra" {
+		t.Fatalf("extra candidate at exhausted budget was not returned for continuation: len=%d omitted=%v truncated=%t err=%v", len(page), omitted, truncated, err)
 	}
-	page, truncated, err = analyticalCandidatePage(ids, maxAnalyticalCandidateAssertions-1)
-	if err != nil || !truncated || len(page) != maxAnalyticalCandidateAssertions-1 {
-		t.Fatalf("over-budget candidate page has wrong result: len=%d truncated=%t err=%v", len(page), truncated, err)
+	page, omitted, truncated, err = analyticalCandidatePage(ids, maxAnalyticalCandidateAssertions-1)
+	if err != nil || !truncated || len(page) != maxAnalyticalCandidateAssertions-1 || len(omitted) != 1 || omitted[0] != ids[maxAnalyticalCandidateAssertions-1] {
+		t.Fatalf("over-budget candidate page has wrong result: len=%d omitted=%v truncated=%t err=%v", len(page), omitted, truncated, err)
 	}
 }
 
@@ -199,6 +199,25 @@ func TestAnalyticalAssertionShareDistributesRemainingBudget(t *testing.T) {
 	}
 }
 
+func TestAnalyticalExcludedAssertionIDsAreBoundedAndValidated(t *testing.T) {
+	validA := analyticalFixtureID("assertion", "excluded-a")
+	validB := analyticalFixtureID("assertion", "excluded-b")
+	got, err := analyticalExcludedAssertionIDs([]string{validB, validA})
+	if err != nil || len(got) != 2 || got[0] >= got[1] {
+		t.Fatalf("valid exclusion IDs were not normalized: %v, %v", got, err)
+	}
+	for _, invalid := range [][]string{
+		{validA, validA},
+		{"endpoint-" + strings.Repeat("a", 64)},
+		{"assertion-invalid"},
+		make([]string, maxAnalyticalExcludedAssertions+1),
+	} {
+		if _, err := analyticalExcludedAssertionIDs(invalid); err == nil {
+			t.Errorf("invalid exclusion list of length %d was accepted", len(invalid))
+		}
+	}
+}
+
 func TestAnalyticalFrontierPageReportsOmittedNodes(t *testing.T) {
 	ids := []string{"entity-a", "entity-b", "entity-c"}
 	page, omitted := analyticalFrontierPage(ids, 2)
@@ -221,8 +240,8 @@ func TestNeo4jAnalyticalSliceUsesGlobalCandidateBudget(t *testing.T) {
 	}
 	seed := neighborhoodTestID("asset", "analytical-limit-seed")
 	entities := []behaviorgraph.Record{{"id": seed, "kind": "asset", "data": map[string]any{"label": "seed"}, "source_refs": []behaviorgraph.Record{source}}}
-	assertions := make([]behaviorgraph.Record, 0, maxAnalyticalCandidateAssertions+1)
-	for i := 0; i <= maxAnalyticalCandidateAssertions; i++ {
+	assertions := make([]behaviorgraph.Record, 0, maxAnalyticalCandidateAssertions+2)
+	for i := 0; i <= maxAnalyticalCandidateAssertions+1; i++ {
 		endpoint := neighborhoodTestID("asset", fmt.Sprintf("analytical-limit-endpoint-%d", i))
 		entities = append(entities, behaviorgraph.Record{
 			"id": endpoint, "kind": "asset", "data": map[string]any{"label": fmt.Sprintf("endpoint-%d", i)}, "source_refs": []behaviorgraph.Record{source},
@@ -243,6 +262,32 @@ func TestNeo4jAnalyticalSliceUsesGlobalCandidateBudget(t *testing.T) {
 	if !result.CandidateAssertionsTruncated || result.CandidateAssertions != maxAnalyticalCandidateAssertions {
 		t.Fatalf("candidate limit was not surfaced: %#v", result)
 	}
+	if len(result.CandidateAssertionIDsOmitted) != 2 || result.AssertionSeedsTruncated {
+		t.Fatalf("over-budget assertion IDs were not made resumable: %#v", result)
+	}
+	excluded := make([]string, 0, maxAnalyticalCandidateAssertions)
+	for _, record := range result.Snapshot["assertions"].([]behaviorgraph.Record) {
+		excluded = append(excluded, record["id"].(string))
+	}
+	continued, err := store.ReadProjectAnalyticalSlice(ctx, project, []string{result.CandidateAssertionIDsOmitted[0]}, AnalyticalSliceOptions{
+		MaxNodes: 30, MaxEdges: 30, MaxDepth: 2, ExcludedAssertionIDs: excluded,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continued.CandidateAssertionsTruncated || !analyticalSnapshotContainsAssertion(continued.Snapshot, result.CandidateAssertionIDsOmitted[1]) {
+		t.Fatalf("continuation repeated the loaded assertion page instead of advancing: first=%v next=%#v", result.CandidateAssertionIDsOmitted, continued)
+	}
+}
+
+func analyticalSnapshotContainsAssertion(snapshot behaviorgraph.Record, id string) bool {
+	assertions, _ := snapshot["assertions"].([]behaviorgraph.Record)
+	for _, assertion := range assertions {
+		if assertion["id"] == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNeo4jAnalyticalSliceReturnsOmittedFrontierSeeds(t *testing.T) {
