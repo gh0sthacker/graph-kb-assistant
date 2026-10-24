@@ -76,3 +76,37 @@ def test_sqlite_compatibility_mode_does_not_require_neo4j_file(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert args_file.read_text().strip() == "run ./cmd/bb-assistant web-ui"
+
+
+def test_launcher_loads_private_application_runtime_environment(tmp_path: Path) -> None:
+    env, args_file = make_fake_go(tmp_path)
+    binary_dir = Path(env["PATH"].split(":", maxsplit=1)[0])
+    go_binary = binary_dir / "go"
+    key_state_file = tmp_path / "vault-key-state.txt"
+    go_binary.write_text(
+        '#!/bin/sh\n'
+        'printf "%s\\n" "$*" > "$GO_ARGS_FILE"\n'
+        'if [ -n "${BB_ASSISTANT_VAULT_KEY:-}" ]; then '
+        'printf present > "$GO_KEY_STATE_FILE"; '
+        'else printf missing > "$GO_KEY_STATE_FILE"; fi\n'
+    )
+    go_binary.chmod(0o700)
+    env["GO_KEY_STATE_FILE"] = str(key_state_file)
+    env["BB_ASSISTANT_GRAPH_BACKEND"] = "sqlite"
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text("BB_ASSISTANT_VAULT_KEY=synthetic-test-key\n")
+    runtime_env.chmod(0o600)
+    env["BB_ASSISTANT_RUNTIME_ENV_FILE"] = str(runtime_env)
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant"), "web-ui"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text().strip() == "run ./cmd/bb-assistant web-ui"
+    assert key_state_file.read_text() == "present"

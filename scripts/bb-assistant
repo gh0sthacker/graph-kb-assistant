@@ -3,11 +3,24 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 data_home="${XDG_DATA_HOME:-${HOME:?HOME must be set}/.local/share}"
-env_file="${BB_ASSISTANT_NEO4J_ENV_FILE:-$data_home/bb-graph-assistant/neo4j.env}"
 requested_backend="${BB_ASSISTANT_GRAPH_BACKEND:-}"
 requested_data_home="${BB_ASSISTANT_DATA_HOME:-}"
+requested_vault_key="${BB_ASSISTANT_VAULT_KEY:-}"
+runtime_data_home="${requested_data_home:-$data_home/bb-graph-assistant/graph-kb-assistant}"
+runtime_env_file="${BB_ASSISTANT_RUNTIME_ENV_FILE:-$runtime_data_home/runtime.env}"
+env_file="${BB_ASSISTANT_NEO4J_ENV_FILE:-$data_home/bb-graph-assistant/neo4j.env}"
 command_name="${1:-}"
 needs_neo4j_config=1
+
+if [[ -f "$runtime_env_file" ]]; then
+  set -a
+  # This owner-managed private file may contain the local vault key.
+  . "$runtime_env_file"
+  set +a
+fi
+runtime_backend="${BB_ASSISTANT_GRAPH_BACKEND:-}"
+runtime_data_home="${BB_ASSISTANT_DATA_HOME:-}"
+runtime_vault_key="${BB_ASSISTANT_VAULT_KEY:-}"
 
 case "$command_name" in
   status|version)
@@ -31,9 +44,18 @@ fi
 
 if [[ -n "$requested_backend" ]]; then
   export BB_ASSISTANT_GRAPH_BACKEND="$requested_backend"
+elif [[ -n "$runtime_backend" ]]; then
+  export BB_ASSISTANT_GRAPH_BACKEND="$runtime_backend"
 fi
 if [[ -n "$requested_data_home" ]]; then
   export BB_ASSISTANT_DATA_HOME="$requested_data_home"
+elif [[ -n "$runtime_data_home" ]]; then
+  export BB_ASSISTANT_DATA_HOME="$runtime_data_home"
+fi
+if [[ -n "$requested_vault_key" ]]; then
+  export BB_ASSISTANT_VAULT_KEY="$requested_vault_key"
+elif [[ -n "$runtime_vault_key" ]]; then
+  export BB_ASSISTANT_VAULT_KEY="$runtime_vault_key"
 fi
 export BB_ASSISTANT_GRAPH_BACKEND="${BB_ASSISTANT_GRAPH_BACKEND:-neo4j}"
 cd "$repo_root"

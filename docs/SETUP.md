@@ -41,6 +41,16 @@ Configure your MCP client to run that executable from the repository checkout. K
 
 The launcher reads the private Neo4j settings from `$XDG_DATA_HOME/bb-graph-assistant/neo4j.env` (or `~/.local/share/bb-graph-assistant/neo4j.env`) and selects Neo4j for graph reads. Set `BB_ASSISTANT_NEO4J_ENV_FILE` to use another private file. Operational commands require that file when Neo4j is selected. `status` and `version` work without it; explicit SQLite compatibility mode also does not require it. The same launcher runs other commands, for example `./scripts/bb-assistant neo4j-check`.
 
+The launcher also loads the optional private application file
+`$BB_ASSISTANT_DATA_HOME/runtime.env`; by default this is
+`$XDG_DATA_HOME/bb-graph-assistant/graph-kb-assistant/runtime.env` (or the
+equivalent path under `~/.local/share`). Set `BB_ASSISTANT_RUNTIME_ENV_FILE` to
+choose another file. Keep it owner-only (`0600`); it can contain the vault key
+used by explicit local evidence-view actions. Values supplied directly in the
+process environment take precedence. The key stays in the local Go process:
+normal graph reads do not load message bytes, and evidence is not sent to
+Hermes automatically.
+
 ## Use Hermes Agent
 
 Hermes is the supported runtime harness for the local assistant. Install it and check the configured MCP server with the project launchers:

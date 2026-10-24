@@ -1,17 +1,21 @@
 # Project status and known limitations
 
-## Local application and Hermes runtime check (2026-10-24 09:17Z) — PARTIAL
+## Local application and Hermes runtime check (2026-10-24 09:24Z) — PARTIAL
 
-- The Go web UI is running at `http://127.0.0.1:8765/`. The landing page and
-  `/api/projects` returned HTTP 200. The Juice Shop surface query returned
-  paginated operations for `192.168.1.149:3000`; a direct graph query returned
-  three entities and two assertions with `incomplete=true`. This verifies the
-  local HTTP-to-Neo4j read path for one focused selection, not full graph or
+- The Go web UI was restarted at `http://127.0.0.1:8765/` through the updated
+  launcher; `/` returned HTTP 200. A read-only Neo4j check returned `ready`.
+  This confirms the local UI and graph backend start, not complete graph or
   Caido coverage.
 - Fresh Go status at 09:10:34Z reported capture schema v7 and BehaviorGraph
   schema v2 compatible, 1,400 captures, 1,369 graph-mapped, 31 unmapped, and
   queue counts of 448 pending, 0 leased, 952 applied and 0 dead-lettered.
   `neo4j-check` returned `ready`; overall coverage remains `PARTIAL`.
+- The shared launcher now reads the optional private `runtime.env` file and
+  passes its vault key to local Go processes. A synthetic regression test
+  confirmed the key reaches the app process; the updated launcher and setup
+  guidance make the existing exact-message preview usable when that key
+  decrypts the selected local revision. The running UI was restarted to load
+  the file. No real capture body was opened during this check.
 - A 20-minute local projection-worker run applied 612 jobs. Its JSON progress
   contained all 612 successful deliveries, matching the durable applied-count
   increase, while the summary showed only 600 because the final partial batch
@@ -25,16 +29,18 @@
   capture-content transfer was performed. The web graph and Hermes MCP are
   verified as separate local entry points; the model-backed consultation
   cycle is not yet runtime-verified.
-- Caido remains on `sperpravo`; the local Juice Shop project is not selected.
-  No Caido request was fetched, no project was switched, and no target traffic
-  was sent. Metadata reconciliation of Juice Shop is pending explicit approval
-  to switch temporarily, so Caido synchronization remains unverified.
-- `TMPDIR=/var/tmp go test -count=1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
-  all 25 Node web-state tests, and `git diff --check` passed. The Node test
-  sandbox now provides the browser Web Crypto API used by the shipped client.
-  Runtime state is still `PARTIAL`: 448 projections remain queued, 31 captures
-  are unmapped, the Caido snapshot is unreconciled, and browser/JavaScript
-  application coverage is absent.
+- An approved metadata-only Juice Shop reconciliation enumerated 355 IDs for
+  `192.168.1.149:3000` in 4 pages; all 355 matched the local index, with no
+  unclassified IDs. No request/response bodies or target traffic were used.
+  Caido was restored to the `sperpravo` selection and verified. Since Caido
+  offers no stable snapshot token, `history_reconciled=false` and coverage
+  remains `PARTIAL`.
+- `PYTHONPATH=src python3 -m pytest -q tests/test_runtime_launcher.py`
+  (4 passed), `bash -n scripts/bb-assistant`, the UI HTTP smoke check,
+  `./scripts/run-hermes mcp test bb_assistant` (15 tools), and
+  `git diff --check` passed. Runtime state is still `PARTIAL`: 448 projections
+  remain queued, 31 captures are unmapped, and browser/JavaScript application
+  coverage and model-backed consultation remain unverified.
 
 ## ECC graph audit correction and projection runtime (2026-10-24 08:21Z) — PARTIAL
 
