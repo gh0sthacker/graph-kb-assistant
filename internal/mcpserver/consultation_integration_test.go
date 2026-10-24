@@ -66,6 +66,73 @@ func (mcpCycleComparison) CompareCaptureMessages(_ context.Context, request appq
 	}, nil
 }
 
+type consultationModelAdapter interface {
+	DraftProposal(context.Context, map[string]any, map[string]any) (consultation.CandidateProposal, []string, []string, error)
+}
+
+// fixtureConsultationModel stands in for the model behind Hermes. It receives
+// only the accepted MCP resume packet and comparison result, never source
+// request/response bodies or the test's raw comparison excerpts.
+type fixtureConsultationModel struct{}
+
+func (fixtureConsultationModel) DraftProposal(_ context.Context, resumed, comparison map[string]any) (consultation.CandidateProposal, []string, []string, error) {
+	if resumed["review_accepted"] != true {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("model received an unreviewed session")
+	}
+	encodedInput, err := json.Marshal([]any{resumed, comparison})
+	if err != nil {
+		return consultation.CandidateProposal{}, nil, nil, err
+	}
+	if strings.Contains(string(encodedInput), "body-secret") {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("model input contained a raw comparison excerpt")
+	}
+	evidence, ok := resumed["evidence"].(map[string]any)
+	if !ok || evidence["question"] == "" {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("accepted evidence packet was not available")
+	}
+	refs, ok := resumed["evidence_references"].([]any)
+	if !ok || len(refs) != 2 {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("model received %d evidence references; want 2", len(refs))
+	}
+	comparisonID, ok := comparison["comparison_id"].(string)
+	if !ok || comparisonID == "" {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("deterministic comparison ID is missing")
+	}
+	result, ok := comparison["result"].(map[string]any)
+	if !ok {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("deterministic comparison result is missing")
+	}
+	requestResult, requestOK := result["request"].(map[string]any)
+	responseResult, responseOK := result["response"].(map[string]any)
+	if !requestOK || !responseOK || requestResult["available"] != true || responseResult["available"] != true {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("exact comparison sides are unavailable")
+	}
+	if requestResult["equal"] != true || responseResult["equal"] != true {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("fixture model expected identical request and response bytes")
+	}
+	evidenceIDs := make([]string, 0, len(refs))
+	for _, value := range refs {
+		ref, ok := value.(map[string]any)
+		if !ok {
+			return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("evidence reference has an unexpected shape")
+		}
+		id, ok := ref["evidence_reference_id"].(string)
+		if !ok || id == "" {
+			return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("evidence reference ID is missing")
+		}
+		evidenceIDs = append(evidenceIDs, id)
+	}
+	return consultation.CandidateProposal{
+		Title:        "Synthetic response comparison",
+		Summary:      "The selected synthetic request and response bytes compare equal; no target impact is established.",
+		Rationale:    "This proposal follows the available exact comparison result and cites both selected fixture responses.",
+		Impact:       "No vulnerability or target impact is established by synthetic data.",
+		Alternatives: []string{"The matching response behavior may be expected."},
+		NextChecks:   []string{"Repeat the comparison with an independently selected synthetic actor."},
+		Limitations:  []string{"This model adapter is a fixture and does not assess real captured data."},
+	}, evidenceIDs, []string{comparisonID}, nil
+}
+
 func TestMCPConsultationCycleSurvivesTransportAndRestart(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "runtime")
@@ -157,19 +224,21 @@ func TestMCPConsultationCycleSurvivesTransportAndRestart(t *testing.T) {
 		t.Fatal("MCP comparison exposed a raw fixture excerpt")
 	}
 	comparisonID := fixtureString(t, comparison, "comparison_id")
+	var model consultationModelAdapter = fixtureConsultationModel{}
+	modelProposal, modelEvidenceIDs, modelComparisonIDs, err := model.DraftProposal(ctx, resumed, comparison)
+	if err != nil {
+		t.Fatalf("synthetic model adapter: %v", err)
+	}
+	if len(modelEvidenceIDs) != 2 || modelEvidenceIDs[0] != leftReferenceID || modelEvidenceIDs[1] != rightReferenceID ||
+		len(modelComparisonIDs) != 1 || modelComparisonIDs[0] != comparisonID {
+		t.Fatalf("synthetic model citations do not match its input: evidence=%v comparisons=%v", modelEvidenceIDs, modelComparisonIDs)
+	}
 	proposal := callMCPFixtureTool(t, server, 6, "bb_consult_record_proposal", map[string]any{
 		"project_key": projectKey, "session_id": sessionID, "expected_version": 3,
-		"idempotency_key": "mcp_record_proposal_0001",
-		"proposal": map[string]any{
-			"title": "Synthetic response difference", "summary": "The selected fixture responses compare equal.",
-			"rationale":    "The result is limited to exact local fixture evidence.",
-			"impact":       "No target impact is established.",
-			"alternatives": []string{"The behavior may be expected."},
-			"next_checks":  []string{"Review another synthetic actor pair."},
-			"limitations":  []string{"Synthetic fixtures do not establish a vulnerability."},
-		},
-		"evidence_reference_ids": []string{leftReferenceID, rightReferenceID},
-		"comparison_ids":         []string{comparisonID},
+		"idempotency_key":        "mcp_record_proposal_0001",
+		"proposal":               modelProposal,
+		"evidence_reference_ids": modelEvidenceIDs,
+		"comparison_ids":         modelComparisonIDs,
 	})
 	proposalID := fixtureString(t, proposal, "proposal_id")
 	receipt := callMCPFixtureTool(t, server, 7, "bb_consult_validate_proposal", map[string]any{

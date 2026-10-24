@@ -19,6 +19,14 @@ Hermes can resume the session with `bb_consult_resume` using the copied
 `project_key` and `session_id`. This allows access to the saved redacted packet;
 it does not send the packet automatically or select a model provider.
 
+The synthetic MCP lifecycle test injects a fixture analyst adapter at the
+model boundary. It receives only the accepted resume result and sanitized
+deterministic comparison, derives a proposal and exact citation IDs, then sends
+that proposal through the same MCP persistence and validation path. The fixture
+rejects unreviewed sessions, unavailable comparisons, and raw excerpt markers.
+It is test-only; Hermes still has no configured model/provider and no captured
+project data has been sent to a model.
+
 Version-1 sessions migrate as unaccepted. Before operator acceptance, Hermes
 also receives no prior comparison, proposal, receipt, or candidate records from
 the session, and assistant mutation retries cannot replay pre-migration results.

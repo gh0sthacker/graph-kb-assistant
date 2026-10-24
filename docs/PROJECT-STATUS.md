@@ -1,5 +1,18 @@
 # Project status and known limitations
 
+## Stage 5 injectable synthetic analyst adapter (2026-10-24) — PARTIAL
+
+- The MCP consultation lifecycle fixture now injects an explicit model-boundary
+  adapter. It receives only an operator-accepted resume result and the
+  sanitized deterministic comparison, derives an unverified proposal with
+  exact evidence/comparison references, and submits it through MCP citation
+  validation, candidate save, and restart/resume.
+- The adapter rejects unreviewed sessions, unavailable comparison sides, and
+  raw excerpt markers. This validates the harness contract on synthetic data;
+  it is test-only and does not configure Hermes or call a model provider. Stage
+  5 remains `PARTIAL` pending a selected provider, data-boundary review, and
+  real model-backed evaluation.
+
 ## Exact evidence range provenance checks (2026-10-24) — PARTIAL
 
 - The local evidence viewer now requires an exact 64-character revision ID and
