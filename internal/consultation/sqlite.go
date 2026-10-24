@@ -21,7 +21,7 @@ import (
 const (
 	consultationDatabaseName  = "consultation.sqlite3"
 	consultationApplicationID = 0x42424353 // ASCII "BBCS".
-	consultationSchemaVersion = 3
+	consultationSchemaVersion = 4
 	maximumStoredSessions     = 5000
 )
 
@@ -192,6 +192,20 @@ func initializeConsultationSchema(db *sql.DB) error {
 				created_at_ns INTEGER NOT NULL
 			)`,
 			`CREATE INDEX consultation_context_annotations_session_idx ON consultation_context_annotations(session_id, created_at_ns, annotation_id)`,
+			`CREATE TABLE consultation_operation_aliases (
+				alias_id TEXT PRIMARY KEY CHECK(length(alias_id) = 43),
+				project_key TEXT NOT NULL CHECK(length(project_key) = 64),
+				operation_id TEXT NOT NULL CHECK(length(operation_id) = 74),
+				alias_version INTEGER NOT NULL CHECK(alias_version >= 1),
+				alias TEXT NOT NULL CHECK(length(alias) BETWEEN 1 AND 96),
+				origin TEXT NOT NULL CHECK(origin = 'analyst'),
+				idempotency_key TEXT NOT NULL,
+				request_hash TEXT NOT NULL CHECK(length(request_hash) = 64),
+				created_at_ns INTEGER NOT NULL,
+				UNIQUE(project_key, operation_id, alias_version),
+				UNIQUE(project_key, operation_id, idempotency_key)
+			)`,
+			`CREATE INDEX consultation_operation_aliases_latest_idx ON consultation_operation_aliases(project_key, operation_id, alias_version DESC)`,
 			`CREATE TABLE consultation_idempotency (
 				project_key TEXT NOT NULL CHECK(length(project_key) = 64),
 				session_id TEXT NOT NULL,
@@ -207,7 +221,7 @@ func initializeConsultationSchema(db *sql.DB) error {
 				old.state != new.state OR old.evidence_json != new.evidence_json OR old.references_json != new.references_json OR old.created_at_ns != new.created_at_ns
 				BEGIN SELECT RAISE(ABORT, 'consultation session identity is immutable'); END`,
 		}
-		for _, table := range []string{"comparisons", "proposals", "receipts", "candidates", "reviews", "context_annotations", "idempotency"} {
+		for _, table := range []string{"comparisons", "proposals", "receipts", "candidates", "reviews", "context_annotations", "operation_aliases", "idempotency"} {
 			statements = append(statements,
 				fmt.Sprintf(`CREATE TRIGGER consultation_%s_no_update BEFORE UPDATE ON consultation_%s BEGIN SELECT RAISE(ABORT, 'consultation records are immutable'); END`, table, table),
 				fmt.Sprintf(`CREATE TRIGGER consultation_%s_no_delete BEFORE DELETE ON consultation_%s BEGIN SELECT RAISE(ABORT, 'consultation records are append-only'); END`, table, table),
@@ -247,6 +261,12 @@ func initializeConsultationSchema(db *sql.DB) error {
 			return err
 		}
 		version = 3
+	}
+	if version == 3 {
+		if err := migrateConsultationV3ToV4(db); err != nil {
+			return err
+		}
+		version = 4
 	}
 	if version != consultationSchemaVersion {
 		return errors.New("consultation database identity or schema version is unsupported")
@@ -313,6 +333,41 @@ func migrateConsultationV2ToV3(db *sql.DB) error {
 		}
 	}
 	if _, err := tx.Exec("PRAGMA user_version = 3"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateConsultationV3ToV4(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`CREATE TABLE consultation_operation_aliases (
+			alias_id TEXT PRIMARY KEY CHECK(length(alias_id) = 43),
+			project_key TEXT NOT NULL CHECK(length(project_key) = 64),
+			operation_id TEXT NOT NULL CHECK(length(operation_id) = 74),
+			alias_version INTEGER NOT NULL CHECK(alias_version >= 1),
+			alias TEXT NOT NULL CHECK(length(alias) BETWEEN 1 AND 96),
+			origin TEXT NOT NULL CHECK(origin = 'analyst'),
+			idempotency_key TEXT NOT NULL,
+			request_hash TEXT NOT NULL CHECK(length(request_hash) = 64),
+			created_at_ns INTEGER NOT NULL,
+			UNIQUE(project_key, operation_id, alias_version),
+			UNIQUE(project_key, operation_id, idempotency_key)
+		)`,
+		`CREATE INDEX consultation_operation_aliases_latest_idx ON consultation_operation_aliases(project_key, operation_id, alias_version DESC)`,
+		`CREATE TRIGGER consultation_operation_aliases_no_update BEFORE UPDATE ON consultation_operation_aliases BEGIN SELECT RAISE(ABORT, 'consultation records are immutable'); END`,
+		`CREATE TRIGGER consultation_operation_aliases_no_delete BEFORE DELETE ON consultation_operation_aliases BEGIN SELECT RAISE(ABORT, 'consultation records are append-only'); END`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("PRAGMA user_version = 4"); err != nil {
 		return err
 	}
 	return tx.Commit()

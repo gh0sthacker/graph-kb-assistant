@@ -113,6 +113,13 @@
     return { maskedSegments, message };
   }
 
+  function operationAliasFor(node, aliases) {
+    if (!node || node.kind !== "operation" || !aliases || typeof aliases.get !== "function") return "";
+    const item = aliases.get(node.id);
+    const alias = typeof item === "string" ? item : item?.alias;
+    return typeof alias === "string" && alias.trim() ? alias.trim() : "";
+  }
+
   function withObservationParseState(node, provenance) {
     if (!node || node.kind !== "observation") return node;
     const data = node.data && typeof node.data === "object" ? node.data : {};
@@ -124,7 +131,7 @@
     return { ...node, data: { ...data, parse_state: source?.parse_state || "unknown" } };
   }
 
-  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, routeFamilyUncertainty, withObservationParseState };
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, routeFamilyUncertainty, withObservationParseState };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);

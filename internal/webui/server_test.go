@@ -19,6 +19,7 @@ import (
 type explorerAPIFixture struct {
 	direct, full        int
 	graphErr            error
+	graphPayload        map[string]any
 	lastRequest         appquery.GraphRequest
 	surfaceErr          error
 	lastSurfaceRequest  appquery.SurfaceRequest
@@ -35,19 +36,25 @@ type explorerAPIFixture struct {
 
 type consultationAPIFixture struct {
 	*explorerAPIFixture
-	reviewSession      consultation.Session
-	resumed            consultation.Session
-	accepted           consultation.Session
-	acceptErr          error
-	acceptCalls        int
-	lastProject        string
-	lastSession        string
-	lastVersion        int
-	lastIdempotency    string
-	contextAnnotation  consultation.ContextAnnotation
-	contextErr         error
-	contextCalls       int
-	lastContextRequest consultation.RecordContextAnnotationRequest
+	reviewSession             consultation.Session
+	resumed                   consultation.Session
+	accepted                  consultation.Session
+	acceptErr                 error
+	acceptCalls               int
+	lastProject               string
+	lastSession               string
+	lastVersion               int
+	lastIdempotency           string
+	contextAnnotation         consultation.ContextAnnotation
+	contextErr                error
+	contextCalls              int
+	lastContextRequest        consultation.RecordContextAnnotationRequest
+	operationAliases          []consultation.OperationAlias
+	operationAlias            consultation.OperationAlias
+	operationAliasErr         error
+	operationAliasGetCalls    int
+	operationAliasSaveCalls   int
+	lastOperationAliasRequest consultation.SaveOperationAliasRequest
 }
 
 func (f *consultationAPIFixture) CreateSession(_ context.Context, _ appquery.EvidencePacketRequest, _ string) (consultation.Session, error) {
@@ -68,6 +75,15 @@ func (f *consultationAPIFixture) RecordContextAnnotation(_ context.Context, requ
 	f.contextCalls++
 	f.lastContextRequest = request
 	return f.contextAnnotation, f.contextErr
+}
+func (f *consultationAPIFixture) ListOperationAliases(_ context.Context, _ string) ([]consultation.OperationAlias, error) {
+	f.operationAliasGetCalls++
+	return f.operationAliases, f.operationAliasErr
+}
+func (f *consultationAPIFixture) SaveOperationAlias(_ context.Context, request consultation.SaveOperationAliasRequest) (consultation.OperationAlias, error) {
+	f.operationAliasSaveCalls++
+	f.lastOperationAliasRequest = request
+	return f.operationAlias, f.operationAliasErr
 }
 func (f *consultationAPIFixture) Compare(context.Context, string, string, int, string, appquery.CaptureComparisonRequest) (consultation.ComparisonRecord, error) {
 	return consultation.ComparisonRecord{}, nil
@@ -96,7 +112,11 @@ func (f *explorerAPIFixture) Graph(_ context.Context, request appquery.GraphRequ
 	} else {
 		f.direct++
 	}
-	return appquery.GraphResult{View: request.View, Payload: map[string]any{"view": string(request.View)}}, f.graphErr
+	payload := f.graphPayload
+	if payload == nil {
+		payload = map[string]any{"view": string(request.View)}
+	}
+	return appquery.GraphResult{View: request.View, Payload: payload}, f.graphErr
 }
 func (f *explorerAPIFixture) CaptureMessageRange(_ context.Context, request appquery.CaptureMessageRangeRequest) (appquery.CaptureMessageRange, error) {
 	f.lastEvidenceRequest = request
@@ -556,6 +576,53 @@ func TestConsultationContextAnnotationRequiresSameOriginAndUsesSelectedReference
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || api.contextCalls != 1 {
 		t.Fatalf("foreign origin status=%d calls=%d", response.Code, api.contextCalls)
+	}
+}
+
+func TestOperationAliasAPIIsProjectScopedAndRequiresAnExistingOperationNode(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	operationID := "operation-" + strings.Repeat("b", 64)
+	api := &consultationAPIFixture{
+		explorerAPIFixture: &explorerAPIFixture{graphPayload: map[string]any{
+			"entities": []any{map[string]any{"id": operationID, "kind": "operation"}},
+		}},
+		operationAliases: []consultation.OperationAlias{{ProjectKey: projectKey, OperationID: operationID, Version: 1, Alias: "Account settings", Origin: "analyst"}},
+		operationAlias:   consultation.OperationAlias{ProjectKey: projectKey, OperationID: operationID, Version: 2, Alias: "Profile update", Origin: "analyst"},
+	}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/consultation/operation-aliases?project_key="+projectKey, nil))
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), "Account settings") || api.operationAliasGetCalls != 1 {
+		t.Fatalf("list response status=%d calls=%d body=%s", get.Code, api.operationAliasGetCalls, get.Body.String())
+	}
+
+	body := `{"project_key":"` + projectKey + `","operation_id":"` + operationID + `","expected_version":1,"idempotency_key":"operation-alias-0123456789","alias":"Profile update"}`
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/operation-alias", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1")
+	post := httptest.NewRecorder()
+	handler.ServeHTTP(post, request)
+	if post.Code != http.StatusOK || !strings.Contains(post.Body.String(), `"version":2`) || api.operationAliasSaveCalls != 1 {
+		t.Fatalf("save response status=%d calls=%d body=%s", post.Code, api.operationAliasSaveCalls, post.Body.String())
+	}
+	if got := api.lastOperationAliasRequest; got.ProjectKey != projectKey || got.OperationID != operationID || got.ExpectedVersion != 1 || got.Alias != "Profile update" {
+		t.Fatalf("save request = %#v", got)
+	}
+	if graph := api.lastRequest; graph.View != appquery.GraphViewDirect || len(graph.SeedIDs) != 1 || graph.SeedIDs[0] != operationID {
+		t.Fatalf("operation existence query = %#v", graph)
+	}
+
+	api.graphPayload = map[string]any{"entities": []any{map[string]any{"id": operationID, "kind": "endpoint"}}}
+	request = httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/operation-alias", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1")
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, request)
+	if missing.Code != http.StatusNotFound || api.operationAliasSaveCalls != 1 {
+		t.Fatalf("non-operation graph node status=%d save calls=%d body=%s", missing.Code, api.operationAliasSaveCalls, missing.Body.String())
 	}
 }
 

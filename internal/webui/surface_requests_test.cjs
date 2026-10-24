@@ -38,9 +38,13 @@ function createApp() {
   const context = vm.createContext({
     document, URLSearchParams, AbortController, crypto: webcrypto, BBGraphFocus, setTimeout, clearTimeout,
     fetch(url, options) {
+      const parsedURL = new URL(url, "http://local.test");
+      if (parsedURL.pathname === "/api/consultation/operation-aliases") {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
       return new Promise((resolve, reject) => {
         requests.push({
-          url: new URL(url, "http://local.test"), signal: options.signal,
+          url: parsedURL, signal: options.signal,
           method: options.method || "GET", headers: options.headers || {}, body: options.body,
           resolve(data) { resolve({ ok: true, json: async () => data }); },
           fail(status, message) { resolve({ ok: false, status, json: async () => ({ error: message }) }); },
@@ -52,7 +56,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, renderInspector, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, saveOperationAlias, renderInspector, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -109,6 +113,37 @@ test("graph continuation merges distinct rows, deduplicates overlaps, and keeps 
   assert.equal(last.truncated, false);
   assert.equal(last.neighborhood_candidate_limit_reached, false);
   assert.deepEqual(snapshot(last.result_page_ids), ["result-1", "result-2", "result-3"]);
+});
+
+test("graph operation title prefers the project alias while preserving the original route data", () => {
+  const app = createApp();
+  const operation = { id: "operation-abc", kind: "operation", data: { method: "POST", route_family: "/api/{value}" } };
+  assert.equal(app.displayTitle(operation), "POST /api/{parameter}");
+  app.state.operationAliases.set(operation.id, { alias: "Update account profile", version: 1 });
+  assert.equal(app.displayTitle(operation), "Update account profile");
+  assert.equal(operation.data.route_family, "/api/{value}");
+});
+
+test("operation alias save is scoped to the selected project and refreshes the display label", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  const operation = { id: `operation-${"b".repeat(64)}`, kind: "operation", data: { method: "GET", route_family: "/api/profile" } };
+  const input = { value: "Account profile", focus() {} };
+  const button = { disabled: false };
+  const saving = app.saveOperationAlias(operation, input, button);
+  const request = app.requests.at(-1);
+  assert.equal(request.method, "POST");
+  assert.equal(request.url.pathname, "/api/consultation/operation-alias");
+  const body = JSON.parse(request.body);
+  assert.equal(body.project_key, app.state.projectKey);
+  assert.equal(body.operation_id, operation.id);
+  assert.equal(body.expected_version, 0);
+  assert.equal(body.alias, "Account profile");
+  request.resolve({ project_key: body.project_key, operation_id: body.operation_id, version: 1, alias: body.alias, origin: "analyst" });
+  await saving;
+  assert.equal(app.state.operationAliases.get(operation.id).alias, "Account profile");
+  assert.equal(app.displayTitle(operation), "Account profile");
+  assert.equal(button.disabled, false);
 });
 
 test("local evidence viewer pins the exact historical revision and keeps HTTP bytes out of normal graph navigation", async () => {

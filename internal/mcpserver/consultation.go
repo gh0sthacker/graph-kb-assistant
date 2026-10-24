@@ -91,6 +91,32 @@ func (t *Tools) AcceptReview(ctx context.Context, projectKey, sessionID string, 
 	return t.consultations.AcceptReview(ctx, projectKey, sessionID, expectedVersion, idempotencyKey)
 }
 
+// RecordContextAnnotation is available to the same-process local web UI; the
+// annotation remains contextual metadata and is not exposed as an MCP write.
+func (t *Tools) RecordContextAnnotation(ctx context.Context, request consultation.RecordContextAnnotationRequest) (consultation.ContextAnnotation, error) {
+	if t == nil || t.consultations == nil {
+		return consultation.ContextAnnotation{}, errors.New("consultation service is unavailable")
+	}
+	return t.consultations.RecordContextAnnotation(ctx, request)
+}
+
+// ListOperationAliases exposes project-local analyst labels to the web UI.
+func (t *Tools) ListOperationAliases(ctx context.Context, projectKey string) ([]consultation.OperationAlias, error) {
+	if t == nil || t.consultations == nil {
+		return nil, errors.New("consultation service is unavailable")
+	}
+	return t.consultations.ListOperationAliases(ctx, projectKey)
+}
+
+// SaveOperationAlias is a project-local web UI write; it is intentionally not
+// part of the default MCP tool catalog.
+func (t *Tools) SaveOperationAlias(ctx context.Context, request consultation.SaveOperationAliasRequest) (consultation.OperationAlias, error) {
+	if t == nil || t.consultations == nil {
+		return consultation.OperationAlias{}, errors.New("consultation service is unavailable")
+	}
+	return t.consultations.SaveOperationAlias(ctx, request)
+}
+
 func (t *Tools) Compare(ctx context.Context, projectKey, sessionID string, expectedVersion int, idempotencyKey string, request appquery.CaptureComparisonRequest) (consultation.ComparisonRecord, error) {
 	if t == nil || t.consultations == nil {
 		return consultation.ComparisonRecord{}, errors.New("consultation service is unavailable")

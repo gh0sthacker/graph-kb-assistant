@@ -121,6 +121,76 @@ func TestContextAnnotationsArePinnedToSelectedEvidenceAndReviewedBeforeHermes(t 
 	}
 }
 
+func TestOperationAliasesAreProjectLocalVersionedAndAppendOnly(t *testing.T) {
+	ctx := context.Background()
+	root, ref, projectKey := createConsultationProject(t, "operation-aliases")
+	service := newTestService(t, root, ref, &evidenceBuilderFake{}, &comparisonBuilderFake{})
+	operationID := "operation-" + strings.Repeat("a", 64)
+	firstRequest := SaveOperationAliasRequest{
+		ProjectKey: projectKey, OperationID: operationID, ExpectedVersion: 0,
+		IdempotencyKey: testIdempotencyKey("operation-alias-first"), Alias: "Account settings",
+	}
+	first, err := service.SaveOperationAlias(ctx, firstRequest)
+	if err != nil {
+		t.Fatalf("SaveOperationAlias: %v", err)
+	}
+	if first.Version != 1 || first.Alias != "Account settings" || first.Origin != "analyst" || first.OperationID != operationID {
+		t.Fatalf("first alias = %#v", first)
+	}
+	replay, err := service.SaveOperationAlias(ctx, firstRequest)
+	if err != nil || replay.ID != first.ID {
+		t.Fatalf("idempotent replay = %#v err=%v", replay, err)
+	}
+	updated, err := service.SaveOperationAlias(ctx, SaveOperationAliasRequest{
+		ProjectKey: projectKey, OperationID: operationID, ExpectedVersion: 1,
+		IdempotencyKey: testIdempotencyKey("operation-alias-next"), Alias: "Account profile update",
+	})
+	if err != nil || updated.Version != 2 || updated.Alias != "Account profile update" {
+		t.Fatalf("updated alias = %#v err=%v", updated, err)
+	}
+	if _, err := service.SaveOperationAlias(ctx, SaveOperationAliasRequest{
+		ProjectKey: projectKey, OperationID: operationID, ExpectedVersion: 1,
+		IdempotencyKey: testIdempotencyKey("operation-alias-stale"), Alias: "stale",
+	}); !errors.Is(err, ErrOperationAliasVersionConflict) {
+		t.Fatalf("stale update error = %v", err)
+	}
+	aliases, err := service.ListOperationAliases(ctx, projectKey)
+	if err != nil || len(aliases) != 1 || aliases[0].Alias != updated.Alias || aliases[0].Version != 2 {
+		t.Fatalf("latest aliases = %#v err=%v", aliases, err)
+	}
+
+	otherRoot, otherRef, otherProjectKey := createConsultationProject(t, "operation-aliases-other")
+	otherService := newTestService(t, otherRoot, otherRef, &evidenceBuilderFake{}, &comparisonBuilderFake{})
+	otherAliases, err := otherService.ListOperationAliases(ctx, otherProjectKey)
+	if err != nil || len(otherAliases) != 0 {
+		t.Fatalf("aliases leaked across projects = %#v err=%v", otherAliases, err)
+	}
+}
+
+func TestOperationAliasRejectsMalformedIdentityAndLabel(t *testing.T) {
+	ctx := context.Background()
+	root, ref, projectKey := createConsultationProject(t, "operation-alias-validation")
+	service := newTestService(t, root, ref, &evidenceBuilderFake{}, &comparisonBuilderFake{})
+	base := SaveOperationAliasRequest{
+		ProjectKey: projectKey, OperationID: "operation-" + strings.Repeat("b", 64), ExpectedVersion: 0,
+		IdempotencyKey: testIdempotencyKey("operation-alias-validation"), Alias: "Readable route",
+	}
+	for name, mutate := range map[string]func(*SaveOperationAliasRequest){
+		"bad operation id":  func(r *SaveOperationAliasRequest) { r.OperationID = "endpoint-" + strings.Repeat("b", 64) },
+		"blank alias":       func(r *SaveOperationAliasRequest) { r.Alias = "  " },
+		"control character": func(r *SaveOperationAliasRequest) { r.Alias = "line\nbreak" },
+		"too long":          func(r *SaveOperationAliasRequest) { r.Alias = strings.Repeat("x", maximumOperationAliasRunes+1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := base
+			mutate(&request)
+			if _, err := service.SaveOperationAlias(ctx, request); !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("SaveOperationAlias error = %v, want ErrInvalidInput", err)
+			}
+		})
+	}
+}
+
 func TestContextAnnotationRejectsUnselectedReferencesAndRawIdentifierLikeLabels(t *testing.T) {
 	ctx := context.Background()
 	root, ref, projectKey := createConsultationProject(t, "context-annotation-validation")

@@ -37,6 +37,7 @@ var (
 		"/api/evidence/packet-preview": {}, "/api/consultation/session": {},
 		"/api/consultation/accept-review": {}, "/api/consultation/compare": {},
 		"/api/consultation/context-annotation": {},
+		"/api/consultation/operation-alias":    {},
 		"/api/consultation/proposal":           {}, "/api/consultation/validate": {},
 		"/api/consultation/candidate": {},
 	}
@@ -60,6 +61,8 @@ type consultationAPI interface {
 	ReviewSession(context.Context, string, string) (consultation.Session, error)
 	AcceptReview(context.Context, string, string, int, string) (consultation.Session, error)
 	RecordContextAnnotation(context.Context, consultation.RecordContextAnnotationRequest) (consultation.ContextAnnotation, error)
+	ListOperationAliases(context.Context, string) ([]consultation.OperationAlias, error)
+	SaveOperationAlias(context.Context, consultation.SaveOperationAliasRequest) (consultation.OperationAlias, error)
 	Compare(context.Context, string, string, int, string, appquery.CaptureComparisonRequest) (consultation.ComparisonRecord, error)
 	RecordProposal(context.Context, consultation.RecordProposalRequest) (consultation.ProposalRecord, error)
 	ValidateProposal(context.Context, consultation.ValidateProposalRequest) (consultation.ValidationReceipt, error)
@@ -94,6 +97,8 @@ func NewHandler(api readAPI) (http.Handler, error) {
 		mux.HandleFunc("POST /api/consultation/session", consultationCreateHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/accept-review", consultationAcceptReviewHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/context-annotation", consultationContextAnnotationHandler(consultations))
+		mux.HandleFunc("GET /api/consultation/operation-aliases", consultationOperationAliasesHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/operation-alias", consultationOperationAliasHandler(api, consultations))
 		mux.HandleFunc("POST /api/consultation/compare", consultationCompareHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/proposal", consultationProposalHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/validate", consultationValidateHandler(consultations))

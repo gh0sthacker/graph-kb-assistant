@@ -1,5 +1,39 @@
 # Project status and known limitations
 
+## Stage 3 project-local operation aliases and live wiring (2026-10-24 12:41Z) — PARTIAL
+
+- The graph inspector can now assign an analyst-readable alias to an operation.
+  It is stored per project in consultation SQLite schema v4 as append-only,
+  versioned metadata with idempotent writes; stale edits return a conflict.
+  The API confirms the selected ID is an operation node in that project's
+  graph before saving. Display aliases do not rewrite route families, graph
+  entity IDs, or historical evidence.
+- Existing consultation stores migrate transactionally from v1, v2, or v3.
+  Tests cover migration, project isolation, validation, replay, version
+  conflicts, API graph-node validation, and the browser save/display flow.
+  `TMPDIR=/var/tmp go test -p 1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
+  JavaScript syntax validation, and all 40
+  `node --test internal/webui/*.cjs` checks passed. The live alias-list API
+  returns HTTP 200; the editor cannot be exercised against this project's
+  active graph until operation nodes exist.
+- The loopback web-ui was restarted. `/api/projects`, `/api/surface`,
+  `/api/consultation/operation-aliases`, and sampled `/api/graph` reads return
+  HTTP 200. The API adapter is wired through the live `Tools` implementation.
+  The current BehaviorGraph still contains 1,317 endpoints and 1,369
+  observations but zero operation nodes, so the alias editor is not yet
+  reachable from this project's graph. There is no durable production
+  graph-rebuild/cutover path; the previously tested larger projection remains
+  a shadow result and the active graph was not replaced.
+- A bounded 10-job delivery batch applied 5 jobs and retried 5 as
+  `projection_unavailable`; none were dead-lettered. The queue now has 55
+  pending, 0 leased, 1,345 applied, 0 dead-letter. No further worker is
+  running. The stale SQLite sidecar was checkpointed under the exclusive
+  project lock and the database integrity check passed, restoring read access.
+- Overall coverage remains `PARTIAL`: 31 captures remain unmapped, the Caido
+  inventory has no stable snapshot token, and browser/JavaScript mapping and
+  Hermes model-backed analysis are incomplete. No alias was written to the
+  real project during runtime checks.
+
 ## Stage 3 analyst context annotations (2026-10-24 11:04Z) — PARTIAL
 
 - Consultation sessions now accept versioned, append-only analyst annotations

@@ -30,6 +30,7 @@
 .detail-explainer{display:grid;gap:5px;margin-top:12px;padding:10px;border:1px solid #35443a;border-radius:4px;background:#19211d;color:#aebbb0;font-size:9px;line-height:1.55}
 .detail-explainer strong{color:#d5e2d0;font-weight:500}
 .detail-help{margin:8px 0 2px;color:#9aa79e;font-size:9px;line-height:1.5}
+.detail-alias-input{box-sizing:border-box;width:100%;margin-top:10px;padding:8px 9px;border:1px solid #3a4740;border-radius:4px;background:#141a18;color:#e1e9e2;font:10px var(--mono)}.detail-alias-input:focus{outline:2px solid var(--green);outline-offset:1px}
 #graph-canvas{user-select:none;-webkit-user-select:none}
 .graph-panel{grid-template-rows:auto 42px minmax(260px,1fr) 48px}
 .graph-filterbar{display:flex;align-items:center;gap:8px;min-width:0;padding:0 12px;border-top:1px solid var(--line-soft);color:#a5b0a8;font:9px var(--mono);overflow:hidden}

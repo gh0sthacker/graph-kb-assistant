@@ -64,8 +64,15 @@ func TestMigrateConsultationV1PreservesCandidateHistory(t *testing.T) {
 		t.Fatalf("initializeConsultationSchema migration: %v", err)
 	}
 	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
 		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+	if _, err := db.Exec("INSERT INTO consultation_operation_aliases(alias_id,project_key,operation_id,alias_version,alias,origin,idempotency_key,request_hash,created_at_ns) VALUES (?,?,?,?,?,'analyst',?,?,1)",
+		testOpaqueID('a'), strings.Repeat("a", 64), "operation-"+strings.Repeat("b", 64), 1, "Readable", testIdempotencyKey("migrated-alias"), strings.Repeat("c", 64)); err != nil {
+		t.Fatalf("v1 migration did not create operation alias storage: %v", err)
+	}
+	if _, err := db.Exec("UPDATE consultation_operation_aliases SET alias='changed'"); err == nil {
+		t.Fatal("migrated operation aliases are mutable")
 	}
 	var candidateID string
 	if err := db.QueryRow("SELECT candidate_id FROM consultation_candidates WHERE session_id=?", sessionID).Scan(&candidateID); err != nil || candidateID != sessionID {
@@ -97,6 +104,10 @@ func downgradeConsultationV2ToV1ForTest(t *testing.T, databasePath, projectKey, 
 	db.SetMaxOpenConns(1)
 	defer db.Close()
 	statements := []string{
+		`DROP TRIGGER consultation_operation_aliases_no_update`,
+		`DROP TRIGGER consultation_operation_aliases_no_delete`,
+		`DROP INDEX consultation_operation_aliases_latest_idx`,
+		`DROP TABLE consultation_operation_aliases`,
 		`DROP TRIGGER consultation_context_annotations_no_update`,
 		`DROP TRIGGER consultation_context_annotations_no_delete`,
 		`DROP INDEX consultation_context_annotations_session_idx`,

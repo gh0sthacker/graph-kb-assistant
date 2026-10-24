@@ -8,6 +8,7 @@ const {
   focusedTransform,
   layeredGridLayout,
   observationNotes,
+  operationAliasFor,
   withObservationParseState,
   routeFamilyUncertainty,
 } = require("./assets/graph-focus.js");
@@ -38,6 +39,13 @@ test("routeFamilyUncertainty also counts legacy endpoint template segments", () 
 test("routeFamilyUncertainty rejects missing route-family values", () => {
   assert.equal(routeFamilyUncertainty(undefined), null);
   assert.equal(routeFamilyUncertainty(42), null);
+});
+
+test("operation aliases are display-only and apply only to operation nodes", () => {
+  const aliases = new Map([["operation-abc", { alias: "Account settings", version: 2 }]]);
+  assert.equal(operationAliasFor({ id: "operation-abc", kind: "operation" }, aliases), "Account settings");
+  assert.equal(operationAliasFor({ id: "endpoint-abc", kind: "endpoint" }, aliases), "");
+  assert.equal(operationAliasFor({ id: "operation-missing", kind: "operation" }, aliases), "");
 });
 
 test("desktop workspace keeps the graph viewport inside the browser window", () => {

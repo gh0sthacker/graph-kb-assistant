@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"bb-graph-assistant/internal/appquery"
@@ -35,6 +36,7 @@ const (
 	maximumCandidateVersions   = 32
 	maximumSessionComparisons  = 16
 	maximumContextAnnotations  = 32
+	maximumOperationAliasRunes = 96
 	maximumAnnotationEvidence  = 4
 	maximumEvidenceReferences  = appquery.MaximumEvidencePacketSpans
 	maximumEvidenceCitations   = 8
@@ -43,24 +45,26 @@ const (
 )
 
 var (
-	ErrInvalidInput           = errors.New("consultation input is invalid")
-	ErrProjectNotRegistered   = errors.New("consultation project is not registered")
-	ErrSessionNotFound        = errors.New("consultation session was not found")
-	ErrStoreUnavailable       = errors.New("consultation store is unavailable")
-	ErrEvidenceUnavailable    = errors.New("consultation evidence is unavailable")
-	ErrComparisonUnavailable  = errors.New("consultation comparison is unavailable")
-	ErrCitationInvalid        = errors.New("proposal citation is not part of the exact selected evidence")
-	ErrReceiptInvalid         = errors.New("proposal has no matching valid citation receipt")
-	ErrReviewNotAccepted      = errors.New("operator review is required before assistant use")
-	ErrLimitReached           = errors.New("consultation storage limit was reached")
-	ErrSessionVersionConflict = errors.New("consultation session version is stale")
-	ErrSessionAlreadyAccepted = errors.New("consultation session is already accepted and immutable")
-	ErrIdempotencyConflict    = errors.New("idempotency key was reused for a different operation")
-	sessionIDPattern          = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
-	idempotencyKeyPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
-	contextAliasSuffixPattern = regexp.MustCompile(`^(?:[a-z]|[0-9]{1,3})$`)
-	projectKeyPattern         = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	revisionPattern           = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	ErrInvalidInput                  = errors.New("consultation input is invalid")
+	ErrProjectNotRegistered          = errors.New("consultation project is not registered")
+	ErrSessionNotFound               = errors.New("consultation session was not found")
+	ErrStoreUnavailable              = errors.New("consultation store is unavailable")
+	ErrEvidenceUnavailable           = errors.New("consultation evidence is unavailable")
+	ErrComparisonUnavailable         = errors.New("consultation comparison is unavailable")
+	ErrCitationInvalid               = errors.New("proposal citation is not part of the exact selected evidence")
+	ErrReceiptInvalid                = errors.New("proposal has no matching valid citation receipt")
+	ErrReviewNotAccepted             = errors.New("operator review is required before assistant use")
+	ErrLimitReached                  = errors.New("consultation storage limit was reached")
+	ErrSessionVersionConflict        = errors.New("consultation session version is stale")
+	ErrSessionAlreadyAccepted        = errors.New("consultation session is already accepted and immutable")
+	ErrOperationAliasVersionConflict = errors.New("operation alias version is stale")
+	ErrIdempotencyConflict           = errors.New("idempotency key was reused for a different operation")
+	sessionIDPattern                 = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+	idempotencyKeyPattern            = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+	contextAliasSuffixPattern        = regexp.MustCompile(`^(?:[a-z]|[0-9]{1,3})$`)
+	operationIDPattern               = regexp.MustCompile(`^operation-[a-f0-9]{64}$`)
+	projectKeyPattern                = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	revisionPattern                  = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
 // EvidenceBuilder returns the same redacted, bounded packet shown to the
@@ -126,6 +130,26 @@ type RecordContextAnnotationRequest struct {
 	Kind                 string   `json:"kind"`
 	Label                string   `json:"label"`
 	EvidenceReferenceIDs []string `json:"evidence_reference_ids"`
+}
+
+// OperationAlias is a project-local analyst label for an immutable graph
+// operation. It never changes route-family data or evidence identifiers.
+type OperationAlias struct {
+	ID          string    `json:"operation_alias_id"`
+	ProjectKey  string    `json:"project_key"`
+	OperationID string    `json:"operation_id"`
+	Version     int       `json:"version"`
+	Alias       string    `json:"alias"`
+	Origin      string    `json:"origin"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type SaveOperationAliasRequest struct {
+	ProjectKey      string `json:"project_key"`
+	OperationID     string `json:"operation_id"`
+	ExpectedVersion int    `json:"expected_version"`
+	IdempotencyKey  string `json:"idempotency_key"`
+	Alias           string `json:"alias"`
 }
 
 type EvidenceReference struct {
@@ -545,6 +569,145 @@ func validContextLabel(kind, label string) bool {
 	}
 	prefix := strings.ReplaceAll(kind, "_", "-") + "-"
 	return strings.HasPrefix(label, prefix) && contextAliasSuffixPattern.MatchString(strings.TrimPrefix(label, prefix))
+}
+
+// ListOperationAliases returns the latest analyst label for each operation in
+// one project. Alias records are contextual metadata, never graph evidence.
+func (s *Service) ListOperationAliases(ctx context.Context, projectKey string) (_ []OperationAlias, retErr error) {
+	if s == nil || ctx == nil || !projectKeyPattern.MatchString(projectKey) {
+		return nil, ErrInvalidInput
+	}
+	lease, err := s.acquireProjectReadLease(ctx, projectKey)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
+	db, err := s.database(projectKey, false)
+	if errors.Is(err, ErrSessionNotFound) {
+		return []OperationAlias{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.db.QueryContext(ctx, `SELECT a.alias_id, a.project_key, a.operation_id,
+		a.alias_version, a.alias, a.origin, a.created_at_ns
+		FROM consultation_operation_aliases a
+		JOIN (SELECT operation_id, max(alias_version) AS alias_version
+			FROM consultation_operation_aliases WHERE project_key = ? GROUP BY operation_id) latest
+		ON latest.operation_id = a.operation_id AND latest.alias_version = a.alias_version
+		WHERE a.project_key = ? ORDER BY a.operation_id`, projectKey, projectKey)
+	if err != nil {
+		return nil, ErrStoreUnavailable
+	}
+	defer rows.Close()
+	aliases := make([]OperationAlias, 0)
+	for rows.Next() {
+		var alias OperationAlias
+		var createdAt int64
+		if err := rows.Scan(&alias.ID, &alias.ProjectKey, &alias.OperationID, &alias.Version, &alias.Alias, &alias.Origin, &createdAt); err != nil {
+			return nil, ErrStoreUnavailable
+		}
+		alias.CreatedAt = time.Unix(0, createdAt).UTC()
+		aliases = append(aliases, alias)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, ErrStoreUnavailable
+	}
+	return aliases, nil
+}
+
+// SaveOperationAlias appends a versioned, project-local analyst label while
+// preserving both the source operation ID and every previous label version.
+func (s *Service) SaveOperationAlias(ctx context.Context, request SaveOperationAliasRequest) (_ OperationAlias, retErr error) {
+	if s == nil || ctx == nil || !projectKeyPattern.MatchString(request.ProjectKey) ||
+		!operationIDPattern.MatchString(request.OperationID) || request.ExpectedVersion < 0 || request.ExpectedVersion >= 1_000_000 ||
+		!validIdempotencyKey(request.IdempotencyKey) || !validOperationAlias(request.Alias) {
+		return OperationAlias{}, ErrInvalidInput
+	}
+	request.Alias = strings.TrimSpace(request.Alias)
+	hash, err := digestJSON(request)
+	if err != nil {
+		return OperationAlias{}, ErrInvalidInput
+	}
+	lease, err := s.acquireProjectReadLease(ctx, request.ProjectKey)
+	if err != nil {
+		return OperationAlias{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
+	db, err := s.database(request.ProjectKey, true)
+	if err != nil {
+		return OperationAlias{}, errors.Join(ErrStoreUnavailable, err)
+	}
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return OperationAlias{}, ErrStoreUnavailable
+	}
+	defer tx.Rollback()
+	if encoded, found, err := lookupMutationTx(ctx, tx, request.ProjectKey, request.OperationID, "operation_alias", request.IdempotencyKey, hash); err != nil {
+		return OperationAlias{}, err
+	} else if found {
+		var replay OperationAlias
+		if decodeSafe(encoded, &replay) != nil {
+			return OperationAlias{}, ErrStoreUnavailable
+		}
+		return replay, nil
+	}
+	var currentVersion int
+	err = tx.QueryRowContext(ctx, `SELECT coalesce(max(alias_version), 0) FROM consultation_operation_aliases
+		WHERE project_key = ? AND operation_id = ?`, request.ProjectKey, request.OperationID).Scan(&currentVersion)
+	if err != nil {
+		return OperationAlias{}, ErrStoreUnavailable
+	}
+	if currentVersion != request.ExpectedVersion {
+		return OperationAlias{}, ErrOperationAliasVersionConflict
+	}
+	id, err := newID()
+	if err != nil {
+		return OperationAlias{}, ErrStoreUnavailable
+	}
+	record := OperationAlias{ID: id, ProjectKey: request.ProjectKey, OperationID: request.OperationID,
+		Version: currentVersion + 1, Alias: request.Alias, Origin: "analyst", CreatedAt: time.Now().UTC()}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO consultation_operation_aliases
+		(alias_id, project_key, operation_id, alias_version, alias, origin, idempotency_key, request_hash, created_at_ns)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, record.ProjectKey, record.OperationID, record.Version,
+		record.Alias, record.Origin, request.IdempotencyKey, hash, record.CreatedAt.UnixNano()); err != nil {
+		return OperationAlias{}, ErrStoreUnavailable
+	}
+	encoded, err := encodeSafe(record)
+	if err != nil {
+		return OperationAlias{}, ErrStoreUnavailable
+	}
+	if err := insertMutation(ctx, tx, request.ProjectKey, request.OperationID, "operation_alias", request.IdempotencyKey, hash, encoded, record.CreatedAt); err != nil {
+		return OperationAlias{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return OperationAlias{}, ErrStoreUnavailable
+	}
+	return record, nil
+}
+
+func validOperationAlias(alias string) bool {
+	if !utf8.ValidString(alias) {
+		return false
+	}
+	trimmed := strings.TrimSpace(alias)
+	if trimmed == "" || utf8.RuneCountInString(trimmed) > maximumOperationAliasRunes {
+		return false
+	}
+	for _, char := range trimmed {
+		if unicode.IsControl(char) {
+			return false
+		}
+	}
+	return true
 }
 
 // Compare appends a deterministic comparison only when both exact revisions

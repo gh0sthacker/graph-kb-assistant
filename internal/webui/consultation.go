@@ -18,6 +18,7 @@ import (
 const maximumConsultationRequestBytes = 96 << 10
 
 var consultationSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+var consultationOperationIDPattern = regexp.MustCompile(`^operation-[a-f0-9]{64}$`)
 
 type consultationCreateRequest struct {
 	ProjectKey     string                             `json:"project_key"`
@@ -79,6 +80,73 @@ type consultationContextAnnotationRequest struct {
 	Kind                 string   `json:"kind"`
 	Label                string   `json:"label"`
 	EvidenceReferenceIDs []string `json:"evidence_reference_ids"`
+}
+
+type consultationOperationAliasRequest struct {
+	ProjectKey      string `json:"project_key"`
+	OperationID     string `json:"operation_id"`
+	ExpectedVersion int    `json:"expected_version"`
+	IdempotencyKey  string `json:"idempotency_key"`
+	Alias           string `json:"alias"`
+}
+
+func consultationOperationAliasesHandler(api consultationAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if len(query) != 1 || len(query["project_key"]) != 1 || !projectKeyPattern.MatchString(query.Get("project_key")) {
+			writeError(w, http.StatusBadRequest, "one registered project_key is required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		defer cancel()
+		result, err := api.ListOperationAliases(ctx, query.Get("project_key"))
+		writeConsultationResult(w, result, err)
+	}
+}
+
+func consultationOperationAliasHandler(graph readAPI, api consultationAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body consultationOperationAliasRequest
+		if !decodeConsultationJSON(w, r, &body) {
+			return
+		}
+		if !projectKeyPattern.MatchString(body.ProjectKey) || !consultationOperationIDPattern.MatchString(body.OperationID) {
+			writeError(w, http.StatusBadRequest, "project or operation identifier is invalid")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), graphTimeout)
+		defer cancel()
+		result, err := graph.Graph(ctx, appquery.GraphRequest{
+			ProjectKey: body.ProjectKey, View: appquery.GraphViewDirect, SeedIDs: []string{body.OperationID},
+		})
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		if !graphPayloadHasOperation(result.Payload, body.OperationID) {
+			writeError(w, http.StatusNotFound, "operation does not exist in the selected project graph")
+			return
+		}
+		alias, err := api.SaveOperationAlias(ctx, consultation.SaveOperationAliasRequest{
+			ProjectKey: body.ProjectKey, OperationID: body.OperationID, ExpectedVersion: body.ExpectedVersion,
+			IdempotencyKey: body.IdempotencyKey, Alias: body.Alias,
+		})
+		writeConsultationResult(w, alias, err)
+	}
+}
+
+func graphPayloadHasOperation(payload map[string]any, operationID string) bool {
+	entities, ok := payload["entities"].([]any)
+	if !ok {
+		return false
+	}
+	for _, value := range entities {
+		entity, ok := value.(map[string]any)
+		if ok && entity["id"] == operationID && entity["kind"] == "operation" {
+			return true
+		}
+	}
+	return false
 }
 
 func consultationResumeHandler(api consultationAPI) http.HandlerFunc {
@@ -273,6 +341,8 @@ func writeConsultationError(w http.ResponseWriter, err error) {
 		status, message = http.StatusBadRequest, "consultation request is invalid"
 	case errors.Is(err, consultation.ErrProjectNotRegistered), errors.Is(err, consultation.ErrSessionNotFound):
 		status, message = http.StatusNotFound, "the selected consultation project or session was not found"
+	case errors.Is(err, consultation.ErrOperationAliasVersionConflict):
+		status, message = http.StatusConflict, "this operation alias changed; reload project aliases before retrying"
 	case errors.Is(err, consultation.ErrSessionVersionConflict), errors.Is(err, consultation.ErrIdempotencyConflict):
 		status, message = http.StatusConflict, "consultation state changed; reload the saved session before retrying"
 	case errors.Is(err, consultation.ErrSessionAlreadyAccepted):

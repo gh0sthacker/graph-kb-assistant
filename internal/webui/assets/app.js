@@ -7,6 +7,7 @@ const MAX_EVIDENCE_PREVIEW_BYTES = 2 << 20;
 const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant"];
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
+  operationAliases: new Map(), operationAliasRequestId: 0,
   surfaceFilter: "", surfaceDebounce: null, totalOperations: 0,
   graph: null, selectedEndpoint: null, selectedNode: null, focusedNodeId: null, graphFocus: false, loadingSurface: false,
   surfaceRequestId: 0, surfaceAbort: null,
@@ -352,6 +353,47 @@ function updateEvidencePacketControl() {
 function newIdempotencyKey() {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function loadOperationAliases(projectKey) {
+  const requestId = ++state.operationAliasRequestId;
+  try {
+    const aliases = await getJSON(`/api/consultation/operation-aliases?${new URLSearchParams({ project_key: projectKey })}`);
+    if (requestId !== state.operationAliasRequestId || state.projectKey !== projectKey) return;
+    state.operationAliases = new Map((Array.isArray(aliases) ? aliases : []).map(item => [item.operation_id, item]));
+    if (state.graph) renderGraph(false);
+    if (state.selectedNode?.kind === "operation") selectNode(state.selectedNode.id);
+  } catch {
+    if (requestId === state.operationAliasRequestId && state.projectKey === projectKey) state.operationAliases = new Map();
+  }
+}
+
+async function saveOperationAlias(node, input, button) {
+  const projectKey = state.projectKey;
+  const alias = input.value.trim();
+  if (!projectKey || node?.kind !== "operation" || !alias) {
+    showToast("Enter a readable project alias first.");
+    input.focus();
+    return;
+  }
+  const current = state.operationAliases.get(node.id);
+  button.disabled = true;
+  try {
+    const saved = await postJSON("/api/consultation/operation-alias", {
+      project_key: projectKey, operation_id: node.id, expected_version: current?.version || 0,
+      idempotency_key: newIdempotencyKey(), alias,
+    });
+    if (state.projectKey !== projectKey) return;
+    state.operationAliases.set(node.id, saved);
+    renderGraph(false);
+    selectNode(node.id);
+    showToast("Project alias saved.");
+  } catch (error) {
+    if (error.status === 409 && state.projectKey === projectKey) await loadOperationAliases(projectKey);
+    showToast(error.message || "Could not save the project alias.");
+  } finally {
+    if (state.projectKey === projectKey) button.disabled = false;
+  }
 }
 
 function resetConsultationUI(message) {
@@ -762,6 +804,8 @@ function clearProjectView() {
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = "";
+  state.operationAliasRequestId++;
+  state.operationAliases = new Map();
   state.projectCursor = null;
   state.endpoints = [];
   state.endpointCursor = null;
@@ -796,6 +840,8 @@ async function selectProject(projectKey) {
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = projectKey;
+  state.operationAliasRequestId++;
+  state.operationAliases = new Map();
   state.endpoints = [];
   state.endpointCursor = null;
   state.surfaceFilter = elements.filter.value.trim();
@@ -816,6 +862,7 @@ async function selectProject(projectKey) {
   renderEmpty("Loading the project surface", "Reading a bounded page from the local structural index.");
   renderEndpointList();
   setStatus("Loading local index", "loading");
+  void loadOperationAliases(projectKey);
   await loadSurface(false);
 }
 
@@ -1405,7 +1452,7 @@ function renderNode(node, point) {
 function displayTitle(node) {
   const data = node.data || {};
   if (node.kind === "endpoint") return `${data.method || "?"} ${displayPath(data.path || "/")}`;
-  if (node.kind === "operation") return `${data.method || "?"} ${displayPath(data.route_family || "/")}`;
+  if (node.kind === "operation") return BBGraphFocus.operationAliasFor(node, state.operationAliases) || `${data.method || "?"} ${displayPath(data.route_family || "/")}`;
   if (node.kind === "observation") return `${data.observation_kind === "live_capture" ? "Live capture" : "Capture"}${data.http_status ? ` · HTTP ${data.http_status}` : ""}`;
   if (node.kind === "parameter") return displayPath(data.path || data.name || "Parameter");
   if (node.kind === "request_variant") return "Request shape";
@@ -1504,6 +1551,7 @@ function renderInspector(node) {
   if (node.kind === "endpoint") {
     elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Select a linked historical capture and choose Open stored HTTP to inspect its exact path in the local evidence view. Live-only records remain in Caido."));
   }
+  if (node.kind === "operation") renderOperationAliasEditor(node);
   if (node.kind === "observation") renderProvenance(node);
   const center = el("button", "detail-action", "Center and zoom to node");
   center.type = "button";
@@ -1518,6 +1566,24 @@ function renderInspector(node) {
   action.addEventListener("click", () => { void focusOnNode(node); });
   elements.inspector.append(action);
   elements.inspector.append(el("p", "detail-help", "Loads this node and its immediate connections. Use Back to return to the previous graph."));
+}
+
+function renderOperationAliasEditor(node) {
+  const section = el("section", "detail-section");
+  section.append(el("div", "detail-section-title", "Project alias"));
+  section.append(el("p", "detail-help", "A readable name for this operation in the selected project. The source route family and evidence IDs stay unchanged."));
+  const input = el("input", "detail-alias-input");
+  input.type = "text";
+  input.maxLength = 96;
+  input.autocomplete = "off";
+  input.value = state.operationAliases.get(node.id)?.alias || "";
+  input.placeholder = "e.g. Update account profile";
+  input.setAttribute("aria-label", "Readable project alias for this operation");
+  const button = el("button", "detail-action", "Save project alias");
+  button.type = "button";
+  button.addEventListener("click", () => { void saveOperationAlias(node, input, button); });
+  section.append(input, button);
+  elements.inspector.append(section);
 }
 
 function safeDetails(node) {
