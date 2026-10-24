@@ -1,5 +1,16 @@
 # Project status and known limitations
 
+## Hermes managed tool allowlist reconciliation (2026-10-24) — PARTIAL
+
+- `setup-hermes` now removes obsolete MCP tool names from its managed Hermes
+  allowlist as well as adding newly approved tools. It preserves settings
+  outside the managed allowlist and still refuses malformed or duplicate
+  entries. This prevents a prior profile from retaining stale tool grants.
+- A regression test first reproduced the stale-tool behavior, then passed with
+  the fix. All five Hermes profile setup tests pass. The installed Hermes MCP
+  discovery check and model-backed workflow were not run; Stage 5 remains
+  `PARTIAL` and the model provider remains an operator decision.
+
 ## Evidence vault readiness indicator (2026-10-24) — PARTIAL
 
 - The local web UI now shows whether the evidence vault key is missing/invalid,

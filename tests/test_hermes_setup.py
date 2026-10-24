@@ -158,6 +158,30 @@ class HermesSetupTests(unittest.TestCase):
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
         self.assertEqual(config_path.read_text(encoding="utf-8"), updated)
 
+    def test_removes_stale_managed_tools_and_preserves_other_settings(self) -> None:
+        created = self.run_setup()
+        self.assertEqual(created.returncode, 0, created.stderr)
+
+        config_path = self.profile / "config.yaml"
+        original = config_path.read_text(encoding="utf-8")
+        stale_profile = original.replace(
+            "        - bb_candidate_save\n",
+            "        - bb_candidate_save\n        - bb_deprecated_tool\n",
+        ) + "\ncustom_setting: keep-me\n"
+        config_path.write_text(stale_profile, encoding="utf-8")
+
+        upgraded = self.run_setup()
+
+        self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
+        updated = config_path.read_text(encoding="utf-8")
+        self.assertNotIn("bb_deprecated_tool", updated)
+        self.assertTrue(updated.endswith("\ncustom_setting: keep-me\n"))
+        mcp_block = updated.split("  bb_assistant:\n", 1)[1].split("\nskills:\n", 1)[0]
+        self.assertEqual(
+            re.findall(r"^        - ([a-z0-9_]+)$", mcp_block, flags=re.MULTILINE),
+            EXPECTED_TOOLS,
+        )
+
     def test_refuses_malformed_or_duplicate_managed_allowlists_without_editing(self) -> None:
         created = self.run_setup()
         self.assertEqual(created.returncode, 0, created.stderr)

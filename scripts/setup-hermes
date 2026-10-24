@@ -114,6 +114,17 @@ def upgrade_managed_profile(existing: str) -> str:
     if not item_indices or len(tool_names) != len(set(tool_names)) or "bb_surface_map" not in tool_names:
         raise SystemExit(f"Managed Hermes tool allowlist is ambiguous; edit it manually: {config_path}")
 
+    stale_indices = {
+        index for index, name in zip(item_indices, tool_names) if name not in tools
+    }
+    if stale_indices:
+        # The managed MCP allowlist is a capability boundary. Remove obsolete
+        # tool grants while leaving the rest of the Hermes profile untouched.
+        updated = "".join(
+            line for index, line in enumerate(lines) if index not in stale_indices
+        )
+        return upgrade_managed_profile(updated)
+
     missing_tools = [name for name in tools if name not in set(tool_names)]
     if not missing_tools:
         return existing
