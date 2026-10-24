@@ -29,8 +29,10 @@ type DatabaseStats struct {
 }
 
 // InspectReadOnly checks the supported BehaviorGraph schema and returns only
-// aggregate table counts. It opens SQLite with mode=ro and does not load row
-// payloads or perform migrations.
+// bounded aggregate table counts. It opens SQLite with mode=ro, does not load
+// row payloads or perform migrations, and limits each table count query to
+// maxGraphRows+1 rows rather than treating the database file size as a schema
+// compatibility limit.
 func InspectReadOnly(ctx context.Context, path, program string) (DatabaseStats, error) {
 	if !graphDigestPattern.MatchString(program) {
 		return DatabaseStats{}, errors.New("selected graph project key is invalid")
@@ -48,9 +50,6 @@ func InspectReadOnly(ctx context.Context, path, program string) (DatabaseStats, 
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return DatabaseStats{}, errors.New("BehaviorGraph database is unavailable")
-	}
-	if info.Size() > maxGraphBytes {
-		return DatabaseStats{}, ErrUnsupportedDatabase
 	}
 	dbURL := (&url.URL{Scheme: "file", Path: absolute}).String() + "?mode=ro"
 	db, err := sql.Open("sqlite", dbURL)

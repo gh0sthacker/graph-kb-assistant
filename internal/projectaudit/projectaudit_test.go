@@ -140,6 +140,35 @@ func TestAuditProjectReportsUnsupportedBehaviorGraphSchema(t *testing.T) {
 	}
 }
 
+func TestAuditProjectAcceptsLargeCompatibleBehaviorGraph(t *testing.T) {
+	root, _, key := newAuditFixture(t, false)
+	behaviorPath := filepath.Join(root, "projects", key, "behavior.sqlite3")
+	createBehaviorFixture(t, behaviorPath, key, 2)
+	const largeGraphPayloadThreshold = int64(256 << 20)
+	if err := os.Truncate(behaviorPath, largeGraphPayloadThreshold+4096); err != nil {
+		t.Fatalf("extend BehaviorGraph fixture beyond payload limit: %v", err)
+	}
+	before, err := os.Stat(behaviorPath)
+	if err != nil {
+		t.Fatalf("stat large BehaviorGraph fixture: %v", err)
+	}
+
+	report, err := AuditProject(context.Background(), root, key)
+	if err != nil {
+		t.Fatalf("AuditProject() error = %v", err)
+	}
+	if report.CaptureStore.State != "compatible" || report.BehaviorGraph.State != "compatible" || report.BehaviorGraph.SchemaVersion != 2 {
+		t.Errorf("audit = %+v; want large schema-v2 BehaviorGraph to remain compatible", report)
+	}
+	after, err := os.Stat(behaviorPath)
+	if err != nil {
+		t.Fatalf("restat large BehaviorGraph fixture: %v", err)
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Errorf("read-only audit changed large BehaviorGraph fixture: before=%d/%s after=%d/%s", before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
+}
+
 func TestAuditProjectRejectsIncompleteBehaviorGraphSchema(t *testing.T) {
 	mutations := []struct {
 		name  string

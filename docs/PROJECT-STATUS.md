@@ -1,5 +1,37 @@
 # Project status and known limitations
 
+## ECC graph audit correction and projection runtime (2026-10-24 08:21Z) — PARTIAL
+
+- A regression fixture reproduced a false `incompatible` result when a valid
+  BehaviorGraph schema-v2 database exceeded the 256 MiB graph-payload limit.
+  The local BehaviorGraph file is 483,246,080 bytes and its bounded structural
+  counts remain below the supported row limits. The read-only schema audit no
+  longer treats the database file size as a schema-compatibility limit; its
+  table checks and row-bounded counts remain in place. The fixture extends a
+  valid schema-v2 database beyond 256 MiB and verifies that audit does not
+  change its size or modification time.
+- The fresh local status now reports capture schema v7 and BehaviorGraph
+  schema v2 as `compatible`; 1,400 captures, 1,369 mapped, 31 unmapped, 1,183
+  pending projection jobs, 217 applied, zero leased, and zero dead-lettered.
+  `neo4j-check` returned `ready`. Overall coverage remains `PARTIAL`.
+- ECC full Go tests, `go vet`, and race tests for graph/audit passed. The
+  projection hot-path change reuses claim-validated payload data: a comparable
+  three-job sample went from decode times of 8.5 seconds/job to zero and ack
+  times of 7.9–26.7 seconds to 13–17 ms after the cold job. These timings are
+  local samples, not a benchmark guarantee.
+- A single watch worker ran for about 20 minutes and applied 179 jobs with no
+  retries, dead letters, or worker errors. It stopped at its supervisor limit
+  with no leased jobs. Remaining queue: 1,183 pending. Across the run, average
+  claim/decode/projection/graph-import/Neo4j-sync/ack durations were
+  1.67s/0/4.99s/1.18s/2.96s/27ms; the first cold graph-writer open took about
+  152s. No Caido request bodies were read and no project was switched.
+- History reconciliation still lacks a stable Caido snapshot token; 31
+  captures remain unmapped; some captures remain partial or unparsed; browser
+  walkthrough and JavaScript endpoint coverage are not present. Model
+  execution and Caido live intake were not checked. Continue with the bounded
+  projection backlog, then address source reconciliation and coverage gaps;
+  do not report the project complete.
+
 ## ECC worker runtime evaluation (2026-10-24 07:28Z) — PARTIAL
 
 - A local watch run reopened the configured project through the normal writable
