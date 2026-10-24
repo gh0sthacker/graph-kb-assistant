@@ -963,6 +963,9 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
     const partial = Boolean(state.graph.incomplete || state.graph.truncated);
     const label = appendPage ? view === "full" ? "Omitted graph branches" : "More direct relationships" : view === "direct" ? "Direct relationships" : "Deeper graph slice";
     setStatus(partial ? `${label} · coverage is partial` : label, "ready");
+    elements.graphState.title = partial
+      ? "This is a bounded graph view; full-project integrity is not assessed. This status is separate from the selected capture's Parse state."
+      : "Graph slice loaded.";
     if (partial) {
       const sampledEntities = Array.isArray(graph.provenance_truncated_entity_ids)
         ? graph.provenance_truncated_entity_ids.length
@@ -1391,8 +1394,13 @@ function renderInspector(node) {
   if (node.kind === "observation") {
     const note = el("div", "detail-explainer");
     note.append(el("strong", "", "What this means"));
-    note.append(el("span", "", "This record represents one saved request from Caido. HTTP 200 is only the response status; it does not indicate an error or a complete parse."));
+    note.append(el("span", "", "This record represents one saved request from Caido. HTTP status and parser completeness are separate properties."));
     elements.inspector.append(note);
+    for (const explanation of BBGraphFocus.observationNotes(node.data || {})) {
+      const detail = el("div", "detail-explainer");
+      detail.append(el("strong", "", explanation.title), el("span", "", explanation.body));
+      elements.inspector.append(detail);
+    }
   }
   if (rows.length) {
     const section = el("section", "detail-section");

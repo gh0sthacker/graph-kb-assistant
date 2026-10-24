@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
+const BBGraphFocus = require("./assets/graph-focus.js");
 
 // Exercise the shipped request/state functions, including their real rendering
 // calls, with an in-memory DOM and a manually completed fetch transport. The
@@ -35,7 +36,7 @@ function createApp() {
   };
   const requests = [];
   const context = vm.createContext({
-    document, URLSearchParams, AbortController, crypto: webcrypto, setTimeout, clearTimeout,
+    document, URLSearchParams, AbortController, crypto: webcrypto, BBGraphFocus, setTimeout, clearTimeout,
     fetch(url, options) {
       return new Promise((resolve, reject) => {
         requests.push({

@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { focusedNeighborhood, focusedTransform } = require("./assets/graph-focus.js");
+const { focusedNeighborhood, focusedTransform, observationNotes } = require("./assets/graph-focus.js");
 
 test("focusedNeighborhood keeps the selected node and its direct neighbors", () => {
   const entities = [
@@ -39,4 +39,24 @@ test("focusedTransform rejects incomplete or invalid geometry", () => {
   assert.equal(focusedTransform(null, 1000, 600, 3), null);
   assert.equal(focusedTransform({ x: 20, y: 30 }, 0, 600, 3), null);
   assert.equal(focusedTransform({ x: 20, y: 30 }, 1000, 600, Number.NaN), null);
+});
+
+test("observationNotes distinguish incomplete parsing from missing context and time", () => {
+  const notes = observationNotes({
+    parse_state: "incomplete",
+    context: { scenario: "unknown" },
+    observed_at: "unknown",
+  });
+
+  assert.deepEqual(notes.map(note => note.title), ["Parsing is incomplete", "Context is not recorded", "Time is not recorded"]);
+  assert.match(notes[0].body, /request and response/i);
+  assert.match(notes[1].body, /does not mean the HTTP exchange has no context/i);
+});
+
+test("observationNotes do not add uncertainty notes to a complete, annotated capture", () => {
+  assert.deepEqual(observationNotes({
+    parse_state: "complete",
+    context: { scenario: "checkout" },
+    observed_at: "2026-10-24T12:00:00Z",
+  }), []);
 });

@@ -43,6 +43,12 @@
   UI/API/local graph-backend path for one neighborhood, not full graph or
   Caido-history completeness. The smoke did not read HTTP bodies or contact
   Caido.
+- Direct graph responses deliberately remain `incomplete=true` because they
+  assess a bounded selected neighborhood, not full-project integrity. The UI
+  now explains that coverage flag separately from a capture's parser state,
+  and explains `incomplete`, unknown context, and missing timestamp on the
+  selected observation. All 29 browser-state tests pass; live browser clicks
+  remain unverified because the browser connector did not connect.
 
 ## Local application and Hermes runtime check (2026-10-24 09:26Z) — PARTIAL
 
