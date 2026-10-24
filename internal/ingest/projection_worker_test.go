@@ -369,6 +369,122 @@ func TestProjectionWorkerAcknowledgesOlderRevisionWithoutReplacingCurrentMapping
 	}
 }
 
+func TestProjectionWorkerMaterializesAndAcknowledgesAcceptedResponseRevisions(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	requestID := "projection-worker-late-response"
+	first := projectionWorkerExchange(selected, requestID, "")
+	second := projectionWorkerExchange(selected, requestID,
+		"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"version\":\"second\"}")
+	notTruncated := false
+	second.RequestTruncated = &notTruncated
+	second.ResponseTruncated = &notTruncated
+	if result, err := writePendingHistoryRevision(ctx, pageWriter, first); err != nil || result.ProjectionState != "pending" {
+		t.Fatalf("accept first response-less revision: result=%+v err=%v", result, err)
+	}
+	if result, err := writePendingHistoryRevision(ctx, pageWriter, second); err != nil || result.ProjectionState != "pending" {
+		t.Fatalf("accept later response revision: result=%+v err=%v", result, err)
+	}
+	var firstRevision, currentRevision string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT revision_id FROM projection_jobs ORDER BY sequence_id LIMIT 1",
+	).Scan(&firstRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id FROM captures WHERE request_id=?", requestID,
+	).Scan(&currentRevision); err != nil {
+		t.Fatal(err)
+	}
+	if firstRevision == currentRevision {
+		t.Fatal("test did not create a later capture revision")
+	}
+	firstJob, err := behaviorgraph.ProjectionJobByRevision(ctx,
+		projectStore.Database.DB(), projectStore.ProjectKey, firstRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentJob, err := behaviorgraph.ProjectionJobByRevision(ctx,
+		projectStore.Database.DB(), projectStore.ProjectKey, currentRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstJob.GraphObservationID == "" || currentJob.GraphObservationID == "" || firstJob.GraphObservationID == currentJob.GraphObservationID {
+		t.Fatal("fixture revisions should retain distinct source-pinned graph identities")
+	}
+
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	options := ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3}
+	projector := func(ctx context.Context, selected *store.ProjectStore, bundles []behaviorgraph.Record) (bool, bool, error) {
+		if len(bundles) != 1 {
+			return false, false, errors.New("synthetic projector expected one bundle")
+		}
+		// Local graph materialization is real; remote readiness stays a test seam.
+		return materializeLocalProjection(ctx, selected, bundles)
+	}
+	now := time.Now().UTC().Add(time.Minute)
+	processedFirst, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, options, projector, now)
+	if err != nil || processedFirst.State != "applied" || processedFirst.RevisionID != firstRevision {
+		t.Fatalf("project initial revision: result=%+v err=%v", processedFirst, err)
+	}
+
+	processedCurrent, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, options, projector, now.Add(time.Second))
+	if err != nil || processedCurrent.State != "applied" || processedCurrent.RevisionID != currentRevision {
+		t.Fatalf("project later response revision: result=%+v err=%v", processedCurrent, err)
+	}
+	currentState, err := behaviorgraph.ProjectionJobByRevision(ctx,
+		projectStore.Database.DB(), projectStore.ProjectKey, currentRevision)
+	if err != nil || currentState.State != "applied" {
+		t.Fatalf("later revision state=%q err=%v", currentState.State, err)
+	}
+	var mappedRevision string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT revision_id FROM graph_capture_map WHERE observation_id=?", currentJob.ObservationID,
+	).Scan(&mappedRevision); err != nil || mappedRevision != currentRevision {
+		t.Fatalf("current graph mapping revision=%q err=%v, want %q", mappedRevision, err, currentRevision)
+	}
+	reader, err := behaviorgraph.OpenReader(ctx, projectStore.BehaviorGraphPath,
+		projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, snapshotErr := reader.Snapshot()
+	readerCloseErr := reader.Close()
+	if snapshotErr != nil || readerCloseErr != nil {
+		t.Fatalf("read materialized graph: snapshot=%v close=%v", snapshotErr, readerCloseErr)
+	}
+	storedCards, ok := snapshot["cards"].([]behaviorgraph.Record)
+	if !ok || len(storedCards) != 2 {
+		t.Fatalf("materialized graph cards=%d, want one source-pinned card per revision", len(storedCards))
+	}
+	entities, ok := snapshot["entities"].([]behaviorgraph.Record)
+	if !ok {
+		t.Fatal("materialized graph entities have an invalid shape")
+	}
+	var currentParseState any
+	for _, entity := range entities {
+		if entity["id"] != currentJob.GraphObservationID || entity["kind"] != "observation" {
+			continue
+		}
+		data, ok := entity["data"].(map[string]any)
+		if ok {
+			currentParseState = data["parse_state"]
+		}
+	}
+	if currentParseState != "complete" {
+		t.Fatalf("later response observation parse state=%v, want complete", currentParseState)
+	}
+}
+
 func TestProjectGraphBundlesWithWriterRetainsOutboxPendingWhenNeo4jIsDisabled(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)

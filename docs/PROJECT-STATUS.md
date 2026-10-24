@@ -1497,4 +1497,23 @@ This repository is an early public alpha. The following boundaries are deliberat
 - The first attempt localized the failure to card insertion; the second classified it as an immutable-record conflict. A synthetic regression reproduced this conflict. The writer now refreshes deterministic endpoint/context/request/response projection fields, preserves existing business-action and hypothesis data, preserves `needs_review` only while the new request and response parse states are complete, and otherwise downgrades the card to `incomplete`. Missing-evidence strings are unioned so a reproject does not erase previously recorded gaps. The reconciled card is committed and checksummed in the Neo4j outbox in the same SQLite transaction; replay is idempotent. Since the last observed `applied=0` runtime result, there were **0 additional worker retries**. A later read-only Go project audit, Caido project list, and KB stats batch was canceled before returning results; it produced no new metrics. The fix is synthetic-verified only; runtime compatibility and queue status remain `PARTIAL`.
 - A subsequent CLI link attempt failed because `/tmp` had only 26 MiB free. The active web UI process still owns its temporary executable, so no temporary files or running services were removed. Use `/var/tmp` for future Go build work and check disk capacity before another runtime command.
 
+## Worker-to-graph synthetic acceptance (2026-10-24) — PARTIAL
+
+- A synthetic `PageWriter → projection worker → BehaviorGraph` scenario now
+  accepts a request without a response, then a later complete JSON response.
+  The actual local SQLite graph writer materializes both source-pinned
+  revisions, the worker acknowledges both projection jobs, the current graph
+  mapping points at the later revision, and its observation has
+  `parse_state=complete`. The projector's remote-ready result is injected by
+  the fixture; no Neo4j client, Caido, or working project database is used.
+- The targeted race test, uncached `internal/ingest` and `internal/graph`
+  package tests, `go vet` for those packages, and `git diff --check` passed.
+  This verifies the local worker/writer path only. Runtime queue health,
+  Neo4j delivery, Caido coverage, and end-to-end restart behavior remain
+  `PARTIAL`.
+- Next local acceptance: make a real synthetic BehaviorGraph import failure
+  leave the projection job retryable, then verify that a later successful
+  local import acknowledges that same job without losing its accepted source
+  revision.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
