@@ -30,6 +30,26 @@ func TestBuildHistoricalBundlePreservesRepeatedQueryOccurrencesWithoutValues(t *
 	}
 }
 
+func TestBuildHistoricalBundleRecordsParserStateSeparatelyFromAnalysisState(t *testing.T) {
+	bundle, _ := buildHistoricalOccurrenceBundle(t, "parse-state", "GET", "https://fixture.invalid/items",
+		"GET /items HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+
+	for _, entity := range bundle["entities"].([]Record) {
+		if entity["kind"] != "observation" {
+			continue
+		}
+		data := entity["data"].(Record)
+		if got := data["parse_state"]; got != "complete" {
+			t.Fatalf("observation parse_state = %v, want complete", got)
+		}
+		if got := data["analysis_state"]; got != "incomplete" {
+			t.Fatalf("observation analysis_state = %v, want incomplete", got)
+		}
+		return
+	}
+	t.Fatal("historical bundle has no observation entity")
+}
+
 func TestBuildHistoricalBundlePreservesRepeatedFormOccurrencesWithoutValues(t *testing.T) {
 	target := "https://fixture.invalid/items"
 	body := "id=FORM_VALUE_A_92&id=FORM_VALUE_B_41&mode=FORM_VALUE_C_83"

@@ -1,7 +1,17 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes } = require("./assets/graph-focus.js");
+
+test("desktop workspace keeps the graph viewport inside the browser window", () => {
+  const css = fs.readFileSync(path.join(__dirname, "assets", "style.css"), "utf8");
+  const desktopShellRule = css.match(/\.app-shell\{([^}]+)\}/)?.[1] || "";
+
+  assert.match(desktopShellRule, /height:100vh/);
+  assert.match(desktopShellRule, /overflow:hidden/);
+});
 
 test("focusedNeighborhood keeps the selected node and its direct neighbors", () => {
   const entities = [
@@ -50,6 +60,7 @@ test("observationNotes distinguish incomplete parsing from missing context and t
 
   assert.deepEqual(notes.map(note => note.title), ["Parsing is incomplete", "Context is not recorded", "Time is not recorded"]);
   assert.match(notes[0].body, /request and response/i);
+  assert.match(notes[0].body, /does not by itself mean.*truncated/i);
   assert.match(notes[1].body, /does not mean the HTTP exchange has no context/i);
 });
 
@@ -59,6 +70,17 @@ test("observationNotes do not add uncertainty notes to a complete, annotated cap
     context: { scenario: "checkout" },
     observed_at: "2026-10-24T12:00:00Z",
   }), []);
+});
+
+test("analysis state does not masquerade as parse completeness", () => {
+  const notes = observationNotes({
+    analysis_state: "incomplete",
+    context: { scenario: "checkout" },
+    observed_at: "2026-10-24T12:00:00Z",
+  });
+
+  assert.deepEqual(notes.map(note => note.title), ["Parse completeness is not recorded"]);
+  assert.match(notes[0].body, /analysis state is separate/i);
 });
 
 test("layeredGridLayout wraps a high-degree layer into a bounded grid", () => {

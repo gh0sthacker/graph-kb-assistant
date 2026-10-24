@@ -1,5 +1,35 @@
 # Project status and known limitations
 
+## Caido recheck and graph viewport/capture-state fixes (2026-10-24 10:02Z) — PARTIAL
+
+- With the user's approval, Caido was switched temporarily from `sperpravo` to
+  the registered Juice Shop project for a read-only reconciliation of
+  `192.168.1.149:3000`. Four metadata pages contained 355 Caido IDs and 355
+  local historical/live IDs; all 355 matched, with zero unmatched,
+  duplicate, or unclassified IDs. Enumeration reached the terminal cursor and
+  the local inventory was complete. The active Caido project was restored to
+  `sperpravo` and verified. No request details, bodies, or target traffic were
+  used. Coverage remains `PARTIAL` because Caido supplies no stable snapshot
+  token.
+- Fixed a graph/UI labeling defect: `analysis_state` had been used as a
+  fallback for `parse_state`, making an unfinished analyst card look like an
+  incomplete HTTP parse. New graph projections now store parser state
+  separately; the inspector labels analysis state separately and reports
+  parser completeness as unknown when older graph data lacks that field.
+- A live browser check on `GET /rest/products/search` showed the existing
+  graph record as **Parse state: unknown** and **Analysis state: incomplete**,
+  with a note that parser completeness is not recorded. Existing graph rows
+  have not been reprojected with the new parse-state field, so they remain
+  unknown until regenerated.
+- The same browser check found that the desktop shell expanded to 2,892 px in
+  a 720 px viewport, pushing graph nodes below the visible area. The shell now
+  uses a fixed viewport-height grid with scrolling inside panels. After the
+  fix, the shell measured 720 px, the graph canvas 405 px, and all 100 nodes
+  were visible. The selected capture stayed inside the graph canvas at 300%
+  zoom.
+- `TMPDIR=/var/tmp go test ./...`, `TMPDIR=/var/tmp go vet ./...`, and all 32
+  browser-state tests passed. Overall coverage remains `PARTIAL`.
+
 ## Stage 3 searchable operation fields (2026-10-24 09:32Z) — PARTIAL
 
 - The operation catalog filter now performs a case-insensitive substring

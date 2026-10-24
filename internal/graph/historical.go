@@ -212,8 +212,9 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	observationData := Record{
 		"program": program, "capture_id": captureID, "card_id": cardID,
 		"endpoint_id": endpointID, "observation_kind": "historical_capture",
-		"observed_at": context["observed_at"], "analysis_state": "incomplete",
-		"freshness": "unknown", "context": context,
+		"observed_at": context["observed_at"], "parse_state": projection.ParseState,
+		"analysis_state": "incomplete",
+		"freshness":      "unknown", "context": context,
 	}
 	if projection.Search.ResponseStatus != nil {
 		observationData["http_status"] = *projection.Search.ResponseStatus

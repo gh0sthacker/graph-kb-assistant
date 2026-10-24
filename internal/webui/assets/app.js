@@ -1363,7 +1363,7 @@ function renderInspector(node) {
   if (node.kind === "observation") {
     const note = el("div", "detail-explainer");
     note.append(el("strong", "", "What this means"));
-    note.append(el("span", "", "This record represents one saved request from Caido. HTTP status and parser completeness are separate properties."));
+    note.append(el("span", "", "This record represents one saved request from Caido. HTTP status, parser completeness, and analysis state describe different properties."));
     elements.inspector.append(note);
     for (const explanation of BBGraphFocus.observationNotes(node.data || {})) {
       const detail = el("div", "detail-explainer");
@@ -1414,7 +1414,8 @@ function safeDetails(node) {
     ["Time", data.observed_at],
     ["Content-Type", data.content_type], ["Headers", data.header_metadata], ["Field names", data.fields],
     ["Body size", data.body_bytes === null || data.body_bytes === undefined ? undefined : formatBytes(data.body_bytes)],
-    ["Parse state", readableParseState(data.parse_state || data.analysis_state)],
+    ["Parse state", data.parse_state ? readableParseState(data.parse_state) : node.kind === "observation" ? "unknown" : undefined],
+    ["Analysis state", data.analysis_state],
     ["Field type", data.type], ["Location", data.location],
     ["Context", data.context?.scenario],
   ];
@@ -1422,7 +1423,7 @@ function safeDetails(node) {
 }
 
 function readableParseState(value) {
-  return ({ complete: "complete", incomplete: "incomplete", partial_prefix: "truncated", unknown_extent: "unknown length", unknown: "unknown" })[value] || value;
+  return ({ complete: "complete", incomplete: "incomplete", partial: "partial", partial_prefix: "truncated", unknown_extent: "unknown length", unknown: "unknown" })[value] || value;
 }
 
 function readableObservationKind(value) {
