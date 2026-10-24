@@ -23,6 +23,12 @@
   diagnostics unavailable; payloads and raw error codes are not returned.
   Synthetic audit tests cover due/retry/expired/age calculations and secret
   omission.
+- Built the Go executable and launched the web UI against an empty temporary
+  data root on an ephemeral loopback port. `GET /` and `GET /api/projects`
+  both returned HTTP 200; the API correctly reported zero registered
+  projects. The temporary server was stopped after the check. This verifies
+  binary startup and the empty-state route only, not the installed service or
+  a real project.
 
 ## Stage 6 bounded project backup and restore (2026-10-24) — SYNTHETICALLY VERIFIED
 
