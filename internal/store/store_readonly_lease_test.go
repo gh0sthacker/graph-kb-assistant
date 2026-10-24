@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -165,6 +167,56 @@ func TestOpenReadOnlyDoesNotCreateSQLiteOrLockSidecars(t *testing.T) {
 	}
 	if after := directoryNames(t, dir); !reflect.DeepEqual(after, before) {
 		t.Fatalf("read-only close created files: before=%v after=%v", before, after)
+	}
+}
+
+func TestOpenReadOnlyReadsCommittedWALWithoutChangingSidecars(t *testing.T) {
+	dir, path := readonlyFixture(t)
+	writer, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatalf("enable fixture WAL mode: %v", err)
+	}
+	if _, err := writer.Exec("CREATE TABLE wal_fixture(value TEXT)"); err != nil {
+		t.Fatalf("create fixture table: %v", err)
+	}
+	if _, err := writer.Exec("INSERT INTO wal_fixture(value) VALUES('committed')"); err != nil {
+		t.Fatalf("write fixture row: %v", err)
+	}
+
+	before := directoryNames(t, dir)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Lstat(path + suffix); err != nil {
+			t.Fatalf("expected synthetic %s sidecar: %v", suffix, err)
+		}
+	}
+	opened, err := OpenReadOnly(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open WAL-backed database read-only: %v", err)
+	}
+	var value string
+	if err := opened.DB().QueryRow("SELECT value FROM wal_fixture").Scan(&value); err != nil {
+		_ = opened.Close()
+		t.Fatalf("read committed WAL row: %v", err)
+	}
+	if value != "committed" {
+		_ = opened.Close()
+		t.Fatalf("read unexpected WAL value %q", value)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatalf("close WAL-backed read-only database: %v", err)
+	}
+	if after := directoryNames(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatalf("read-only WAL access changed directory entries: before=%v after=%v", before, after)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		info, err := os.Lstat(path + suffix)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			t.Fatalf("read-only WAL access changed or removed %s sidecar: info=%v err=%v", suffix, info, err)
+		}
 	}
 }
 

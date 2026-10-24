@@ -9,12 +9,27 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"bb-graph-assistant/internal/appquery"
 	"bb-graph-assistant/internal/consultation"
+	"bb-graph-assistant/internal/graphaccess"
+	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
+	"bb-graph-assistant/internal/store"
 )
+
+type surfaceServiceAPI struct {
+	*explorerAPIFixture
+	service *appquery.Service
+}
+
+func (f *surfaceServiceAPI) GraphExplorerSurface(ctx context.Context, request appquery.SurfaceRequest) (appquery.SurfaceResult, error) {
+	return f.service.Surface(ctx, request)
+}
 
 type explorerAPIFixture struct {
 	direct, full        int
@@ -537,6 +552,109 @@ func TestSurfaceHandlerPassesServerSideFilterAndOpaqueCursor(t *testing.T) {
 	}
 	if api.lastSurfaceRequest.ProjectKey != strings.Repeat("a", 64) || api.lastSurfaceRequest.Filter != filter || api.lastSurfaceRequest.Cursor != cursor || api.lastSurfaceRequest.Limit != 80 {
 		t.Fatalf("surface request = %#v", api.lastSurfaceRequest)
+	}
+}
+
+func TestSurfaceHTTPReadsWALBackedProjectAndFailsClosedOnRollbackJournal(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	ref := project.CaidoProjectRef{InstanceID: "surface-http-instance", ProjectID: "surface-http-project"}
+	created, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("CreateProject(): %v", err)
+	}
+	if err := created.Close(); err != nil {
+		t.Fatalf("close created project: %v", err)
+	}
+	key, err := ref.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := appquery.NewGraphQueryService(root, []project.CaidoProjectRef{ref}, graphaccess.NewService())
+	if err != nil {
+		t.Fatalf("NewGraphQueryService(): %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close(ctx) })
+
+	directory, err := store.ProjectDirectory(ref, root)
+	if err != nil {
+		t.Fatalf("ProjectDirectory(): %v", err)
+	}
+	lease, err := projectlock.Acquire(ctx, directory)
+	if err != nil {
+		t.Fatalf("Acquire(): %v", err)
+	}
+	writable, err := store.OpenProjectForWrite(ctx, ref, root)
+	if err != nil {
+		_ = lease.Close()
+		t.Fatalf("OpenProjectForWrite(): %v", err)
+	}
+	observationID := strings.Repeat("a", 64)
+	if _, err := writable.Database.DB().ExecContext(ctx,
+		`INSERT INTO captures(observation_id,caido_instance_id,caido_project_id,request_id,request_sha256,request_size,request_vault_ref,parse_state)
+		 VALUES(?,?,?,?,?,0,'fixture-vault-ref','complete')`, observationID, ref.InstanceID, ref.ProjectID, "request-1", strings.Repeat("b", 64)); err != nil {
+		_ = writable.Close()
+		_ = lease.Close()
+		t.Fatalf("insert capture: %v", err)
+	}
+	if _, err := writable.Database.DB().ExecContext(ctx,
+		`INSERT INTO capture_search(observation_id,method,host,port,route,response_status,request_content_type,response_content_type,field_names_json,header_names_json)
+		 VALUES(?,'GET','api.fixture',443,'/wal',200,'','application/json','[]','[]')`, observationID); err != nil {
+		_ = writable.Close()
+		_ = lease.Close()
+		t.Fatalf("insert surface index: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		_ = writable.Close()
+		t.Fatalf("release fixture writer lease: %v", err)
+	}
+	databasePath := filepath.Join(directory, "graph.sqlite3")
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Lstat(databasePath + suffix); err != nil {
+			_ = writable.Close()
+			t.Fatalf("expected synthetic %s sidecar: %v", suffix, err)
+		}
+	}
+
+	api := &surfaceServiceAPI{explorerAPIFixture: &explorerAPIFixture{}, service: service}
+	handler, err := NewHandler(api)
+	if err != nil {
+		_ = writable.Close()
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/surface?project_key="+key, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		_ = writable.Close()
+		t.Fatalf("WAL-backed surface status=%d: %s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		_ = writable.Close()
+		t.Fatalf("decode surface response: %v", err)
+	}
+	if payload["total_operations"] != float64(1) || payload["operations"] == nil {
+		_ = writable.Close()
+		t.Fatalf("surface response did not include committed WAL data: %#v", payload)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatalf("close fixture writer: %v", err)
+	}
+
+	journal := databasePath + "-journal"
+	marker := []byte("synthetic rollback journal")
+	if err := os.WriteFile(journal, marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/surface?project_key="+key, nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("rollback-journal surface status=%d, want 503: %s", response.Code, response.Body.String())
+	}
+	got, err := os.ReadFile(journal)
+	if err != nil || !bytes.Equal(got, marker) {
+		t.Fatalf("failed-closed read changed rollback journal: data=%q err=%v", got, err)
 	}
 }
 

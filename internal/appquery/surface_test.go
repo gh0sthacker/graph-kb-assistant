@@ -4,13 +4,71 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
 )
+
+func TestSurfaceReadsProjectWhileCommittedCaptureIsInWAL(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	ref := project.CaidoProjectRef{InstanceID: "wal-surface-instance", ProjectID: "wal-surface-project"}
+	createSurfaceFixtureProject(t, ctx, root, ref, 0)
+	key, err := ref.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewGraphQueryService(root, []project.CaidoProjectRef{ref}, graphaccess.NewService())
+	if err != nil {
+		t.Fatalf("NewGraphQueryService(): %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close(ctx) })
+
+	directory, err := store.ProjectDirectory(ref, root)
+	if err != nil {
+		t.Fatalf("ProjectDirectory(): %v", err)
+	}
+	writerLease, err := projectlock.Acquire(ctx, directory)
+	if err != nil {
+		t.Fatalf("Acquire(): %v", err)
+	}
+	writable, err := store.OpenProjectForWrite(ctx, ref, root)
+	if err != nil {
+		_ = writerLease.Close()
+		t.Fatalf("OpenProjectForWrite(): %v", err)
+	}
+	insertSurfaceIndexRow(t, ctx, writable, ref, "wal-request", fmt.Sprintf("%064x", 901), "GET", "api.fixture", 443, "/wal")
+	if err := writerLease.Close(); err != nil {
+		_ = writable.Close()
+		t.Fatalf("release synthetic writer lease: %v", err)
+	}
+	databasePath := filepath.Join(directory, "graph.sqlite3")
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Lstat(databasePath + suffix); err != nil {
+			_ = writable.Close()
+			t.Fatalf("expected synthetic %s sidecar while writer is open: %v", suffix, err)
+		}
+	}
+
+	result, err := service.Surface(ctx, SurfaceRequest{ProjectKey: key, Limit: 10})
+	if err != nil {
+		_ = writable.Close()
+		t.Fatalf("Surface() with committed WAL row: %v", err)
+	}
+	if result.TotalOperations != 1 || len(result.Operations) != 1 || result.Operations[0].Route != "/wal" {
+		_ = writable.Close()
+		t.Fatalf("Surface() did not include the committed WAL row: %#v", result)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatalf("close synthetic writer: %v", err)
+	}
+}
 
 func TestSurfaceCursorBindsProjectFilterAndLocalIndexSnapshot(t *testing.T) {
 	ctx := context.Background()

@@ -246,19 +246,25 @@ func TestCaptureProvenanceRetainsRevisionsAndCurrentParseState(t *testing.T) {
 
 func TestMergeAnalyticalSnapshotsDeduplicatesAndSortsRecordFamilies(t *testing.T) {
 	projectKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	sourceRef := behaviorgraph.Record{"path": "/synthetic/fixture.json", "sha256": strings.Repeat("e", 64), "record_locator": "$.endpoint"}
+	sourceID, err := continuationSourceRecordID(sourceRef)
+	if err != nil {
+		t.Fatalf("continuationSourceRecordID: %v", err)
+	}
+	sourceRefs := []behaviorgraph.Record{sourceRef}
 	first := map[string]any{
 		"project_key": projectKey,
 		"entities": []behaviorgraph.Record{
-			{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "endpoint"},
+			{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "endpoint", "source_refs": sourceRefs},
 		},
 		"assertions": []behaviorgraph.Record{{"id": "assertion-" + strings.Repeat("c", 64), "predicate": "exposes"}},
 		"cards":      []behaviorgraph.Record{{"id": "card-" + strings.Repeat("d", 64), "analysis_state": "candidate"}},
-		"sources":    []behaviorgraph.Record{{"id": "source-" + strings.Repeat("e", 64), "sha256": strings.Repeat("e", 64)}},
+		"sources":    []behaviorgraph.Record{{"id": sourceID, "path": sourceRef["path"], "sha256": sourceRef["sha256"], "record_locator": sourceRef["record_locator"]}},
 	}
 	second := map[string]any{
 		"project_key": projectKey,
 		"entities": []any{
-			map[string]any{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "endpoint"},
+			map[string]any{"id": "endpoint-" + strings.Repeat("b", 64), "kind": "endpoint", "source_refs": sourceRefs},
 			map[string]any{"id": "observation-" + strings.Repeat("f", 64), "kind": "observation"},
 		},
 		"assertions": []any{map[string]any{"id": "assertion-" + strings.Repeat("a", 64), "predicate": "returns"}},

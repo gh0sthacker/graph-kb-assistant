@@ -85,15 +85,20 @@ func open(ctx context.Context, path string, readonly bool, acquireReadLease bool
 	if !readonly && info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("writable database permissions must be owner-only")
 	}
+	readOnlyMode := "immutable"
 	if readonly {
-		if err := rejectSQLiteSidecars(absolute); err != nil {
+		readOnlyMode, err = readonlySQLiteMode(absolute)
+		if err != nil {
 			return nil, err
 		}
 	}
 
 	fileURL := (&url.URL{Scheme: "file", Path: absolute}).String()
 	if readonly {
-		fileURL += "?mode=ro&immutable=1"
+		fileURL += "?mode=ro"
+		if readOnlyMode == "immutable" {
+			fileURL += "&immutable=1"
+		}
 	}
 	db, err := sql.Open("sqlite", fileURL)
 	if err != nil {
@@ -111,17 +116,35 @@ func open(ctx context.Context, path string, readonly bool, acquireReadLease bool
 	return store, nil
 }
 
-func rejectSQLiteSidecars(databasePath string) error {
-	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-		_, err := os.Lstat(databasePath + suffix)
-		if err == nil {
-			return errors.New("database has a SQLite sidecar; read-only open refused")
+func readonlySQLiteMode(databasePath string) (string, error) {
+	walInfo, walErr := os.Lstat(databasePath + "-wal")
+	shmInfo, shmErr := os.Lstat(databasePath + "-shm")
+	_, journalErr := os.Lstat(databasePath + "-journal")
+
+	if journalErr == nil {
+		return "", errors.New("database has a SQLite rollback journal; read-only open refused")
+	}
+	if !errors.Is(journalErr, os.ErrNotExist) {
+		return "", errors.New("SQLite journal state could not be checked; read-only open refused")
+	}
+
+	walExists := walErr == nil
+	shmExists := shmErr == nil
+	if !walExists && !shmExists {
+		if !errors.Is(walErr, os.ErrNotExist) || !errors.Is(shmErr, os.ErrNotExist) {
+			return "", errors.New("SQLite sidecar state could not be checked; read-only open refused")
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return errors.New("SQLite sidecar state could not be checked; read-only open refused")
+		return "immutable", nil
+	}
+	if !walExists || !shmExists {
+		return "", errors.New("database has an incomplete SQLite WAL sidecar pair; read-only open refused")
+	}
+	for suffix, info := range map[string]os.FileInfo{"-wal": walInfo, "-shm": shmInfo} {
+		if info == nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return "", fmt.Errorf("database has an unsafe SQLite %s sidecar; read-only open refused", suffix)
 		}
 	}
-	return nil
+	return "wal", nil
 }
 
 func (s *Store) validate(ctx context.Context) error {

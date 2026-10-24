@@ -1568,11 +1568,10 @@ This repository is an early public alpha. The following boundaries are deliberat
   `internal/graph` package tests, `go vet` for those packages, and
   `git diff --check` passed. Runtime queue health, Neo4j delivery, and Caido
   coverage remain `PARTIAL`.
-- Next local acceptance: execute the opt-in multi-page provenance continuation
-  against a disposable Neo4j database with enough temporary storage, then
-  verify the full HTTP/MCP cursor round trip and exact-boundary behavior.
-  Focused-view performance on the working dataset still requires a permitted
-  runtime check.
+- The opt-in multi-page provenance continuation subsequently passed against a
+  disposable Neo4j database, as recorded below. Next local acceptance is a full
+  HTTP/MCP cursor round trip with exact-boundary fixtures. Focused-view
+  performance on the working dataset remains unverified.
 
 ## Entity provenance continuation (2026-10-24) — PARTIAL
 
@@ -1601,5 +1600,34 @@ This repository is an early public alpha. The following boundaries are deliberat
   appquery, MCP contract, and HTTP handler tests passed. These verify adapter
   contracts only; a full cursor round trip through appquery and the HTTP/MCP
   entry points remains outstanding.
+
+## WAL-backed read-only surface access (2026-10-24) — PARTIAL
+
+- The project read-only store previously refused every SQLite sidecar, so a
+  valid project database left in WAL mode made `/api/surface` return HTTP 503
+  and blocked `project-audit`. Read-only open now accepts only a regular,
+  non-symlink `-wal`/`-shm` pair, uses SQLite `mode=ro` so committed WAL pages
+  are visible, and retains the shared project lease for the read. A rollback
+  journal, incomplete pair, or unsafe sidecar still fails closed. Databases
+  without sidecars retain the immutable read-only path.
+- Synthetic regression fixtures prove committed WAL data is visible through
+  the appquery service and HTTP `GET /api/surface` (200), while a synthetic
+  rollback journal remains unchanged and produces 503. The prior deduplication
+  test fixture was updated to include valid source provenance required by the
+  current graph contract.
+- `TMPDIR=/var/tmp go test ./...`, `TMPDIR=/var/tmp go vet ./...`, and
+  `git diff --check` pass. The loopback UI was restarted from the updated source:
+  `/` and `/api/projects` returned 200, and the registered Juice Shop
+  `/api/surface` request returned 200 with 131 operations and 1,400 indexed
+  rows. A read-only `project-audit` also opened successfully and returned
+  `overall_state=partial`. This confirms the observed sidecar-related 503 is
+  cleared for project and surface reads; graph API/Neo4j response, Caido import
+  coverage, queue delivery, KB readiness, and Hermes consultation remain
+  `PARTIAL`.
+- A fresh Caido read-only metadata enumeration reached the terminal cursor
+  with 196,809 unique request IDs; no request bodies were read. `sperpravo` was
+  restored after the temporary Juice Shop comparison. Because Caido exposes
+  no stable history snapshot token, this remains metadata-only evidence and
+  does not establish point-in-time completeness.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
