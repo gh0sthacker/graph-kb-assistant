@@ -1,5 +1,20 @@
 # Project status and known limitations
 
+## Stage 4 synthetic HTTP evidence acceptance (2026-10-24) — PARTIAL
+
+- A new end-to-end synthetic fixture writes two encrypted HTTP exchanges into
+  a disposable project vault, then reads an exact request revision and
+  compares both request and response revisions through the real appquery
+  service and local HTTP handlers. It verifies deterministic difference
+  excerpts, exact revision IDs, truncation flags, and `no-store` responses.
+- `go test ./internal/webui -run
+  TestEvidenceAndComparisonHTTPUseExactEncryptedCaptureRevisions -count=1`
+  passed. All data and vault keys are generated in the test; no existing
+  project, Caido, Neo4j, KB, or model provider is used.
+- This proves the application path against a synthetic encrypted vault only.
+  Decryption of the pre-existing vault and full Stage 4 source coverage remain
+  unverified; Stage 4 remains `PARTIAL`.
+
 ## Stage 2 full-view provenance cursor round trip (2026-10-24) — PARTIAL
 
 - A synthetic end-to-end regression test now traverses the shared
