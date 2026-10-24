@@ -37,12 +37,15 @@ loop remain `PARTIAL`.
   selected project is the unrelated `sperpravo` project. No project switch,
   request enumeration, body read, replay, or target traffic was performed.
   Caido reconciliation remains unverified.
-- The local KB fallback reports 15,535 semantic files and 75,930 vectors;
-  13,750 files and 56,935 vectors are compatible. Semantic integrity is
-  degraded (`ok=false`) with 1,785 wrong-version or unhashed rows. Lexical
-  search is available with 15,438 files and 67,991 passages; its last refresh
-  was 2026-10-13. Semantic indexing last completed 2026-10-07. The MCP
-  `kb_stats` call timed out. KB readiness remains `PARTIAL`; no reindex was run.
+- The local KB fallback reports 15,536 semantic files and 76,962 vectors;
+  14,254 files and 59,981 vectors are compatible. Semantic integrity remains
+  degraded (`ok=false`) with 1,282 wrong-version and unhashed rows; the stored
+  index version is null and last semantic index is 2026-10-07. Lexical search
+  is available with 15,438 files and 67,991 passages; its last refresh was
+  2026-10-13. The incremental `kb_reindex(force=false)` call timed out after
+  300 seconds. During that call the KB database grew and a later stats snapshot
+  showed 116 more compatible files, but completion and queue status are
+  unconfirmed. KB readiness remains `PARTIAL`.
 - `./scripts/run-hermes mcp test bb_assistant` passed and discovered the
   nine-tool read-only local MCP allowlist. The private Hermes profile is mode
   0600 and has no provider/model selection. A model-backed analysis and
