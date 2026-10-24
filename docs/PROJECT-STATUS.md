@@ -7,9 +7,11 @@
   outside the managed allowlist and still refuses malformed or duplicate
   entries. This prevents a prior profile from retaining stale tool grants.
 - A regression test first reproduced the stale-tool behavior, then passed with
-  the fix. All five Hermes profile setup tests pass. The installed Hermes MCP
-  discovery check and model-backed workflow were not run; Stage 5 remains
-  `PARTIAL` and the model provider remains an operator decision.
+  the fix. Six Hermes profile tests pass, including a synthetic check that all
+  15 managed names exist in the Go MCP tool catalog and the raw-capture tool is
+  excluded. The installed Hermes MCP discovery check and model-backed workflow
+  were not run; Stage 5 remains `PARTIAL` and the model provider remains an
+  operator decision.
 
 ## Evidence vault readiness indicator (2026-10-24) — PARTIAL
 

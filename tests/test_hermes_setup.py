@@ -111,6 +111,24 @@ class HermesSetupTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(config_path.read_text(encoding="utf-8"), config)
 
+    def test_managed_tools_are_registered_by_the_local_mcp_server(self) -> None:
+        env = os.environ.copy()
+        env.pop("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL", None)
+        result = subprocess.run(
+            ["go", "run", "./cmd/bb-assistant", "mcp-tools"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        catalog = json.loads(result.stdout)
+        registered = {tool["name"] for tool in catalog["tools"]}
+        self.assertEqual(set(EXPECTED_TOOLS) - registered, set())
+        self.assertNotIn("bb_get_capture_raw", EXPECTED_TOOLS)
+
     def test_refuses_to_overwrite_unmanaged_profile(self) -> None:
         self.profile.mkdir(parents=True)
         config_path = self.profile / "config.yaml"
