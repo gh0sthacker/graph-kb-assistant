@@ -71,6 +71,96 @@ Caido operations use the Caido MCP interface. Select one Caido project and pass 
 
 Use a dedicated private local data directory. Historical import stores capture bytes in the encrypted vault; preserve the generated vault key outside Git and back it up securely. A reconciliation without a stable source snapshot token remains `PARTIAL`, even if the enumerated IDs match.
 
+Run the Go live tail for one explicitly selected and authorized Caido project
+from the repository checkout:
+
+```sh
+./scripts/bb-assistant caido-tail \
+  --project-key <registered-project-sha256> \
+  --mcp-command <verified-caido-mcp-executable> \
+  --mcp-sha256 <verified-executable-sha256> \
+  --token-file <private-caido-token-file> \
+  --page-size 50 --max-pages 1 --watch --poll-interval 10s \
+  --overlap-seconds 90 --body-limit 262144
+```
+
+Live intake imports every request in that Caido project during the overlap
+window. Keep the project restricted to traffic authorized for collection. The
+command persists its cursor and deduplicates previously indexed request IDs;
+it does not declare historical capture coverage complete.
+
+## Managed Go runtime (Linux/systemd)
+
+The checked-in units in [`systemd/`](../systemd/) run the Go web UI, bounded
+Caido live intake, and the durable projection worker. They are templates; this
+repository does not install or start them. The live-tail unit reads every
+request in its selected Caido project, so enable it only for a dedicated
+project whose traffic is authorized for collection.
+
+The examples assume a `bbassist` system account, an installation at
+`/opt/bb-graph-assistant`, and private state at `/var/lib/bb-graph-assistant`.
+Create the account if it does not already exist, then build and install the
+executable and units:
+
+```sh
+if ! id bbassist >/dev/null 2>&1; then
+  sudo useradd --system --user-group --home-dir /var/lib/bb-graph-assistant --create-home --shell /usr/sbin/nologin bbassist
+fi
+mkdir -p bin
+go build -o bin/bb-assistant ./cmd/bb-assistant
+sudo install -D -o root -g root -m 0755 bin/bb-assistant /opt/bb-graph-assistant/bin/bb-assistant
+sudo install -d -o bbassist -g bbassist -m 0700 /var/lib/bb-graph-assistant
+sudo install -d -o bbassist -g bbassist -m 0700 /var/lib/bb-graph-assistant/data
+sudo install -d -o bbassist -g bbassist -m 0700 /var/lib/bb-graph-assistant/.caido-mcp
+sudo install -d -o root -g root -m 0700 /etc/bb-graph-assistant
+sudo install -m 0644 systemd/*.service /etc/systemd/system/
+```
+
+Prepare `/etc/bb-graph-assistant/runtime.env` with the same data root,
+Neo4j connection, graph backend, and vault key used by the selected local
+project. Prepare `/etc/bb-graph-assistant/caido-tail.env` with
+`CAIDO_URL`, `BB_ASSISTANT_CAIDO_MCP_COMMAND`, the verified MCP executable
+SHA-256, and `BB_ASSISTANT_CAIDO_TOKEN_FILE`. Keep both environment files
+root-owned with mode `0600`; keep the token file owned by `bbassist` with mode
+`0600`. Do not put token or vault-key values in the unit file, this repository,
+or service arguments. Restarted services receive the key through the private
+runtime environment; the backup archive does not contain it.
+
+Before enabling services, list the registered project and run its local audit:
+
+```sh
+./scripts/bb-assistant projects --data-root /var/lib/bb-graph-assistant/data
+./scripts/bb-assistant project-audit --project-key <registered-project-sha256> --data-root /var/lib/bb-graph-assistant/data
+```
+
+Resolve incompatible schemas or a missing vault key before enabling intake.
+Then enable the loopback-only web UI and the project-specific worker/intake
+units:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now bb-assistant-web-ui.service
+sudo systemctl enable --now bb-assistant-projection-worker@<registered-project-sha256>.service
+sudo systemctl enable --now bb-assistant-caido-tail@<registered-project-sha256>.service
+```
+
+The UI listens only on `127.0.0.1:8765`. Inspect current state and service logs
+with:
+
+```sh
+./scripts/bb-assistant project-audit --project-key <registered-project-sha256> --data-root /var/lib/bb-graph-assistant/data
+sudo journalctl -u 'bb-assistant-caido-tail@<registered-project-sha256>.service' -f
+sudo journalctl -u 'bb-assistant-projection-worker@<registered-project-sha256>.service' -f
+```
+
+The live-tail checkpoint and request-ID index are persisted in the project
+SQLite store. A synthetic test now closes and reopens the store between pages,
+resumes the saved cursor, then replays known IDs and confirms no duplicate
+captures. This verifies the local restart contract; it does not verify a
+running systemd manager, the configured Caido MCP process, Neo4j delivery, or
+the working project. Keep those runtime checks `PARTIAL` until observed on the
+installed host.
+
 ## Knowledge-base tools
 
 Install the Python extras and run the CLI:

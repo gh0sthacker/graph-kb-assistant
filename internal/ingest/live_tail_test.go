@@ -290,9 +290,10 @@ func TestRunLiveTailMarksCheckpointPartialWhenCaidoReadFails(t *testing.T) {
 	}
 }
 
-func TestRunLiveTailResumesFromCommittedCursor(t *testing.T) {
+func TestRunLiveTailResumesFromCommittedCursorAfterStoreRestart(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, writer := newLiveTailFixture(t)
+	dataRoot := filepath.Dir(filepath.Dir(projectStore.Directory))
 
 	firstRequestRaw := []byte("GET /api/first HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\nfirst-page-marker")
 	secondRequestRaw := []byte("GET /api/second HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\nsecond-page-marker")
@@ -321,6 +322,11 @@ func TestRunLiveTailResumesFromCommittedCursor(t *testing.T) {
 	}
 	options := LiveTailOptions{PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
 
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatalf("acquire first-cycle project lease: %v", err)
+	}
+	t.Cleanup(func() { _ = maintenance.Close() })
 	firstRun, err := RunLiveTail(ctx, source, writer, selected, options)
 	if err != nil {
 		t.Fatalf("first RunLiveTail() error = %v", err)
@@ -328,7 +334,29 @@ func TestRunLiveTailResumesFromCommittedCursor(t *testing.T) {
 	if firstRun.State != "partial" || firstRun.RequestsAdded != 1 || firstRun.PagesCompleted != 1 || !firstRun.CursorPending || !firstRun.LimitReached {
 		t.Fatalf("first RunLiveTail() result = %+v, want a committed partial page with a pending cursor", firstRun)
 	}
+	if err := maintenance.Close(); err != nil {
+		t.Fatalf("close first-cycle project lease: %v", err)
+	}
+	writer.Close()
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("close project store before restart: %v", err)
+	}
+	projectStore, err = store.OpenProjectForWrite(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatalf("reopen project store after restart: %v", err)
+	}
+	t.Cleanup(func() { _ = projectStore.Close() })
+	writer, err = OpenLiveTailWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatalf("reopen live-tail writer after restart: %v", err)
+	}
+	t.Cleanup(writer.Close)
 
+	maintenance, err = projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatalf("acquire resumed-cycle project lease: %v", err)
+	}
+	t.Cleanup(func() { _ = maintenance.Close() })
 	secondRun, err := RunLiveTail(ctx, source, writer, selected, options)
 	if err != nil {
 		t.Fatalf("resumed RunLiveTail() error = %v", err)
@@ -342,15 +370,63 @@ func TestRunLiveTailResumesFromCommittedCursor(t *testing.T) {
 	if len(source.httpqlFilters) != 2 || source.httpqlFilters[0] != source.httpqlFilters[1] {
 		t.Fatalf("resumed live-tail time filter changed: %v", source.httpqlFilters)
 	}
+	if err := maintenance.Close(); err != nil {
+		t.Fatalf("close resumed-cycle project lease: %v", err)
+	}
 	if len(source.fetchedExchanges) != 2 || !allBytesZero(source.fetchedExchanges[0].RequestRaw) || !allBytesZero(source.fetchedExchanges[1].RequestRaw) {
 		t.Fatal("resumed RunLiveTail() retained raw request bytes after processing")
+	}
+	writer.Close()
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("close project store before replay restart: %v", err)
+	}
+	projectStore, err = store.OpenProjectForWrite(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatalf("reopen project store before replay: %v", err)
+	}
+	writer, err = OpenLiveTailWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatalf("reopen live-tail writer before replay: %v", err)
+	}
+	t.Cleanup(writer.Close)
+
+	replay := &liveTailSourceFixture{
+		project: selected,
+		pages: []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{
+			{RequestID: firstID, Method: "GET", URL: firstExchange.Target},
+			{RequestID: secondID, Method: "GET", URL: secondExchange.Target},
+		}}},
+	}
+	maintenance, err = projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatalf("acquire replay-cycle project lease: %v", err)
+	}
+	t.Cleanup(func() { _ = maintenance.Close() })
+	replayOptions := options
+	replayOptions.PageSize = 2
+	replayRun, err := RunLiveTail(ctx, replay, writer, selected, replayOptions)
+	if err != nil {
+		t.Fatalf("replayed RunLiveTail() error = %v", err)
+	}
+	if replayRun.State != "idle" || replayRun.RequestsSeen != 2 || replayRun.RequestsAdded != 0 || replayRun.PagesCompleted != 1 {
+		t.Fatalf("replayed RunLiveTail() result = %+v, want a deduplicated idle page", replayRun)
+	}
+	if len(replay.skippedCounts) != 1 || replay.skippedCounts[0] != 2 {
+		t.Fatalf("replay skip counts = %v, want both known request IDs skipped", replay.skippedCounts)
+	}
+	if err := maintenance.Close(); err != nil {
+		t.Fatalf("close replay-cycle project lease: %v", err)
+	}
+
+	if len(source.fetchedExchanges) != 2 || !allBytesZero(source.fetchedExchanges[0].RequestRaw) || !allBytesZero(source.fetchedExchanges[1].RequestRaw) {
+		t.Fatal("live-tail run retained raw request bytes after processing")
 	}
 	var count int
 	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM live_capture_index").Scan(&count); err != nil {
 		t.Fatalf("count live captures: %v", err)
 	}
 	if count != 2 {
-		t.Fatalf("live capture count after cursor resume = %d, want 2", count)
+		t.Fatalf("live capture count after restart and replay = %d, want 2", count)
 	}
 	var checkpointState string
 	if err := projectStore.Database.DB().QueryRowContext(ctx,

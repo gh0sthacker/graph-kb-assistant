@@ -1,0 +1,36 @@
+[Unit]
+Description=BB Graph Assistant projection worker for project %i
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=4
+
+[Service]
+Type=simple
+User=bbassist
+Group=bbassist
+WorkingDirectory=/opt/bb-graph-assistant
+EnvironmentFile=/etc/bb-graph-assistant/runtime.env
+ExecStart=/opt/bb-graph-assistant/bin/bb-assistant projection-worker --project-key %i --data-root /var/lib/bb-graph-assistant/data --max-jobs 10 --lease-duration 10m --max-attempts 8 --watch --poll-interval 1s
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+UMask=0077
+MemoryMax=768M
+CPUQuota=150%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/bb-graph-assistant/data
+ReadOnlyPaths=/etc/bb-graph-assistant
+
+[Install]
+WantedBy=multi-user.target

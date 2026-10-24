@@ -1,5 +1,23 @@
 # Project status and known limitations
 
+## Stage 6 synthetic live restart/replay and Go service templates (2026-10-24) — PARTIAL
+
+- Extended live-tail coverage to commit one metadata page, close the store and
+  writer, reopen them from the project path, resume the saved cursor, then
+  replay both known request IDs and verify that no duplicate captures are
+  added. The test takes the same exclusive project lease used by the CLI and
+  confirms raw fixture markers are not written in plaintext.
+- Added Linux/systemd templates for the loopback web UI, per-project live
+  intake, and per-project projection worker, plus a setup/runbook path. Static
+  `systemd-analyze verify` passed on copies with the install-time executable
+  path replaced by `/usr/bin/true`. The real install path is not present in
+  this checkout; no systemd service was installed or started.
+- `TMPDIR=/var/tmp go test -count=1 -run
+  TestRunLiveTailResumesFromCommittedCursorAfterStoreRestart ./internal/ingest`
+  passed with synthetic data. No Caido instance, existing project,
+  production queue, or Neo4j was accessed; test state stayed in a temporary
+  synthetic project. Managed runtime and live source parity remain `PARTIAL`.
+
 ## Stage 6 bounded project backup and restore (2026-10-24) — SYNTHETICALLY VERIFIED
 
 - Added offline `project-backup` and `project-restore` CLI commands. They use

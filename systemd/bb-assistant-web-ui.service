@@ -1,0 +1,34 @@
+[Unit]
+Description=BB Graph Assistant local web interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bbassist
+Group=bbassist
+WorkingDirectory=/opt/bb-graph-assistant
+EnvironmentFile=/etc/bb-graph-assistant/runtime.env
+ExecStart=/opt/bb-graph-assistant/bin/bb-assistant web-ui --data-root /var/lib/bb-graph-assistant/data --addr 127.0.0.1:8765
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+MemoryMax=768M
+CPUQuota=150%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/bb-graph-assistant/data
+ReadOnlyPaths=/etc/bb-graph-assistant
+
+[Install]
+WantedBy=multi-user.target
