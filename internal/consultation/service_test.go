@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,103 @@ type comparisonBuilderFake struct {
 	err    error
 	calls  int
 	got    appquery.CaptureComparisonRequest
+}
+
+func TestContextAnnotationsArePinnedToSelectedEvidenceAndReviewedBeforeHermes(t *testing.T) {
+	ctx := context.Background()
+	root, ref, projectKey := createConsultationProject(t, "context-annotations")
+	evidence := &evidenceBuilderFake{packet: samplePacket(projectKey)}
+	service := newTestService(t, root, ref, evidence, &comparisonBuilderFake{result: sampleComparison()})
+	created, err := service.CreateSession(ctx, createRequestFor(projectKey, 2), testIdempotencyKey("context-create"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	annotationRequest := RecordContextAnnotationRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: created.Version,
+		IdempotencyKey: testIdempotencyKey("context-actor"), Kind: "actor", Label: "actor-a",
+		EvidenceReferenceIDs: []string{created.References[0].ID, created.References[1].ID},
+	}
+	annotation, err := service.RecordContextAnnotation(ctx, annotationRequest)
+	if err != nil {
+		t.Fatalf("RecordContextAnnotation: %v", err)
+	}
+	if annotation.Kind != "actor" || annotation.Label != "actor-a" || annotation.Origin != "analyst" || annotation.EvidenceState != "analyst_provided" || len(annotation.EvidenceReferenceIDs) != 2 {
+		t.Fatalf("annotation = %#v", annotation)
+	}
+	replayedAnnotation, err := service.RecordContextAnnotation(ctx, annotationRequest)
+	if err != nil || replayedAnnotation.ID != annotation.ID {
+		t.Fatalf("context annotation retry = %#v err=%v", replayedAnnotation, err)
+	}
+
+	operatorPreview, err := service.ReviewSession(ctx, projectKey, created.ID)
+	if err != nil || operatorPreview.Version != 2 || len(operatorPreview.ContextAnnotations) != 1 {
+		t.Fatalf("operator review = %#v err=%v", operatorPreview, err)
+	}
+	assistantSession, err := service.Resume(ctx, projectKey, created.ID)
+	if err != nil || len(assistantSession.ContextAnnotations) != 0 {
+		t.Fatalf("unaccepted context reached assistant: %#v err=%v", assistantSession.ContextAnnotations, err)
+	}
+	accepted, err := service.AcceptReview(ctx, projectKey, created.ID, operatorPreview.Version, testIdempotencyKey("context-accept"))
+	if err != nil || accepted.Version != 3 {
+		t.Fatalf("AcceptReview = %#v err=%v", accepted, err)
+	}
+	assistantSession, err = service.Resume(ctx, projectKey, created.ID)
+	if err != nil || len(assistantSession.ContextAnnotations) != 1 || assistantSession.ContextAnnotations[0].Label != "actor-a" {
+		t.Fatalf("accepted context not available to assistant: %#v err=%v", assistantSession.ContextAnnotations, err)
+	}
+	if _, err := service.RecordContextAnnotation(ctx, RecordContextAnnotationRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: accepted.Version,
+		IdempotencyKey: testIdempotencyKey("context-after-accept"), Kind: "object", Label: "object-a",
+		EvidenceReferenceIDs: []string{created.References[0].ID},
+	}); !errors.Is(err, ErrSessionAlreadyAccepted) {
+		t.Fatalf("annotation after acceptance error=%v, want ErrSessionAlreadyAccepted", err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatalf("Close before context restart: %v", err)
+	}
+	restarted, err := NewService(root, []project.CaidoProjectRef{ref}, evidence, &comparisonBuilderFake{result: sampleComparison()})
+	if err != nil {
+		t.Fatalf("NewService after annotation: %v", err)
+	}
+	defer restarted.Close()
+	resumed, err := restarted.Resume(ctx, projectKey, created.ID)
+	if err != nil || len(resumed.ContextAnnotations) != 1 || resumed.ContextAnnotations[0].Label != "actor-a" {
+		t.Fatalf("context annotation was not durable across restart: %#v err=%v", resumed.ContextAnnotations, err)
+	}
+}
+
+func TestContextAnnotationRejectsUnselectedReferencesAndRawIdentifierLikeLabels(t *testing.T) {
+	ctx := context.Background()
+	root, ref, projectKey := createConsultationProject(t, "context-annotation-validation")
+	service := newTestService(t, root, ref, &evidenceBuilderFake{packet: samplePacket(projectKey)}, &comparisonBuilderFake{result: sampleComparison()})
+	created, err := service.CreateSession(ctx, createRequestFor(projectKey, 2), testIdempotencyKey("context-validation-create"))
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	base := RecordContextAnnotationRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: created.Version,
+		IdempotencyKey: testIdempotencyKey("context-invalid-ref"), Kind: "object", Label: "object-a",
+		EvidenceReferenceIDs: []string{created.References[0].ID},
+	}
+	base.EvidenceReferenceIDs = []string{testOpaqueID('x')}
+	if _, err := service.RecordContextAnnotation(ctx, base); !errors.Is(err, ErrCitationInvalid) {
+		t.Fatalf("unselected reference error = %v, want ErrCitationInvalid", err)
+	}
+	base.EvidenceReferenceIDs = []string{created.References[0].ID}
+	for index, input := range []struct{ kind, label string }{
+		{kind: "object", label: "https://fixture.invalid/secret?token=value"},
+		{kind: "actor", label: "actor-alice"},
+		{kind: "object", label: "object-12345678"},
+		{kind: "object", label: "object-1 "},
+	} {
+		base.Kind = input.kind
+		base.Label = input.label
+		base.IdempotencyKey = testIdempotencyKey(fmt.Sprintf("context-bad-label-%d", index))
+		if _, err := service.RecordContextAnnotation(ctx, base); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("label %q error = %v, want ErrInvalidInput", input.label, err)
+		}
+	}
 }
 
 func (f *comparisonBuilderFake) CompareCaptureMessages(_ context.Context, request appquery.CaptureComparisonRequest) (appquery.CaptureComparison, error) {

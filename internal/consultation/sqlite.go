@@ -21,7 +21,7 @@ import (
 const (
 	consultationDatabaseName  = "consultation.sqlite3"
 	consultationApplicationID = 0x42424353 // ASCII "BBCS".
-	consultationSchemaVersion = 2
+	consultationSchemaVersion = 3
 	maximumStoredSessions     = 5000
 )
 
@@ -180,6 +180,18 @@ func initializeConsultationSchema(db *sql.DB) error {
 				session_version INTEGER NOT NULL,
 				accepted_at_ns INTEGER NOT NULL
 			)`,
+			`CREATE TABLE consultation_context_annotations (
+				annotation_id TEXT PRIMARY KEY CHECK(length(annotation_id) = 43),
+				session_id TEXT NOT NULL REFERENCES consultation_sessions(session_id),
+				session_version INTEGER NOT NULL,
+				kind TEXT NOT NULL CHECK(kind IN ('actor', 'session', 'tenant', 'role', 'object', 'flow', 'scenario', 'scenario_step')),
+				label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 64),
+				evidence_ids_json BLOB NOT NULL,
+				origin TEXT NOT NULL CHECK(origin = 'analyst'),
+				evidence_state TEXT NOT NULL CHECK(evidence_state = 'analyst_provided'),
+				created_at_ns INTEGER NOT NULL
+			)`,
+			`CREATE INDEX consultation_context_annotations_session_idx ON consultation_context_annotations(session_id, created_at_ns, annotation_id)`,
 			`CREATE TABLE consultation_idempotency (
 				project_key TEXT NOT NULL CHECK(length(project_key) = 64),
 				session_id TEXT NOT NULL,
@@ -195,7 +207,7 @@ func initializeConsultationSchema(db *sql.DB) error {
 				old.state != new.state OR old.evidence_json != new.evidence_json OR old.references_json != new.references_json OR old.created_at_ns != new.created_at_ns
 				BEGIN SELECT RAISE(ABORT, 'consultation session identity is immutable'); END`,
 		}
-		for _, table := range []string{"comparisons", "proposals", "receipts", "candidates", "reviews", "idempotency"} {
+		for _, table := range []string{"comparisons", "proposals", "receipts", "candidates", "reviews", "context_annotations", "idempotency"} {
 			statements = append(statements,
 				fmt.Sprintf(`CREATE TRIGGER consultation_%s_no_update BEFORE UPDATE ON consultation_%s BEGIN SELECT RAISE(ABORT, 'consultation records are immutable'); END`, table, table),
 				fmt.Sprintf(`CREATE TRIGGER consultation_%s_no_delete BEFORE DELETE ON consultation_%s BEGIN SELECT RAISE(ABORT, 'consultation records are append-only'); END`, table, table),
@@ -221,10 +233,22 @@ func initializeConsultationSchema(db *sql.DB) error {
 		}
 		return tx.Commit()
 	}
-	if applicationID == consultationApplicationID && version == 1 {
-		return migrateConsultationV1ToV2(db)
+	if applicationID != consultationApplicationID {
+		return errors.New("consultation database identity or schema version is unsupported")
 	}
-	if applicationID != consultationApplicationID || version != consultationSchemaVersion {
+	if version == 1 {
+		if err := migrateConsultationV1ToV2(db); err != nil {
+			return err
+		}
+		version = 2
+	}
+	if version == 2 {
+		if err := migrateConsultationV2ToV3(db); err != nil {
+			return err
+		}
+		version = 3
+	}
+	if version != consultationSchemaVersion {
 		return errors.New("consultation database identity or schema version is unsupported")
 	}
 	return nil
@@ -256,6 +280,39 @@ func migrateConsultationV1ToV2(db *sql.DB) error {
 		}
 	}
 	if _, err := tx.Exec("PRAGMA user_version = 2"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateConsultationV2ToV3(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`CREATE TABLE consultation_context_annotations (
+			annotation_id TEXT PRIMARY KEY CHECK(length(annotation_id) = 43),
+			session_id TEXT NOT NULL REFERENCES consultation_sessions(session_id),
+			session_version INTEGER NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('actor', 'session', 'tenant', 'role', 'object', 'flow', 'scenario', 'scenario_step')),
+			label TEXT NOT NULL CHECK(length(label) BETWEEN 1 AND 64),
+			evidence_ids_json BLOB NOT NULL,
+			origin TEXT NOT NULL CHECK(origin = 'analyst'),
+			evidence_state TEXT NOT NULL CHECK(evidence_state = 'analyst_provided'),
+			created_at_ns INTEGER NOT NULL
+		)`,
+		`CREATE INDEX consultation_context_annotations_session_idx ON consultation_context_annotations(session_id, created_at_ns, annotation_id)`,
+		`CREATE TRIGGER consultation_context_annotations_no_update BEFORE UPDATE ON consultation_context_annotations BEGIN SELECT RAISE(ABORT, 'consultation records are immutable'); END`,
+		`CREATE TRIGGER consultation_context_annotations_no_delete BEFORE DELETE ON consultation_context_annotations BEGIN SELECT RAISE(ABORT, 'consultation records are append-only'); END`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("PRAGMA user_version = 3"); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -365,6 +422,7 @@ func (d *sessionDB) readSession(ctx context.Context, projectKey, sessionID strin
 		return Session{}, ErrStoreUnavailable
 	}
 	session.Comparisons = []ComparisonRecord{}
+	session.ContextAnnotations = []ContextAnnotation{}
 	session.Proposals = []ProposalRecord{}
 	session.Receipts = []ValidationReceipt{}
 	session.Candidates = []CandidateVersion{}
@@ -383,6 +441,28 @@ func (d *sessionDB) readSession(ctx context.Context, projectKey, sessionID strin
 		}
 		item.CreatedAt = time.Unix(0, created).UTC()
 		session.Comparisons = append(session.Comparisons, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return Session{}, ErrStoreUnavailable
+	}
+	_ = rows.Close()
+	rows, err = d.db.QueryContext(ctx, `SELECT annotation_id, session_version, kind, label, evidence_ids_json, origin, evidence_state, created_at_ns
+		FROM consultation_context_annotations WHERE session_id = ? ORDER BY session_version, annotation_id`, sessionID)
+	if err != nil {
+		return Session{}, ErrStoreUnavailable
+	}
+	for rows.Next() {
+		var item ContextAnnotation
+		var evidenceIDsJSON []byte
+		var created int64
+		if err := rows.Scan(&item.ID, &item.SessionVersion, &item.Kind, &item.Label, &evidenceIDsJSON, &item.Origin, &item.EvidenceState, &created); err != nil ||
+			decodeSafe(evidenceIDsJSON, &item.EvidenceReferenceIDs) != nil {
+			_ = rows.Close()
+			return Session{}, ErrStoreUnavailable
+		}
+		item.CreatedAt = time.Unix(0, created).UTC()
+		session.ContextAnnotations = append(session.ContextAnnotations, item)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -534,6 +614,34 @@ func (d *sessionDB) appendComparison(ctx context.Context, projectKey, sessionID 
 	var result ComparisonRecord
 	if decodeSafe(encoded, &result) != nil {
 		return ComparisonRecord{}, ErrStoreUnavailable
+	}
+	return result, nil
+}
+
+func (d *sessionDB) appendContextAnnotation(ctx context.Context, projectKey, sessionID string, expectedVersion int, idempotencyKey, requestHash string, record ContextAnnotation) (ContextAnnotation, error) {
+	encoded, err := d.mutateSession(ctx, projectKey, sessionID, expectedVersion, "context_annotation", idempotencyKey, requestHash, record.SessionVersion, func(tx *sql.Tx) (any, error) {
+		var count int
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM consultation_context_annotations WHERE session_id = ?", sessionID).Scan(&count); err != nil || count >= maximumContextAnnotations {
+			return nil, ErrLimitReached
+		}
+		evidenceIDsJSON, err := encodeSafe(record.EvidenceReferenceIDs)
+		if err != nil {
+			return nil, ErrInvalidInput
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO consultation_context_annotations
+			(annotation_id, session_id, session_version, kind, label, evidence_ids_json, origin, evidence_state, created_at_ns)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, sessionID, record.SessionVersion, record.Kind, record.Label,
+			evidenceIDsJSON, record.Origin, record.EvidenceState, record.CreatedAt.UnixNano()); err != nil {
+			return nil, ErrStoreUnavailable
+		}
+		return record, nil
+	})
+	if err != nil {
+		return ContextAnnotation{}, err
+	}
+	var result ContextAnnotation
+	if decodeSafe(encoded, &result) != nil {
+		return ContextAnnotation{}, ErrStoreUnavailable
 	}
 	return result, nil
 }
@@ -724,7 +832,7 @@ func insertMutation(ctx context.Context, tx *sql.Tx, projectKey, sessionID, oper
 }
 
 func validateStoredSession(session Session) error {
-	maximumSessionVersion := 1 + 1 + maximumSessionComparisons + maximumProposals + maximumValidationReceipts + maximumCandidateVersions
+	maximumSessionVersion := 1 + 1 + maximumContextAnnotations + maximumSessionComparisons + maximumProposals + maximumValidationReceipts + maximumCandidateVersions
 	if !sessionIDPattern.MatchString(session.ID) || !projectKeyPattern.MatchString(session.ProjectKey) || session.Version < 1 || session.Version > maximumSessionVersion || session.State != SessionOpen ||
 		session.Question != session.Evidence.Question || session.Evidence.ProjectKey != session.ProjectKey || len(session.References) != len(session.Evidence.Evidence) ||
 		len(session.References) > maximumEvidenceReferences || len(session.Comparisons) > maximumSessionComparisons || len(session.Proposals) > maximumProposals ||
@@ -777,6 +885,22 @@ func validateStoredSession(session Session) error {
 	}
 	if session.ReviewAccepted && (!addVersion(session.ReviewAcceptedVersion) || session.ReviewAcceptedAt.Before(session.CreatedAt)) {
 		return errors.New("consultation review transition is inconsistent")
+	}
+	if len(session.ContextAnnotations) > maximumContextAnnotations {
+		return errors.New("consultation context annotation limit is exceeded")
+	}
+	for _, annotation := range session.ContextAnnotations {
+		if !sessionIDPattern.MatchString(annotation.ID) || !addVersion(annotation.SessionVersion) || annotation.CreatedAt.IsZero() ||
+			!validContextKind(annotation.Kind) || !validContextLabel(annotation.Kind, annotation.Label) || annotation.Origin != "analyst" ||
+			annotation.EvidenceState != "analyst_provided" || len(annotation.EvidenceReferenceIDs) < 1 ||
+			len(annotation.EvidenceReferenceIDs) > maximumAnnotationEvidence || !validOpaqueIDs(annotation.EvidenceReferenceIDs) {
+			return errors.New("consultation context annotation is inconsistent")
+		}
+		for _, referenceID := range annotation.EvidenceReferenceIDs {
+			if _, exists := references[referenceID]; !exists {
+				return errors.New("consultation context annotation references unselected evidence")
+			}
+		}
 	}
 	comparisons := comparisonMap(session)
 	for _, comparison := range session.Comparisons {

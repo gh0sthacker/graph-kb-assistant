@@ -71,6 +71,16 @@ type consultationAcceptReviewRequest struct {
 	IdempotencyKey  string `json:"idempotency_key"`
 }
 
+type consultationContextAnnotationRequest struct {
+	ProjectKey           string   `json:"project_key"`
+	SessionID            string   `json:"session_id"`
+	ExpectedVersion      int      `json:"expected_version"`
+	IdempotencyKey       string   `json:"idempotency_key"`
+	Kind                 string   `json:"kind"`
+	Label                string   `json:"label"`
+	EvidenceReferenceIDs []string `json:"evidence_reference_ids"`
+}
+
 func consultationResumeHandler(api consultationAPI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -133,6 +143,23 @@ func consultationAcceptReviewHandler(api consultationAPI) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 		defer cancel()
 		result, err := api.AcceptReview(ctx, body.ProjectKey, body.SessionID, body.ExpectedVersion, body.IdempotencyKey)
+		writeConsultationResult(w, result, err)
+	}
+}
+
+func consultationContextAnnotationHandler(api consultationAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body consultationContextAnnotationRequest
+		if !decodeConsultationJSON(w, r, &body) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		defer cancel()
+		result, err := api.RecordContextAnnotation(ctx, consultation.RecordContextAnnotationRequest{
+			ProjectKey: body.ProjectKey, SessionID: body.SessionID, ExpectedVersion: body.ExpectedVersion,
+			IdempotencyKey: body.IdempotencyKey, Kind: body.Kind, Label: body.Label,
+			EvidenceReferenceIDs: body.EvidenceReferenceIDs,
+		})
 		writeConsultationResult(w, result, err)
 	}
 }
@@ -248,6 +275,8 @@ func writeConsultationError(w http.ResponseWriter, err error) {
 		status, message = http.StatusNotFound, "the selected consultation project or session was not found"
 	case errors.Is(err, consultation.ErrSessionVersionConflict), errors.Is(err, consultation.ErrIdempotencyConflict):
 		status, message = http.StatusConflict, "consultation state changed; reload the saved session before retrying"
+	case errors.Is(err, consultation.ErrSessionAlreadyAccepted):
+		status, message = http.StatusConflict, "accepted consultation sessions cannot be changed"
 	case errors.Is(err, consultation.ErrReviewNotAccepted):
 		status, message = http.StatusConflict, "review the redacted evidence locally before allowing assistant use"
 	case errors.Is(err, consultation.ErrCitationInvalid), errors.Is(err, consultation.ErrReceiptInvalid):

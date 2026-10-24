@@ -128,8 +128,27 @@
             <p id="consultation-status" role="status" aria-live="polite">Preview the selected evidence before creating a consultation.</p>
           </div>
           <section class="consultation-review" id="consultation-review" aria-label="Operator review before assistant access" hidden>
-            <p><strong>Operator review required.</strong> Check the saved redacted question and excerpts below. Hermes cannot read them until you accept this exact packet.</p>
+            <p><strong>Operator review required.</strong> Check the saved redacted question, excerpts, and analyst context below. Hermes cannot read them until you accept this exact session.</p>
             <pre id="consultation-review-content" tabindex="0" aria-label="Saved redacted packet for operator review"></pre>
+            <section class="consultation-context" id="consultation-context" aria-label="Analyst context labels" hidden>
+              <strong>Analyst context</strong>
+              <p>Attach pseudonymous labels to selected evidence, such as actor-a or object-1. The suffix must be one lowercase letter or a 1–3 digit ordinal. Do not enter actual IDs, usernames, or secrets. These labels are analyst-provided context, not proof of ownership, equality, or causality; Hermes sees them only after you accept this session.</p>
+              <div class="context-fields">
+                <label for="consultation-context-kind">Context type
+                  <select id="consultation-context-kind">
+                    <option value="actor">Actor</option><option value="session">Session</option><option value="tenant">Tenant</option>
+                    <option value="role">Role</option><option value="object">Object</option><option value="flow">Flow</option>
+                    <option value="scenario">Scenario</option><option value="scenario_step">Scenario step</option>
+                  </select>
+                </label>
+                <label for="consultation-context-label">Pseudonymous label
+                  <input id="consultation-context-label" maxlength="64" placeholder="actor-a" autocomplete="off">
+                </label>
+              </div>
+              <div id="consultation-context-evidence" class="context-evidence" aria-label="Select evidence references"></div>
+              <button class="tool-button" id="consultation-context-save" type="button" disabled>Add analyst label</button>
+              <div id="consultation-context-list" class="context-label-list" aria-live="polite"></div>
+            </section>
             <button class="tool-button" id="consultation-accept" type="button" disabled>I reviewed this packet — allow Hermes access</button>
           </section>
         </section>

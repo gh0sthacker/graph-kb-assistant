@@ -36,7 +36,8 @@ var (
 	sameOriginPostRoutes = map[string]struct{}{
 		"/api/evidence/packet-preview": {}, "/api/consultation/session": {},
 		"/api/consultation/accept-review": {}, "/api/consultation/compare": {},
-		"/api/consultation/proposal": {}, "/api/consultation/validate": {},
+		"/api/consultation/context-annotation": {},
+		"/api/consultation/proposal":           {}, "/api/consultation/validate": {},
 		"/api/consultation/candidate": {},
 	}
 )
@@ -58,6 +59,7 @@ type consultationAPI interface {
 	Resume(context.Context, string, string) (consultation.Session, error)
 	ReviewSession(context.Context, string, string) (consultation.Session, error)
 	AcceptReview(context.Context, string, string, int, string) (consultation.Session, error)
+	RecordContextAnnotation(context.Context, consultation.RecordContextAnnotationRequest) (consultation.ContextAnnotation, error)
 	Compare(context.Context, string, string, int, string, appquery.CaptureComparisonRequest) (consultation.ComparisonRecord, error)
 	RecordProposal(context.Context, consultation.RecordProposalRequest) (consultation.ProposalRecord, error)
 	ValidateProposal(context.Context, consultation.ValidateProposalRequest) (consultation.ValidationReceipt, error)
@@ -91,6 +93,7 @@ func NewHandler(api readAPI) (http.Handler, error) {
 		mux.HandleFunc("GET /api/consultation/review", consultationReviewHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/session", consultationCreateHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/accept-review", consultationAcceptReviewHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/context-annotation", consultationContextAnnotationHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/compare", consultationCompareHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/proposal", consultationProposalHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/validate", consultationValidateHandler(consultations))

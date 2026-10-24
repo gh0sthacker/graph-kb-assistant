@@ -64,7 +64,7 @@ func TestMigrateConsultationV1PreservesCandidateHistory(t *testing.T) {
 		t.Fatalf("initializeConsultationSchema migration: %v", err)
 	}
 	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	var candidateID string
@@ -97,6 +97,10 @@ func downgradeConsultationV2ToV1ForTest(t *testing.T, databasePath, projectKey, 
 	db.SetMaxOpenConns(1)
 	defer db.Close()
 	statements := []string{
+		`DROP TRIGGER consultation_context_annotations_no_update`,
+		`DROP TRIGGER consultation_context_annotations_no_delete`,
+		`DROP INDEX consultation_context_annotations_session_idx`,
+		`DROP TABLE consultation_context_annotations`,
 		`DROP TRIGGER consultation_candidates_no_update`,
 		`DROP INDEX IF EXISTS consultation_candidates_identity_idx`,
 		`CREATE TABLE consultation_candidates_legacy_copy AS

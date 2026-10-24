@@ -15,7 +15,7 @@ const state = {
   renderedEntities: [], renderedAssertions: [], layoutPositions: new Map(), zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
   evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
-  evidencePacketPreview: null, consultation: null, consultationCreateKey: "",
+  evidencePacketPreview: null, consultation: null, consultationCreateKey: "", contextAnnotationKey: "",
 };
 
 const elements = {
@@ -43,6 +43,9 @@ const elements = {
   evidencePacketPreview: $("#evidence-packet-preview"), evidencePacketContent: $("#evidence-packet-content"),
   consultationCreate: $("#consultation-create"), consultationCopyID: $("#consultation-copy-id"), consultationStatus: $("#consultation-status"),
   consultationReview: $("#consultation-review"), consultationReviewContent: $("#consultation-review-content"),
+  consultationContext: $("#consultation-context"), consultationContextKind: $("#consultation-context-kind"),
+  consultationContextLabel: $("#consultation-context-label"), consultationContextEvidence: $("#consultation-context-evidence"),
+  consultationContextSave: $("#consultation-context-save"), consultationContextList: $("#consultation-context-list"),
   consultationAccept: $("#consultation-accept"),
   evidenceRequest: $("#evidence-request"), evidenceResponse: $("#evidence-response"),
 };
@@ -342,7 +345,7 @@ function updateEvidencePacketControl() {
   elements.evidencePacketAdd.disabled = !validSpan || evidence.loading || selections.length >= 4 || selectedBytes + length > 8192 || duplicate;
   elements.evidencePacketPreview.disabled = !evidence || evidence.loading || evidence.packetPreviewLoading ||
     !draft.question.trim() || selections.length === 0;
-  elements.consultationCreate.disabled = !state.evidencePacketPreview || evidence?.packetPreviewLoading || Boolean(state.consultation?.reviewLoaded);
+  elements.consultationCreate.disabled = !state.evidencePacketPreview || evidence?.packetPreviewLoading;
   elements.consultationCreate.textContent = state.consultation ? "Reload saved review" : "Save session for review";
 }
 
@@ -354,9 +357,15 @@ function newIdempotencyKey() {
 function resetConsultationUI(message) {
   state.consultation = null;
   state.consultationCreateKey = "";
+  state.contextAnnotationKey = "";
   elements.consultationStatus.textContent = message;
   elements.consultationReview.hidden = true;
   elements.consultationReviewContent.textContent = "";
+  elements.consultationContext.hidden = true;
+  elements.consultationContextEvidence.replaceChildren();
+  elements.consultationContextList.replaceChildren();
+  elements.consultationContextLabel.value = "";
+  elements.consultationContextSave.hidden = false;
   elements.consultationAccept.disabled = true;
   elements.consultationAccept.hidden = false;
   elements.consultationCopyID.hidden = true;
@@ -455,10 +464,13 @@ async function createOrReviewConsultation() {
     session.version = review.version;
     session.accepted = Boolean(review.review_accepted);
     session.reviewLoaded = true;
+    session.contextAnnotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
+    elements.consultationContextLabel.value = "";
     elements.consultationReviewContent.textContent = JSON.stringify({
       consultation_id: review.consultation_id, version: review.version,
-      question: review.question, evidence: review.evidence,
+      question: review.question, evidence: review.evidence, context_annotations: review.context_annotations || [],
     }, null, 2);
+    renderConsultationContext(review, session.accepted);
     elements.consultationReview.hidden = false;
     elements.consultationAccept.hidden = session.accepted;
     elements.consultationAccept.disabled = session.accepted;
@@ -471,6 +483,89 @@ async function createOrReviewConsultation() {
     elements.consultationStatus.textContent = `Could not load the saved review: ${error.message}`;
     elements.consultationCreate.disabled = false;
     if (state.consultation) elements.consultationCreate.textContent = "Reload saved review";
+  }
+}
+
+function renderConsultationContext(review, accepted) {
+  elements.consultationContext.hidden = false;
+  elements.consultationContextEvidence.replaceChildren();
+  elements.consultationContextList.replaceChildren();
+  for (const reference of review.evidence_references || []) {
+    const label = el("label");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.value = reference.evidence_reference_id;
+    checkbox.disabled = accepted;
+    checkbox.addEventListener("change", () => { state.contextAnnotationKey = ""; updateContextAnnotationControl(); });
+    const title = `Evidence ${Number(reference.evidence_index) + 1} · ${reference.side} · Caido ${reference.request_id}`;
+    label.append(checkbox, document.createTextNode(title));
+    elements.consultationContextEvidence.append(label);
+  }
+  const annotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
+  for (const annotation of annotations) {
+    const count = Array.isArray(annotation.evidence_reference_ids) ? annotation.evidence_reference_ids.length : 0;
+    elements.consultationContextList.append(el("div", "context-label-item", `${annotation.kind}: ${annotation.label} · ${count} evidence item${count === 1 ? "" : "s"} · analyst-provided`));
+  }
+  if (!annotations.length) elements.consultationContextList.append(el("div", "context-label-item", "No analyst context labels yet."));
+  elements.consultationContextKind.disabled = accepted;
+  elements.consultationContextLabel.disabled = accepted;
+  elements.consultationContextSave.hidden = accepted;
+  updateContextAnnotationControl();
+}
+
+function updateContextAnnotationControl() {
+  const hasSelectedEvidence = elements.consultationContextEvidence.querySelector("input:checked") !== null;
+  elements.consultationContextSave.disabled = elements.consultationContextKind.disabled ||
+    !elements.consultationContextLabel.value.trim() || !hasSelectedEvidence;
+}
+
+async function saveContextAnnotation() {
+  const preview = state.evidencePacketPreview;
+  const session = state.consultation;
+  if (!preview || !session || !session.reviewLoaded || session.accepted || preview.projectKey !== state.projectKey ||
+      elements.consultationContextSave.disabled) return;
+  const evidenceReferenceIDs = [...elements.consultationContextEvidence.querySelectorAll("input:checked")].map(input => input.value);
+  state.contextAnnotationKey ||= newIdempotencyKey();
+  const requestKey = state.contextAnnotationKey;
+  elements.consultationContextSave.disabled = true;
+  elements.consultationContextKind.disabled = true;
+  elements.consultationContextLabel.disabled = true;
+  for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = true;
+  elements.consultationAccept.disabled = true;
+  elements.consultationStatus.textContent = "Saving analyst context to the local review…";
+  let saved = false;
+  try {
+    await postJSON("/api/consultation/context-annotation", {
+      project_key: preview.projectKey, session_id: session.id, expected_version: session.version,
+      idempotency_key: requestKey, kind: elements.consultationContextKind.value,
+      label: elements.consultationContextLabel.value, evidence_reference_ids: evidenceReferenceIDs,
+    });
+    saved = true;
+    if (state.consultation !== session || state.projectKey !== preview.projectKey || state.evidencePacketPreview !== preview) return;
+    const query = new URLSearchParams({ project_key: preview.projectKey, session_id: session.id });
+    const review = await getJSON(`/api/consultation/review?${query}`);
+    if (state.consultation !== session || state.projectKey !== preview.projectKey || state.evidencePacketPreview !== preview) return;
+    session.version = review.version;
+    session.contextAnnotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
+    state.contextAnnotationKey = "";
+    elements.consultationContextLabel.value = "";
+    elements.consultationReviewContent.textContent = JSON.stringify({
+      consultation_id: review.consultation_id, version: review.version,
+      question: review.question, evidence: review.evidence, context_annotations: review.context_annotations || [],
+    }, null, 2);
+    renderConsultationContext(review, false);
+    elements.consultationAccept.disabled = false;
+    elements.consultationStatus.textContent = `Saved locally · ${session.contextAnnotations.length} analyst context label${session.contextAnnotations.length === 1 ? "" : "s"} included in the review.`;
+  } catch (error) {
+    elements.consultationStatus.textContent = saved
+      ? `Context was saved, but the review could not reload: ${error.message}. Reload the saved review before continuing.`
+      : `Context label was not saved: ${error.message}`;
+    elements.consultationContextKind.disabled = false;
+    elements.consultationContextLabel.disabled = false;
+    for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = false;
+    elements.consultationAccept.disabled = false;
+    updateContextAnnotationControl();
+    updateEvidencePacketControl();
   }
 }
 
@@ -489,10 +584,15 @@ async function acceptConsultationReview() {
     session.version = accepted.version;
     session.accepted = Boolean(accepted.review_accepted);
     elements.consultationAccept.hidden = true;
+    elements.consultationContextKind.disabled = true;
+    elements.consultationContextLabel.disabled = true;
+    for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = true;
+    elements.consultationContextSave.hidden = true;
     elements.consultationStatus.textContent = `Accepted · consultation ${session.id} · Hermes can now resume this session.`;
   } catch (error) {
     elements.consultationStatus.textContent = `Approval was not recorded: ${error.message}`;
     elements.consultationAccept.disabled = false;
+    updateEvidencePacketControl();
   }
 }
 
@@ -1644,6 +1744,16 @@ elements.evidencePacketClear.addEventListener("click", clearEvidencePacketDraft)
 elements.evidencePacketPreview.addEventListener("click", () => { void previewEvidencePacket(); });
 elements.consultationCreate.addEventListener("click", () => { void createOrReviewConsultation(); });
 elements.consultationAccept.addEventListener("click", () => { void acceptConsultationReview(); });
+elements.consultationContextKind.addEventListener("change", () => {
+  elements.consultationContextLabel.placeholder = `${elements.consultationContextKind.value.replaceAll("_", "-")}-a`;
+  state.contextAnnotationKey = "";
+  updateContextAnnotationControl();
+});
+elements.consultationContextLabel.addEventListener("input", () => {
+  state.contextAnnotationKey = "";
+  updateContextAnnotationControl();
+});
+elements.consultationContextSave.addEventListener("click", () => { void saveContextAnnotation(); });
 elements.consultationCopyID.addEventListener("click", async () => {
   if (!state.consultation?.id) return;
   const resumeArguments = JSON.stringify({ project_key: state.projectKey, session_id: state.consultation.id });

@@ -35,15 +35,19 @@ type explorerAPIFixture struct {
 
 type consultationAPIFixture struct {
 	*explorerAPIFixture
-	reviewSession   consultation.Session
-	resumed         consultation.Session
-	accepted        consultation.Session
-	acceptErr       error
-	acceptCalls     int
-	lastProject     string
-	lastSession     string
-	lastVersion     int
-	lastIdempotency string
+	reviewSession      consultation.Session
+	resumed            consultation.Session
+	accepted           consultation.Session
+	acceptErr          error
+	acceptCalls        int
+	lastProject        string
+	lastSession        string
+	lastVersion        int
+	lastIdempotency    string
+	contextAnnotation  consultation.ContextAnnotation
+	contextErr         error
+	contextCalls       int
+	lastContextRequest consultation.RecordContextAnnotationRequest
 }
 
 func (f *consultationAPIFixture) CreateSession(_ context.Context, _ appquery.EvidencePacketRequest, _ string) (consultation.Session, error) {
@@ -59,6 +63,11 @@ func (f *consultationAPIFixture) AcceptReview(_ context.Context, projectKey, ses
 	f.acceptCalls++
 	f.lastProject, f.lastSession, f.lastVersion, f.lastIdempotency = projectKey, sessionID, version, idempotencyKey
 	return f.accepted, f.acceptErr
+}
+func (f *consultationAPIFixture) RecordContextAnnotation(_ context.Context, request consultation.RecordContextAnnotationRequest) (consultation.ContextAnnotation, error) {
+	f.contextCalls++
+	f.lastContextRequest = request
+	return f.contextAnnotation, f.contextErr
 }
 func (f *consultationAPIFixture) Compare(context.Context, string, string, int, string, appquery.CaptureComparisonRequest) (consultation.ComparisonRecord, error) {
 	return consultation.ComparisonRecord{}, nil
@@ -510,6 +519,43 @@ func TestConsultationReviewAndAcceptanceAreLocalNoStoreAndSameOrigin(t *testing.
 	}
 	if api.acceptCalls != 1 || api.lastProject != projectKey || api.lastSession != sessionID || api.lastVersion != 1 || api.lastIdempotency != "accept-review-0123456789" {
 		t.Fatalf("accept call was not routed exactly: %#v", api)
+	}
+}
+
+func TestConsultationContextAnnotationRequiresSameOriginAndUsesSelectedReferenceIDs(t *testing.T) {
+	projectKey, sessionID, referenceID := strings.Repeat("a", 64), strings.Repeat("b", 43), strings.Repeat("c", 43)
+	api := &consultationAPIFixture{
+		explorerAPIFixture: &explorerAPIFixture{},
+		contextAnnotation: consultation.ContextAnnotation{
+			ID: strings.Repeat("d", 43), SessionVersion: 2, Kind: "actor", Label: "actor-a",
+			EvidenceReferenceIDs: []string{referenceID}, Origin: "analyst", EvidenceState: "analyst_provided",
+		},
+	}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"project_key":"` + projectKey + `","session_id":"` + sessionID + `","expected_version":1,"idempotency_key":"context-label-0123456789","kind":"actor","label":"actor-a","evidence_reference_ids":["` + referenceID + `"]}`
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/context-annotation", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || !strings.Contains(response.Body.String(), `"evidence_state":"analyst_provided"`) {
+		t.Fatalf("annotation response status=%d cache=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+	got := api.lastContextRequest
+	if api.contextCalls != 1 || got.ProjectKey != projectKey || got.SessionID != sessionID || got.ExpectedVersion != 1 || got.Kind != "actor" || got.Label != "actor-a" || len(got.EvidenceReferenceIDs) != 1 || got.EvidenceReferenceIDs[0] != referenceID {
+		t.Fatalf("context annotation was not routed exactly: calls=%d request=%#v", api.contextCalls, got)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/context-annotation", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://evil.example")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || api.contextCalls != 1 {
+		t.Fatalf("foreign origin status=%d calls=%d", response.Code, api.contextCalls)
 	}
 }
 

@@ -1,5 +1,30 @@
 # Project status and known limitations
 
+## Stage 3 analyst context annotations (2026-10-24 11:04Z) — PARTIAL
+
+- Consultation sessions now accept versioned, append-only analyst annotations
+  (`actor`, `session`, `tenant`, `role`, `object`, `flow`, `scenario`, and
+  `scenario_step`) attached to exact selected evidence-reference IDs. Labels
+  are constrained to a short type-prefixed alias such as `actor-a` or
+  `object-1`; the UI says these labels are analyst context, not proof of
+  ownership, equality, or causality. Accepted sessions are immutable. Hermes
+  receives the annotations only after the operator accepts the updated
+  session; pre-accept resume responses omit them.
+- Consultation SQLite schema v3 adds an append-only annotation table and
+  migrates v1/v2 session stores transactionally. Tests cover selected-reference
+  binding, alias validation, idempotent retry, version changes, accepted-state
+  rejection, pre/post-review visibility, and persistence after service restart.
+  ECC review found and the UI now fixes stale-review recovery after a version
+  conflict.
+- `TMPDIR=/var/tmp go test -count=1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
+  `node --check internal/webui/assets/app.js`, 37 graph/surface UI tests, and
+  `git diff --check` passed. This code slice did not access Caido, inspect raw
+  traffic, migrate the live consultation store, or reproject graph data.
+- The local application and overall data coverage remain `PARTIAL`: live
+  consultation startup with this schema, complete Caido synchronization,
+  graph reprojection, and Hermes model-backed analysis still need runtime
+  verification.
+
 ## Stage 3 route-family uncertainty in graph inspector (2026-10-24 10:47Z) — PARTIAL
 
 - Operation and endpoint nodes now identify route grouping as heuristic. The

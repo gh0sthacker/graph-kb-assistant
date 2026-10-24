@@ -34,6 +34,8 @@ const (
 	maximumValidationReceipts  = 512
 	maximumCandidateVersions   = 32
 	maximumSessionComparisons  = 16
+	maximumContextAnnotations  = 32
+	maximumAnnotationEvidence  = 4
 	maximumEvidenceReferences  = appquery.MaximumEvidencePacketSpans
 	maximumEvidenceCitations   = 8
 	maximumComparisonCitations = 16
@@ -52,9 +54,11 @@ var (
 	ErrReviewNotAccepted      = errors.New("operator review is required before assistant use")
 	ErrLimitReached           = errors.New("consultation storage limit was reached")
 	ErrSessionVersionConflict = errors.New("consultation session version is stale")
+	ErrSessionAlreadyAccepted = errors.New("consultation session is already accepted and immutable")
 	ErrIdempotencyConflict    = errors.New("idempotency key was reused for a different operation")
 	sessionIDPattern          = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 	idempotencyKeyPattern     = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+	contextAliasSuffixPattern = regexp.MustCompile(`^(?:[a-z]|[0-9]{1,3})$`)
 	projectKeyPattern         = regexp.MustCompile(`^[a-f0-9]{64}$`)
 	revisionPattern           = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
@@ -92,12 +96,36 @@ type Session struct {
 	ReviewAcceptedAt      time.Time               `json:"review_accepted_at,omitempty"`
 	Evidence              appquery.EvidencePacket `json:"evidence"`
 	References            []EvidenceReference     `json:"evidence_references"`
+	ContextAnnotations    []ContextAnnotation     `json:"context_annotations"`
 	Comparisons           []ComparisonRecord      `json:"comparisons"`
 	Proposals             []ProposalRecord        `json:"proposals"`
 	Receipts              []ValidationReceipt     `json:"validation_receipts"`
 	Candidates            []CandidateVersion      `json:"candidates"`
 	CreatedAt             time.Time               `json:"created_at"`
 	UpdatedAt             time.Time               `json:"updated_at"`
+}
+
+// ContextAnnotation records an analyst-assigned pseudonymous label for exact
+// evidence references. It is contextual metadata, not an observed fact.
+type ContextAnnotation struct {
+	ID                   string    `json:"context_annotation_id"`
+	SessionVersion       int       `json:"session_version"`
+	Kind                 string    `json:"kind"`
+	Label                string    `json:"label"`
+	EvidenceReferenceIDs []string  `json:"evidence_reference_ids"`
+	Origin               string    `json:"origin"`
+	EvidenceState        string    `json:"evidence_state"`
+	CreatedAt            time.Time `json:"created_at"`
+}
+
+type RecordContextAnnotationRequest struct {
+	ProjectKey           string   `json:"project_key"`
+	SessionID            string   `json:"session_id"`
+	ExpectedVersion      int      `json:"expected_version"`
+	IdempotencyKey       string   `json:"idempotency_key"`
+	Kind                 string   `json:"kind"`
+	Label                string   `json:"label"`
+	EvidenceReferenceIDs []string `json:"evidence_reference_ids"`
 }
 
 type EvidenceReference struct {
@@ -339,7 +367,7 @@ func (s *Service) CreateSession(ctx context.Context, request appquery.EvidencePa
 	now := time.Now().UTC()
 	session := Session{
 		ID: id, ProjectKey: request.ProjectKey, Version: 1, Question: packet.Question, State: SessionOpen,
-		Evidence: packet, References: references, Comparisons: []ComparisonRecord{}, Proposals: []ProposalRecord{},
+		Evidence: packet, References: references, ContextAnnotations: []ContextAnnotation{}, Comparisons: []ComparisonRecord{}, Proposals: []ProposalRecord{},
 		Receipts: []ValidationReceipt{}, Candidates: []CandidateVersion{}, CreatedAt: now, UpdatedAt: now,
 	}
 	created, err := db.createSession(ctx, session, idempotencyKey, hash)
@@ -432,6 +460,91 @@ func (s *Service) AcceptReview(ctx context.Context, projectKey, sessionID string
 		return Session{}, err
 	}
 	return session, nil
+}
+
+// RecordContextAnnotation appends a pseudonymous analyst label to exact
+// evidence references before the operator accepts the consultation packet.
+// The annotation is not an observed fact and cannot be changed after review.
+func (s *Service) RecordContextAnnotation(ctx context.Context, request RecordContextAnnotationRequest) (_ ContextAnnotation, retErr error) {
+	if s == nil || ctx == nil || !validSessionInput(request.ProjectKey, request.SessionID, request.ExpectedVersion, request.IdempotencyKey) ||
+		!validContextKind(request.Kind) || !validContextLabel(request.Kind, request.Label) ||
+		len(request.EvidenceReferenceIDs) < 1 || len(request.EvidenceReferenceIDs) > maximumAnnotationEvidence || !validOpaqueIDs(request.EvidenceReferenceIDs) {
+		return ContextAnnotation{}, ErrInvalidInput
+	}
+	canonical := request
+	canonical.Label = strings.TrimSpace(request.Label)
+	hash, err := digestJSON(canonical)
+	if err != nil {
+		return ContextAnnotation{}, ErrInvalidInput
+	}
+	lease, err := s.acquireProjectReadLease(ctx, request.ProjectKey)
+	if err != nil {
+		return ContextAnnotation{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
+	db, err := s.database(request.ProjectKey, false)
+	if err != nil {
+		return ContextAnnotation{}, errors.Join(ErrStoreUnavailable, err)
+	}
+	if encoded, found, lookupErr := db.lookupMutation(ctx, request.ProjectKey, request.SessionID, "context_annotation", request.IdempotencyKey, hash); lookupErr != nil {
+		return ContextAnnotation{}, lookupErr
+	} else if found {
+		var replay ContextAnnotation
+		if decodeSafe(encoded, &replay) != nil {
+			return ContextAnnotation{}, ErrStoreUnavailable
+		}
+		return replay, nil
+	}
+	session, err := s.loadSession(ctx, request.ProjectKey, request.SessionID)
+	if err != nil {
+		return ContextAnnotation{}, err
+	}
+	if session.ReviewAccepted {
+		return ContextAnnotation{}, ErrSessionAlreadyAccepted
+	}
+	if session.Version != request.ExpectedVersion {
+		return ContextAnnotation{}, ErrSessionVersionConflict
+	}
+	refs := referenceMap(session)
+	for _, referenceID := range request.EvidenceReferenceIDs {
+		if _, selected := refs[referenceID]; !selected {
+			return ContextAnnotation{}, ErrCitationInvalid
+		}
+	}
+	if len(session.ContextAnnotations) >= maximumContextAnnotations {
+		return ContextAnnotation{}, ErrLimitReached
+	}
+	id, err := newID()
+	if err != nil {
+		return ContextAnnotation{}, ErrStoreUnavailable
+	}
+	record := ContextAnnotation{
+		ID: id, SessionVersion: request.ExpectedVersion + 1, Kind: request.Kind, Label: canonical.Label,
+		EvidenceReferenceIDs: append([]string(nil), request.EvidenceReferenceIDs...),
+		Origin:               "analyst", EvidenceState: "analyst_provided", CreatedAt: time.Now().UTC(),
+	}
+	return db.appendContextAnnotation(ctx, request.ProjectKey, request.SessionID, request.ExpectedVersion, request.IdempotencyKey, hash, record)
+}
+
+func validContextKind(kind string) bool {
+	switch kind {
+	case "actor", "session", "tenant", "role", "object", "flow", "scenario", "scenario_step":
+		return true
+	default:
+		return false
+	}
+}
+
+func validContextLabel(kind, label string) bool {
+	if !utf8.ValidString(label) || len(label) == 0 || len(label) > 64 || strings.TrimSpace(label) != label {
+		return false
+	}
+	prefix := strings.ReplaceAll(kind, "_", "-") + "-"
+	return strings.HasPrefix(label, prefix) && contextAliasSuffixPattern.MatchString(strings.TrimPrefix(label, prefix))
 }
 
 // Compare appends a deterministic comparison only when both exact revisions
@@ -903,6 +1016,7 @@ func assistantVisible(session Session) Session {
 	for index := range session.References {
 		session.References[index].SHA256 = ""
 	}
+	session.ContextAnnotations = []ContextAnnotation{}
 	session.Comparisons = []ComparisonRecord{}
 	session.Proposals = []ProposalRecord{}
 	session.Receipts = []ValidationReceipt{}
