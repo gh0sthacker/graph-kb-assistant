@@ -3,7 +3,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes } = require("./assets/graph-focus.js");
+const {
+  focusedNeighborhood,
+  focusedTransform,
+  layeredGridLayout,
+  observationNotes,
+  withObservationParseState,
+} = require("./assets/graph-focus.js");
 
 test("desktop workspace keeps the graph viewport inside the browser window", () => {
   const css = fs.readFileSync(path.join(__dirname, "assets", "style.css"), "utf8");
@@ -81,6 +87,21 @@ test("analysis state does not masquerade as parse completeness", () => {
 
   assert.deepEqual(notes.map(note => note.title), ["Parse completeness is not recorded"]);
   assert.match(notes[0].body, /analysis state is separate/i);
+});
+
+test("observation inspector uses parse state from the matching current capture provenance", () => {
+  const node = { id: "observation-a", kind: "observation", data: { analysis_state: "incomplete" } };
+  const provenance = [
+    { graph_observation_id: "observation-a", parse_state: "unknown", revision_mapping: "revision" },
+    { graph_observation_id: "observation-a", parse_state: "complete", revision_mapping: "current" },
+  ];
+
+  const enriched = withObservationParseState(node, provenance);
+
+  assert.equal(enriched.data.parse_state, "complete");
+  assert.equal(enriched.data.analysis_state, "incomplete");
+  assert.equal(node.data.parse_state, undefined, "the graph node remains unchanged");
+  assert.equal(withObservationParseState(node, [provenance[0]]).data.parse_state, "unknown");
 });
 
 test("layeredGridLayout wraps a high-degree layer into a bounded grid", () => {

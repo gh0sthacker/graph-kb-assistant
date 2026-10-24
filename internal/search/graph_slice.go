@@ -457,10 +457,13 @@ func captureProvenance(ctx context.Context, projectStore *store.ProjectStore, ob
 		query := `SELECT gr.graph_observation_id,cr.revision_id,c.observation_id,c.request_id,
 		                 cr.request_sha256,cr.response_sha256,cr.request_size,cr.response_size,
 		                 cr.first_seen_at,cr.request_truncated,cr.response_truncated,
-		                 cr.request_wire_fidelity,cr.response_wire_fidelity
+		                 cr.request_wire_fidelity,cr.response_wire_fidelity,
+		                 CASE WHEN gm.revision_id=gr.revision_id AND gm.graph_observation_id=gr.graph_observation_id
+		                      THEN c.parse_state ELSE 'unknown' END
 		          FROM graph_capture_revisions gr
 		          JOIN capture_revisions cr ON cr.revision_id=gr.revision_id
 		          JOIN captures c ON c.observation_id=cr.observation_id
+		          LEFT JOIN graph_capture_map gm ON gm.observation_id=c.observation_id
 		          WHERE gr.graph_observation_id IN (` + placeholders + `)
 		            AND c.caido_instance_id=? AND c.caido_project_id=?
 		          ORDER BY cr.first_seen_at,cr.revision_id LIMIT ?`
@@ -472,11 +475,12 @@ func captureProvenance(ctx context.Context, projectStore *store.ProjectStore, ob
 			var graphID, revisionID, observationID, requestID string
 			var requestSHA string
 			var responseSHA, firstSeen, requestFidelity, responseFidelity sql.NullString
+			var parseState string
 			var requestSize int64
 			var responseSize, requestTruncated, responseTruncated sql.NullInt64
 			if err := rows.Scan(&graphID, &revisionID, &observationID, &requestID, &requestSHA, &responseSHA,
 				&requestSize, &responseSize, &firstSeen, &requestTruncated, &responseTruncated,
-				&requestFidelity, &responseFidelity); err != nil {
+				&requestFidelity, &responseFidelity, &parseState); err != nil {
 				_ = rows.Close()
 				return nil, false, errors.New("historical capture provenance is malformed")
 			}
@@ -488,6 +492,7 @@ func captureProvenance(ctx context.Context, projectStore *store.ProjectStore, ob
 				"response_truncated":     nullableBool(responseTruncated),
 				"request_wire_fidelity":  valueOrUnknown(requestFidelity),
 				"response_wire_fidelity": valueOrUnknown(responseFidelity),
+				"parse_state":            parseState,
 				"record_source":          "encrypted_local_capture", "raw_stored_locally": true,
 				"caido_request_reference": map[string]string{
 					"instance_id": projectStore.Project.InstanceID, "project_id": projectStore.Project.ProjectID, "request_id": requestID,

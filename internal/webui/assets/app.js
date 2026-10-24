@@ -1336,7 +1336,7 @@ function selectNode(nodeId) {
   if (!node) return;
   state.selectedNode = node;
   for (const group of elements.graphScene.querySelectorAll(".node-group")) group.classList.toggle("selected", group.getAttribute("data-node-id") === nodeId);
-  renderInspector(node);
+  renderInspector(BBGraphFocus.withObservationParseState(node, state.graph?.capture_provenance));
 }
 
 function centerNodeInGraph(nodeId) {

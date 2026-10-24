@@ -10,7 +10,7 @@ import (
 	"bb-graph-assistant/internal/store"
 )
 
-func TestCaptureProvenanceRetainsEarlierLiveGraphRevision(t *testing.T) {
+func TestCaptureProvenanceRetainsRevisionsAndCurrentParseState(t *testing.T) {
 	ctx := context.Background()
 	ref := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "live-graph-provenance"}
 	root := t.TempDir()
@@ -34,6 +34,13 @@ func TestCaptureProvenanceRetainsEarlierLiveGraphRevision(t *testing.T) {
 	const responseSignature = "1111111111111111111111111111111111111111111111111111111111111111"
 	const legacyObservationID = "9999999999999999999999999999999999999999999999999999999999999999"
 	const legacyGraphID = "observation-2222222222222222222222222222222222222222222222222222222222222222"
+	const historicalObservationID = "8888888888888888888888888888888888888888888888888888888888888888"
+	const historicalOldRevision = "7777777777777777777777777777777777777777777777777777777777777777"
+	const historicalCurrentRevision = "6666666666666666666666666666666666666666666666666666666666666666"
+	const historicalOldGraphID = "observation-5555555555555555555555555555555555555555555555555555555555555555"
+	const historicalCurrentGraphID = "observation-4444444444444444444444444444444444444444444444444444444444444444"
+	const historicalRequestSHA = "3333333333333333333333333333333333333333333333333333333333333333"
+	const historicalOldRequestSHA = "2222222222222222222222222222222222222222222222222222222222222222"
 	for _, revision := range []string{oldRevision, currentRevision} {
 		if _, err := writable.Database.DB().ExecContext(ctx,
 			`INSERT INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at)
@@ -66,6 +73,44 @@ func TestCaptureProvenanceRetainsEarlierLiveGraphRevision(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert legacy live capture without registry row: %v", err)
 	}
+	if _, err := writable.Database.DB().ExecContext(ctx,
+		`INSERT INTO captures(observation_id,caido_instance_id,caido_project_id,request_id,
+		 request_sha256,request_size,current_revision_id,request_vault_ref,parse_state)
+		 VALUES(?,?,?,?,?,10,?,?,?)`,
+		historicalObservationID, ref.InstanceID, ref.ProjectID, "request-history",
+		historicalRequestSHA, historicalCurrentRevision, "request-history.bba", "complete",
+	); err != nil {
+		t.Fatalf("insert historical capture: %v", err)
+	}
+	for revision, requestSHA := range map[string]string{
+		historicalOldRevision: historicalOldRequestSHA,
+		historicalCurrentRevision: historicalRequestSHA,
+	} {
+		if _, err := writable.Database.DB().ExecContext(ctx,
+			`INSERT INTO capture_revisions(revision_id,observation_id,request_sha256,request_size,
+			 request_vault_ref,first_seen_at) VALUES(?,?,?,10,?,?)`,
+			revision, historicalObservationID, requestSHA, "request-history-"+revision+".bba", "2026-10-23T10:00:00Z",
+		); err != nil {
+			t.Fatalf("insert historical capture revision: %v", err)
+		}
+	}
+	for revision, graphID := range map[string]string{
+		historicalOldRevision: historicalOldGraphID,
+		historicalCurrentRevision: historicalCurrentGraphID,
+	} {
+		if _, err := writable.Database.DB().ExecContext(ctx,
+			`INSERT INTO graph_capture_revisions(revision_id,graph_observation_id,updated_at) VALUES(?,?,?)`,
+			revision, graphID, "2026-10-23T10:00:01Z",
+		); err != nil {
+			t.Fatalf("insert historical graph revision: %v", err)
+		}
+	}
+	if _, err := writable.Database.DB().ExecContext(ctx,
+		`INSERT INTO graph_capture_map(observation_id,revision_id,graph_observation_id,updated_at) VALUES(?,?,?,?)`,
+		historicalObservationID, historicalCurrentRevision, historicalCurrentGraphID, "2026-10-23T10:00:02Z",
+	); err != nil {
+		t.Fatalf("insert current historical graph mapping: %v", err)
+	}
 	for revision, graphID := range map[string]string{oldRevision: oldGraphID} {
 		if _, err := writable.Database.DB().ExecContext(ctx,
 			`INSERT INTO live_graph_capture_revisions(revision_id,observation_id,graph_observation_id,updated_at)
@@ -84,12 +129,14 @@ func TestCaptureProvenanceRetainsEarlierLiveGraphRevision(t *testing.T) {
 		t.Fatalf("OpenProjectReadOnly(): %v", err)
 	}
 	t.Cleanup(func() { _ = readonly.Close() })
-	rows, truncated, err := captureProvenance(ctx, readonly, []string{oldGraphID, currentGraphID, legacyGraphID})
+	rows, truncated, err := captureProvenance(ctx, readonly, []string{
+		oldGraphID, currentGraphID, legacyGraphID, historicalOldGraphID, historicalCurrentGraphID,
+	})
 	if err != nil {
 		t.Fatalf("captureProvenance(): %v", err)
 	}
-	if truncated || len(rows) != 3 {
-		t.Fatalf("live graph provenance rows=%d truncated=%v, want both revisions and the legacy mapping", len(rows), truncated)
+	if truncated || len(rows) != 5 {
+		t.Fatalf("graph provenance rows=%d truncated=%v, want both live revisions, both historical revisions and the legacy mapping", len(rows), truncated)
 	}
 	byGraphID := make(map[string]map[string]any, len(rows))
 	for _, row := range rows {
@@ -117,6 +164,14 @@ func TestCaptureProvenanceRetainsEarlierLiveGraphRevision(t *testing.T) {
 	legacyRevision, legacyRevisionOK := legacy["revision_id"].(*string)
 	if legacy == nil || !legacyRevisionOK || legacyRevision != nil || legacy["revision_mapping"] != "current" || legacy["request_id"] != "request-legacy" {
 		t.Fatalf("legacy graph provenance without revision registry = %#v", legacy)
+	}
+	historicalOld := byGraphID[historicalOldGraphID]
+	if historicalOld == nil || historicalOld["parse_state"] != "unknown" {
+		t.Fatalf("older historical graph revision parse state = %#v, want unknown", historicalOld)
+	}
+	historicalCurrent := byGraphID[historicalCurrentGraphID]
+	if historicalCurrent == nil || historicalCurrent["parse_state"] != "complete" {
+		t.Fatalf("current historical graph revision parse state = %#v, want complete", historicalCurrent)
 	}
 }
 

@@ -102,7 +102,18 @@
     return notes;
   }
 
-  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes };
+  function withObservationParseState(node, provenance) {
+    if (!node || node.kind !== "observation") return node;
+    const data = node.data && typeof node.data === "object" ? node.data : {};
+    if (data.parse_state && data.parse_state !== "unknown") return node;
+    const source = Array.isArray(provenance)
+      ? provenance.find(item => item?.graph_observation_id === node.id &&
+        typeof item.parse_state === "string" && item.parse_state !== "unknown")
+      : null;
+    return { ...node, data: { ...data, parse_state: source?.parse_state || "unknown" } };
+  }
+
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, withObservationParseState };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);
