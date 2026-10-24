@@ -1,5 +1,23 @@
 # Project status and known limitations
 
+## Stage 2 full-view provenance cursor round trip (2026-10-24) — PARTIAL
+
+- A synthetic end-to-end regression test now traverses the shared
+  `appquery.Service`, HTTP graph endpoint, and MCP `bb_graph_slice` tool. It
+  starts with 64 source references, follows the generation-pinned cursor to
+  retrieve the remaining two, verifies the cumulative result has all 66, and
+  confirms replay returns the same accepted page.
+- The test exposed that analytical graph responses add `integrity` and
+  `freshness` to source references, while the BehaviorGraph snapshot reader
+  accepts only the canonical `path`/`sha256`/`record_locator` shape. Continuation
+  now identifies sources by that canonical triple, rejects inconsistent
+  integrity states across pages, and strips response-only status fields before
+  reopening the merged snapshot.
+- The acceptance uses a synthetic in-memory graph store and a temporary local
+  project. It does not contact Neo4j, Caido, the KB, a model provider, or a
+  target. Full Neo4j query compatibility and runtime coverage remain
+  unverified; Stage 2 remains `PARTIAL`.
+
 ## Stage 2 assertion/frontier candidate continuation (2026-10-24) — PARTIAL
 
 - The Neo4j analytical slice no longer applies a separate 100-assertion cap

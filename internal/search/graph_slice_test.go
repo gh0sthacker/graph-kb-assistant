@@ -51,24 +51,16 @@ func TestMergeAnalyticalSnapshotsUnionsEntityProvenancePages(t *testing.T) {
 	owner := "endpoint-" + strings.Repeat("b", 64)
 	first := behaviorgraph.Record{"path": "/synthetic/one.json", "sha256": strings.Repeat("1", 64), "record_locator": "$.one"}
 	second := behaviorgraph.Record{"path": "/synthetic/two.json", "sha256": strings.Repeat("2", 64), "record_locator": "$.two"}
-	page := func(ref behaviorgraph.Record, sourceID string) map[string]any {
+	page := func(ref behaviorgraph.Record) map[string]any {
 		return map[string]any{
 			"project_key": project,
 			"entities":    []behaviorgraph.Record{{"id": owner, "kind": "endpoint", "data": map[string]any{"method": "GET"}, "source_refs": []behaviorgraph.Record{ref}}},
 			"assertions":  []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{},
-			"sources": []behaviorgraph.Record{{"id": sourceID, "path": ref["path"], "sha256": ref["sha256"], "record_locator": ref["record_locator"]}},
+			"sources": []behaviorgraph.Record{{"path": ref["path"], "sha256": ref["sha256"], "record_locator": ref["record_locator"], "integrity": "current", "freshness": "current"}},
 		}
 	}
-	firstID, err := continuationSourceRecordID(first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondID, err := continuationSourceRecordID(second)
-	if err != nil {
-		t.Fatal(err)
-	}
 	snapshot, _, err := mergeAnalyticalSnapshots(project,
-		page(first, firstID), page(second, secondID))
+		page(first), page(second))
 	if err != nil {
 		t.Fatalf("merge entity provenance pages: %v", err)
 	}
@@ -76,6 +68,28 @@ func TestMergeAnalyticalSnapshotsUnionsEntityProvenancePages(t *testing.T) {
 	refs := entities[0]["source_refs"].([]behaviorgraph.Record)
 	if len(refs) != 2 {
 		t.Fatalf("merged entity retains %d refs, want 2: %#v", len(refs), refs)
+	}
+	sources := snapshot["sources"].([]behaviorgraph.Record)
+	if len(sources) != 2 || len(sources[0]) != 3 || len(sources[1]) != 3 {
+		t.Fatalf("merged snapshot sources are not normalized BehaviorGraph refs: %#v", sources)
+	}
+}
+
+func TestMergeAnalyticalSnapshotsRejectsConflictingSourceIntegrity(t *testing.T) {
+	project := strings.Repeat("a", 64)
+	ref := behaviorgraph.Record{"path": "/synthetic/one.json", "sha256": strings.Repeat("1", 64), "record_locator": "$.one"}
+	page := func(integrity string) map[string]any {
+		return map[string]any{
+			"project_key": project,
+			"entities":    []behaviorgraph.Record{}, "assertions": []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{},
+			"sources": []behaviorgraph.Record{{
+				"path": ref["path"], "sha256": ref["sha256"], "record_locator": ref["record_locator"],
+				"integrity": integrity, "freshness": "current",
+			}},
+		}
+	}
+	if _, _, err := mergeAnalyticalSnapshots(project, page("current"), page("stale")); err == nil || !strings.Contains(err.Error(), "conflicting source integrity") {
+		t.Fatalf("conflicting duplicate source states error = %v", err)
 	}
 }
 
@@ -247,10 +261,6 @@ func TestCaptureProvenanceRetainsRevisionsAndCurrentParseState(t *testing.T) {
 func TestMergeAnalyticalSnapshotsDeduplicatesAndSortsRecordFamilies(t *testing.T) {
 	projectKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	sourceRef := behaviorgraph.Record{"path": "/synthetic/fixture.json", "sha256": strings.Repeat("e", 64), "record_locator": "$.endpoint"}
-	sourceID, err := continuationSourceRecordID(sourceRef)
-	if err != nil {
-		t.Fatalf("continuationSourceRecordID: %v", err)
-	}
 	sourceRefs := []behaviorgraph.Record{sourceRef}
 	first := map[string]any{
 		"project_key": projectKey,
@@ -259,7 +269,7 @@ func TestMergeAnalyticalSnapshotsDeduplicatesAndSortsRecordFamilies(t *testing.T
 		},
 		"assertions": []behaviorgraph.Record{{"id": "assertion-" + strings.Repeat("c", 64), "predicate": "exposes"}},
 		"cards":      []behaviorgraph.Record{{"id": "card-" + strings.Repeat("d", 64), "analysis_state": "candidate"}},
-		"sources":    []behaviorgraph.Record{{"id": sourceID, "path": sourceRef["path"], "sha256": sourceRef["sha256"], "record_locator": sourceRef["record_locator"]}},
+		"sources":    []behaviorgraph.Record{{"path": sourceRef["path"], "sha256": sourceRef["sha256"], "record_locator": sourceRef["record_locator"], "integrity": "current", "freshness": "current"}},
 	}
 	second := map[string]any{
 		"project_key": projectKey,

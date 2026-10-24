@@ -9,7 +9,9 @@ import (
 	"bb-graph-assistant/internal/neo4jstore"
 )
 
-type neo4jGraphStore interface {
+// GraphStore is the narrow Neo4j query surface used by graph access. It keeps
+// application-query tests independent of a running Neo4j process.
+type GraphStore interface {
 	ReadProjectSnapshot(context.Context, string) (behaviorgraph.Record, error)
 	ReadProjectNeighborhood(context.Context, string, []string, int) (neo4jstore.Neighborhood, error)
 	ReadProjectNeighborhoodPage(context.Context, string, []string, int, *neo4jstore.NeighborhoodCursor) (neo4jstore.Neighborhood, error)
@@ -18,7 +20,13 @@ type neo4jGraphStore interface {
 	Close(context.Context) error
 }
 
-type neo4jStoreFactory func(context.Context, neo4jstore.Config) (neo4jGraphStore, error)
+// GraphStoreFactory creates the Neo4j-backed query store after the service
+// has validated its configured connection. The constructor is also used by
+// deterministic integration fixtures that provide an in-memory store.
+type GraphStoreFactory func(context.Context, neo4jstore.Config) (GraphStore, error)
+
+type neo4jGraphStore = GraphStore
+type neo4jStoreFactory = GraphStoreFactory
 
 // Service owns the Neo4j driver for one application process. Operations use
 // short-lived sessions through neo4jstore; the driver is closed only after all
@@ -37,13 +45,19 @@ type Service struct {
 // Neo4j until a request selects that backend, so local startup remains usable
 // while Neo4j is temporarily unavailable.
 func NewService() *Service {
-	return newService(func(ctx context.Context, cfg neo4jstore.Config) (neo4jGraphStore, error) {
+	return NewServiceWithFactory(func(ctx context.Context, cfg neo4jstore.Config) (GraphStore, error) {
 		return neo4jstore.New(ctx, cfg)
 	})
 }
 
-func newService(factory neo4jStoreFactory) *Service {
+// NewServiceWithFactory creates a process-owned graph service with an injected
+// Neo4j store factory. Production callers should normally use NewService.
+func NewServiceWithFactory(factory GraphStoreFactory) *Service {
 	return &Service{factory: factory}
+}
+
+func newService(factory neo4jStoreFactory) *Service {
+	return NewServiceWithFactory(factory)
 }
 
 func (s *Service) acquireNeo4jStore(ctx context.Context) (neo4jGraphStore, func(), error) {

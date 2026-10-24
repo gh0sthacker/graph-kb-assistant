@@ -500,6 +500,7 @@ func graphPayloadFlag(payload map[string]any, key string) bool {
 func mergeAnalyticalSnapshots(projectKey string, pages ...map[string]any) (behaviorgraph.Record, map[string]int, error) {
 	fields := []string{"entities", "assertions", "cards", "sources"}
 	merged := make(map[string]map[string]behaviorgraph.Record, len(fields))
+	sourceStates := make(map[string]string)
 	counts := make(map[string]int, len(fields))
 	for _, field := range fields {
 		merged[field] = make(map[string]behaviorgraph.Record)
@@ -514,26 +515,39 @@ func mergeAnalyticalSnapshots(projectKey string, pages ...map[string]any) (behav
 				return nil, nil, errors.New("analytical graph continuation record list is malformed")
 			}
 			for _, record := range records {
-				id, ok := record["id"].(string)
-				if !ok || id == "" {
+				id, normalized := "", record
+				var identityErr error
+				if field == "sources" {
+					var state string
+					id, normalized, state, identityErr = analyticalContinuationSourceRecord(record)
+					if identityErr == nil {
+						if previous, exists := sourceStates[id]; exists && previous != state {
+							return nil, nil, errors.New("analytical graph continuation contains conflicting source integrity records")
+						}
+						sourceStates[id] = state
+					}
+				} else {
+					id, identityErr = analyticalContinuationRecordID(record)
+				}
+				if identityErr != nil {
 					return nil, nil, errors.New("analytical graph continuation record has no identity")
 				}
 				if previous, exists := merged[field][id]; exists && field == "entities" {
-					combined, mergeErr := mergeEntityProvenanceRecord(previous, record)
+					combined, mergeErr := mergeEntityProvenanceRecord(previous, normalized)
 					if mergeErr != nil {
 						return nil, nil, mergeErr
 					}
 					merged[field][id] = combined
 					continue
 				}
-				if previous, exists := merged[field][id]; exists && field != "sources" {
+				if previous, exists := merged[field][id]; exists {
 					previousJSON, previousErr := json.Marshal(previous)
-					recordJSON, recordErr := json.Marshal(record)
+					recordJSON, recordErr := json.Marshal(normalized)
 					if previousErr != nil || recordErr != nil || !bytes.Equal(previousJSON, recordJSON) {
 						return nil, nil, errors.New("analytical graph continuation contains conflicting record versions")
 					}
 				}
-				merged[field][id] = record
+				merged[field][id] = normalized
 			}
 		}
 	}
@@ -552,6 +566,74 @@ func mergeAnalyticalSnapshots(projectKey string, pages ...map[string]any) (behav
 		counts[field] = len(records)
 	}
 	return snapshot, counts, nil
+}
+
+func analyticalContinuationRecordID(record behaviorgraph.Record) (string, error) {
+	id, ok := record["id"].(string)
+	if !ok || id == "" {
+		return "", errors.New("analytical continuation record identity is missing")
+	}
+	return id, nil
+}
+
+func analyticalContinuationSourceRecord(record behaviorgraph.Record) (string, behaviorgraph.Record, string, error) {
+	if len(record) < 3 || len(record) > 5 {
+		return "", nil, "", errors.New("analytical continuation source has unexpected fields")
+	}
+	for key, value := range record {
+		switch key {
+		case "path", "sha256", "record_locator":
+		case "integrity":
+			state, ok := value.(string)
+			if !ok || !validContinuationSourceIntegrity(state) {
+				return "", nil, "", errors.New("analytical continuation source integrity is malformed")
+			}
+		case "freshness":
+			state, ok := value.(string)
+			if !ok || !validContinuationSourceFreshness(state) {
+				return "", nil, "", errors.New("analytical continuation source freshness is malformed")
+			}
+		default:
+			return "", nil, "", errors.New("analytical continuation source has unexpected fields")
+		}
+	}
+	_, hasIntegrity := record["integrity"]
+	_, hasFreshness := record["freshness"]
+	if hasIntegrity != hasFreshness {
+		return "", nil, "", errors.New("analytical continuation source status is incomplete")
+	}
+	ref := behaviorgraph.Record{
+		"path": record["path"], "sha256": record["sha256"], "record_locator": record["record_locator"],
+	}
+	id, err := continuationSourceRecordID(ref)
+	if err != nil {
+		return "", nil, "", err
+	}
+	state, err := json.Marshal(behaviorgraph.Record{
+		"integrity": record["integrity"], "freshness": record["freshness"],
+	})
+	if err != nil {
+		return "", nil, "", err
+	}
+	return id, ref, string(state), nil
+}
+
+func validContinuationSourceIntegrity(state string) bool {
+	switch state {
+	case "current", "stale", "missing", "unknown", "unavailable":
+		return true
+	default:
+		return false
+	}
+}
+
+func validContinuationSourceFreshness(state string) bool {
+	switch state {
+	case "current", "stale", "unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 func mergeEntityProvenanceRecord(previous, current behaviorgraph.Record) (behaviorgraph.Record, error) {
