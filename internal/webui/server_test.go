@@ -201,6 +201,41 @@ func TestEvidenceHandlerExplainsUnavailableLocalVaultKey(t *testing.T) {
 	}
 }
 
+func TestRuntimeCapabilitiesReportVaultKeyStateWithoutExposingKey(t *testing.T) {
+	api := &explorerAPIFixture{}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestState := func() (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/runtime-capabilities", nil))
+		var payload map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode runtime capabilities: %v", err)
+		}
+		return response, payload
+	}
+
+	t.Setenv("BB_ASSISTANT_VAULT_KEY", "")
+	response, payload := requestState()
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || payload["evidence_vault_key_state"] != "missing_or_invalid" {
+		t.Fatalf("missing-key response status=%d cache=%q payload=%#v", response.Code, response.Header().Get("Cache-Control"), payload)
+	}
+
+	key := make([]byte, 32)
+	encoded := base64.RawURLEncoding.EncodeToString(key)
+	t.Setenv("BB_ASSISTANT_VAULT_KEY", encoded)
+	response, payload = requestState()
+	if response.Code != http.StatusOK || payload["evidence_vault_key_state"] != "configured_not_verified" {
+		t.Fatalf("configured-key response status=%d payload=%#v", response.Code, payload)
+	}
+	if strings.Contains(response.Body.String(), encoded) {
+		t.Fatal("runtime capabilities response exposed the configured key")
+	}
+}
+
 func TestComparisonHandlerReadsExactLocalRevisionsWithoutCaching(t *testing.T) {
 	projectKey := strings.Repeat("a", 64)
 	leftRevision := strings.Repeat("b", 64)

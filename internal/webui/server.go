@@ -21,6 +21,7 @@ import (
 
 	"bb-graph-assistant/internal/appquery"
 	"bb-graph-assistant/internal/consultation"
+	"bb-graph-assistant/internal/ingest"
 )
 
 const (
@@ -84,8 +85,10 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	})
 	mux.HandleFunc("GET /assets/app.js", serveAsset("assets/app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /assets/graph-focus.js", serveAsset("assets/graph-focus.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /assets/runtime-capabilities.js", serveAsset("assets/runtime-capabilities.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /assets/style.css", serveAsset("assets/style.css", "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /api/projects", projectsHandler(api))
+	mux.HandleFunc("GET /api/runtime-capabilities", runtimeCapabilitiesHandler)
 	mux.HandleFunc("GET /api/surface", surfaceHandler(api))
 	mux.HandleFunc("GET /api/graph", graphHandler(api))
 	mux.HandleFunc("GET /api/evidence", captureMessageRangeHandler(api))
@@ -105,6 +108,12 @@ func NewHandler(api readAPI) (http.Handler, error) {
 		mux.HandleFunc("POST /api/consultation/candidate", consultationCandidateHandler(consultations))
 	}
 	return securityHeaders(localRequestGate(mux)), nil
+}
+
+func runtimeCapabilitiesHandler(w http.ResponseWriter, _ *http.Request) {
+	writeResult(w, map[string]any{
+		"evidence_vault_key_state": ingest.VaultKeyConfigurationState(),
+	}, nil)
 }
 
 // ValidateLoopbackAddress rejects wildcard and non-loopback listeners.

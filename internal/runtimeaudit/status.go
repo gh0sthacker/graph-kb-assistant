@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"bb-graph-assistant/internal/graphaccess"
+	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
 	projectaudit "bb-graph-assistant/internal/projectaudit"
@@ -23,12 +24,13 @@ type GraphBackendStatus struct {
 }
 
 type CapabilitySummary struct {
-	WebUI              string `json:"web_ui"`
-	MCPStdio           string `json:"mcp_stdio"`
-	Consultation       string `json:"consultation"`
-	CaidoLiveIntake    string `json:"caido_live_intake"`
-	ModelExecution     string `json:"model_execution"`
-	CapturedBodiesRead bool   `json:"captured_bodies_read"`
+	WebUI                 string `json:"web_ui"`
+	MCPStdio              string `json:"mcp_stdio"`
+	Consultation          string `json:"consultation"`
+	CaidoLiveIntake       string `json:"caido_live_intake"`
+	ModelExecution        string `json:"model_execution"`
+	EvidenceVaultKeyState string `json:"evidence_vault_key_state"`
+	CapturedBodiesRead    bool   `json:"captured_bodies_read"`
 }
 
 type ProjectSummary struct {
@@ -82,17 +84,19 @@ func Build(ctx context.Context, dataRoot, backend string, generatedAt time.Time)
 		ProjectRegistryState: inspectProjectRegistryState(dataRoot),
 		GraphBackend:         backendStatus,
 		Capabilities: CapabilitySummary{
-			WebUI:              "implemented; process state not checked",
-			MCPStdio:           "implemented; harness connection not checked",
-			Consultation:       "implemented; synthetic workflow verified",
-			CaidoLiveIntake:    "not checked; Caido was not contacted",
-			ModelExecution:     "not invoked",
-			CapturedBodiesRead: false,
+			WebUI:                 "implemented; process state not checked",
+			MCPStdio:              "implemented; harness connection not checked",
+			Consultation:          "implemented; synthetic workflow verified",
+			CaidoLiveIntake:       "not checked; Caido was not contacted",
+			ModelExecution:        "not invoked",
+			EvidenceVaultKeyState: ingest.VaultKeyConfigurationState(),
+			CapturedBodiesRead:    false,
 		},
 		RegisteredProjects: len(refs),
 		Projects:           make([]ProjectSummary, 0, len(refs)),
 		Notes: []string{
 			"This report contains local structural metadata and aggregate counts only; it does not read captured bodies or encrypted vault files.",
+			"Evidence-vault key state checks only key syntax and length; it does not verify decryption against stored vault objects.",
 			"Graph backend connectivity, Caido intake, model-provider behavior, and browser/JavaScript coverage are not assessed by this command.",
 			"Overall state remains partial until source history is reconciled and outstanding coverage gaps are verified.",
 		},

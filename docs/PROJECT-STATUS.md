@@ -1,5 +1,20 @@
 # Project status and known limitations
 
+## Evidence vault readiness indicator (2026-10-24) — PARTIAL
+
+- The local web UI now shows whether the evidence vault key is missing/invalid,
+  syntactically configured but unverified, or unavailable to inspect. The
+  read-only capability endpoint returns only this state and disables caching;
+  it never returns key material or reads stored vault objects. Runtime audit
+  output reports the same state and explicitly says that key syntax does not
+  verify decryption.
+- Synthetic checks passed: Go tests for `internal/ingest`,
+  `internal/runtimeaudit`, and `internal/webui`; all 49 web UI tests; JavaScript
+  syntax checks; `go vet` for those Go packages; and `git diff --check`.
+- The status indicator does not establish that existing evidence can be
+  decrypted. The original vault key and stored-object verification remain
+  unresolved; Stage 4 and overall project readiness remain `PARTIAL`.
+
 ## Stage 2 bounded analysis cards in the direct view (2026-10-24) — PARTIAL
 
 - The Neo4j one-hop query now loads up to 24 matching analysis cards in the

@@ -54,8 +54,8 @@ function createApp() {
     },
   });
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
-  assert.match(source, /\nloadProjects\(\);\s*$/);
-  vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
+  assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
+  vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
     "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, saveOperationAlias, renderInspector, renderConsultationContext, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));

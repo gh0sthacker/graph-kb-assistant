@@ -7,6 +7,7 @@
     <title>Graph Explorer — BB Graph Assistant</title>
     <link rel="stylesheet" href="/assets/style.css">
     <script defer src="/assets/graph-focus.js"></script>
+    <script defer src="/assets/runtime-capabilities.js"></script>
     <script defer src="/assets/app.js"></script>
   </head>
   <body>
@@ -161,7 +162,7 @@
 
       <footer class="statusbar">
         <div class="status-left"><span class="status-led"></span><span id="status-text">Waiting for data</span><span class="status-separator">/</span><span>127.0.0.1</span></div>
-        <div class="status-right"><span id="coverage-status">Coverage: unknown</span><span class="status-separator">·</span><span id="last-updated">—</span></div>
+        <div class="status-right"><span id="coverage-status">Coverage: unknown</span><span class="status-separator">·</span><span id="evidence-vault-status" class="evidence-vault-status" role="status" aria-live="polite">Evidence: checking</span><span class="status-separator">·</span><span id="last-updated">—</span></div>
       </footer>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>

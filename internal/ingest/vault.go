@@ -20,7 +20,23 @@ import (
 
 const vaultMagic = "BBA1"
 
+const (
+	vaultKeyStateMissingOrInvalid      = "missing_or_invalid"
+	vaultKeyStateConfiguredNotVerified = "configured_not_verified"
+)
+
 var ErrVaultKeyUnavailable = errors.New("local capture vault key is unavailable or invalid")
+
+// VaultKeyConfigurationState checks only whether the current process has a
+// syntactically valid key. It does not read or decrypt any vault object.
+func VaultKeyConfigurationState() string {
+	key, err := readVaultKey()
+	if err != nil {
+		return vaultKeyStateMissingOrInvalid
+	}
+	clear(key)
+	return vaultKeyStateConfiguredNotVerified
+}
 
 func readVaultKey() ([]byte, error) {
 	encoded := os.Getenv("BB_ASSISTANT_VAULT_KEY")

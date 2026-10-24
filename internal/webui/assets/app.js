@@ -28,7 +28,7 @@ const elements = {
   graphCounts: $("#graph-counts"), inspector: $("#inspector-content"), inspectIndex: $("#inspect-index"),
   graphFilters: $("#graph-filters"), graphFilterSummary: $("#graph-filter-summary"),
   graphOverview: $("#graph-overview"), graphShowAll: $("#graph-show-all"), edgeLabels: $("#toggle-edge-labels"),
-  status: $("#status-text"), coverage: $("#coverage-status"), updated: $("#last-updated"),
+  status: $("#status-text"), coverage: $("#coverage-status"), updated: $("#last-updated"), evidenceVaultStatus: $("#evidence-vault-status"),
   zoom: $("#zoom-readout"), zoomIn: $("#zoom-in"), zoomOut: $("#zoom-out"),
   focusGraph: $("#focus-graph"), workspace: $(".workspace"),
   captureSelect: $("#capture-select"), graphBack: $("#graph-back"), graphMore: $("#graph-more"), graphDeeper: $("#graph-deeper"),
@@ -829,6 +829,21 @@ async function loadProjects(append = false) {
     elements.endpointList.replaceChildren(emptyList("Read error", error.message));
     elements.coverage.textContent = "Coverage: unavailable";
     setStatus("Project read error", "error");
+  }
+}
+
+async function loadRuntimeCapabilities() {
+  try {
+    const capabilities = await getJSON("/api/runtime-capabilities");
+    const presentation = BBRuntimeCapabilities.evidenceVaultPresentation(capabilities.evidence_vault_key_state);
+    elements.evidenceVaultStatus.textContent = presentation.label;
+    elements.evidenceVaultStatus.title = presentation.title;
+    elements.evidenceVaultStatus.dataset.state = presentation.state;
+  } catch {
+    const presentation = BBRuntimeCapabilities.evidenceVaultPresentation("unknown");
+    elements.evidenceVaultStatus.textContent = presentation.label;
+    elements.evidenceVaultStatus.title = presentation.title;
+    elements.evidenceVaultStatus.dataset.state = presentation.state;
   }
 }
 
@@ -1935,4 +1950,5 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape" && state.graphFocus) setGraphFocus(false);
 });
 
+void loadRuntimeCapabilities();
 loadProjects();

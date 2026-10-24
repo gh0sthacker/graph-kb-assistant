@@ -1,6 +1,7 @@
 package runtimeaudit
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 )
 
 func TestBuildStatusSummarizesLocalCoverageWithoutContactingServices(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_VAULT_KEY", "")
 	t.Setenv("BB_ASSISTANT_NEO4J_URI", "bolt://127.0.0.1:9999")
 	t.Setenv("BB_ASSISTANT_NEO4J_USERNAME", "private-user-marker")
 	t.Setenv("BB_ASSISTANT_NEO4J_PASSWORD", "private-password-marker")
@@ -53,6 +55,9 @@ func TestBuildStatusSummarizesLocalCoverageWithoutContactingServices(t *testing.
 		report.Capabilities.ModelExecution != "not invoked" || report.Capabilities.CapturedBodiesRead {
 		t.Fatalf("status overstated unverified capabilities: %+v", report.Capabilities)
 	}
+	if report.Capabilities.EvidenceVaultKeyState != "missing_or_invalid" {
+		t.Fatalf("evidence vault key state = %q", report.Capabilities.EvidenceVaultKeyState)
+	}
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		t.Fatalf("marshal report: %v", err)
@@ -61,6 +66,19 @@ func TestBuildStatusSummarizesLocalCoverageWithoutContactingServices(t *testing.
 		if strings.Contains(string(encoded), marker) {
 			t.Fatalf("runtime status exposed private value marker %q", marker)
 		}
+	}
+}
+
+func TestBuildStatusMarksConfiguredVaultKeyAsUnverified(t *testing.T) {
+	key := make([]byte, 32)
+	t.Setenv("BB_ASSISTANT_VAULT_KEY", base64.RawURLEncoding.EncodeToString(key))
+	root := t.TempDir()
+	report, err := Build(t.Context(), root, "sqlite", time.Date(2026, 10, 23, 23, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if report.Capabilities.EvidenceVaultKeyState != "configured_not_verified" {
+		t.Fatalf("configured evidence key state = %q", report.Capabilities.EvidenceVaultKeyState)
 	}
 }
 

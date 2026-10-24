@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"encoding/base64"
 	"errors"
 	"testing"
 )
@@ -17,5 +18,18 @@ func TestReadVaultKeyReportsUnavailableWithoutReturningKeyMaterial(t *testing.T)
 				t.Fatalf("readVaultKey() returned %d key bytes, error %v; want no key and typed unavailable error", len(key), err)
 			}
 		})
+	}
+}
+
+func TestVaultKeyConfigurationStateNeverClaimsDecryptionWasVerified(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_VAULT_KEY", "")
+	if got := VaultKeyConfigurationState(); got != vaultKeyStateMissingOrInvalid {
+		t.Fatalf("missing key state = %q", got)
+	}
+	key := make([]byte, 32)
+	encoded := base64.RawURLEncoding.EncodeToString(key)
+	t.Setenv("BB_ASSISTANT_VAULT_KEY", encoded)
+	if got := VaultKeyConfigurationState(); got != vaultKeyStateConfiguredNotVerified {
+		t.Fatalf("configured key state = %q", got)
 	}
 }
