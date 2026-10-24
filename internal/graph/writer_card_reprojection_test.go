@@ -2,12 +2,17 @@ package graph
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"bb-graph-assistant/internal/caido"
+	"bb-graph-assistant/internal/project"
 )
 
 func TestWriteNormalizedReprojectsCardAndPreservesAnalysis(t *testing.T) {
@@ -176,6 +181,146 @@ func TestMergeBundlesReconcilesDuplicateCardIdentity(t *testing.T) {
 	if len(card["hypotheses"].([]any)) != 1 || len(card["missing_evidence"].([]any)) != 2 {
 		t.Fatal("batch merge discarded prior analysis or missing evidence")
 	}
+}
+
+func TestImportBundlesReprojectsCardWithoutDroppingAnalysisOrOutboxParity(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	receiptRoot := filepath.Join(root, "receipts")
+	if err := os.Mkdir(receiptRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	program := project.CaidoProjectRef{InstanceID: "synthetic-instance", ProjectID: "card-reprojection"}
+	projectKey, err := program.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(receiptRoot, "synthetic-receipt.json")
+	receiptBytes := []byte("synthetic-receipt")
+	if err := os.WriteFile(receiptPath, receiptBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptDigest := sha256.Sum256(receiptBytes)
+	source := Record{
+		"path": receiptPath, "sha256": hex.EncodeToString(receiptDigest[:]),
+		"record_locator": "$.records[0]",
+	}
+	status, truncated := 200, false
+	exchange := caido.HttpExchange{
+		Ref:         caido.ExchangeRef{Project: program, RequestID: "request-1"},
+		RequestRaw:  []byte("GET /items HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n"),
+		ResponseRaw: []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
+		HasResponse: true, Method: "GET", Scheme: "https", Host: "fixture.invalid",
+		Port: 443, Target: "https://fixture.invalid/items", ResponseStatus: &status,
+		RequestTruncated: &truncated, ResponseTruncated: &truncated,
+		RequestWireFidelity: "reconstructed_text", ResponseWireFidelity: "reconstructed_text",
+	}
+	initial, _, err := BuildHistoricalBundle(exchange, projectKey, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialCards := initial["cards"].([]Record)
+	initialCards[0]["business_action"] = Record{"known_effect": "unknown", "analyst_note": "retain"}
+	initialCards[0]["hypotheses"] = []any{Record{"outcome": "candidate", "claim": "synthetic hypothesis"}}
+	initialCards[0]["missing_evidence"] = append(initialCards[0]["missing_evidence"].([]any), "analyst-marked gap")
+
+	writer := &Writer{
+		program: projectKey, graphPath: filepath.Join(root, "behavior.sqlite3"), receiptRoot: receiptRoot,
+	}
+	if _, err := writer.ImportBundle(ctx, initial); err != nil {
+		t.Fatalf("import initial valid graph bundle: %v", err)
+	}
+
+	reprojection := cloneRecord(initial)
+	incomingCard := cloneRecord(initialCards[0])
+	requestAnalysis, ok := asRecord(incomingCard["request_analysis"])
+	if !ok {
+		t.Fatal("initial request analysis is invalid")
+	}
+	incomingCard["request_analysis"] = cloneRecord(requestAnalysis)
+	incomingCard["request_analysis"].(Record)["parse_state"] = "complete"
+	responseAnalysis, ok := asRecord(incomingCard["response_analysis"])
+	if !ok {
+		t.Fatal("initial response analysis is invalid")
+	}
+	incomingCard["response_analysis"] = cloneRecord(responseAnalysis)
+	incomingCard["response_analysis"].(Record)["parse_state"] = "complete"
+	incomingCard["business_action"] = Record{"known_effect": "unknown"}
+	incomingCard["hypotheses"] = []any{}
+	incomingCard["missing_evidence"] = []any{"new parser gap"}
+	reprojection["cards"] = []Record{incomingCard}
+	retryBundle := cloneRecord(reprojection)
+	result, err := writer.ImportBundle(ctx, reprojection)
+	if err != nil {
+		t.Fatalf("reproject existing card through ImportBundle(): %v", err)
+	}
+	if result.UpdatedCards != 1 {
+		t.Fatalf("updated cards = %d, want 1", result.UpdatedCards)
+	}
+
+	reader, err := OpenReader(ctx, writer.graphPath, projectKey, receiptRoot)
+	if err != nil {
+		t.Fatalf("open reprojected graph: %v", err)
+	}
+	snapshot, err := reader.Snapshot()
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedCards := snapshot["cards"].([]Record)
+	if len(storedCards) != 1 {
+		t.Fatalf("stored cards = %d, want 1", len(storedCards))
+	}
+	stored := storedCards[0]
+	if stored["analysis_state"] != "incomplete" || stored["request_analysis"].(map[string]any)["parse_state"] != "complete" {
+		t.Fatal("new parser projection was not committed consistently")
+	}
+	if stored["business_action"].(map[string]any)["analyst_note"] != "retain" || len(stored["hypotheses"].([]any)) != 1 {
+		t.Fatal("reprojection discarded existing analyst data")
+	}
+	if !containsStringValue(stored["missing_evidence"].([]any), "analyst-marked gap") ||
+		!containsStringValue(stored["missing_evidence"].([]any), "new parser gap") {
+		t.Fatal("reprojection did not preserve and extend missing evidence")
+	}
+
+	items, err := writer.PendingOutbox(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("pending outbox events = %d, want 2", len(items))
+	}
+	outboxBundle, err := DecodeBundleJSON(items[1].BundleJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outboxCards, ok := outboxBundle["cards"].([]any)
+	if !ok || len(outboxCards) != 1 {
+		t.Fatal("outbox card list is invalid")
+	}
+	outboxCard, ok := asRecord(outboxCards[0])
+	if !ok || !sameCanonical(outboxCard, stored) {
+		t.Fatal("outbox card differs from the committed BehaviorGraph card")
+	}
+	replay, err := writer.ImportBundle(ctx, retryBundle)
+	if err != nil {
+		t.Fatalf("replay normalized input: %v", err)
+	}
+	if !replay.Replayed || replay.UpdatedCards != 0 {
+		t.Fatalf("replay result = replayed %t, updated cards %d", replay.Replayed, replay.UpdatedCards)
+	}
+}
+
+func containsStringValue(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func cardProjectionTestBundle(program string, card Record) Record {
