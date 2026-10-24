@@ -77,6 +77,38 @@ loop remain `PARTIAL`.
   Hermes analysis loop are still absent. Keep product and coverage claims
   `PARTIAL` until those gaps are closed and verified.
 
+## Fresh compatibility and KB recheck (2026-10-23 22:22 -0400)
+
+- A new read-only `project-audit` reports capture schema v7 and BehaviorGraph
+  schema v2 compatible. The selected local Juice Shop store has 1,400 captures
+  and search entries: 1,369 are graph-mapped, 31 are unmapped, 444 parse
+  complete, 956 partial, and none unparsed. The BehaviorGraph contains 33,366
+  entities, 33,987 assertions, 1,369 sources, and 1,369 cards. Historical
+  synchronization is `partial`; `history_reconciled=false`. The audit reads
+  structural metadata only, not captured bodies.
+- A fresh `neo4j-backfill --verify-only` returned `verified` for the selected
+  local BehaviorGraph and Neo4j snapshot, with 33,366 entities, 33,987
+  assertions, 1,369 sources, and 1,369 cards. Its coverage field remains
+  `source_sync_not_assessed`; parity does not reconcile imported Caido history.
+  Verify-only did not replace the snapshot.
+- Caido 0.58.3 lists the Juice Shop project as `READY` but inactive; the
+  selected project is `sperpravo`. Only the project list was read. No project
+  switch, history enumeration, body read, replay, or target request occurred.
+- The connected `kb_stats` request timed out after 300 seconds. The documented
+  local `query-kb.sh stats` fallback completed read-only: 15,591 semantic files,
+  79,376 chunks/vectors, 15,381 compatible files and 67,382 compatible
+  vectors. Semantic integrity is degraded: 210 files have a wrong index
+  version and no source hash, 210 file chunk counts are incomplete, and the
+  stored index version is null. The semantic index timestamp is 2026-10-07.
+  Lexical search is available with 15,438 files and 67,991 passages, last
+  refreshed 2026-10-13. KB readiness remains `PARTIAL`.
+- The packet builder now accumulates up to four exact spans from multiple
+  historical captures in one project (4 KiB per span, 8 KiB total), clears on
+  project switch, and renders only the redacted preview locally. It still does
+  not call a model; the Hermes/provider cycle is Stage 5. Synthetic Go, race,
+  and vet checks passed for this implementation; all 23 browser-state tests
+  passed. Runtime decryption still lacks a configured vault key.
+
 ## Stage 4 local evidence preview (2026-10-23 21:31 -0400)
 
 - Added a typed Go evidence-range use case backed by the authenticated local
@@ -167,6 +199,41 @@ loop remain `PARTIAL`.
   recovered or copied. Runtime source reconciliation, complete browser/JS
   coverage, bounded model packets, and the Hermes consultation cycle remain
   outstanding. Stage 4 and overall coverage stay `PARTIAL`.
+
+## Stage 4 bounded evidence packet preview (2026-10-23)
+
+- Added an explicit local preview for an analyst question plus byte spans from
+  exact encrypted historical revisions. The API is capped at four spans, 4 KiB
+  per span, and 8 KiB selected in total. It retains revision IDs, source hashes,
+  absolute byte offsets, capture/parser/fidelity/truncation metadata, and
+  reports omission totals as unknown when the exact source is unavailable.
+  For messages up to 1 MiB, redaction scans the complete stored message before
+  extracting a selected span. Larger messages are rejected from indexed size
+  before the vault file is opened, then omitted with their known size. Their
+  indexed digest is labeled `indexed_only`; only a successfully decrypted and
+  hash-checked message is labeled `verified`.
+- The question and selected UTF-8 excerpts pass through heuristic redaction for
+  common credential headers and assignments, bearer/JWT/private-key material,
+  prefixed secret keys, quoted multiword values, email addresses, and labeled
+  PII fields. A partial selection overlapping a detected secret is replaced
+  in full. A final public-data validation gate rejects unsafe questions and
+  omits excerpts that still fail validation. Redaction remains heuristic and
+  each preview is marked for operator review.
+- The loopback API accepts only bounded JSON from a same-origin POST, disables
+  caching, and renders the result as text in the local UI. This operation does
+  not call a model and is not registered in MCP/Hermes. The provider remains
+  unset. The UI can accumulate up to four exact spans across historical
+  captures in the selected project, remove individual spans, and preview the
+  redacted packet. It clears the draft on project switch and blocks additions
+  beyond 8 KiB total before posting.
+- Synthetic unit and service tests exercise encrypted fixture reads, exact
+  revision binding, source offsets, redaction, missing-capture accounting,
+  request limits, multi-capture packet assembly, project-switch invalidation,
+  and local rendering. Runtime decryption of the existing
+  project vault is still unverified because the running service lacks
+  `BB_ASSISTANT_VAULT_KEY`; no real capture was read or sent to a model.
+  Stage 4 and overall coverage remain `PARTIAL` pending configured vault
+  access and the later Hermes consultation cycle.
 
 ## Fresh local verification (2026-10-23, after `b4f460e`)
 

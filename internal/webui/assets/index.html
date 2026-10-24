@@ -105,6 +105,24 @@
           </div>
           <button class="tool-button" id="evidence-more" type="button" hidden>Load next range</button>
         </div>
+        <section class="evidence-packet-controls" id="evidence-packet-controls" aria-label="Redacted model packet preview" hidden>
+          <label class="evidence-question-label" for="evidence-packet-question">Analyst question
+            <textarea id="evidence-packet-question" maxlength="2048" rows="2" placeholder="What should the assistant compare or explain?"></textarea>
+          </label>
+          <div class="evidence-packet-fields">
+            <label for="evidence-packet-offset">Start byte<input id="evidence-packet-offset" type="number" min="0" value="0"></label>
+            <label for="evidence-packet-length">Span bytes<input id="evidence-packet-length" type="number" min="1" max="4096"></label>
+            <button class="tool-button" id="evidence-packet-add" type="button" disabled>Add current span</button>
+          </div>
+          <p class="evidence-packet-selection-count" id="evidence-packet-selection-count" aria-live="polite">0 selected spans · 0/8192 bytes</p>
+          <div class="evidence-packet-selection-list" id="evidence-packet-selection-list" aria-label="Selected evidence spans"></div>
+          <div class="evidence-packet-actions">
+            <button class="tool-button" id="evidence-packet-clear" type="button" disabled>Clear packet</button>
+            <button class="tool-button" id="evidence-packet-preview" type="button" disabled>Preview redacted packet</button>
+          </div>
+          <p class="evidence-packet-note">Add up to 4 spans from captures in this project, with a 4 KiB limit per span and 8 KiB total. Local preview only; nothing is sent to a model. Review every excerpt because heuristic redaction can miss sensitive values.</p>
+          <pre class="evidence-packet-content" id="evidence-packet-content" tabindex="0" aria-label="Redacted evidence packet preview" hidden></pre>
+        </section>
         <div class="evidence-meta" id="evidence-meta" aria-live="polite">Select an exact historical capture to inspect its stored message.</div>
         <pre class="evidence-content" id="evidence-content" tabindex="0" aria-label="Stored HTTP message bytes"></pre>
         <pre class="evidence-compare-content" id="evidence-compare-content" tabindex="0" aria-label="Deterministic capture comparison" hidden></pre>

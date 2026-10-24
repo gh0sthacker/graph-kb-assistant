@@ -27,6 +27,9 @@ type explorerAPIFixture struct {
 	comparisonErr       error
 	comparisonResult    appquery.CaptureComparison
 	lastComparison      appquery.CaptureComparisonRequest
+	packetErr           error
+	packetResult        appquery.EvidencePacket
+	lastPacketRequest   appquery.EvidencePacketRequest
 }
 
 func (*explorerAPIFixture) GraphExplorerProjects(context.Context, string, int) (map[string]any, error) {
@@ -52,6 +55,10 @@ func (f *explorerAPIFixture) CaptureMessageRange(_ context.Context, request appq
 func (f *explorerAPIFixture) CompareCaptureMessages(_ context.Context, request appquery.CaptureComparisonRequest) (appquery.CaptureComparison, error) {
 	f.lastComparison = request
 	return f.comparisonResult, f.comparisonErr
+}
+func (f *explorerAPIFixture) BuildEvidencePacket(_ context.Context, request appquery.EvidencePacketRequest) (appquery.EvidencePacket, error) {
+	f.lastPacketRequest = request
+	return f.packetResult, f.packetErr
 }
 
 func TestEvidenceHandlerReadsOnePinnedBoundedLocalMessageRange(t *testing.T) {
@@ -193,6 +200,71 @@ func TestComparisonHandlerExplainsUnavailableVaultKey(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+target, nil))
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "local vault key is unavailable or invalid") {
 		t.Fatalf("comparison missing-key response status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestEvidencePacketPreviewRequiresSameOriginAndReturnsNoStorePacket(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	revision := strings.Repeat("b", 64)
+	request := appquery.EvidencePacketRequest{
+		ProjectKey: projectKey, Question: "Compare these spans.",
+		Selections: []appquery.EvidencePacketSelection{{RequestID: "239", RevisionID: revision, Side: "request", Offset: 12, Length: 80}},
+	}
+	api := &explorerAPIFixture{packetResult: appquery.EvidencePacket{
+		Version: "1", PolicyVersion: appquery.EvidencePacketPolicyVersion, ProjectKey: projectKey,
+		Question: request.Question, PreviewOnly: true, OperatorReviewNeeded: true,
+	}}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/evidence/packet-preview", bytes.NewReader(encoded))
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("Origin", "http://127.0.0.1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httpRequest)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("packet preview status=%d cache=%q: %s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+	if got := api.lastPacketRequest; got.ProjectKey != request.ProjectKey || got.Question != request.Question || len(got.Selections) != 1 || got.Selections[0] != request.Selections[0] {
+		t.Fatalf("packet request = %#v", got)
+	}
+	var result appquery.EvidencePacket
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || !result.PreviewOnly || !result.OperatorReviewNeeded {
+		t.Fatalf("packet response = %#v, error=%v", result, err)
+	}
+}
+
+func TestEvidencePacketPreviewRejectsUnknownFieldsAndCrossOrigin(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	validBody := `{"project_key":"` + projectKey + `","question":"compare","selections":[{"request_id":"239","revision_id":"` + strings.Repeat("b", 64) + `","side":"request","offset":0,"length":8}]}`
+	tests := []struct {
+		name, body, origin string
+		wantStatus         int
+	}{
+		{name: "unknown field", body: strings.TrimSuffix(validBody, "}") + `,"raw":"secret"}`, origin: "http://127.0.0.1", wantStatus: http.StatusBadRequest},
+		{name: "cross origin", body: validBody, origin: "http://example.test", wantStatus: http.StatusForbidden},
+		{name: "missing origin", body: validBody, origin: "", wantStatus: http.StatusMethodNotAllowed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := &explorerAPIFixture{}
+			handler, _ := NewHandler(api)
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/evidence/packet-preview", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || api.lastPacketRequest.ProjectKey != "" {
+				t.Fatalf("status=%d request=%#v body=%s", response.Code, api.lastPacketRequest, response.Body.String())
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -42,6 +43,7 @@ type readAPI interface {
 	Graph(context.Context, appquery.GraphRequest) (appquery.GraphResult, error)
 	CaptureMessageRange(context.Context, appquery.CaptureMessageRangeRequest) (appquery.CaptureMessageRange, error)
 	CompareCaptureMessages(context.Context, appquery.CaptureComparisonRequest) (appquery.CaptureComparison, error)
+	BuildEvidencePacket(context.Context, appquery.EvidencePacketRequest) (appquery.EvidencePacket, error)
 }
 
 // NewHandler constructs the local UI and its narrowly scoped read-only API.
@@ -65,6 +67,7 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	mux.HandleFunc("GET /api/graph", graphHandler(api))
 	mux.HandleFunc("GET /api/evidence", captureMessageRangeHandler(api))
 	mux.HandleFunc("GET /api/compare", captureComparisonHandler(api))
+	mux.HandleFunc("POST /api/evidence/packet-preview", evidencePacketPreviewHandler(api))
 	return securityHeaders(localRequestGate(mux)), nil
 }
 
@@ -323,6 +326,33 @@ func captureComparisonHandler(api readAPI) http.HandlerFunc {
 	}
 }
 
+func evidencePacketPreviewHandler(api readAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || !strings.EqualFold(mediaType, "application/json") {
+			writeError(w, http.StatusUnsupportedMediaType, "evidence packet preview requires application/json")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		var request appquery.EvidencePacketRequest
+		if err := decoder.Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, "evidence packet request is malformed or too large")
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "evidence packet request must contain one JSON object")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		defer cancel()
+		result, err := api.BuildEvidencePacket(ctx, request)
+		writeEvidencePacketResult(w, result, err)
+	}
+}
+
 func optionalNonnegativeInt64(value string) (int64, bool, error) {
 	if value == "" {
 		return 0, false, nil
@@ -489,6 +519,40 @@ func writeComparisonResult(w http.ResponseWriter, result appquery.CaptureCompari
 	_, _ = io.Copy(w, bytes.NewReader(encoded))
 }
 
+func writeEvidencePacketResult(w http.ResponseWriter, result appquery.EvidencePacket, err error) {
+	if err != nil {
+		var queryErr *appquery.QueryError
+		if errors.As(err, &queryErr) {
+			switch queryErr.Code {
+			case appquery.ErrorInvalidInput:
+				writeError(w, http.StatusBadRequest, "evidence packet request is invalid")
+			case appquery.ErrorProjectNotRegistered:
+				writeError(w, http.StatusNotFound, "selected project is not registered")
+			case appquery.ErrorProjectUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "selected project is unavailable for local evidence reads")
+			case appquery.ErrorEvidenceKeyUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "local vault key is unavailable or invalid; evidence packet cannot be built")
+			default:
+				writeError(w, http.StatusNotFound, "selected local evidence is unavailable")
+			}
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "evidence packet preview could not be built")
+		return
+	}
+	encoded, marshalErr := json.Marshal(result)
+	if marshalErr != nil || len(encoded) > 128<<10 {
+		writeError(w, http.StatusRequestEntityTooLarge, "evidence packet exceeds the local preview limit")
+		return
+	}
+	defer clear(encoded)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, bytes.NewReader(encoded))
+}
+
 func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -502,14 +566,17 @@ func localRequestGate(next http.Handler) http.Handler {
 			writeError(w, http.StatusMisdirectedRequest, "graph explorer accepts localhost requests only")
 			return
 		}
+		sameOrigin := false
 		if origin := r.Header.Get("Origin"); origin != "" {
 			parsed, err := url.Parse(origin)
 			if err != nil || parsed.Scheme != "http" || !strings.EqualFold(parsed.Host, r.Host) {
 				writeError(w, http.StatusForbidden, "cross-origin requests are not allowed")
 				return
 			}
+			sameOrigin = true
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead &&
+			!(r.Method == http.MethodPost && r.URL.Path == "/api/evidence/packet-preview" && sameOrigin) {
 			w.Header().Set("Allow", "GET, HEAD")
 			writeError(w, http.StatusMethodNotAllowed, "read-only graph explorer")
 			return

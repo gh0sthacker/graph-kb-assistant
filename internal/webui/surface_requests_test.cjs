@@ -39,6 +39,7 @@ function createApp() {
       return new Promise((resolve, reject) => {
         requests.push({
           url: new URL(url, "http://local.test"), signal: options.signal,
+          method: options.method || "GET", headers: options.headers || {}, body: options.body,
           resolve(data) { resolve({ ok: true, json: async () => data }); },
           fail(status, message) { resolve({ ok: false, status, json: async () => ({ error: message }) }); },
           reject,
@@ -49,7 +50,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, setComparisonBaseline, openComparison, formatCaptureComparison, renderInspector, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, renderInspector, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -227,6 +228,183 @@ test("capture comparison pins exact revisions, reports fidelity and truncation, 
   assert.equal(app.state.comparisonBaseline, null, "a project switch clears the pinned baseline");
   app.requests[1].resolve(page("b.test"));
   await switchProject;
+});
+
+test("evidence packet preview accumulates exact spans across captures and resets on project switch", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const revisionId = "b".repeat(64);
+  const secondRevisionId = "c".repeat(64);
+  app.state.projectKey = projectKey;
+  const open = app.openEvidence({
+    request_id: "239", revision_id: revisionId,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  app.requests[0].resolve({
+    request_id: "239", revision_id: revisionId, side: "request", offset: 0,
+    total_size: 64, returned_size: 64, next_offset: null, data: "GET /items?password=secret HTTP/1.1", encoding: "utf-8",
+    wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
+  });
+  await open;
+  app.elements.evidencePacketQuestion.value = "Explain password=private-value in this request.";
+  app.elements.evidencePacketQuestion.listeners.input();
+  app.elements.evidencePacketOffset.value = "4";
+  app.elements.evidencePacketOffset.listeners.input();
+  app.elements.evidencePacketLength.value = "24";
+  app.elements.evidencePacketLength.listeners.input();
+  assert.equal(app.elements.evidencePacketAdd.disabled, false);
+  assert.equal(app.addCurrentEvidenceSpan(), true);
+  assert.equal(app.state.evidencePacketDraft.selections.length, 1);
+
+  const loadResponse = app.selectEvidenceSide("response");
+  assert.equal(app.requests.length, 2);
+  app.requests[1].resolve({
+    request_id: "239", revision_id: revisionId, side: "response", offset: 0,
+    total_size: 64, returned_size: 64, next_offset: null, data: "HTTP/1.1 200 OK\r\nContent-Type: application/json", encoding: "utf-8",
+    wire_fidelity: "source_bytes", parse_state: "complete", response_truncated: false,
+  });
+  await loadResponse;
+  app.elements.evidencePacketOffset.value = "0";
+  app.elements.evidencePacketOffset.listeners.input();
+  app.elements.evidencePacketLength.value = "20";
+  app.elements.evidencePacketLength.listeners.input();
+  assert.equal(app.addCurrentEvidenceSpan(), true);
+
+  const openSecond = app.openEvidence({
+    request_id: "240", revision_id: secondRevisionId,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  app.requests[2].resolve({
+    request_id: "240", revision_id: secondRevisionId, side: "request", offset: 0,
+    total_size: 64, returned_size: 64, next_offset: null, data: "GET /profile HTTP/1.1", encoding: "utf-8",
+    wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
+  });
+  await openSecond;
+  assert.equal(app.elements.evidencePacketQuestion.value, "Explain password=private-value in this request.");
+  app.elements.evidencePacketOffset.value = "0";
+  app.elements.evidencePacketOffset.listeners.input();
+  app.elements.evidencePacketLength.value = "18";
+  app.elements.evidencePacketLength.listeners.input();
+  assert.equal(app.addCurrentEvidenceSpan(), true);
+  assert.equal(app.state.evidencePacketDraft.selections.length, 3);
+  assert.match(app.elements.evidencePacketSelectionCount.textContent, /3 selected spans/);
+  app.elements.evidencePacketOffset.value = "20";
+  app.elements.evidencePacketOffset.listeners.input();
+  app.elements.evidencePacketLength.value = "12";
+  app.elements.evidencePacketLength.listeners.input();
+  assert.equal(app.addCurrentEvidenceSpan(), true);
+  assert.equal(app.state.evidencePacketDraft.selections.length, 4);
+  assert.equal(app.elements.evidencePacketAdd.disabled, true);
+
+  const preview = app.previewEvidencePacket();
+  assert.equal(app.requests.length, 4);
+  const call = app.requests[3];
+  assert.equal(call.url.pathname, "/api/evidence/packet-preview");
+  assert.equal(call.method, "POST");
+  assert.equal(call.headers["Content-Type"], "application/json");
+  const body = JSON.parse(call.body);
+  assert.equal(body.project_key, projectKey);
+  assert.equal(body.question, "Explain password=private-value in this request.");
+  assert.deepEqual(snapshot(body.selections), [{
+    request_id: "239", revision_id: revisionId, side: "request", offset: 4, length: 24,
+  }, {
+    request_id: "239", revision_id: revisionId, side: "response", offset: 0, length: 20,
+  }, {
+    request_id: "240", revision_id: secondRevisionId, side: "request", offset: 0, length: 18,
+  }, {
+    request_id: "240", revision_id: secondRevisionId, side: "request", offset: 20, length: 12,
+  }]);
+  call.resolve({
+    version: "1", policy_version: "bb-evidence-redaction-v1", preview_only: true, operator_review_needed: true,
+    question: "Explain password=[REDACTED] in this request.",
+    evidence: [
+      { available: true, excerpt: "/items?password=[REDACTED]", redactions: [{ start: 18, end: 24, rule: "credential-assignment" }] },
+      { available: true, excerpt: "HTTP/1.1 200 OK", redactions: [] },
+      { available: true, excerpt: "GET /profile", redactions: [] },
+      { available: true, excerpt: "extra selected bytes", redactions: [] },
+    ],
+  });
+  await preview;
+  assert.match(app.elements.evidencePacketContent.textContent, /preview_only/);
+  assert.match(app.elements.evidencePacketContent.textContent, /password=\[REDACTED\]/);
+  assert.equal(app.elements.evidencePacketContent.hidden, false);
+  assert.equal(app.elements.evidencePacketControls.hidden, false);
+
+  const switchProject = app.selectProject("B");
+  assert.equal(app.elements.evidencePacketControls.hidden, true);
+  assert.equal(app.elements.evidencePacketQuestion.value, "");
+  assert.equal(app.state.evidencePacketDraft.selections.length, 0);
+  app.requests[4].resolve(page("b.test"));
+  await switchProject;
+});
+
+test("evidence packet span budget disables additions beyond 8192 bytes", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const revisionId = "b".repeat(64);
+  app.state.projectKey = projectKey;
+  const open = app.openEvidence({
+    request_id: "large", revision_id: revisionId,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  app.requests[0].resolve({
+    request_id: "large", revision_id: revisionId, side: "request", offset: 0,
+    total_size: 12000, returned_size: 64, next_offset: 64, data: "GET /large HTTP/1.1", encoding: "utf-8",
+    wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
+  });
+  await open;
+  app.elements.evidencePacketQuestion.value = "Review these selected bytes.";
+  app.elements.evidencePacketQuestion.listeners.input();
+  app.elements.evidencePacketLength.value = "4096";
+  app.elements.evidencePacketLength.listeners.input();
+  assert.equal(app.addCurrentEvidenceSpan(), true);
+  app.elements.evidencePacketOffset.value = "4096";
+  app.elements.evidencePacketOffset.listeners.input();
+  assert.equal(app.addCurrentEvidenceSpan(), true);
+  assert.equal(app.elements.evidencePacketSelectionCount.textContent, "2 selected spans · 8192/8192 bytes");
+  app.elements.evidencePacketOffset.value = "8192";
+  app.elements.evidencePacketOffset.listeners.input();
+  app.elements.evidencePacketLength.value = "1";
+  app.elements.evidencePacketLength.listeners.input();
+  assert.equal(app.elements.evidencePacketAdd.disabled, true);
+});
+
+test("late evidence packet response cannot populate after a project switch", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const revisionId = "b".repeat(64);
+  app.state.projectKey = projectKey;
+  const open = app.openEvidence({
+    request_id: "239", revision_id: revisionId,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  app.requests[0].resolve({
+    request_id: "239", revision_id: revisionId, side: "request", offset: 0,
+    total_size: 64, returned_size: 64, next_offset: null, data: "GET /items HTTP/1.1", encoding: "utf-8",
+    wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
+  });
+  await open;
+  app.elements.evidencePacketQuestion.value = "Inspect this request.";
+  app.elements.evidencePacketQuestion.listeners.input();
+  app.elements.evidencePacketOffset.value = "0";
+  app.elements.evidencePacketOffset.listeners.input();
+  app.elements.evidencePacketLength.value = "12";
+  app.elements.evidencePacketLength.listeners.input();
+  assert.equal(app.addCurrentEvidenceSpan(), true);
+
+  const preview = app.previewEvidencePacket();
+  const packetRequest = app.requests[1];
+  const switchProject = app.selectProject("B");
+  app.requests[2].resolve(page("b.test"));
+  await switchProject;
+  packetRequest.resolve({
+    version: "1", preview_only: true, operator_review_needed: true,
+    evidence: [{ available: true, excerpt: "late response" }],
+  });
+  await preview;
+  assert.equal(app.elements.evidencePacketContent.hidden, true);
+  assert.equal(app.elements.evidencePacketContent.textContent, "");
+  assert.equal(app.state.evidencePacketDraft.selections.length, 0);
 });
 
 test("late request bytes cannot replace the response side after a fast tab switch", async () => {

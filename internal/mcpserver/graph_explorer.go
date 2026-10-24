@@ -123,6 +123,18 @@ func (t *Tools) CompareCaptureMessages(ctx context.Context, request appquery.Cap
 	return t.graphQueries.CompareCaptureMessages(ctx, request)
 }
 
+// BuildEvidencePacket is used by the loopback UI to preview exact selected
+// historical spans. It is deliberately absent from MCP dispatch and never
+// sends the packet to a model.
+func (t *Tools) BuildEvidencePacket(ctx context.Context, request appquery.EvidencePacketRequest) (appquery.EvidencePacket, error) {
+	if t.graphQueries == nil {
+		return appquery.EvidencePacket{}, &appquery.QueryError{
+			Code: appquery.ErrorEvidenceUnavailable, Message: "evidence packet service is unavailable",
+		}
+	}
+	return t.graphQueries.BuildEvidencePacket(ctx, request)
+}
+
 func (t *Tools) checkGraphWireSize(wire map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(wire)
 	if err != nil {

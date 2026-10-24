@@ -13,7 +13,8 @@ const state = {
   graphSeeds: [], graphView: "direct", graphHistory: [], graphRequestId: 0, graphAbort: null,
   loadingGraph: false, hiddenKinds: new Set(OVERVIEW_HIDDEN_KINDS), routeScope: true, edgeLabelsVisible: true,
   renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
-  evidence: null, evidenceRequestId: 0, evidenceTrigger: null, comparisonBaseline: null, comparison: null,
+  evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
+  evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
 };
 
 const elements = {
@@ -34,6 +35,11 @@ const elements = {
   evidenceLabel: $("#evidence-capture-label"), evidenceMeta: $("#evidence-meta"), evidenceContent: $("#evidence-content"),
   evidenceFoot: $("#evidence-foot"), evidenceMore: $("#evidence-more"), evidenceCompareContent: $("#evidence-compare-content"),
   evidenceTitle: $("#evidence-title"), evidenceSides: $(".evidence-sides"),
+  evidencePacketControls: $("#evidence-packet-controls"), evidencePacketQuestion: $("#evidence-packet-question"),
+  evidencePacketOffset: $("#evidence-packet-offset"), evidencePacketLength: $("#evidence-packet-length"),
+  evidencePacketAdd: $("#evidence-packet-add"), evidencePacketSelectionCount: $("#evidence-packet-selection-count"),
+  evidencePacketSelectionList: $("#evidence-packet-selection-list"), evidencePacketClear: $("#evidence-packet-clear"),
+  evidencePacketPreview: $("#evidence-packet-preview"), evidencePacketContent: $("#evidence-packet-content"),
   evidenceRequest: $("#evidence-request"), evidenceResponse: $("#evidence-response"),
 };
 
@@ -103,8 +109,24 @@ async function getJSON(path, signal) {
   return payload;
 }
 
+async function postJSON(path, body) {
+  const response = await fetch(path, {
+    method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" },
+    credentials: "same-origin", cache: "no-store", body: JSON.stringify(body),
+  });
+  let payload;
+  try { payload = await response.json(); } catch { throw new Error("The server returned an invalid response."); }
+  if (!response.ok) {
+    const error = new Error(payload.error || `Read failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
 function clearEvidence(closeDialog = true) {
   state.evidenceRequestId++;
+  state.packetPreviewRequestId++;
   state.evidence = null;
   state.comparison = null;
   const trigger = state.evidenceTrigger;
@@ -121,6 +143,15 @@ function clearEvidence(closeDialog = true) {
   elements.evidenceCompareContent.hidden = true;
   elements.evidenceSides.hidden = false;
   elements.evidenceTitle.textContent = "Captured HTTP message";
+  elements.evidencePacketControls.hidden = true;
+  elements.evidencePacketQuestion.value = state.evidencePacketDraft.question;
+  elements.evidencePacketOffset.value = "0";
+  elements.evidencePacketLength.value = "";
+  elements.evidencePacketAdd.disabled = true;
+  elements.evidencePacketPreview.disabled = true;
+  elements.evidencePacketContent.textContent = "";
+  elements.evidencePacketContent.hidden = true;
+  renderEvidencePacketSelections();
   elements.evidenceFoot.textContent = "";
   elements.evidenceMore.hidden = true;
   elements.evidenceMore.disabled = true;
@@ -146,11 +177,18 @@ function openEvidence(item, trigger = null) {
   const requestID = ++state.evidenceRequestId;
   state.evidence = {
     projectKey: project, requestId, requestID, revisionId: typeof item.revision_id === "string" ? item.revision_id : "",
-    side: "request", nextOffset: 0, totalSize: null, loading: false,
+    side: "request", nextOffset: 0, totalSize: null, loading: false, packetPreviewLoading: false, packetDefaultsInitialized: false,
   };
   state.comparison = null;
   state.evidenceTrigger = trigger;
   elements.evidenceTitle.textContent = "Captured HTTP message";
+  elements.evidencePacketControls.hidden = false;
+  elements.evidencePacketQuestion.value = state.evidencePacketDraft.question;
+  elements.evidencePacketOffset.value = "0";
+  elements.evidencePacketLength.value = "";
+  elements.evidencePacketContent.textContent = "";
+  elements.evidencePacketContent.hidden = true;
+  renderEvidencePacketSelections();
   elements.evidenceSides.hidden = false;
   elements.evidenceContent.hidden = false;
   elements.evidenceCompareContent.hidden = true;
@@ -188,6 +226,11 @@ async function loadEvidenceRange(append) {
     if (state.evidence !== evidence || requestID !== state.evidenceRequestId || evidence.projectKey !== state.projectKey) return;
     evidence.revisionId = payload.revision_id || evidence.revisionId;
     evidence.totalSize = Number(payload.total_size || 0);
+    if (!evidence.packetDefaultsInitialized) {
+      elements.evidencePacketOffset.value = "0";
+      elements.evidencePacketLength.value = evidence.totalSize > 0 ? String(Math.min(4096, evidence.totalSize)) : "";
+      evidence.packetDefaultsInitialized = true;
+    }
     evidence.nextOffset = payload.next_offset === null || payload.next_offset === undefined ? null : Number(payload.next_offset);
     evidence.loadedBytes = (evidence.loadedBytes || 0) + Number(payload.returned_size || 0);
     const chunk = evidenceText(payload);
@@ -199,6 +242,7 @@ async function loadEvidenceRange(append) {
     const capturedAt = payload.captured_at ? ` · captured ${payload.captured_at}` : " · capture time unknown";
     const digest = payload.sha256 ? ` · SHA-256 ${payload.sha256}` : " · SHA-256 unavailable";
     elements.evidenceMeta.textContent = `Revision ${evidence.revisionId || "unknown"}${capturedAt} · ${size} · ${fidelity} · parse ${parse}${truncated}${digest}`;
+    updateEvidencePacketControl();
     const previewCapped = evidence.nextOffset !== null && evidence.loadedBytes >= MAX_EVIDENCE_PREVIEW_BYTES;
     elements.evidenceMore.hidden = evidence.nextOffset === null || previewCapped;
     elements.evidenceMore.disabled = evidence.nextOffset === null || previewCapped;
@@ -211,6 +255,7 @@ async function loadEvidenceRange(append) {
     if (state.evidence !== evidence || requestID !== state.evidenceRequestId) return;
     elements.evidenceMeta.textContent = "The selected message range could not be read.";
     elements.evidenceContent.textContent = "";
+    elements.evidencePacketPreview.disabled = true;
     elements.evidenceFoot.textContent = error.message;
     elements.evidenceMore.hidden = true;
     showToast(`HTTP evidence unavailable: ${error.message}`);
@@ -218,22 +263,142 @@ async function loadEvidenceRange(append) {
     if (state.evidence === evidence && requestID === state.evidenceRequestId) {
       evidence.loading = false;
       if (evidence.nextOffset !== null) elements.evidenceMore.disabled = false;
+      updateEvidencePacketControl();
     }
   }
 }
 
 function selectEvidenceSide(side) {
   if (!state.evidence || (side !== "request" && side !== "response")) return;
+  invalidateEvidencePacketPreview();
   state.evidence.requestID = ++state.evidenceRequestId;
   state.evidence.loading = false;
   state.evidence.side = side;
   state.evidence.nextOffset = 0;
   state.evidence.loadedBytes = 0;
+  state.evidence.packetDefaultsInitialized = false;
+  elements.evidencePacketOffset.value = "0";
+  elements.evidencePacketLength.value = "";
+  elements.evidencePacketContent.textContent = "";
+  elements.evidencePacketContent.hidden = true;
+  elements.evidencePacketPreview.disabled = true;
   setEvidenceSideButtons(side);
   elements.evidenceContent.textContent = "";
   elements.evidenceMore.hidden = true;
   elements.evidenceMeta.textContent = `Loading ${side} from the same pinned capture revision…`;
-  void loadEvidenceRange(false);
+  return loadEvidenceRange(false);
+}
+
+function invalidateEvidencePacketPreview() {
+  state.packetPreviewRequestId++;
+  if (state.evidence) state.evidence.packetPreviewLoading = false;
+  elements.evidencePacketContent.textContent = "";
+  elements.evidencePacketContent.hidden = true;
+  updateEvidencePacketControl();
+}
+
+function renderEvidencePacketSelections() {
+  const draft = state.evidencePacketDraft;
+  const selections = draft.projectKey === state.projectKey ? draft.selections : [];
+  const selectedBytes = selections.reduce((total, selection) => total + selection.length, 0);
+  elements.evidencePacketSelectionCount.textContent = `${selections.length} selected spans · ${selectedBytes}/8192 bytes`;
+  elements.evidencePacketSelectionList.replaceChildren();
+  for (const [index, selection] of selections.entries()) {
+    const row = el("div", "evidence-packet-selection");
+    const label = el("span", "", `Request ${selection.request_id} · ${selection.side} · bytes ${selection.offset}–${selection.offset + selection.length}`);
+    const remove = el("button", "tool-button", "Remove");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove request ${selection.request_id} ${selection.side} span`);
+    remove.addEventListener("click", () => removeEvidencePacketSelection(index));
+    row.append(label, remove);
+    elements.evidencePacketSelectionList.append(row);
+  }
+  elements.evidencePacketClear.disabled = selections.length === 0 && !draft.question;
+  updateEvidencePacketControl();
+}
+
+function updateEvidencePacketControl() {
+  const evidence = state.evidence;
+  const offset = Number(elements.evidencePacketOffset.value);
+  const length = Number(elements.evidencePacketLength.value);
+  const draft = state.evidencePacketDraft;
+  const selections = draft.projectKey === state.projectKey ? draft.selections : [];
+  const selectedBytes = selections.reduce((total, selection) => total + selection.length, 0);
+  const validRevision = !!evidence && /^[a-f0-9]{64}$/.test(evidence.revisionId);
+  const validSpan = validRevision && evidence.totalSize !== null && Number.isSafeInteger(offset) && offset >= 0 &&
+    Number.isSafeInteger(length) && length > 0 && length <= 4096 && offset + length <= evidence.totalSize;
+  const duplicate = validSpan && selections.some(selection => selection.request_id === evidence.requestId &&
+    selection.revision_id === evidence.revisionId && selection.side === evidence.side &&
+    selection.offset === offset && selection.length === length);
+  elements.evidencePacketAdd.disabled = !validSpan || evidence.loading || selections.length >= 4 || selectedBytes + length > 8192 || duplicate;
+  elements.evidencePacketPreview.disabled = !evidence || evidence.loading || evidence.packetPreviewLoading ||
+    !draft.question.trim() || selections.length === 0;
+}
+
+function addCurrentEvidenceSpan() {
+  updateEvidencePacketControl();
+  if (!state.evidence || elements.evidencePacketAdd.disabled) return false;
+  if (state.evidencePacketDraft.projectKey !== state.projectKey) {
+    state.evidencePacketDraft = { projectKey: state.projectKey, question: elements.evidencePacketQuestion.value, selections: [] };
+  }
+  state.evidencePacketDraft.selections.push({
+    request_id: state.evidence.requestId, revision_id: state.evidence.revisionId, side: state.evidence.side,
+    offset: Number(elements.evidencePacketOffset.value), length: Number(elements.evidencePacketLength.value),
+  });
+  renderEvidencePacketSelections();
+  invalidateEvidencePacketPreview();
+  return true;
+}
+
+function removeEvidencePacketSelection(index) {
+  const draft = state.evidencePacketDraft;
+  if (draft.projectKey !== state.projectKey || !Number.isInteger(index) || index < 0 || index >= draft.selections.length) return false;
+  draft.selections.splice(index, 1);
+  renderEvidencePacketSelections();
+  invalidateEvidencePacketPreview();
+  return true;
+}
+
+function clearEvidencePacketDraft() {
+  state.evidencePacketDraft = { projectKey: state.projectKey, question: "", selections: [] };
+  elements.evidencePacketQuestion.value = "";
+  elements.evidencePacketContent.textContent = "";
+  elements.evidencePacketContent.hidden = true;
+  renderEvidencePacketSelections();
+  invalidateEvidencePacketPreview();
+}
+
+async function previewEvidencePacket() {
+  const evidence = state.evidence;
+  const draft = state.evidencePacketDraft;
+  updateEvidencePacketControl();
+  if (!evidence || elements.evidencePacketPreview.disabled) return;
+  const previewRequestId = ++state.packetPreviewRequestId;
+  const question = draft.question;
+  const selections = draft.selections.map(selection => ({ ...selection }));
+  const selectionsKey = JSON.stringify(selections);
+  evidence.packetPreviewLoading = true;
+  elements.evidencePacketPreview.disabled = true;
+  elements.evidencePacketContent.hidden = false;
+  elements.evidencePacketContent.textContent = "Building a redacted local preview…";
+  try {
+    const packet = await postJSON("/api/evidence/packet-preview", {
+      project_key: evidence.projectKey, question,
+      selections,
+    });
+    if (state.evidence !== evidence || previewRequestId !== state.packetPreviewRequestId || evidence.projectKey !== state.projectKey ||
+        question !== state.evidencePacketDraft.question || selectionsKey !== JSON.stringify(state.evidencePacketDraft.selections)) return;
+    elements.evidencePacketContent.textContent = JSON.stringify(packet, null, 2);
+  } catch (error) {
+    if (state.evidence !== evidence || previewRequestId !== state.packetPreviewRequestId) return;
+    elements.evidencePacketContent.textContent = error.message;
+    showToast(`Packet preview unavailable: ${error.message}`);
+  } finally {
+    if (state.evidence === evidence && previewRequestId === state.packetPreviewRequestId) {
+      evidence.packetPreviewLoading = false;
+      updateEvidencePacketControl();
+    }
+  }
 }
 
 function setComparisonBaseline(item, button) {
@@ -278,6 +443,10 @@ async function openComparison(item, trigger = null) {
   const requestID = ++state.evidenceRequestId;
   state.evidenceTrigger = trigger;
   elements.evidenceTitle.textContent = "Capture comparison";
+  state.packetPreviewRequestId++;
+  elements.evidencePacketControls.hidden = true;
+  elements.evidencePacketContent.textContent = "";
+  elements.evidencePacketContent.hidden = true;
   elements.evidenceLabel.textContent = `Baseline request ${baseline.requestId} vs request ${rightRequestId}`;
   elements.evidenceMeta.textContent = "Comparing exact local historical revisions…";
   elements.evidenceContent.textContent = "";
@@ -392,6 +561,7 @@ async function loadProjects(append = false) {
 }
 
 function clearProjectView() {
+  state.evidencePacketDraft = { projectKey: "", question: "", selections: [] };
   clearEvidence();
   state.comparisonBaseline = null;
   resetSurfaceRequest();
@@ -424,6 +594,7 @@ async function selectProject(projectKey) {
     return;
   }
   if (state.projectKey !== projectKey) {
+    state.evidencePacketDraft = { projectKey, question: "", selections: [] };
     clearEvidence();
     state.comparisonBaseline = null;
   }
@@ -1354,6 +1525,15 @@ elements.evidenceDialog.addEventListener("close", () => {
 elements.evidenceRequest.addEventListener("click", () => selectEvidenceSide("request"));
 elements.evidenceResponse.addEventListener("click", () => selectEvidenceSide("response"));
 elements.evidenceMore.addEventListener("click", () => { void loadEvidenceRange(true); });
+elements.evidencePacketQuestion.addEventListener("input", () => {
+  state.evidencePacketDraft.question = elements.evidencePacketQuestion.value;
+  invalidateEvidencePacketPreview();
+});
+elements.evidencePacketOffset.addEventListener("input", invalidateEvidencePacketPreview);
+elements.evidencePacketLength.addEventListener("input", invalidateEvidencePacketPreview);
+elements.evidencePacketAdd.addEventListener("click", addCurrentEvidenceSpan);
+elements.evidencePacketClear.addEventListener("click", clearEvidencePacketDraft);
+elements.evidencePacketPreview.addEventListener("click", () => { void previewEvidencePacket(); });
 elements.graphCanvas.addEventListener("pointerdown", event => {
   if (event.target.closest?.(".node-group")) return;
   event.preventDefault();

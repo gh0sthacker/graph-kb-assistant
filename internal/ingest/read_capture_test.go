@@ -116,6 +116,25 @@ func TestReadCaptureMessageForGraphRebuildIsAuthenticatedAndBounded(t *testing.T
 		t.Fatal("bounded range read did not return the requested authenticated response prefix")
 	}
 	clear(segment.Data)
+
+	var oversizedRevision, oversizedVaultRef string
+	if err := readonly.Database.DB().QueryRowContext(ctx, `
+		SELECT cr.revision_id,cr.response_vault_ref
+		FROM captures AS c JOIN capture_revisions AS cr ON cr.observation_id=c.observation_id
+		WHERE c.request_id=? AND cr.revision_id=c.current_revision_id`, requestID,
+	).Scan(&oversizedRevision, &oversizedVaultRef); err != nil {
+		t.Fatalf("load oversized response reference: %v", err)
+	}
+	if err := os.Remove(filepath.Join(readonly.VaultDirectory, oversizedVaultRef)); err != nil {
+		t.Fatalf("remove oversized response fixture to prove preflight ordering: %v", err)
+	}
+	oversized, err := ReadCaptureRevisionForRedaction(ctx, readonly, requestID, oversizedRevision, "response")
+	if !errors.Is(err, ErrCaptureContextLimit) {
+		t.Fatalf("oversized redaction-context read error = %v, want context-limit before vault access", err)
+	}
+	if len(oversized.Data) != 0 || oversized.TotalSize != int64(len(response)) || oversized.RevisionID == nil || *oversized.RevisionID != oversizedRevision || oversized.IntegrityStatus != CaptureIntegrityIndexedOnly {
+		t.Fatalf("oversized context metadata = %#v; want exact revision and size without plaintext", oversized)
+	}
 }
 
 func TestReadCaptureRevisionRangePinsPriorRevisionAfterCurrentChanges(t *testing.T) {

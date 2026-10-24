@@ -14,9 +14,15 @@ import (
 )
 
 var (
-	secretAssignmentPattern = regexp.MustCompile(`(?i)\b(password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session[_-]?(id|cookie)|cookie|secret)\s*[=:]\s*([^\s&;,]+)`)
-	secretOtherValuePattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[^\s/@]+@[^\s/]+\.[A-Za-z]{2,}\b`)
-	privateKeys             = map[string]struct{}{
+	secretAssignmentPattern           = regexp.MustCompile(`(?i)\b([A-Za-z0-9_-]*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session(?:[_-]?(?:id|cookie|key))?|cookie|secret(?:[_-]?key)?|authorization|token|jwt))\b["']?\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&;,"']+)`)
+	jsonSecretAssignmentPattern       = regexp.MustCompile(`(?i)"([A-Za-z0-9_-]*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session(?:[_-]?(?:id|cookie|key))?|cookie|secret(?:[_-]?key)?|authorization|token|jwt))"\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s}\]]+)`)
+	sensitivePIIAssignmentPattern     = regexp.MustCompile(`(?i)\b[A-Za-z0-9_-]*(email|phone|mobile|ssn|credential|private[_-]?key)\b["']?\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&;,"']+)`)
+	jsonSensitivePIIAssignmentPattern = regexp.MustCompile(`(?i)"[A-Za-z0-9_-]*(email|phone|mobile|ssn|credential|private[_-]?key)"\s*:\s*("(?:\\.|[^"\\])*"|[^,\s}\]]+)`)
+	secretOtherValuePattern           = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
+	sensitiveHeaderPattern            = regexp.MustCompile(`(?i)(authorization|cookie|token|secret|password|passwd|credential|api[_-]?key|session|csrf|xsrf)`)
+	headerFieldPattern                = regexp.MustCompile(`(?im)^([A-Za-z0-9-]{1,128}):[ \t]*([^\r\n]*)`)
+	privateKeyBlockPattern            = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
+	privateKeys                       = map[string]struct{}{
 		"raw": {}, "body": {}, "headers": {}, "header_values": {}, "request_body": {},
 		"response_body": {}, "field_values": {}, "token": {}, "session_id": {},
 		"session_cookie": {}, "credential": {}, "credentials": {}, "pii": {},
@@ -178,13 +184,29 @@ func containsSecretLikeValue(value string) bool {
 	if secretOtherValuePattern.MatchString(value) {
 		return true
 	}
-	for _, match := range secretAssignmentPattern.FindAllStringSubmatchIndex(value, -1) {
-		if len(match) < 8 {
-			return true
-		}
-		assignmentValue := value[match[6]:match[7]]
-		if !strings.EqualFold(assignmentValue, "[REDACTED]") && !strings.EqualFold(assignmentValue, "<REDACTED>") {
-			return true
+	for _, item := range []struct {
+		pattern   *regexp.Regexp
+		valueFrom int
+		valueTo   int
+	}{
+		{secretAssignmentPattern, 4, 5}, {jsonSecretAssignmentPattern, 4, 5},
+		{sensitivePIIAssignmentPattern, 4, 5}, {jsonSensitivePIIAssignmentPattern, 4, 5},
+	} {
+		for _, match := range item.pattern.FindAllStringSubmatchIndex(value, -1) {
+			if len(match) <= item.valueTo || match[item.valueFrom] < 0 || match[item.valueTo] < 0 {
+				return true
+			}
+			assignmentValue := strings.Trim(value[match[item.valueFrom]:match[item.valueTo]], `"'`)
+			for range 3 {
+				decoded, err := url.QueryUnescape(assignmentValue)
+				if err != nil || decoded == assignmentValue {
+					break
+				}
+				assignmentValue = decoded
+			}
+			if !strings.EqualFold(assignmentValue, "[REDACTED]") && !strings.EqualFold(assignmentValue, "<REDACTED>") {
+				return true
+			}
 		}
 	}
 	return false
