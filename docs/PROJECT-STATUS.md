@@ -583,6 +583,13 @@ See [Project backup and restore](PROJECT-BACKUP-RESTORE.md) for operator steps.
   Caido project was switched back to `sperpravo` immediately afterward and its
   active selection was verified. Snapshot completeness remains `PARTIAL` for
   the same missing stable-snapshot-token limitation.
+- Repeated the exact-host check through the Go `caido-reconcile` command at
+  2026-10-24 15:50 UTC: 4 pages, 355 Caido IDs, 355 local historical/live IDs,
+  all 355 matched, and zero Caido-only, local-only, duplicate, or unclassified
+  IDs. No request or response details were fetched and no target traffic was
+  sent. Caido was restored to `sperpravo` and verified. The enumeration still
+  reports `coverage_reconciled=false` because Caido provides no stable snapshot
+  token.
 - ECC TDD fixtures cover exact-host filter construction, host/port comparison,
   wrong-port exclusion, malformed source URLs, local unclassified rows,
   invalid scope values, and a database digest check proving the reconciler is
