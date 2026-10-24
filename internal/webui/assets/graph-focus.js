@@ -19,7 +19,17 @@
     };
   }
 
-  const api = { focusedNeighborhood };
+  function focusedTransform(position, width, height, zoom) {
+    if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y) ||
+        !Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(zoom) ||
+        width <= 0 || height <= 0 || zoom <= 0) return null;
+    return {
+      panX: zoom * (width / 2 - position.x),
+      panY: zoom * (height / 2 - position.y),
+    };
+  }
+
+  const api = { focusedNeighborhood, focusedTransform };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);

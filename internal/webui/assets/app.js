@@ -12,7 +12,7 @@ const state = {
   surfaceRequestId: 0, surfaceAbort: null,
   graphSeeds: [], graphView: "direct", graphHistory: [], graphRequestId: 0, graphAbort: null,
   loadingGraph: false, hiddenKinds: new Set(OVERVIEW_HIDDEN_KINDS), routeScope: true, edgeLabelsVisible: true,
-  renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
+  renderedEntities: [], renderedAssertions: [], layoutPositions: new Map(), zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
   evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
   evidencePacketPreview: null, consultation: null, consultationCreateKey: "",
@@ -1043,6 +1043,7 @@ function renderEmpty(title, copy) {
   elements.graphScene.replaceChildren();
   state.renderedEntities = [];
   state.renderedAssertions = [];
+  state.layoutPositions = new Map();
 }
 
 function renderGraph(resetView = true) {
@@ -1076,6 +1077,7 @@ function renderGraph(resetView = true) {
   renderGraphFilters(entities, renderedEntities);
   if (!renderedEntities.length) {
     state.selectedNode = null;
+    state.layoutPositions = new Map();
     elements.graphCanvas.setAttribute("viewBox", "0 0 960 560");
     elements.graphScene.replaceChildren();
     elements.canvasEmpty.hidden = false;
@@ -1099,6 +1101,7 @@ function renderGraph(resetView = true) {
       : `Showing ${renderedEntities.length} of ${entities.length} nodes and ${renderedAssertions.length} edges in this graph slice.`;
   elements.graphScene.replaceChildren();
   const layout = layoutGraph(renderedEntities, renderedAssertions);
+  state.layoutPositions = layout.positions;
   const edgeLayer = svgEl("g", { class: "edge-layer" });
   for (const edge of renderedAssertions) {
     const from = layout.positions.get(edge.subject);
@@ -1364,6 +1367,17 @@ function selectNode(nodeId) {
   renderInspector(node);
 }
 
+function centerNodeInGraph(nodeId) {
+  const view = elements.graphCanvas.viewBox.baseVal;
+  const zoom = Math.max(3, state.zoom);
+  const transform = BBGraphFocus.focusedTransform(state.layoutPositions.get(nodeId), view.width, view.height, zoom);
+  if (!transform) return;
+  state.zoom = Math.min(MAX_GRAPH_ZOOM, zoom);
+  state.panX = transform.panX;
+  state.panY = transform.panY;
+  applyTransform();
+}
+
 function renderInspector(node) {
   elements.inspector.replaceChildren();
   elements.inspectIndex.textContent = String((state.graph?.entities || []).findIndex(item => item.id === node.id) + 1).padStart(2, "0");
@@ -1400,6 +1414,13 @@ function renderInspector(node) {
     elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Select a linked historical capture and choose Open stored HTTP to inspect its exact path in the local evidence view. Live-only records remain in Caido."));
   }
   if (node.kind === "observation") renderProvenance(node);
+  const center = el("button", "detail-action", "Center and zoom to node");
+  center.type = "button";
+  center.disabled = !state.layoutPositions.has(node.id);
+  center.title = "Center the selected node and zoom to at least 300%. Use the zoom controls for more detail.";
+  center.addEventListener("click", () => centerNodeInGraph(node.id));
+  elements.inspector.append(center);
+  elements.inspector.append(el("p", "detail-help", "Centers this node in the graph and zooms in for inspection."));
   const action = el("button", "detail-action", "Load direct relationships →");
   action.type = "button";
   action.disabled = !/^[a-z][a-z0-9_]*-[a-f0-9]{64}$/.test(node.id || "");

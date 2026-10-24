@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { focusedNeighborhood } = require("./assets/graph-focus.js");
+const { focusedNeighborhood, focusedTransform } = require("./assets/graph-focus.js");
 
 test("focusedNeighborhood keeps the selected node and its direct neighbors", () => {
   const entities = [
@@ -26,4 +26,17 @@ test("focusedNeighborhood returns an empty view for a node absent from the loade
   const focused = focusedNeighborhood([{ id: "endpoint-a" }], [], "missing-node");
 
   assert.deepEqual(focused, { entities: [], assertions: [] });
+});
+
+test("focusedTransform centers a node at the requested zoom", () => {
+  assert.deepEqual(focusedTransform({ x: 200, y: 100 }, 1000, 600, 3), {
+    panX: 900,
+    panY: 600,
+  });
+});
+
+test("focusedTransform rejects incomplete or invalid geometry", () => {
+  assert.equal(focusedTransform(null, 1000, 600, 3), null);
+  assert.equal(focusedTransform({ x: 20, y: 30 }, 0, 600, 3), null);
+  assert.equal(focusedTransform({ x: 20, y: 30 }, 1000, 600, Number.NaN), null);
 });

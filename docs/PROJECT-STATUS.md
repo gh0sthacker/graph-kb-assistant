@@ -22,6 +22,17 @@
   actor/session/object/flow annotations are still outstanding. This feature
   does not promote current source coverage or graph data beyond `PARTIAL`.
 
+## Graph node zoom focus (2026-10-24) — PARTIAL
+
+- The selected-node inspector now offers **Center and zoom to node**. It moves
+  the selected node to the center of the graph and raises zoom to at least
+  300%, while preserving a higher current zoom. The existing zoom controls can
+  then increase magnification further.
+- Pure transform tests cover centering and invalid geometry. The running UI
+  returned HTTP 200 and served the updated JavaScript; browser-level clicking
+  was not confirmed in this slice. Graph data coverage and the overall
+  application remain `PARTIAL`.
+
 ## Local application and Hermes runtime check (2026-10-24 09:26Z) — PARTIAL
 
 - The Go web UI was restarted at `http://127.0.0.1:8765/` through the updated
