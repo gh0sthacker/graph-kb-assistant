@@ -1,5 +1,28 @@
 # Project status and known limitations
 
+## Stage 3 historical operation backfill preview (2026-10-24) — PARTIAL
+
+- Added `graph-operation-backfill-preview`, a read-only CLI preview for legacy
+  projects. It inspects current historical revisions under the project's
+  exclusive maintenance lease, decrypts request messages locally with a 1 MiB
+  per-message cap and a default 512 MiB aggregate cap, then builds candidate
+  operation nodes and `belongs_to_operation` links in memory. It does not call
+  Caido, read responses, write receipts, update SQLite/Neo4j, or drain either
+  projection queue. The output contains coverage counts, a candidate digest,
+  and at most ten method/route-family samples; candidate bundles and raw
+  requests are omitted.
+- Limits are explicit: 5,000 captures/512 MiB by default, at most
+  20,000 captures/1 GiB. Unmapped captures, oversized requests, unsupported
+  route targets, endpoint-ID mismatches, and capped scans make the preview
+  `PARTIAL`. A synthetic historical-projection fixture, origin/target guards,
+  bounded bundle batching/provenance tests, and JSON redaction test pass with
+  `TMPDIR=/var/tmp go test -count=1 -p 1 ./internal/ingest ./cmd/bb-assistant`.
+- The preview was not run against the saved Juice Shop graph. The latest
+  verified active graph still has zero operation nodes, so the operation
+  alias editor remains unavailable there. A separate decision is required
+  before importing the previewed bundles through the durable outbox; no live
+  graph or queue was changed for this slice.
+
 ## Stage 3 project-local operation aliases and live wiring (2026-10-24 12:41Z) — PARTIAL
 
 - The graph inspector can now assign an analyst-readable alias to an operation.
