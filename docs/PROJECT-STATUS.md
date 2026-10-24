@@ -1,5 +1,33 @@
 # Project status and known limitations
 
+## ECC worker runtime evaluation (2026-10-24 07:28Z) — PARTIAL
+
+- A local watch run reopened the configured project through the normal writable
+  path and applied six projection jobs. The cold graph-writer open took about
+  2.5 minutes; the run applied six jobs in roughly five minutes. The graph
+  database grew from 252 MB to 254 MB. No request bodies were read.
+- A first monitoring wrapper polled `status` while the worker held its
+  exclusive maintenance lease. The read timed out, the wrapper exited, and its
+  child remained running until it was interrupted. A read-only audit then
+  refused the SQLite database while WAL sidecars were present. The normal
+  worker writer reopened the database; the subsequent audit again reported
+  capture schema v7 and BehaviorGraph v2 as compatible. Sidecars were gone
+  after the worker stopped. This was a supervisor failure, not evidence of
+  data corruption; do not remove SQLite sidecars manually.
+- The post-run audit at 2026-10-24 07:28Z reported 1,400 captures, 1,369 graph
+  mappings, 31 unmapped captures, and queue counts of 1,366 pending, 2 leased,
+  32 applied, and 0 dead-lettered. The two leases remain visible after stop
+  and must expire before those jobs can be reclaimed. The watch process is no
+  longer running.
+- `neo4j-check` returned `ready`. Caido remained on `sperpravo`; the Juice Shop
+  project is ready but not selected. Caido was not contacted for captures and
+  no project was switched. Historical reconciliation, complete queue drain,
+  and browser/JavaScript coverage remain unverified, so runtime coverage stays
+  `PARTIAL`.
+- Next: measure per-job timing events with a supervisor that never audits
+  during the maintenance lease, resume after the two leases expire, and keep
+  the source-history and UI/JavaScript coverage gaps explicit.
+
 ## ECC watch-runner writer reuse and bounded runtime check (2026-10-24 05:46Z) — PARTIAL
 
 - The CLI now owns one `ProjectionWorkerRunner` for the lifetime of a drain or
