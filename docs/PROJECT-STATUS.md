@@ -1,5 +1,29 @@
 # Project status and known limitations
 
+## Stage 6 current runtime and KB recheck (2026-10-24) — PARTIAL
+
+- `bb-assistant status` at 2026-10-24 04:01:52Z reported capture schema v7
+  and BehaviorGraph schema v2 compatible; 1,400 captures, 1,369 graph mappings,
+  31 unmapped captures, 1,382 pending projection jobs, 1 leased job, 17 applied,
+  and 0 dead-lettered. History reconciliation and coverage remain `PARTIAL`.
+  Neo4j connection, Caido intake, and model execution were not checked by this
+  command. No projection worker was running after the earlier bounded attempt.
+- Caido 0.58.3 reported the registered Juice Shop project `READY`, but it was
+  not the selected project. No project switch, request enumeration, or body
+  fetch was performed. `BB_ASSISTANT_VAULT_KEY` was absent from the process
+  environment and the default private runtime environment file; encrypted
+  historical import remains blocked on that key.
+- The project-local immutable KB snapshot passed `bb-assistant kb-validate`:
+  snapshot `d342e9df…`, 14,300 documents and 16,961 chunks. A local
+  `kb-search` query returned three cited results. Snapshot source coverage is
+  still `PARTIAL`; this validates the current snapshot and lookup path, not
+  corpus completeness or a model-backed consultation.
+- The separate global KB statistics fallback did not finish during this
+  check. Its two launched read-only processes were interrupted after both used
+  sustained CPU, and process inspection confirmed they had exited. No KB
+  reindex or source change was started; current global KB statistics remain
+  unverified by this attempt.
+
 ## Stage 6 graph backlog runtime attempt (2026-10-23) — PARTIAL
 
 - After the earlier status snapshot, the bounded projection worker applied 2
