@@ -21,6 +21,10 @@ loop remain `PARTIAL`.
   Caido coverage or complete browser/JavaScript mapping. A direct graph query
   for one sampled seed returned 3 entities, 2 assertions, and 1 source; its
   slice is `incomplete=true` with 2 omitted edges and `truncated=false`.
+  The bounded full-view query returned 4 entities, 3 assertions, 1 source, and
+  1 card; it is also marked incomplete without truncation. These results verify
+  that graph data is served, not that the selected operation has complete
+  evidence closure.
 - A read-only `neo4j-backfill --verify-only`, rerun after reconciliation,
   reports `verified`: local and Neo4j snapshot digests both equal
   `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`, with
