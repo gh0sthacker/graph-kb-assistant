@@ -23,6 +23,8 @@ import (
 
 const maxParsedBodyBytes = 2 << 20
 
+const RouteFamilyV1Version = "route-family-v1"
+
 var (
 	fieldNamePattern        = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$`)
 	secretNamePattern       = regexp.MustCompile(`(?i)(token|secret|password|passwd|cookie|authorization|session|api[_-]?key|credential|email|phone|ssn)`)
@@ -206,6 +208,58 @@ func RouteTemplate(target string) string {
 		result = result[:2048]
 	}
 	return result
+}
+
+// RouteFamilyV1 returns a versioned, value-free route family for operation
+// grouping. It intentionally uses the existing static route vocabulary so
+// endpoint identity and historic route labels remain unchanged.
+func RouteFamilyV1(target string) (string, bool) {
+	if target == "" || !historicalTargetValid(target) {
+		return "", false
+	}
+	parsed, err := historicalParseURL(target)
+	if err != nil || parsed.Opaque != "" {
+		return "", false
+	}
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if len(path) > 2048 || len(strings.Split(path, "/")) > 4096 {
+		return "", false
+	}
+	return routeFamilyFromEscapedPath(path), true
+}
+
+func routeFamilyFromEscapedPath(path string) string {
+	parts := strings.Split(path, "/")
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		decoded, valid := historicalURLUnquote(part, false, true)
+		if !valid {
+			parts[index] = "{value}"
+			continue
+		}
+		lower := strings.ToLower(decoded)
+		_, static := historicalRouteWords[lower]
+		versionLike := len(lower) >= 2 && len(lower) <= 3 && lower[0] == 'v'
+		if versionLike {
+			for _, char := range lower[1:] {
+				if char < '0' || char > '9' {
+					versionLike = false
+					break
+				}
+			}
+		}
+		if static || versionLike {
+			parts[index] = lower
+		} else {
+			parts[index] = "{value}"
+		}
+	}
+	return strings.Join(parts, "/")
 }
 
 // DeriveLiveKeys mirrors the existing Python project-keyed signature scheme.

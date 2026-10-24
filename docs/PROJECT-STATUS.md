@@ -1,5 +1,24 @@
 # Project status and known limitations
 
+## Stage 3 versioned operation grouping (2026-10-24 10:28Z) — PARTIAL
+
+- Historical imports now add a separate `operation` node keyed by project,
+  origin, method, `route-family-v1`, and its canonical route family. An
+  endpoint links to that operation with `belongs_to_operation`; existing
+  endpoint, capture, and card identities remain unchanged. Dynamic values are
+  masked, while recognized static paths and HTTP methods stay distinct.
+- The graph reader, writer, bounded slice, and inspector accept and display
+  the new node and relation. Synthetic tests cover equivalent dynamic routes,
+  static-route separation, method separation, provenance linkage, and absence
+  of concrete path values in the grouped bundle. `TMPDIR=/var/tmp go test
+  ./internal/graph`, both graph/surface browser-state suites, and
+  `git diff --check` passed.
+- This is a code/projection slice only: the local graph was not reprojected or
+  restarted, and Caido was not queried. `route-family-v1` uses a static-word
+  vocabulary, so unfamiliar static segments can still group as dynamic;
+  analyst route aliases and actor/session/object/flow annotations remain
+  outstanding. Stage 3 and source coverage remain `PARTIAL`.
+
 ## Caido recheck and graph viewport/capture-state fixes (2026-10-24 10:02Z) — PARTIAL
 
 - With the user's approval, Caido was switched temporarily from `sperpravo` to

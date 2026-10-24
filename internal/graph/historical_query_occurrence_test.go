@@ -50,6 +50,85 @@ func TestBuildHistoricalBundleRecordsParserStateSeparatelyFromAnalysisState(t *t
 	t.Fatal("historical bundle has no observation entity")
 }
 
+func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing.T) {
+	first, firstEndpointID := buildHistoricalOccurrenceBundle(t, "route-50", "GET", "https://fixture.invalid/api/products/50",
+		"GET /api/products/50 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	second, secondEndpointID := buildHistoricalOccurrenceBundle(t, "route-51", "GET", "https://fixture.invalid/api/products/51",
+		"GET /api/products/51 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	firstOperation := operationEntity(t, first)
+	secondOperation := operationEntity(t, second)
+	firstData := firstOperation["data"].(Record)
+	if firstOperation["id"] != secondOperation["id"] || firstEndpointID != secondEndpointID {
+		t.Fatalf("dynamic paths should preserve legacy endpoint grouping and share a versioned operation: endpoints %q/%q, operations %q/%q",
+			firstEndpointID, secondEndpointID, firstOperation["id"], secondOperation["id"])
+	}
+	if firstData["route_family_version"] != RouteFamilyV1Version || firstData["route_family"] != "/api/products/{value}" {
+		t.Fatalf("versioned operation data = %#v", firstData)
+	}
+	operationRecord := Record{
+		"id": firstOperation["id"], "kind": "operation", "data": map[string]any(firstData),
+	}
+	program := firstData["program"].(string)
+	if err := validateEntity(operationRecord, 2, program); err != nil {
+		t.Fatalf("reader rejected valid versioned operation: %v", err)
+	}
+	invalidOperation := cloneRecord(operationRecord)
+	invalidData := cloneRecord(firstData)
+	invalidData["route_family"] = "/api/products/secret-segment"
+	invalidOperation["data"] = map[string]any(invalidData)
+	if err := validateEntity(invalidOperation, 2, program); err == nil {
+		t.Fatal("reader accepted an unmasked operation route family")
+	}
+	if !hasOperationGroupingAssertion(first, firstEndpointID, firstOperation["id"].(string)) {
+		t.Fatal("endpoint is not linked to its grouped operation")
+	}
+
+	static, _ := buildHistoricalOccurrenceBundle(t, "route-search", "GET", "https://fixture.invalid/api/products/search",
+		"GET /api/products/search HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	otherMethod, _ := buildHistoricalOccurrenceBundle(t, "route-post", "POST", "https://fixture.invalid/api/products/50",
+		"POST /api/products/50 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	encodedSeparator, _ := buildHistoricalOccurrenceBundle(t, "route-encoded-separator", "GET", "https://fixture.invalid/api/products/a%2Fb",
+		"GET /api/products/a%2Fb HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	plainSegments, _ := buildHistoricalOccurrenceBundle(t, "route-plain-segments", "GET", "https://fixture.invalid/api/products/a/b",
+		"GET /api/products/a/b HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	if operationEntity(t, static)["id"] == firstOperation["id"] {
+		t.Fatal("static search route was grouped with a dynamic product route")
+	}
+	if operationEntity(t, otherMethod)["id"] == firstOperation["id"] {
+		t.Fatal("different HTTP methods shared one operation identity")
+	}
+	if operationEntity(t, encodedSeparator)["id"] == operationEntity(t, plainSegments)["id"] {
+		t.Fatal("encoded path separator changed the segment count used for grouping")
+	}
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal grouped graph: %v", err)
+	}
+	if strings.Contains(string(encoded), "/api/products/50") {
+		t.Fatal("grouped graph contains the concrete dynamic path")
+	}
+}
+
+func operationEntity(t *testing.T, bundle Record) Record {
+	t.Helper()
+	for _, entity := range bundle["entities"].([]Record) {
+		if entity["kind"] == "operation" {
+			return entity
+		}
+	}
+	t.Fatal("historical bundle has no operation entity")
+	return nil
+}
+
+func hasOperationGroupingAssertion(bundle Record, endpointID, operationID string) bool {
+	for _, assertion := range bundle["assertions"].([]Record) {
+		if assertion["subject"] == endpointID && assertion["predicate"] == "belongs_to_operation" && assertion["object"] == operationID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildHistoricalBundlePreservesRepeatedFormOccurrencesWithoutValues(t *testing.T) {
 	target := "https://fixture.invalid/items"
 	body := "id=FORM_VALUE_A_92&id=FORM_VALUE_B_41&mode=FORM_VALUE_C_83"

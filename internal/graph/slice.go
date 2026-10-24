@@ -22,7 +22,7 @@ var sliceIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
 var contextKeys = []string{"program", "origin", "actor", "session_version", "tenant", "role", "object_state", "scenario", "scenario_step"}
 
 var allowedPredicates = map[string]struct{}{
-	"exposes": {}, "has_parameter": {}, "invokes": {}, "references": {}, "returns": {},
+	"belongs_to_operation": {}, "exposes": {}, "has_parameter": {}, "invokes": {}, "references": {}, "returns": {},
 	"owned_by": {}, "visible_to": {}, "value_used_in": {}, "requires": {}, "produces": {},
 	"supports": {}, "contradicts": {}, "contains": {}, "precedes": {}, "uses_request_variant": {},
 	"received_response": {}, "referrer_context_for": {}, "redirects_to": {},

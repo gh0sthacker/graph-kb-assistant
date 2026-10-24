@@ -48,18 +48,19 @@ const elements = {
 };
 
 const nodeLabels = {
-  observation: "HTTP REQUEST", endpoint: "ENDPOINT", parameter: "PARAMETER",
+  observation: "HTTP REQUEST", endpoint: "ENDPOINT", operation: "OPERATION", parameter: "PARAMETER",
   asset: "HOST", actor: "ACTOR", object: "OBJECT", session_context: "SESSION CONTEXT",
   condition: "CONDITION", flow: "FLOW", classifier_signal: "SIGNAL",
   hypothesis: "HYPOTHESIS", request_variant: "REQUEST SHAPE", response_variant: "RESPONSE SHAPE",
 };
 const filterLabels = {
-  observation: "Requests", endpoint: "Endpoints", parameter: "Parameters", asset: "Hosts",
+  observation: "Requests", endpoint: "Endpoints", operation: "Operations", parameter: "Parameters", asset: "Hosts",
   actor: "Actors", object: "Objects", session_context: "Contexts",
   condition: "Conditions", flow: "Flows", classifier_signal: "Signals",
   hypothesis: "Hypotheses", request_variant: "Request shapes", response_variant: "Response shapes",
 };
 const relationLabels = {
+  belongs_to_operation: "belongs to operation",
   exposes: "serves endpoint",
   invokes: "calls endpoint",
   has_parameter: "has parameter",
@@ -72,7 +73,7 @@ const relationLabels = {
   precedes: "precedes",
 };
 const MASKED_PATH_HELP = "Graph route labels hide dynamic values so IDs and secrets do not become graph data. To inspect one saved request's exact path, open its linked capture with Open stored HTTP; live-only records remain in Caido.";
-const kindColors = { observation: "#83c8cf", endpoint: "#e0b56b", parameter: "#b8a3da", asset: "#b2d88a" };
+const kindColors = { observation: "#83c8cf", endpoint: "#e0b56b", operation: "#83b5e8", parameter: "#b8a3da", asset: "#b2d88a" };
 
 function el(tag, className, text) {
   const result = document.createElement(tag);
@@ -1304,6 +1305,7 @@ function renderNode(node, point) {
 function displayTitle(node) {
   const data = node.data || {};
   if (node.kind === "endpoint") return `${data.method || "?"} ${displayPath(data.path || "/")}`;
+  if (node.kind === "operation") return `${data.method || "?"} ${displayPath(data.route_family || "/")}`;
   if (node.kind === "observation") return `${data.observation_kind === "live_capture" ? "Live capture" : "Capture"}${data.http_status ? ` · HTTP ${data.http_status}` : ""}`;
   if (node.kind === "parameter") return displayPath(data.path || data.name || "Parameter");
   if (node.kind === "request_variant") return "Request shape";
@@ -1316,6 +1318,7 @@ function displaySubtitle(node) {
   const data = node.data || {};
   if (node.kind === "observation") return data.observed_at && data.observed_at !== "unknown" ? data.observed_at : "Capture time unavailable";
   if (node.kind === "endpoint") return (data.query_names || []).slice(0, 4).join(" · ") || "Route template · values masked";
+  if (node.kind === "operation") return `${data.route_family_version || "unversioned"} · grouped route family`;
   if (node.kind === "parameter") return [data.type, data.location].filter(Boolean).join(" · ") || "Structural field";
   if (node.kind === "request_variant" || node.kind === "response_variant") {
     const headers = Array.isArray(data.header_metadata) ? data.header_metadata.length : 0;
@@ -1410,6 +1413,7 @@ function safeDetails(node) {
   const data = node.data || {};
   const candidates = [
     ["Method", data.method], ["Source", data.origin], ["Path", data.path ? displayPath(data.path) : undefined],
+    ["Route family", data.route_family ? displayPath(data.route_family) : undefined], ["Family version", data.route_family_version],
     ["HTTP status", data.http_status ?? data.status], ["Record source", data.observation_kind ? readableObservationKind(data.observation_kind) : undefined],
     ["Time", data.observed_at],
     ["Content-Type", data.content_type], ["Headers", data.header_metadata], ["Field names", data.fields],

@@ -1148,6 +1148,23 @@ func validateBatchReferences(ctx context.Context, db *sql.DB, bundle Record) err
 		object := assertion["object"].(string)
 		subjectKind, objectKind := entityKinds[subject], entityKinds[object]
 		switch assertion["predicate"] {
+		case "belongs_to_operation":
+			if subjectKind != "endpoint" || objectKind != "operation" {
+				return errors.New("operation relation has incompatible entity kinds")
+			}
+			endpoint := entities[subject]
+			if endpoint == nil {
+				endpoint = storedEntities[subject]
+			}
+			operation := entities[object]
+			if operation == nil {
+				operation = storedEntities[object]
+			}
+			endpointData, _ := endpoint["data"].(map[string]any)
+			operationData, _ := operation["data"].(map[string]any)
+			if endpointData["program"] != operationData["program"] || endpointData["origin"] != operationData["origin"] || endpointData["method"] != operationData["method"] {
+				return errors.New("operation relation does not match its endpoint")
+			}
 		case "has_parameter":
 			if subjectKind != "endpoint" || objectKind != "parameter" {
 				return errors.New("parameter relation has incompatible entity kinds")

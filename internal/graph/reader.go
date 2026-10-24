@@ -40,7 +40,7 @@ var (
 	classifierCategory = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 	classifierASVS     = regexp.MustCompile(`^V[0-9V./]{1,32}$`)
 	allowedKinds       = map[string]struct{}{
-		"asset": {}, "endpoint": {}, "actor": {}, "session_context": {}, "object": {},
+		"asset": {}, "endpoint": {}, "operation": {}, "actor": {}, "session_context": {}, "object": {},
 		"observation": {}, "parameter": {}, "condition": {}, "flow": {},
 		"classifier_signal": {}, "hypothesis": {}, "request_variant": {}, "response_variant": {},
 	}
@@ -686,6 +686,12 @@ func validateEntity(record Record, schema int, program string) error {
 			return errors.New("parameter ID does not match its content")
 		}
 	}
+	if kind == "operation" {
+		expectedID, err := historicalEntityID(kind, Record(data))
+		if err != nil || expectedID != id {
+			return errors.New("operation ID does not match its content")
+		}
+	}
 	if schema == 1 {
 		if _, ok := record["source_refs"].([]any); !ok {
 			return errors.New("invalid legacy refs")
@@ -698,6 +704,21 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 	switch kind {
 	case "observation":
 		return validateObservationStates(data)
+	case "operation":
+		selectedProgram, okProgram := data["program"].(string)
+		origin, okOrigin := data["origin"].(string)
+		method, okMethod := data["method"].(string)
+		version, okVersion := data["route_family_version"].(string)
+		family, okFamily := data["route_family"].(string)
+		parsedOrigin, originErr := url.Parse(origin)
+		canonicalFamily, familyOK := RouteFamilyV1(family)
+		if !okProgram || selectedProgram != program || !okOrigin || len(origin) > 4096 || originErr != nil ||
+			parsedOrigin == nil || (parsedOrigin.Scheme != "http" && parsedOrigin.Scheme != "https") ||
+			parsedOrigin.Hostname() == "" || parsedOrigin.User != nil || parsedOrigin.Path != "" ||
+			parsedOrigin.RawQuery != "" || parsedOrigin.Fragment != "" || !okMethod || !httpMethodPattern.MatchString(method) ||
+			!okVersion || version != RouteFamilyV1Version || !okFamily || !familyOK || canonicalFamily != family {
+			return errors.New("invalid operation metadata")
+		}
 	case "parameter":
 		selectedProgram, okProgram := data["program"].(string)
 		endpointID, okEndpoint := data["endpoint_id"].(string)

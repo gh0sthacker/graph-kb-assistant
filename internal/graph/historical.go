@@ -135,6 +135,23 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	if err != nil {
 		return nil, "", errors.New("historical graph endpoint identity could not be computed")
 	}
+	var operation Record
+	var belongsToOperation Record
+	if family, ok := RouteFamilyV1(target); ok && origin != "unknown" && method != "UNKNOWN" {
+		operationData := Record{
+			"program": program, "origin": origin, "method": method,
+			"route_family_version": RouteFamilyV1Version, "route_family": family,
+		}
+		operationID, operationErr := historicalEntityID("operation", operationData)
+		if operationErr != nil {
+			return nil, "", errors.New("historical graph operation identity could not be computed")
+		}
+		operation = Record{"id": operationID, "kind": "operation", "data": operationData, "source_refs": refs}
+		belongsToOperation, operationErr = historicalAssertion(program, endpointID, "belongs_to_operation", operationID, historicalUnknownContext(program, origin, exchange.CapturedAt), refs)
+		if operationErr != nil {
+			return nil, "", errors.New("historical graph operation provenance could not be computed")
+		}
+	}
 	assetID, err := historicalEntityID("asset", Record{"program": program, "origin": origin})
 	if err != nil {
 		return nil, "", errors.New("historical graph asset identity could not be computed")
@@ -231,6 +248,10 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	}
 	entities := []Record{asset, endpoint, observation}
 	assertions := []Record{exposes, invokes}
+	if operation != nil {
+		entities = append(entities, operation)
+		assertions = append(assertions, belongsToOperation)
+	}
 	if hasPathField {
 		queryFields = append(queryFields, pathField)
 	}
