@@ -13,7 +13,7 @@ const state = {
   graphSeeds: [], graphView: "direct", graphHistory: [], graphRequestId: 0, graphAbort: null,
   loadingGraph: false, hiddenKinds: new Set(OVERVIEW_HIDDEN_KINDS), routeScope: true, edgeLabelsVisible: true,
   renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
-  evidence: null, evidenceRequestId: 0, evidenceTrigger: null,
+  evidence: null, evidenceRequestId: 0, evidenceTrigger: null, comparisonBaseline: null, comparison: null,
 };
 
 const elements = {
@@ -32,7 +32,8 @@ const elements = {
   toast: $("#toast"), viewport: $("#graph-viewport"),
   evidenceDialog: $("#evidence-dialog"), evidenceClose: $("#evidence-close"),
   evidenceLabel: $("#evidence-capture-label"), evidenceMeta: $("#evidence-meta"), evidenceContent: $("#evidence-content"),
-  evidenceFoot: $("#evidence-foot"), evidenceMore: $("#evidence-more"),
+  evidenceFoot: $("#evidence-foot"), evidenceMore: $("#evidence-more"), evidenceCompareContent: $("#evidence-compare-content"),
+  evidenceTitle: $("#evidence-title"), evidenceSides: $(".evidence-sides"),
   evidenceRequest: $("#evidence-request"), evidenceResponse: $("#evidence-response"),
 };
 
@@ -105,6 +106,7 @@ async function getJSON(path, signal) {
 function clearEvidence(closeDialog = true) {
   state.evidenceRequestId++;
   state.evidence = null;
+  state.comparison = null;
   const trigger = state.evidenceTrigger;
   state.evidenceTrigger = null;
   if (closeDialog && elements.evidenceDialog.open) {
@@ -114,6 +116,11 @@ function clearEvidence(closeDialog = true) {
   elements.evidenceLabel.textContent = "No capture selected";
   elements.evidenceMeta.textContent = "Select an exact historical capture to inspect its stored message.";
   elements.evidenceContent.textContent = "";
+  elements.evidenceContent.hidden = false;
+  elements.evidenceCompareContent.textContent = "";
+  elements.evidenceCompareContent.hidden = true;
+  elements.evidenceSides.hidden = false;
+  elements.evidenceTitle.textContent = "Captured HTTP message";
   elements.evidenceFoot.textContent = "";
   elements.evidenceMore.hidden = true;
   elements.evidenceMore.disabled = true;
@@ -141,7 +148,13 @@ function openEvidence(item, trigger = null) {
     projectKey: project, requestId, requestID, revisionId: typeof item.revision_id === "string" ? item.revision_id : "",
     side: "request", nextOffset: 0, totalSize: null, loading: false,
   };
+  state.comparison = null;
   state.evidenceTrigger = trigger;
+  elements.evidenceTitle.textContent = "Captured HTTP message";
+  elements.evidenceSides.hidden = false;
+  elements.evidenceContent.hidden = false;
+  elements.evidenceCompareContent.hidden = true;
+  elements.evidenceCompareContent.textContent = "";
   elements.evidenceLabel.textContent = `Request ID ${requestId} · ${state.projects.find(row => row.project_key === project)?.display_name || project}`;
   elements.evidenceMeta.textContent = "Authenticating the selected local message revision…";
   elements.evidenceContent.textContent = "";
@@ -223,6 +236,105 @@ function selectEvidenceSide(side) {
   void loadEvidenceRange(false);
 }
 
+function setComparisonBaseline(item, button) {
+  const requestId = String(item?.request_id ?? "");
+  const revisionId = String(item?.revision_id ?? "");
+  if (!state.projectKey || !requestId || requestId.length > 512 || !/^[a-f0-9]{64}$/.test(revisionId) ||
+      item?.record_source !== "encrypted_local_capture" || item?.raw_stored_locally !== true) {
+    showToast("An exact local historical revision is required as the comparison baseline.");
+    return;
+  }
+  state.comparisonBaseline = { projectKey: state.projectKey, requestId, revisionId };
+  if (state.selectedNode?.kind === "observation") {
+    renderInspector(state.selectedNode);
+  } else {
+    button.textContent = "Current baseline";
+    button.disabled = true;
+    const comparisonButton = button.parentElement?.querySelector(".capture-compare");
+    if (comparisonButton) comparisonButton.disabled = true;
+  }
+  showToast(`Comparison baseline set to request ${requestId}.`);
+}
+
+async function openComparison(item, trigger = null) {
+  const baseline = state.comparisonBaseline;
+  const rightRequestId = String(item?.request_id ?? "");
+  const rightRevisionId = String(item?.revision_id ?? "");
+  if (!baseline || baseline.projectKey !== state.projectKey || !rightRequestId ||
+      !/^[a-f0-9]{64}$/.test(rightRevisionId) || item?.record_source !== "encrypted_local_capture" || item?.raw_stored_locally !== true) {
+    showToast("Choose two exact local historical revisions in the same project.");
+    return;
+  }
+  if (baseline.requestId === rightRequestId && baseline.revisionId === rightRevisionId) {
+    showToast("Choose a different capture from the comparison baseline.");
+    return;
+  }
+  clearEvidence(false);
+  const comparison = {
+    projectKey: state.projectKey, leftRequestId: baseline.requestId, leftRevisionId: baseline.revisionId,
+    rightRequestId, rightRevisionId,
+  };
+  state.comparison = comparison;
+  const requestID = ++state.evidenceRequestId;
+  state.evidenceTrigger = trigger;
+  elements.evidenceTitle.textContent = "Capture comparison";
+  elements.evidenceLabel.textContent = `Baseline request ${baseline.requestId} vs request ${rightRequestId}`;
+  elements.evidenceMeta.textContent = "Comparing exact local historical revisions…";
+  elements.evidenceContent.textContent = "";
+  elements.evidenceContent.hidden = true;
+  elements.evidenceCompareContent.hidden = false;
+  elements.evidenceCompareContent.textContent = "";
+  elements.evidenceSides.hidden = true;
+  elements.evidenceMore.hidden = true;
+  elements.evidenceFoot.textContent = "Loading deterministic request and response byte comparisons. No data is sent to a model.";
+  if (!elements.evidenceDialog.open) elements.evidenceDialog.showModal();
+
+  const query = new URLSearchParams({
+    project_key: comparison.projectKey, left_request_id: comparison.leftRequestId,
+    left_revision_id: comparison.leftRevisionId, right_request_id: comparison.rightRequestId,
+    right_revision_id: comparison.rightRevisionId,
+  });
+  try {
+    const result = await getJSON(`/api/compare?${query}`);
+    if (state.comparison !== comparison || requestID !== state.evidenceRequestId || comparison.projectKey !== state.projectKey) return;
+    elements.evidenceMeta.textContent = `Exact revisions · ${comparison.leftRevisionId} → ${comparison.rightRevisionId}`;
+    elements.evidenceCompareContent.textContent = formatCaptureComparison(result);
+    elements.evidenceFoot.textContent = result.coverage_note || "Exact local byte comparison; unavailable or incomplete messages are identified per side.";
+  } catch (error) {
+    if (state.comparison !== comparison || requestID !== state.evidenceRequestId) return;
+    elements.evidenceMeta.textContent = "The selected revisions could not be compared.";
+    elements.evidenceCompareContent.textContent = "";
+    elements.evidenceFoot.textContent = error.message;
+    showToast(`Capture comparison unavailable: ${error.message}`);
+  }
+}
+
+function formatCaptureComparison(result) {
+  const renderRevision = (label, revision) => {
+    if (!revision?.sha256) return null;
+    const truncation = revision.truncated === true ? "yes" : revision.truncated === false ? "no" : "unknown";
+    return `${label} · request ${revision.request_id || "unknown"} · revision ${revision.revision_id || "unknown"} · ${formatBytes(revision.size)} · SHA-256 ${revision.sha256} · ${revision.wire_fidelity || "fidelity unknown"} · parse ${readableParseState(revision.parse_state || "unknown")} · truncated ${truncation}${revision.captured_at ? ` · captured ${revision.captured_at}` : " · capture time unknown"}`;
+  };
+  const renderSide = (name, side) => {
+    const lines = [`${name.toUpperCase()}`];
+    if (!side?.available) {
+      lines.push(`Not compared · ${side?.reason || "exact bytes unavailable"}`);
+    } else if (side.equal) {
+      lines.push(`Identical stored bytes · ${formatBytes(side.compared_bytes)} compared`);
+    } else {
+      lines.push(`Different · first byte difference at offset ${side.first_difference_offset} · ${formatBytes(side.compared_bytes)} compared`);
+      lines.push(`Baseline context · ${side.left_excerpt}`);
+      lines.push(`Selected context · ${side.right_excerpt}`);
+    }
+    const left = renderRevision("Baseline", side?.left);
+    const right = renderRevision("Selected", side?.right);
+    if (left) lines.push(left);
+    if (right) lines.push(right);
+    return lines.join("\n");
+  };
+  return [renderSide("Request", result.request), renderSide("Response", result.response)].join("\n\n");
+}
+
 async function loadProjects(append = false) {
   elements.project.disabled = true;
   if (!append) {
@@ -281,6 +393,7 @@ async function loadProjects(append = false) {
 
 function clearProjectView() {
   clearEvidence();
+  state.comparisonBaseline = null;
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = "";
@@ -310,7 +423,10 @@ async function selectProject(projectKey) {
     clearProjectView();
     return;
   }
-  if (state.projectKey !== projectKey) clearEvidence();
+  if (state.projectKey !== projectKey) {
+    clearEvidence();
+    state.comparisonBaseline = null;
+  }
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = projectKey;
@@ -1063,6 +1179,18 @@ function renderProvenance(node) {
       line.append(el("b", "", `Request ID · ${item.request_id || "—"}`));
       line.append(el("span", "", `${readableRecordSource(item.record_source)} · ${formatBytes(item.request_size)}${item.first_seen_at ? ` · ${item.first_seen_at}` : ""}`));
       if (item.record_source === "encrypted_local_capture" && item.raw_stored_locally === true) {
+        const revisionId = String(item.revision_id || "");
+        const isBaseline = state.comparisonBaseline?.projectKey === state.projectKey &&
+          state.comparisonBaseline.requestId === String(item.request_id) && state.comparisonBaseline.revisionId === revisionId;
+        const baselineButton = el("button", "detail-action capture-baseline", isBaseline ? "Current baseline" : "Set as baseline");
+        baselineButton.type = "button";
+        baselineButton.disabled = isBaseline || !/^[a-f0-9]{64}$/.test(revisionId);
+        baselineButton.addEventListener("click", () => setComparisonBaseline(item, baselineButton));
+        const compareButton = el("button", "detail-action capture-compare", "Compare with baseline →");
+        compareButton.type = "button";
+        compareButton.disabled = !state.comparisonBaseline || state.comparisonBaseline.projectKey !== state.projectKey || isBaseline;
+        compareButton.addEventListener("click", () => { void openComparison(item, compareButton); });
+        line.append(baselineButton, compareButton);
         const button = el("button", "detail-action evidence-open", "Open stored HTTP →");
         button.type = "button";
         button.addEventListener("click", () => { void openEvidence(item, button); });

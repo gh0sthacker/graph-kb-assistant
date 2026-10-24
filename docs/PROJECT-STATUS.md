@@ -142,6 +142,32 @@ loop remain `PARTIAL`.
   `PARTIAL` because source reconciliation, browser/JavaScript coverage, the
   model-backed consultation cycle, and managed startup/recovery are not proven.
 
+## Stage 4 deterministic local capture comparison (2026-10-23 21:40 -0400)
+
+- The graph inspector can now pin an exact locally encrypted historical
+  revision as a baseline and compare another exact revision from the same
+  project. The local API decrypts request and response bytes read-only, compares
+  at most 1 MiB per message side, and reports equality or the first differing
+  byte with bounded escaped context. It does not contact Caido or expose a
+  comparison tool to Hermes/MCP; the UI renders results with `textContent` and
+  uses the existing sensitive-values warning.
+- Both revisions' request IDs, revision IDs, hashes, sizes, capture times,
+  parser state, wire fidelity, and truncation flags are shown when available,
+  including when stored bytes match. A byte match therefore does not imply a
+  complete capture. Missing bytes and messages above the limit are marked
+  unavailable. Baselines are cleared when the selected project changes.
+- Synthetic Go and browser-state coverage verifies exact revision parameters,
+  strict query validation, no-store responses, equality/difference metadata,
+  first-difference context, unavailability, truncation visibility, project
+  switch cleanup, and UI text rendering. `go test -count=1 ./...`,
+  `go test -race -count=1 ./...`, `go vet ./...`, `node --check`, the 20
+  browser-state tests, and `git diff --check` pass.
+- Runtime decryption of the existing vault is still unverified because the
+  running local service has no configured `BB_ASSISTANT_VAULT_KEY`; no key was
+  recovered or copied. Runtime source reconciliation, complete browser/JS
+  coverage, bounded model packets, and the Hermes consultation cycle remain
+  outstanding. Stage 4 and overall coverage stay `PARTIAL`.
+
 ## Fresh local verification (2026-10-23, after `b4f460e`)
 
 This checkpoint supersedes earlier runtime claims below where they conflict;

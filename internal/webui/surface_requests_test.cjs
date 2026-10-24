@@ -49,7 +49,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, setComparisonBaseline, openComparison, formatCaptureComparison, renderInspector, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -162,6 +162,71 @@ test("local evidence viewer refuses non-local and live-only records without requ
   await app.openEvidence({ request_id: 239, record_source: "caido_history", raw_stored_locally: false });
   assert.equal(app.requests.length, 0);
   assert.equal(app.elements.evidenceDialog.open, false);
+});
+
+test("capture comparison pins exact revisions, reports fidelity and truncation, and clears baseline on project switch", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const baselineRevision = "b".repeat(64);
+  const selectedRevision = "c".repeat(64);
+  app.state.projectKey = projectKey;
+  const observation = { id: `observation-${"f".repeat(64)}`, kind: "observation", data: { method: "GET", path: "/items" } };
+  app.state.selectedNode = observation;
+  app.state.graph = {
+    entities: [observation], assertions: [],
+    capture_provenance: [
+      { graph_observation_id: observation.id, request_id: "239", revision_id: baselineRevision, record_source: "encrypted_local_capture", raw_stored_locally: true, request_size: 28 },
+      { graph_observation_id: observation.id, request_id: "240", revision_id: selectedRevision, record_source: "encrypted_local_capture", raw_stored_locally: true, request_size: 28 },
+    ],
+  };
+  app.renderInspector(observation);
+  const allChildren = root => [root, ...(root.children || []).flatMap(child => allChildren(child))];
+  const baselineButton = allChildren(app.elements.inspector).find(item => item.className === "detail-action capture-baseline" && item.textContent === "Set as baseline");
+  assert.ok(baselineButton, "the graph inspector should offer a baseline action");
+  baselineButton.listeners.click();
+  assert.deepEqual(snapshot(app.state.comparisonBaseline), {
+    projectKey, requestId: "239", revisionId: baselineRevision,
+  });
+  const renderedButtons = allChildren(app.elements.inspector);
+  const baselineCompare = renderedButtons.find(item => item.className === "detail-action capture-compare" && item.disabled);
+  const selectedCompare = renderedButtons.find(item => item.className === "detail-action capture-compare" && !item.disabled);
+  assert.ok(baselineCompare, "the baseline row cannot be compared with itself");
+  assert.ok(selectedCompare, "another exact revision becomes available for comparison");
+
+  const pending = app.openComparison({
+    request_id: "240", revision_id: selectedRevision,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].url.pathname, "/api/compare");
+  assert.equal(app.requests[0].url.searchParams.get("project_key"), projectKey);
+  assert.equal(app.requests[0].url.searchParams.get("left_request_id"), "239");
+  assert.equal(app.requests[0].url.searchParams.get("left_revision_id"), baselineRevision);
+  assert.equal(app.requests[0].url.searchParams.get("right_request_id"), "240");
+  assert.equal(app.requests[0].url.searchParams.get("right_revision_id"), selectedRevision);
+  app.requests[0].resolve({
+    request: {
+      available: true, equal: false, compared_bytes: 28, first_difference_offset: 14,
+      left_excerpt: '"GET /item?id=1"', right_excerpt: '"GET /item?id=2"',
+      left: { request_id: "239", revision_id: baselineRevision, size: 28, sha256: "d".repeat(64), parse_state: "incomplete", wire_fidelity: "source_bytes", truncated: true },
+      right: { request_id: "240", revision_id: selectedRevision, size: 28, sha256: "e".repeat(64), parse_state: "complete", wire_fidelity: "reconstructed_text", truncated: false },
+    },
+    response: { available: false, reason: "Exact local bytes are unavailable for one or both selected revisions." },
+    coverage_note: "Stored bytes only; truncation and source fidelity are reported per message.",
+  });
+  await pending;
+  assert.equal(app.elements.evidenceTitle.textContent, "Capture comparison");
+  assert.match(app.elements.evidenceCompareContent.textContent, /first byte difference at offset 14/);
+  assert.match(app.elements.evidenceCompareContent.textContent, /wire_fidelity|source_bytes/);
+  assert.match(app.elements.evidenceCompareContent.textContent, /truncated yes/);
+  assert.match(app.elements.evidenceCompareContent.textContent, /truncated no/);
+  assert.match(app.elements.evidenceCompareContent.textContent, /RESPONSE[\s\S]*Not compared/);
+  assert.equal(app.elements.evidenceFoot.textContent, "Stored bytes only; truncation and source fidelity are reported per message.");
+
+  const switchProject = app.selectProject("B");
+  assert.equal(app.state.comparisonBaseline, null, "a project switch clears the pinned baseline");
+  app.requests[1].resolve(page("b.test"));
+  await switchProject;
 });
 
 test("late request bytes cannot replace the response side after a fast tab switch", async () => {

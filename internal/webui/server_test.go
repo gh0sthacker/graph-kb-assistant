@@ -24,6 +24,9 @@ type explorerAPIFixture struct {
 	evidenceErr         error
 	evidenceResult      appquery.CaptureMessageRange
 	lastEvidenceRequest appquery.CaptureMessageRangeRequest
+	comparisonErr       error
+	comparisonResult    appquery.CaptureComparison
+	lastComparison      appquery.CaptureComparisonRequest
 }
 
 func (*explorerAPIFixture) GraphExplorerProjects(context.Context, string, int) (map[string]any, error) {
@@ -45,6 +48,10 @@ func (f *explorerAPIFixture) Graph(_ context.Context, request appquery.GraphRequ
 func (f *explorerAPIFixture) CaptureMessageRange(_ context.Context, request appquery.CaptureMessageRangeRequest) (appquery.CaptureMessageRange, error) {
 	f.lastEvidenceRequest = request
 	return f.evidenceResult, f.evidenceErr
+}
+func (f *explorerAPIFixture) CompareCaptureMessages(_ context.Context, request appquery.CaptureComparisonRequest) (appquery.CaptureComparison, error) {
+	f.lastComparison = request
+	return f.comparisonResult, f.comparisonErr
 }
 
 func TestEvidenceHandlerReadsOnePinnedBoundedLocalMessageRange(t *testing.T) {
@@ -114,6 +121,78 @@ func TestEvidenceHandlerExplainsUnavailableLocalVaultKey(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "local vault key is unavailable or invalid") {
 		t.Fatalf("missing-key response status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestComparisonHandlerReadsExactLocalRevisionsWithoutCaching(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	leftRevision := strings.Repeat("b", 64)
+	rightRevision := strings.Repeat("c", 64)
+	offset := int64(7)
+	api := &explorerAPIFixture{comparisonResult: appquery.CaptureComparison{
+		ProjectKey: projectKey, LeftRequestID: "left", LeftRevisionID: leftRevision,
+		RightRequestID: "right", RightRevisionID: rightRevision,
+		Request: appquery.CaptureSideComparison{Available: true, Equal: false, ComparedBytes: 42, FirstDifferenceOffset: &offset},
+	}}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "/api/compare?project_key=" + projectKey + "&left_request_id=left&left_revision_id=" + leftRevision +
+		"&right_request_id=right&right_revision_id=" + rightRevision
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+target, nil))
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("comparison response status=%d cache=%q: %s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+	if got := api.lastComparison; got.ProjectKey != projectKey || got.LeftRequestID != "left" || got.LeftRevisionID != leftRevision ||
+		got.RightRequestID != "right" || got.RightRevisionID != rightRevision {
+		t.Fatalf("comparison request = %#v", got)
+	}
+	var result appquery.CaptureComparison
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode comparison response: %v", err)
+	}
+	if !result.Request.Available || result.Request.FirstDifferenceOffset == nil || *result.Request.FirstDifferenceOffset != 7 {
+		t.Fatalf("comparison result = %#v", result)
+	}
+}
+
+func TestComparisonHandlerRejectsDuplicateAndUnknownQueryParameters(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	revision := strings.Repeat("b", 64)
+	base := "/api/compare?project_key=" + projectKey + "&left_request_id=left&left_revision_id=" + revision +
+		"&right_request_id=right&right_revision_id=" + revision
+	for _, target := range []string{base + "&project_key=" + projectKey, base + "&unexpected=value",
+		strings.Replace(base, "left_revision_id="+revision, "left_revision_id="+strings.Repeat("z", 64), 1),
+		strings.Replace(base, "left_request_id=left", "left_request_id=%20%20", 1),
+	} {
+		api := &explorerAPIFixture{}
+		handler, _ := NewHandler(api)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+target, nil))
+		if response.Code != http.StatusBadRequest || api.lastComparison.LeftRequestID != "" {
+			t.Fatalf("invalid comparison query status=%d request=%#v", response.Code, api.lastComparison)
+		}
+	}
+}
+
+func TestComparisonHandlerExplainsUnavailableVaultKey(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	revision := strings.Repeat("b", 64)
+	api := &explorerAPIFixture{comparisonErr: &appquery.QueryError{
+		Code: appquery.ErrorEvidenceKeyUnavailable, Message: "local vault key is unavailable or invalid",
+	}}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "/api/compare?project_key=" + projectKey + "&left_request_id=left&left_revision_id=" + revision +
+		"&right_request_id=right&right_revision_id=" + strings.Repeat("c", 64)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+target, nil))
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "local vault key is unavailable or invalid") {
+		t.Fatalf("comparison missing-key response status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

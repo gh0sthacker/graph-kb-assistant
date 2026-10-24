@@ -28,7 +28,10 @@ const (
 	graphTimeout     = 3 * time.Minute
 )
 
-var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var (
+	projectKeyPattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	captureRevisionRegex = regexp.MustCompile(`^[a-f0-9]{64}$`)
+)
 
 //go:embed assets/*
 var assets embed.FS
@@ -38,6 +41,7 @@ type readAPI interface {
 	GraphExplorerSurface(context.Context, appquery.SurfaceRequest) (appquery.SurfaceResult, error)
 	Graph(context.Context, appquery.GraphRequest) (appquery.GraphResult, error)
 	CaptureMessageRange(context.Context, appquery.CaptureMessageRangeRequest) (appquery.CaptureMessageRange, error)
+	CompareCaptureMessages(context.Context, appquery.CaptureComparisonRequest) (appquery.CaptureComparison, error)
 }
 
 // NewHandler constructs the local UI and its narrowly scoped read-only API.
@@ -60,6 +64,7 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	mux.HandleFunc("GET /api/surface", surfaceHandler(api))
 	mux.HandleFunc("GET /api/graph", graphHandler(api))
 	mux.HandleFunc("GET /api/evidence", captureMessageRangeHandler(api))
+	mux.HandleFunc("GET /api/compare", captureComparisonHandler(api))
 	return securityHeaders(localRequestGate(mux)), nil
 }
 
@@ -277,6 +282,47 @@ func captureMessageRangeHandler(api readAPI) http.HandlerFunc {
 	}
 }
 
+func captureComparisonHandler(api readAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		allowed := map[string]struct{}{
+			"project_key": {}, "left_request_id": {}, "left_revision_id": {},
+			"right_request_id": {}, "right_revision_id": {},
+		}
+		for key := range query {
+			if _, ok := allowed[key]; !ok {
+				writeError(w, http.StatusBadRequest, "capture comparison query contains an unsupported field")
+				return
+			}
+		}
+		value := func(key string) (string, bool) {
+			values, exists := query[key]
+			if !exists || len(values) != 1 || values[0] == "" {
+				return "", false
+			}
+			return values[0], true
+		}
+		projectKey, projectOK := value("project_key")
+		leftRequestID, leftRequestOK := value("left_request_id")
+		leftRevisionID, leftRevisionOK := value("left_revision_id")
+		rightRequestID, rightRequestOK := value("right_request_id")
+		rightRevisionID, rightRevisionOK := value("right_revision_id")
+		if !projectOK || !projectKeyPattern.MatchString(projectKey) || !leftRequestOK || strings.TrimSpace(leftRequestID) == "" || len(leftRequestID) > 512 ||
+			!leftRevisionOK || !captureRevisionRegex.MatchString(leftRevisionID) || !rightRequestOK || strings.TrimSpace(rightRequestID) == "" || len(rightRequestID) > 512 ||
+			!rightRevisionOK || !captureRevisionRegex.MatchString(rightRevisionID) {
+			writeError(w, http.StatusBadRequest, "capture comparison query is malformed")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		defer cancel()
+		result, err := api.CompareCaptureMessages(ctx, appquery.CaptureComparisonRequest{
+			ProjectKey: projectKey, LeftRequestID: leftRequestID, LeftRevisionID: leftRevisionID,
+			RightRequestID: rightRequestID, RightRevisionID: rightRevisionID,
+		})
+		writeComparisonResult(w, result, err)
+	}
+}
+
 func optionalNonnegativeInt64(value string) (int64, bool, error) {
 	if value == "" {
 		return 0, false, nil
@@ -399,6 +445,40 @@ func writeEvidenceResult(w http.ResponseWriter, result appquery.CaptureMessageRa
 	}
 	if marshalErr != nil || len(encoded) > 2<<20 {
 		writeError(w, http.StatusRequestEntityTooLarge, "capture evidence range exceeds the local UI limit")
+		return
+	}
+	defer clear(encoded)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, bytes.NewReader(encoded))
+}
+
+func writeComparisonResult(w http.ResponseWriter, result appquery.CaptureComparison, err error) {
+	if err != nil {
+		var queryErr *appquery.QueryError
+		if errors.As(err, &queryErr) {
+			switch queryErr.Code {
+			case appquery.ErrorInvalidInput:
+				writeError(w, http.StatusBadRequest, "capture comparison request is invalid")
+			case appquery.ErrorProjectNotRegistered:
+				writeError(w, http.StatusNotFound, "selected project is not registered")
+			case appquery.ErrorProjectUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "selected project is unavailable for local evidence reads")
+			case appquery.ErrorEvidenceKeyUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "local vault key is unavailable or invalid; historical bytes cannot be compared")
+			default:
+				writeError(w, http.StatusNotFound, "exact local historical bytes are unavailable for this comparison")
+			}
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "capture comparison could not be completed")
+		return
+	}
+	encoded, marshalErr := json.Marshal(result)
+	if marshalErr != nil || len(encoded) > 64<<10 {
+		writeError(w, http.StatusRequestEntityTooLarge, "capture comparison exceeds the local UI limit")
 		return
 	}
 	defer clear(encoded)

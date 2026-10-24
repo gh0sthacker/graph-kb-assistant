@@ -112,6 +112,17 @@ func (t *Tools) CaptureMessageRange(ctx context.Context, request appquery.Captur
 	return t.graphQueries.CaptureMessageRange(ctx, request)
 }
 
+// CompareCaptureMessages exposes deterministic local revision comparison to
+// the loopback UI only. It is deliberately absent from MCP dispatch.
+func (t *Tools) CompareCaptureMessages(ctx context.Context, request appquery.CaptureComparisonRequest) (appquery.CaptureComparison, error) {
+	if t.graphQueries == nil {
+		return appquery.CaptureComparison{}, &appquery.QueryError{
+			Code: appquery.ErrorEvidenceUnavailable, Message: "capture comparison service is unavailable",
+		}
+	}
+	return t.graphQueries.CompareCaptureMessages(ctx, request)
+}
+
 func (t *Tools) checkGraphWireSize(wire map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(wire)
 	if err != nil {
