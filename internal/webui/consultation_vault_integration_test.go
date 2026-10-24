@@ -154,6 +154,30 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if created.Question != "" || created.Evidence.Evidence[0].Excerpt != "" {
 		t.Fatal("creation response exposed unreviewed question or evidence")
 	}
+	if len(created.References) != 1 {
+		t.Fatalf("created evidence references=%d, want one exact selected revision", len(created.References))
+	}
+	annotationBody, err := json.Marshal(map[string]any{
+		"project_key": projectKey, "session_id": created.ID, "expected_version": 1,
+		"idempotency_key": "operator_http_context_0001", "kind": "actor", "label": "actor-a",
+		"evidence_reference_ids": []string{created.References[0].ID},
+	})
+	if err != nil {
+		t.Fatalf("encode analyst context: %v", err)
+	}
+	annotationResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/context-annotation", annotationBody)
+	if annotationResponse.Code != http.StatusOK || annotationResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("context annotation status=%d cache=%q body=%s", annotationResponse.Code, annotationResponse.Header().Get("Cache-Control"), annotationResponse.Body.String())
+	}
+	var annotation consultation.ContextAnnotation
+	if err := json.Unmarshal(annotationResponse.Body.Bytes(), &annotation); err != nil {
+		t.Fatalf("decode analyst context: %v", err)
+	}
+	if annotation.Kind != "actor" || annotation.Label != "actor-a" || annotation.Origin != "analyst" ||
+		annotation.EvidenceState != "analyst_provided" || len(annotation.EvidenceReferenceIDs) != 1 ||
+		annotation.EvidenceReferenceIDs[0] != created.References[0].ID {
+		t.Fatalf("context annotation lost its provenance/reference: %#v", annotation)
+	}
 
 	reviewResponse := serveLocalGET(handler, "/api/consultation/review?project_key="+projectKey+"&session_id="+created.ID)
 	if reviewResponse.Code != http.StatusOK || reviewResponse.Header().Get("Cache-Control") != "no-store" {
@@ -163,7 +187,8 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if err := json.Unmarshal(reviewResponse.Body.Bytes(), &review); err != nil {
 		t.Fatalf("decode review session: %v", err)
 	}
-	if review.Question == "" || review.ReviewAccepted || len(review.Evidence.Evidence) != 1 ||
+	if review.Question == "" || review.ReviewAccepted || len(review.Evidence.Evidence) != 1 || len(review.ContextAnnotations) != 1 ||
+		review.ContextAnnotations[0].Label != "actor-a" || review.ContextAnnotations[0].Origin != "analyst" ||
 		!review.Evidence.Evidence[0].Available || review.Evidence.Evidence[0].RedactedBytes == 0 ||
 		!strings.Contains(review.Evidence.Evidence[0].Excerpt, "[REDACTED]") ||
 		strings.Contains(reviewResponse.Body.String(), "operator-review-secret") {
@@ -171,7 +196,7 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	}
 
 	acceptBody, err := json.Marshal(map[string]any{
-		"project_key": projectKey, "session_id": created.ID, "expected_version": 1,
+		"project_key": projectKey, "session_id": created.ID, "expected_version": 2,
 		"idempotency_key": "operator_http_accept_0001",
 	})
 	if err != nil {
@@ -185,7 +210,7 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if err := json.Unmarshal(acceptedResponse.Body.Bytes(), &accepted); err != nil {
 		t.Fatalf("decode accepted session: %v", err)
 	}
-	if !accepted.ReviewAccepted || accepted.Version != 2 || strings.Contains(acceptedResponse.Body.String(), "operator-review-secret") {
+	if !accepted.ReviewAccepted || accepted.Version != 3 || len(accepted.ContextAnnotations) != 1 || strings.Contains(acceptedResponse.Body.String(), "operator-review-secret") {
 		t.Fatalf("explicit review transition did not persist or returned raw evidence: %#v", accepted)
 	}
 
@@ -197,7 +222,8 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if err := json.Unmarshal(resumeResponse.Body.Bytes(), &resumed); err != nil {
 		t.Fatalf("decode resumed session: %v", err)
 	}
-	if !resumed.ReviewAccepted || resumed.Question == "" || resumed.Evidence.Evidence[0].RedactedBytes == 0 ||
+	if !resumed.ReviewAccepted || resumed.Question == "" || len(resumed.ContextAnnotations) != 1 ||
+		resumed.ContextAnnotations[0].Label != "actor-a" || resumed.Evidence.Evidence[0].RedactedBytes == 0 ||
 		strings.Contains(resumeResponse.Body.String(), "operator-review-secret") {
 		t.Fatalf("accepted session did not resume with redacted exact evidence: %#v", resumed)
 	}

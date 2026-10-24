@@ -27,9 +27,11 @@
   candidate resumes at the expected version while remaining `candidate`.
 - The loopback web handler also now has an end-to-end synthetic approval test:
   create returns a redacted/withheld session, the review route reveals only the
-  redacted exact packet, the same-origin acceptance POST records the explicit
-  operator transition, and the session resume route returns the approved
-  redacted evidence. This goes through the actual consultation service and
+  redacted exact packet, a same-origin context-annotation POST binds a
+  pseudonymous actor label to its exact evidence reference with
+  `origin=analyst`, the acceptance POST records the explicit operator
+  transition, and the session resume route returns the approved redacted
+  evidence and context. This goes through the actual consultation service and
   encrypted temporary vault.
 - `go test ./internal/mcpserver -run
   TestMCPConsultationUsesEncryptedEvidenceAndResumesSavedCandidate -count=1`
