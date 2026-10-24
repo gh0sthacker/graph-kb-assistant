@@ -923,7 +923,7 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		},
 		{
 			Name: "bb_surface_map", Title: "Search local operations in one project",
-			Description: "Search and page exact host:port, method, and route operations from one explicitly selected local project. Counts cover deduplicated records in the local structural indexes, not total Caido history. The signed cursor is bound to the project, filter, and index fingerprint; reload the first page if it is stale. Field/header names and graph seed IDs are bounded samples. Browser and JavaScript coverage remain partial; request/response values are not returned.",
+			Description: "Search and page local operations in one explicitly selected project. The case-insensitive substring filter searches host, method, route, observed field names, and header names; when matching names, only matching observations contribute to operation counts and graph seeds. Counts come from bounded local structural indexes, not total Caido history, and truncated or invalid name lists can hide name matches. The signed cursor is bound to the project, filter, and index fingerprint; reload the first page if it is stale. Field/header names and graph seed IDs are bounded samples. Browser and JavaScript coverage remain partial; request/response values are not returned.",
 			InputSchema: objectSchema(map[string]any{
 				"project_key": projectString,
 				"filter":      stringSchema(capturesearch.MaximumSurfaceFilterBytes, nil),

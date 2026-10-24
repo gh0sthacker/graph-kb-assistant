@@ -764,7 +764,7 @@ async function loadSurface(append) {
     elements.coverage.textContent = `Coverage: ${String(state.coverageState).toUpperCase()}`;
     elements.updated.textContent = `Updated ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
     if (!state.endpoints.length) {
-      renderEmpty(filter ? "No matching operations" : "No operations in the local index", filter ? "Change the search text to see other host, method, and route combinations." : "Import HTTP history for the selected project, then refresh.");
+      renderEmpty(filter ? "No matching operations" : "No operations in the local index", filter ? "Search a host, method, route, field name, or header name." : "Import HTTP history for the selected project, then refresh.");
       elements.endpointList.replaceChildren(emptyList(filter ? "No matches" : "Index is empty", filter ? "No indexed operation matches this filter." : "The project opened, but it has no local structural records yet."));
       setStatus("No indexed requests");
     } else if (!append || !state.selectedEndpoint) {
@@ -1572,7 +1572,7 @@ elements.filter.addEventListener("input", () => {
   elements.graphSubtitle.textContent = "Select an operation to open its graph neighborhood.";
   elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
   renderInspectorEmpty();
-  renderEmpty("Searching local operations", "Results are filtered by host, method, and route.");
+  renderEmpty("Searching local operations", "Results match host, method, route, field names, or header names.");
   elements.surfaceFoot.textContent = "Updating local operation filter…";
   elements.endpointCount.textContent = "0";
   renderEndpointList();

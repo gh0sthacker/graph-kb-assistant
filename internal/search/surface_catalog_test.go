@@ -121,6 +121,66 @@ func TestReadSurfaceCatalogFiltersBeforePagingAndUsesHostPortMethodRouteOrder(t 
 	}
 }
 
+func TestReadSurfaceCatalogCanFilterByObservedFieldAndHeaderNames(t *testing.T) {
+	ctx := context.Background()
+	ref := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "catalog-field-filter-project"}
+	root := t.TempDir()
+	writable, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("CreateProject(): %v", err)
+	}
+	insertCatalogHistorical(t, ctx, writable, ref, "request-id", fmt.Sprintf("%064x", 1), "GET", "api.fixture", 443, "/orders", "complete", `["id"]`, `["accept"]`, "observation-"+strings.Repeat("1", 64))
+	insertCatalogHistorical(t, ctx, writable, ref, "request-email", fmt.Sprintf("%064x", 2), "GET", "api.fixture", 443, "/orders", "partial", `["email"]`, `["x-correlation-id"]`, "observation-"+strings.Repeat("2", 64))
+	insertCatalogHistorical(t, ctx, writable, ref, "request-other", fmt.Sprintf("%064x", 3), "POST", "api.fixture", 443, "/users", "complete", `["name"]`, `["content-type"]`, "observation-"+strings.Repeat("3", 64))
+	insertCatalogHistorical(t, ctx, writable, ref, "request-account", fmt.Sprintf("%064x", 4), "GET", "api.fixture", 443, "/accounts", "complete", `["account_id"]`, `[]`, "observation-"+strings.Repeat("4", 64))
+	insertCatalogHistorical(t, ctx, writable, ref, "request-invoice", fmt.Sprintf("%064x", 5), "GET", "api.fixture", 443, "/invoices", "complete", `["account_id"]`, `[]`, "observation-"+strings.Repeat("5", 64))
+	if err := writable.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+	readonly, err := store.OpenProjectReadOnly(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("OpenProjectReadOnly(): %v", err)
+	}
+	t.Cleanup(func() { _ = readonly.Close() })
+
+	fieldPage, err := ReadSurfaceCatalog(ctx, readonly, SurfaceCatalogRequest{Filter: "EMAIL", Limit: 10})
+	if err != nil {
+		t.Fatalf("ReadSurfaceCatalog(field): %v", err)
+	}
+	if fieldPage.TotalOperations != 1 || fieldPage.TotalObservations != 1 || len(fieldPage.Operations) != 1 {
+		t.Fatalf("field-filtered totals = operations %d, observations %d, rows %#v; want one matching capture", fieldPage.TotalOperations, fieldPage.TotalObservations, fieldPage.Operations)
+	}
+	fieldOperation := fieldPage.Operations[0]
+	if fieldOperation.Route != "/orders" || fieldOperation.ObservationCount != 1 || len(fieldOperation.FieldNames) != 1 || fieldOperation.FieldNames[0] != "email" || len(fieldOperation.SampledGraphSeedIDs) != 1 || fieldOperation.SampledGraphSeedIDs[0] != "observation-"+strings.Repeat("2", 64) {
+		t.Fatalf("field-filtered operation = %#v", fieldOperation)
+	}
+
+	headerPage, err := ReadSurfaceCatalog(ctx, readonly, SurfaceCatalogRequest{Filter: "CORRELATION", Limit: 10})
+	if err != nil {
+		t.Fatalf("ReadSurfaceCatalog(header): %v", err)
+	}
+	if headerPage.TotalOperations != 1 || headerPage.TotalObservations != 1 || len(headerPage.Operations) != 1 || headerPage.Operations[0].Route != "/orders" || len(headerPage.Operations[0].HeaderNames) != 1 || headerPage.Operations[0].HeaderNames[0] != "x-correlation-id" {
+		t.Fatalf("header-filtered result = %#v", headerPage)
+	}
+
+	firstFieldPage, err := ReadSurfaceCatalog(ctx, readonly, SurfaceCatalogRequest{Filter: "account_id", Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadSurfaceCatalog(field continuation): %v", err)
+	}
+	if firstFieldPage.TotalOperations != 2 || firstFieldPage.TotalObservations != 2 || firstFieldPage.NextAfter == nil || len(firstFieldPage.Operations) != 1 || firstFieldPage.Operations[0].Route != "/accounts" {
+		t.Fatalf("first field-filtered page = %#v", firstFieldPage)
+	}
+	secondFieldPage, err := ReadSurfaceCatalog(ctx, readonly, SurfaceCatalogRequest{
+		Filter: "account_id", Limit: 1, After: firstFieldPage.NextAfter, SnapshotFingerprint: firstFieldPage.SnapshotFingerprint,
+	})
+	if err != nil {
+		t.Fatalf("ReadSurfaceCatalog(second field page): %v", err)
+	}
+	if secondFieldPage.TotalOperations != 2 || secondFieldPage.TotalObservations != 2 || len(secondFieldPage.Operations) != 1 || secondFieldPage.Operations[0].Route != "/invoices" {
+		t.Fatalf("second field-filtered page = %#v", secondFieldPage)
+	}
+}
+
 func TestSurfaceCatalogQueryPlanUsesProjectIdentityIndexes(t *testing.T) {
 	ctx := context.Background()
 	ref := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "catalog-plan-project"}

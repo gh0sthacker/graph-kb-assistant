@@ -136,13 +136,17 @@ func ReadSurfaceCatalog(ctx context.Context, projectStore *store.ProjectStore, r
 			"Browser UI walkthrough and JavaScript endpoint coverage are not included.",
 		},
 	}
+	if filter != "" {
+		page.CoverageGaps = appendCoverageGap(page.CoverageGaps, "Search checks host, method, route, field, and header names in the bounded local structural index; truncated or invalid name lists can hide matches.")
+	}
 	hasher := sha256.New()
 	var current *catalogAccumulator
+	groupMatched := false
 	sawIncompleteParse := false
 	sawUnmappedCapture := false
 	pageCapacity := request.Limit + 1
 	flush := func() {
-		if current == nil || !catalogMatchesFilter(current.operation, filter) {
+		if current == nil {
 			return
 		}
 		if len(page.Operations) >= pageCapacity {
@@ -166,32 +170,29 @@ func ReadSurfaceCatalog(ctx context.Context, projectStore *store.ProjectStore, r
 		}
 		page.RowsRead++
 		writeCatalogFingerprint(hasher, record)
-		if catalogMatchesFilterKey(record.key, filter) {
-			if record.parseState != "complete" {
-				sawIncompleteParse = true
-			}
-			if !record.graphSeedID.Valid || !surfaceSeedPattern.MatchString(record.graphSeedID.String) {
-				sawUnmappedCapture = true
-			}
-		}
 		if !haveGroup || compareCatalogKey(groupKey, record.key) != 0 {
 			flush()
 			current = nil
 			groupKey = record.key
 			haveGroup = true
-			if catalogMatchesFilterKey(record.key, filter) {
-				page.TotalOperations++
-				page.TotalObservations++
-				if request.After == nil || compareCatalogKey(record.key, *request.After) > 0 {
-					if len(page.Operations) < pageCapacity {
-						current = newCatalogAccumulator(record.key)
-					}
-				}
-			} else {
-				continue
+			groupMatched = false
+		}
+		if !catalogRecordMatchesFilter(record, filter) {
+			continue
+		}
+		if !groupMatched {
+			groupMatched = true
+			page.TotalOperations++
+			if (request.After == nil || compareCatalogKey(record.key, *request.After) > 0) && len(page.Operations) < pageCapacity {
+				current = newCatalogAccumulator(record.key)
 			}
-		} else if catalogMatchesFilterKey(record.key, filter) {
-			page.TotalObservations++
+		}
+		page.TotalObservations++
+		if record.parseState != "complete" {
+			sawIncompleteParse = true
+		}
+		if !record.graphSeedID.Valid || !surfaceSeedPattern.MatchString(record.graphSeedID.String) {
+			sawUnmappedCapture = true
 		}
 		if current != nil {
 			current.add(record)
@@ -247,15 +248,25 @@ ORDER BY host COLLATE BINARY,port,method COLLATE BINARY,route COLLATE BINARY,req
 
 func normalizeSurfaceFilter(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
 
-func catalogMatchesFilter(operation SurfaceOperation, filter string) bool {
-	return catalogMatchesFilterKey(SurfaceCatalogKey{Host: operation.Host, Port: operation.Port, Method: operation.Method, Route: operation.Route}, filter)
-}
-
-func catalogMatchesFilterKey(key SurfaceCatalogKey, filter string) bool {
+func catalogRecordMatchesFilter(record catalogRecord, filter string) bool {
 	if filter == "" {
 		return true
 	}
-	return strings.Contains(strings.ToLower(key.Host), filter) || strings.Contains(strings.ToLower(key.Method), filter) || strings.Contains(strings.ToLower(key.Route), filter)
+	if strings.Contains(strings.ToLower(record.key.Host), filter) || strings.Contains(strings.ToLower(record.key.Method), filter) || strings.Contains(strings.ToLower(record.key.Route), filter) {
+		return true
+	}
+	for _, encoded := range []string{record.fieldNames, record.headerNames} {
+		names, _, err := decodeNames(encoded)
+		if err != nil {
+			continue
+		}
+		for _, name := range names {
+			if strings.Contains(strings.ToLower(name), filter) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validCatalogKey(key SurfaceCatalogKey) bool {

@@ -1,5 +1,27 @@
 # Project status and known limitations
 
+## Stage 3 searchable operation fields (2026-10-24 09:32Z) — PARTIAL
+
+- The operation catalog filter now performs a case-insensitive substring
+  search over host, method, route, observed field names, and header names.
+  When a field/header name matches, that operation's counts and graph seeds
+  include only matching observations, so selecting the operation opens the
+  relevant capture set. Host/method/route matches continue to include the full
+  matching operation. The UI and Hermes tool description expose the expanded
+  search.
+- Field-filter pagination remains bound to the same project, filter, and
+  structural-index fingerprint. Invalid or truncated field/header-name lists
+  can hide matches; the API marks that limitation in coverage gaps. The query
+  reads structural metadata only and never reads request/response values.
+- Synthetic Go fixtures cover case-insensitive field/header matches, matched
+  observation counts/graph seeds, and continuation across matching operations.
+  `TMPDIR=/var/tmp go test -count=1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
+  and all 25 browser-state tests passed. The restarted local UI returns HTTP
+  200 and serves the updated field-search controls.
+- Stage 3 remains `PARTIAL`: versioned route-family grouping and analyst
+  actor/session/object/flow annotations are still outstanding. This feature
+  does not promote current source coverage or graph data beyond `PARTIAL`.
+
 ## Local application and Hermes runtime check (2026-10-24 09:26Z) — PARTIAL
 
 - The Go web UI was restarted at `http://127.0.0.1:8765/` through the updated
