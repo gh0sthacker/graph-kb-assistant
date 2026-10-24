@@ -8,10 +8,11 @@
   shows parse state, known-effect metadata, hypothesis count, and bounded
   missing-evidence notes for the selected capture/endpoint.
 - Added an opt-in Neo4j integration assertion for card selection and a UI
-  identity-resolution test. The opt-in Neo4j test was not run here; actual
-  Neo4j query behavior and existing project data remain unverified. Go package
-  tests and JavaScript tests are the available synthetic evidence. Stage 2
-  remains `PARTIAL`.
+  identity-resolution test. The assertion passed against an ephemeral
+  `neo4j:2026.10.0` container on a random loopback port with synthetic fixtures;
+  the temporary container was removed afterward. This verifies the Neo4j query
+  behavior for the fixture, but existing project data and production query
+  behavior remain unverified. Stage 2 remains `PARTIAL`.
 
 ## Stage 6 synthetic live restart/replay and Go service templates (2026-10-24) — PARTIAL
 
