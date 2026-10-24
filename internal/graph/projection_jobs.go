@@ -38,16 +38,21 @@ type ProjectionJob struct {
 	RevisionID    string
 	ObservationID string
 	PayloadJSON   string
-	PayloadSHA256 string
-	State         string
-	AttemptCount  int
-	NextAttemptAt string
-	CreatedAt     string
-	UpdatedAt     string
-	LastErrorCode sql.NullString
-	AppliedAt     sql.NullString
-	LeaseToken    sql.NullString
-	LeaseUntil    sql.NullString
+	// PayloadBundle is populated only after the durable payload has passed its
+	// checksum, canonicalization, project, source, and observation validation.
+	// The worker reuses it instead of decoding and validating the same JSON again.
+	PayloadBundle      Record `json:"-"`
+	GraphObservationID string `json:"-"`
+	PayloadSHA256      string
+	State              string
+	AttemptCount       int
+	NextAttemptAt      string
+	CreatedAt          string
+	UpdatedAt          string
+	LastErrorCode      sql.NullString
+	AppliedAt          sql.NullString
+	LeaseToken         sql.NullString
+	LeaseUntil         sql.NullString
 }
 
 type projectionJobTx interface {
@@ -81,11 +86,11 @@ func EnqueueProjectionJob(
 	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
 		return ProjectionJob{}, false, err
 	}
-	normalizedPayload, err := validateProjectionBundle(payload, projectKey)
+	bundle, normalizedPayload, err := validateProjectionBundleWithRecord(payload, projectKey)
 	if err != nil {
 		return ProjectionJob{}, false, ErrInvalidProjectionJob
 	}
-	if _, err := projectionObservationID(normalizedPayload, observationID); err != nil {
+	if _, err := projectionObservationIDFromBundle(bundle, observationID); err != nil {
 		return ProjectionJob{}, false, ErrInvalidProjectionJob
 	}
 	var registeredObservationID string
@@ -361,15 +366,8 @@ func MarkLeasedProjectionJobApplied(
 	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
 		return err
 	}
-	job, err := queryProjectionJobByRevision(ctx, tx, projectKey, revisionID)
-	if err != nil {
+	if _, err := verifyLeasedProjectionJob(ctx, tx, revisionID, leaseToken, payloadSHA256); err != nil {
 		return err
-	}
-	if job.State != "leased" || !job.LeaseToken.Valid || job.LeaseToken.String != leaseToken {
-		return ErrProjectionJobNotPending
-	}
-	if job.PayloadSHA256 != payloadSHA256 {
-		return ErrProjectionJobConflict
 	}
 	now := appliedAt.UTC().Format(projectionTimestampLayout)
 	result, err := tx.ExecContext(ctx,
@@ -385,6 +383,44 @@ func MarkLeasedProjectionJobApplied(
 		return ErrProjectionJobNotPending
 	}
 	return nil
+}
+
+// verifyLeasedProjectionJob checks the current lease and payload checksum
+// without decoding and normalizing the JSON again. ClaimNextProjectionJob has
+// already fully validated the payload; the digest ties this transition to the
+// exact bytes that the worker projected.
+func verifyLeasedProjectionJob(
+	ctx context.Context,
+	queryer projectionJobQueryer,
+	revisionID string,
+	leaseToken string,
+	payloadSHA256 string,
+) (ProjectionJob, error) {
+	var job ProjectionJob
+	var payloadJSON string
+	err := queryer.QueryRowContext(ctx,
+		`SELECT j.job_id,j.revision_id,j.payload_json,j.payload_sha256,j.state,j.attempt_count,
+		 j.lease_token,j.lease_until,r.observation_id
+		 FROM projection_jobs j JOIN capture_revision_registry r ON r.revision_id=j.revision_id
+		 WHERE j.revision_id=?`, revisionID,
+	).Scan(&job.JobID, &job.RevisionID, &payloadJSON, &job.PayloadSHA256, &job.State,
+		&job.AttemptCount, &job.LeaseToken, &job.LeaseUntil, &job.ObservationID)
+	if err != nil {
+		return ProjectionJob{}, err
+	}
+	if job.JobID != "projection-"+revisionID || job.RevisionID != revisionID ||
+		len(payloadJSON) == 0 || len(payloadJSON) > maxProjectionJobPayloadBytes {
+		return ProjectionJob{}, ErrInvalidProjectionJob
+	}
+	if job.State != "leased" || !job.LeaseToken.Valid || job.LeaseToken.String != leaseToken ||
+		!validProjectionLeaseToken(job.LeaseToken.String) || !job.LeaseUntil.Valid {
+		return ProjectionJob{}, ErrProjectionJobNotPending
+	}
+	checksum := sha256.Sum256([]byte(payloadJSON))
+	if job.PayloadSHA256 != payloadSHA256 || hex.EncodeToString(checksum[:]) != job.PayloadSHA256 {
+		return ProjectionJob{}, ErrProjectionJobConflict
+	}
+	return job, nil
 }
 
 // FailLeasedProjectionJob releases a failed delivery for retry or moves it to
@@ -413,15 +449,9 @@ func FailLeasedProjectionJob(
 	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
 		return err
 	}
-	job, err := queryProjectionJobByRevision(ctx, tx, projectKey, revisionID)
+	job, err := verifyLeasedProjectionJob(ctx, tx, revisionID, leaseToken, payloadSHA256)
 	if err != nil {
 		return err
-	}
-	if job.State != "leased" || !job.LeaseToken.Valid || job.LeaseToken.String != leaseToken {
-		return ErrProjectionJobNotPending
-	}
-	if job.PayloadSHA256 != payloadSHA256 {
-		return ErrProjectionJobConflict
 	}
 	state := "pending"
 	if job.AttemptCount >= maxAttempts {
@@ -496,41 +526,45 @@ func queryProjectionJobByRevision(
 	if err != nil {
 		return ProjectionJob{}, err
 	}
-	if err := validateStoredProjectionJob(job, projectKey, job.ObservationID); err != nil {
+	bundle, graphObservationID, err := validateStoredProjectionJob(job, projectKey, job.ObservationID)
+	if err != nil {
 		return ProjectionJob{}, err
 	}
+	job.PayloadBundle = bundle
+	job.GraphObservationID = graphObservationID
 	return job, nil
 }
 
-func validateStoredProjectionJob(job ProjectionJob, projectKey, observationID string) error {
+func validateStoredProjectionJob(job ProjectionJob, projectKey, observationID string) (Record, string, error) {
 	if !validProjectionRevisionID(job.RevisionID) || job.JobID != "projection-"+job.RevisionID ||
 		len(job.PayloadJSON) == 0 || len(job.PayloadJSON) > maxProjectionJobPayloadBytes {
-		return errors.New("stored projection job identity or payload is invalid")
+		return nil, "", errors.New("stored projection job identity or payload is invalid")
 	}
 	checksum := sha256.Sum256([]byte(job.PayloadJSON))
 	if job.PayloadSHA256 != hex.EncodeToString(checksum[:]) {
-		return errors.New("stored projection job checksum does not match its payload")
+		return nil, "", errors.New("stored projection job checksum does not match its payload")
 	}
-	normalized, err := validateProjectionBundle([]byte(job.PayloadJSON), projectKey)
+	bundle, normalized, err := validateProjectionBundleWithRecord([]byte(job.PayloadJSON), projectKey)
 	if err != nil || !bytes.Equal(normalized, []byte(job.PayloadJSON)) {
-		return errors.New("stored projection job payload is invalid")
+		return nil, "", errors.New("stored projection job payload is invalid")
 	}
-	if _, err := projectionObservationID(normalized, observationID); err != nil {
-		return errors.New("stored projection job does not match its capture revision")
+	graphObservationID, err := projectionObservationIDFromBundle(bundle, observationID)
+	if err != nil {
+		return nil, "", errors.New("stored projection job does not match its capture revision")
 	}
 	switch job.State {
 	case "pending", "leased", "applied", "dead_letter":
 	default:
-		return errors.New("stored projection job state is invalid")
+		return nil, "", errors.New("stored projection job state is invalid")
 	}
 	if job.State == "leased" {
 		if !job.LeaseToken.Valid || !validProjectionLeaseToken(job.LeaseToken.String) || !job.LeaseUntil.Valid {
-			return errors.New("stored projection job lease is invalid")
+			return nil, "", errors.New("stored projection job lease is invalid")
 		}
 	} else if job.LeaseToken.Valid || job.LeaseUntil.Valid {
-		return errors.New("stored non-leased projection job has lease metadata")
+		return nil, "", errors.New("stored non-leased projection job has lease metadata")
 	}
-	return nil
+	return bundle, graphObservationID, nil
 }
 
 // ProjectionObservationID validates a project-bound graph bundle and returns
@@ -540,22 +574,31 @@ func ProjectionObservationID(payload []byte, projectKey, captureID string) (stri
 	if strings.TrimSpace(captureID) == "" {
 		return "", ErrInvalidProjectionJob
 	}
-	normalized, err := validateProjectionBundle(payload, projectKey)
+	bundle, _, err := validateProjectionBundleWithRecord(payload, projectKey)
 	if err != nil {
 		return "", ErrInvalidProjectionJob
 	}
-	return projectionObservationID(normalized, captureID)
+	return projectionObservationIDFromBundle(bundle, captureID)
 }
 
-func projectionObservationID(normalizedPayload []byte, captureID string) (string, error) {
-	decoder := json.NewDecoder(bytes.NewReader(normalizedPayload))
-	decoder.UseNumber()
-	var bundle map[string]any
-	if err := decoder.Decode(&bundle); err != nil || bundle == nil {
+func projectionObservationIDFromBundle(bundle Record, captureID string) (string, error) {
+	if bundle == nil || strings.TrimSpace(captureID) == "" {
 		return "", ErrInvalidProjectionJob
 	}
-	entities, err := recordList(bundle["entities"], maxWriterRecords)
-	if err != nil {
+	var entities []Record
+	switch value := bundle["entities"].(type) {
+	case []Record:
+		entities = value
+	case []any:
+		var err error
+		entities, err = recordList(value, maxWriterRecords)
+		if err != nil {
+			return "", ErrInvalidProjectionJob
+		}
+	default:
+		return "", ErrInvalidProjectionJob
+	}
+	if len(entities) > maxWriterRecords {
 		return "", ErrInvalidProjectionJob
 	}
 	var graphObservationID string
@@ -580,27 +623,32 @@ func projectionObservationID(normalizedPayload []byte, captureID string) (string
 }
 
 func validateProjectionBundle(payload []byte, projectKey string) ([]byte, error) {
+	_, normalized, err := validateProjectionBundleWithRecord(payload, projectKey)
+	return normalized, err
+}
+
+func validateProjectionBundleWithRecord(payload []byte, projectKey string) (Record, []byte, error) {
 	if err := publicdata.ValidateJSON(payload); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
 	var bundle Record
 	if err := decoder.Decode(&bundle); err != nil || bundle == nil {
-		return nil, errors.New("projection bundle is not a JSON object")
+		return nil, nil, errors.New("projection bundle is not a JSON object")
 	}
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return nil, errors.New("projection bundle has trailing content")
+		return nil, nil, errors.New("projection bundle has trailing content")
 	}
 	normalized, err := (&Writer{program: projectKey}).normalizeBundle(bundle)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	encoded, err := canonicalJSON(normalized)
 	if err != nil || len(encoded) == 0 || len(encoded) > maxProjectionJobPayloadBytes {
-		return nil, errors.New("normalized projection bundle exceeds the size limit")
+		return nil, nil, errors.New("normalized projection bundle exceeds the size limit")
 	}
-	return encoded, nil
+	return normalized, encoded, nil
 }
 
 func validProjectionRevisionID(value string) bool {

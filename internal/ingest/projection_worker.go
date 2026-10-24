@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -339,17 +338,10 @@ func runProjectionWorkerOnce(
 	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, options.LeaseDuration-time.Second)
 	defer cancelDelivery()
 
-	decodeStarted := time.Now()
-	var bundle behaviorgraph.Record
-	if err := json.Unmarshal([]byte(job.PayloadJSON), &bundle); err != nil || bundle == nil {
-		result.DecodeDurationMS = time.Since(decodeStarted).Milliseconds()
+	bundle := job.PayloadBundle
+	if bundle == nil || job.GraphObservationID == "" {
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "invalid_job", result)
 	}
-	if _, err := behaviorgraph.ProjectionObservationID([]byte(job.PayloadJSON), selected.ProjectKey, job.ObservationID); err != nil {
-		result.DecodeDurationMS = time.Since(decodeStarted).Milliseconds()
-		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "invalid_job", result)
-	}
-	result.DecodeDurationMS = time.Since(decodeStarted).Milliseconds()
 	projectionStarted := time.Now()
 	materialized, neo4jReady, projectionErr := projector(deliveryCtx, selected, []behaviorgraph.Record{bundle})
 	result.ProjectionDurationMS = time.Since(projectionStarted).Milliseconds()
@@ -386,29 +378,17 @@ func runProjectionWorkerOnce(
 	defer func() {
 		releaseAckConn()
 	}()
-	current, err := behaviorgraph.ProjectionJobByRevision(deliveryCtx, ackConn, selected.ProjectKey, job.RevisionID)
-	if err != nil || !sameProjectionLease(current, job) {
-		finishAckTiming()
-		releaseAckConn()
-		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "projection_fence_mismatch", result)
-	}
-	graphObservationID, err := behaviorgraph.ProjectionObservationID([]byte(current.PayloadJSON), selected.ProjectKey, current.ObservationID)
-	if err != nil {
-		finishAckTiming()
-		releaseAckConn()
-		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "invalid_job", result)
-	}
 	appliedAt := time.Now().UTC()
 	if appliedAt.Before(now) {
 		appliedAt = now
 	}
-	if err := persistProjectionJobMapping(deliveryCtx, ackConn, current, graphObservationID, appliedAt); err != nil {
+	if err := persistProjectionJobMapping(deliveryCtx, ackConn, job, job.GraphObservationID, appliedAt); err != nil {
 		finishAckTiming()
 		releaseAckConn()
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, "mapping_invalid", result)
 	}
 	if err := behaviorgraph.MarkLeasedProjectionJobApplied(
-		deliveryCtx, ackConn, selected.ProjectKey, current.RevisionID, job.LeaseToken.String, job.PayloadSHA256, appliedAt,
+		deliveryCtx, ackConn, selected.ProjectKey, job.RevisionID, job.LeaseToken.String, job.PayloadSHA256, appliedAt,
 	); err != nil {
 		finishAckTiming()
 		releaseAckConn()
@@ -423,13 +403,6 @@ func runProjectionWorkerOnce(
 	finishAckTiming()
 	result.State = "applied"
 	return result, nil
-}
-
-func sameProjectionLease(current, claimed behaviorgraph.ProjectionJob) bool {
-	return current.State == "leased" && current.LeaseToken.Valid && claimed.LeaseToken.Valid &&
-		current.LeaseToken.String == claimed.LeaseToken.String &&
-		current.PayloadSHA256 == claimed.PayloadSHA256 && current.PayloadJSON == claimed.PayloadJSON &&
-		current.ObservationID == claimed.ObservationID
 }
 
 func persistProjectionJobMapping(

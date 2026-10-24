@@ -274,6 +274,15 @@ func TestProjectionJobLeaseIsExclusiveAndAckRequiresCurrentToken(t *testing.T) {
 		_ = tx.Rollback()
 		t.Fatalf("claimed job fields = %+v", claimed)
 	}
+	if claimed.PayloadBundle == nil {
+		_ = tx.Rollback()
+		t.Fatal("claimed job did not retain its already-validated graph bundle")
+	}
+	observation, err := projectionObservationIDFromBundle(claimed.PayloadBundle, claimed.ObservationID)
+	if err != nil || !graphIDPattern.MatchString(observation) {
+		_ = tx.Rollback()
+		t.Fatalf("claimed validated bundle observation = %q, err=%v", observation, err)
+	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
@@ -487,6 +496,28 @@ func TestLeasedProjectionAcknowledgementRequiresPayloadDigest(t *testing.T) {
 	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
 	if err != nil || job.State != "leased" {
 		t.Fatalf("wrong digest changed the leased job: job=%+v err=%v", job, err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE projection_jobs SET payload_json=? WHERE revision_id=?", "{}", revisionID); err != nil {
+		t.Fatalf("tamper claimed payload fixture: %v", err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLeasedProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID,
+		claimed.LeaseToken.String, claimed.PayloadSHA256, now.Add(2*time.Second)); !errors.Is(err, ErrProjectionJobConflict) {
+		_ = tx.Rollback()
+		t.Fatalf("changed payload acknowledgement error=%v, want digest conflict", err)
+	}
+	_ = tx.Rollback()
+	if _, err := db.ExecContext(ctx,
+		"UPDATE projection_jobs SET payload_json=? WHERE revision_id=?", claimed.PayloadJSON, revisionID); err != nil {
+		t.Fatalf("restore claimed payload fixture: %v", err)
+	}
+	job, err = ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || job.State != "leased" {
+		t.Fatalf("changed payload modified the lease: job=%+v err=%v", job, err)
 	}
 }
 
