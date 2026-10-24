@@ -1497,7 +1497,7 @@ This repository is an early public alpha. The following boundaries are deliberat
 - The first attempt localized the failure to card insertion; the second classified it as an immutable-record conflict. A synthetic regression reproduced this conflict. The writer now refreshes deterministic endpoint/context/request/response projection fields, preserves existing business-action and hypothesis data, preserves `needs_review` only while the new request and response parse states are complete, and otherwise downgrades the card to `incomplete`. Missing-evidence strings are unioned so a reproject does not erase previously recorded gaps. The reconciled card is committed and checksummed in the Neo4j outbox in the same SQLite transaction; replay is idempotent. Since the last observed `applied=0` runtime result, there were **0 additional worker retries**. A later read-only Go project audit, Caido project list, and KB stats batch was canceled before returning results; it produced no new metrics. The fix is synthetic-verified only; runtime compatibility and queue status remain `PARTIAL`.
 - A subsequent CLI link attempt failed because `/tmp` had only 26 MiB free. The active web UI process still owns its temporary executable, so no temporary files or running services were removed. Use `/var/tmp` for future Go build work and check disk capacity before another runtime command.
 
-## Worker-to-graph synthetic acceptance (2026-10-24) — PARTIAL
+## Worker-to-graph and retry synthetic acceptance (2026-10-24) — PARTIAL
 
 - A synthetic `PageWriter → projection worker → BehaviorGraph` scenario now
   accepts a request without a response, then a later complete JSON response.
@@ -1506,14 +1506,21 @@ This repository is an early public alpha. The following boundaries are deliberat
   mapping points at the later revision, and its observation has
   `parse_state=complete`. The projector's remote-ready result is injected by
   the fixture; no Neo4j client, Caido, or working project database is used.
-- The targeted race test, uncached `internal/ingest` and `internal/graph`
-  package tests, `go vet` for those packages, and `git diff --check` passed.
-  This verifies the local worker/writer path only. Runtime queue health,
-  Neo4j delivery, Caido coverage, and end-to-end restart behavior remain
-  `PARTIAL`.
-- Next local acceptance: make a real synthetic BehaviorGraph import failure
-  leave the projection job retryable, then verify that a later successful
-  local import acknowledges that same job without losing its accepted source
-  revision.
+- A second scenario temporarily removes a source receipt in `t.TempDir()`. The
+  real graph import returns the fixed `receipt_validation_failed` stage, while
+  the accepted revision and retryable job remain committed. After closing and
+  reopening the project store, the pending state is still present; restoring
+  the receipt lets the same revision import and acknowledge on attempt two.
+  The test projector injects remote readiness, so this verifies local graph
+  materialization and durable retry only.
+- The targeted race tests for both scenarios, uncached `internal/ingest` and
+  `internal/graph` package tests, `go vet` for those packages, and
+  `git diff --check` passed. Runtime queue health, Neo4j delivery, and Caido
+  coverage remain `PARTIAL`.
+- Next local acceptance: extend Stage 2's native full-graph query continuation
+  so frontier, assertion, card, and provenance candidate limits do not hide
+  reachable branches; verify exact-boundary and multi-page closure on
+  synthetic graph fixtures. Focused-view performance on the working dataset
+  still requires a permitted runtime check.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.

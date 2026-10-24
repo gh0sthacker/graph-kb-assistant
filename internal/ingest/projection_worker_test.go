@@ -485,6 +485,146 @@ func TestProjectionWorkerMaterializesAndAcknowledgesAcceptedResponseRevisions(t 
 	}
 }
 
+func TestProjectionWorkerRetriesImportAfterReceiptIsRestored(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	exchange := projectionWorkerExchange(selected, "projection-worker-receipt-retry",
+		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nsynthetic receipt retry")
+	if result, err := writePendingHistoryRevision(ctx, pageWriter, exchange); err != nil || result.ProjectionState != "pending" {
+		t.Fatalf("accept capture before graph projection: result=%+v err=%v", result, err)
+	}
+	var revisionID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT revision_id FROM projection_jobs WHERE state='pending'",
+	).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := behaviorgraph.ProjectionJobByRevision(ctx,
+		projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(job.PayloadBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := behaviorgraph.DecodeBundleJSON(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, ok := bundle["sources"].([]any)
+	if !ok || len(sources) != 1 {
+		t.Fatal("accepted projection job has an invalid receipt reference")
+	}
+	source, ok := sources[0].(map[string]any)
+	if !ok {
+		t.Fatal("accepted projection receipt has an invalid shape")
+	}
+	receiptPath, ok := source["path"].(string)
+	if !ok || !filepath.IsAbs(receiptPath) {
+		t.Fatal("accepted projection receipt path is not absolute")
+	}
+	receiptRoot := filepath.Clean(projectStore.BehaviorReceiptPath)
+	relativeReceipt, err := filepath.Rel(receiptRoot, receiptPath)
+	if err != nil || relativeReceipt == "." || relativeReceipt == ".." ||
+		strings.HasPrefix(relativeReceipt, ".."+string(os.PathSeparator)) || filepath.IsAbs(relativeReceipt) {
+		t.Fatal("fixture receipt path escaped the temporary project receipt root")
+	}
+	unavailablePath := receiptPath + ".temporarily-unavailable"
+	if err := os.Rename(receiptPath, unavailablePath); err != nil {
+		t.Fatalf("make synthetic receipt unavailable: %v", err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			_ = os.Rename(unavailablePath, receiptPath)
+		}
+	})
+
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	options := ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3}
+	projector := func(ctx context.Context, selected *store.ProjectStore, bundles []behaviorgraph.Record) (bool, bool, error) {
+		if len(bundles) != 1 {
+			return false, false, errors.New("synthetic projector expected one bundle")
+		}
+		return materializeLocalProjection(ctx, selected, bundles)
+	}
+	now := time.Now().UTC().Add(time.Minute)
+	failed, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, options, projector, now)
+	if err != nil || failed.State != "pending" || failed.AttemptCount != 1 || failed.ErrorCode != "receipt_validation_failed" {
+		t.Fatalf("missing-receipt projection result=%+v err=%v", failed, err)
+	}
+	pending, err := behaviorgraph.ProjectionJobByRevision(ctx,
+		projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+	if err != nil || pending.State != "pending" || pending.AttemptCount != 1 ||
+		!pending.LastErrorCode.Valid || pending.LastErrorCode.String != failed.ErrorCode {
+		t.Fatalf("failed projection was not durably retryable: job=%+v err=%v", pending, err)
+	}
+	var acceptedRevisions int
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT count(*) FROM capture_revision_registry WHERE revision_id=?", revisionID,
+	).Scan(&acceptedRevisions); err != nil || acceptedRevisions != 1 {
+		t.Fatalf("accepted source revision count=%d err=%v, want one", acceptedRevisions, err)
+	}
+	pageWriter.Close()
+	if err := maintenance.Close(); err != nil {
+		t.Fatalf("release project lease before restart: %v", err)
+	}
+	projectDirectory := projectStore.Directory
+	dataRoot := filepath.Dir(filepath.Dir(projectDirectory))
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("close project store before restart: %v", err)
+	}
+	projectStore, err = store.OpenProjectForWrite(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatalf("reopen project after failed projection: %v", err)
+	}
+	t.Cleanup(func() { _ = projectStore.Close() })
+	maintenance, err = projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		t.Fatalf("reacquire project lease after restart: %v", err)
+	}
+	defer maintenance.Close()
+	persistedFailure, err := behaviorgraph.ProjectionJobByRevision(ctx,
+		projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+	if err != nil || persistedFailure.State != "pending" || persistedFailure.AttemptCount != 1 ||
+		!persistedFailure.LastErrorCode.Valid || persistedFailure.LastErrorCode.String != failed.ErrorCode {
+		t.Fatalf("failed projection did not survive restart: job=%+v err=%v", persistedFailure, err)
+	}
+	if err := os.Rename(unavailablePath, receiptPath); err != nil {
+		t.Fatalf("restore synthetic receipt: %v", err)
+	}
+	restored = true
+	deadline, err := time.Parse(projectionWorkerTimestampLayout, failed.NextAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := runProjectionWorkerOnce(ctx, projectStore, maintenance, options, projector, deadline.Add(time.Second))
+	if err != nil || recovered.State != "applied" || recovered.RevisionID != revisionID || recovered.AttemptCount != 2 {
+		t.Fatalf("retry after receipt restore: result=%+v err=%v", recovered, err)
+	}
+	applied, err := behaviorgraph.ProjectionJobByRevision(ctx,
+		projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+	if err != nil || applied.State != "applied" || applied.AttemptCount != 2 {
+		t.Fatalf("recovered projection job=%+v err=%v", applied, err)
+	}
+	var mappedRevision string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT revision_id FROM graph_capture_map WHERE observation_id=?", job.ObservationID,
+	).Scan(&mappedRevision); err != nil || mappedRevision != revisionID {
+		t.Fatalf("recovered graph mapping revision=%q err=%v, want %q", mappedRevision, err, revisionID)
+	}
+}
+
 func TestProjectGraphBundlesWithWriterRetainsOutboxPendingWhenNeo4jIsDisabled(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)
