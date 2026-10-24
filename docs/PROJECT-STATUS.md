@@ -1,5 +1,29 @@
 # Project status and known limitations
 
+## Caido full-project inventory and scope gap (2026-10-24) — PARTIAL
+
+- Installed the pinned Caido MCP v4.3.0 binary in user-local app data after its
+  downloaded Linux amd64 artifact matched the SHA-256 published on the pinned
+  GitHub release and reported `v4.3.0`. The read-only Go reconciler uses only
+  project-list and request-list metadata tools; no request details or bodies
+  were fetched. The existing private token file passed ownership/mode checks.
+- The read-only reconciliation reached Caido's terminal cursor for the whole
+  selected Juice Shop project: 1,969 pages and 196,809 distinct request IDs.
+  The local inventory contained 1,400 IDs; all 1,400 matched, 195,409 Caido IDs
+  were absent locally, and there were no local-only IDs or duplicates. This is
+  an all-project inventory, not a host-scoped result. Caido provides no stable
+  snapshot token, so `coverage_reconciled` remains false.
+- Caido's configured scope allowlists host `192.168.1.149`; its scope name says
+  port 3000 is enforced by the run gate. A separate metadata-only host filter
+  returned 355 IDs for that host, including the previously inspected Request
+  ID 239. The current reconciler cannot compare host/port subsets or classify
+  local historical rows whose parse/search metadata is missing, so the
+  195,409 all-project difference cannot be attributed to this host. The prior
+  Caido project selection was restored. No local database rows were changed.
+- Caido history coverage remains `PARTIAL` pending host-and-port reconciliation,
+  missing local records, source snapshot limitations, and unmapped/partially
+  parsed captures. No request bodies were read.
+
 ## ECC writer-reuse slice and bounded runtime validation (2026-10-24) — PARTIAL
 
 - The historical projection path now reuses one selected-project BehaviorGraph
