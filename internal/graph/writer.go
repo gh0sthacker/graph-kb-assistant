@@ -72,6 +72,7 @@ type ImportResult struct {
 	Replayed        bool           `json:"replayed"`
 	Inserted        map[string]int `json:"inserted"`
 	UpdatedEntities int            `json:"updated_entities"`
+	UpdatedCards    int            `json:"updated_cards"`
 }
 
 type importFailure struct {
@@ -372,17 +373,11 @@ func (w *Writer) ImportBundles(ctx context.Context, bundles []Record) (ImportRes
 	if err != nil {
 		return ImportResult{}, wrapImportFailure("bundle_merge_failed", err)
 	}
-	canonical, err := canonicalJSON(merged)
-	if err != nil || len(canonical) > MaxBundleJSONBytes {
-		return ImportResult{}, wrapImportFailure("bundle_digest_failed", errors.New("normalized graph batch exceeds the size limit"))
-	}
-	digest := sha256.Sum256(canonical)
-	bundleID := "bundle-" + hex.EncodeToString(digest[:])
 	sources := merged["sources"].([]Record)
 	if err := w.verifyReceipts(sources); err != nil {
 		return ImportResult{}, wrapImportFailure("receipt_validation_failed", err)
 	}
-	return w.writeNormalized(ctx, merged, bundleID)
+	return w.writeNormalized(ctx, merged)
 }
 
 type boundedBuffer struct {
@@ -563,9 +558,20 @@ func (w *Writer) mergeBundles(bundles []Record) (Record, error) {
 			}
 		}
 		for _, item := range bundle["cards"].([]Record) {
-			if err := mergeImmutableRecord(cards, item); err != nil {
+			id, ok := item["id"].(string)
+			if !ok {
+				return nil, errors.New("graph card ID is invalid")
+			}
+			previous, exists := cards[id]
+			if !exists {
+				cards[id] = item
+				continue
+			}
+			merged, _, err := mergeCardProjection(previous, item)
+			if err != nil {
 				return nil, err
 			}
+			cards[id] = merged
 		}
 	}
 	if len(sources) > maxWriterSources*maxWriterBundles {
@@ -666,7 +672,7 @@ func (w *Writer) verifyReceipt(path, expectedDigest string, maxBytes int64) (int
 	return count, nil
 }
 
-func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID string) (ImportResult, error) {
+func (w *Writer) writeNormalized(ctx context.Context, bundle Record) (ImportResult, error) {
 	db, created, err := w.openGraphDatabase(ctx)
 	if err != nil {
 		return ImportResult{}, wrapImportFailure("graph_database_open_failed", err)
@@ -697,6 +703,14 @@ func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID st
 	if err := ensureNeo4jOutboxSchema(ctx, db); err != nil {
 		return ImportResult{}, wrapImportFailure("graph_outbox_schema_failed", err)
 	}
+	updatedCards, err := reconcileExistingCardProjections(ctx, db, bundle)
+	if err != nil {
+		return ImportResult{}, wrapImportFailure("graph_cards_reconcile_failed", err)
+	}
+	bundleID, err := graphBundleID(bundle)
+	if err != nil {
+		return ImportResult{}, wrapImportFailure("bundle_digest_failed", err)
+	}
 	if err := validateBatchReferences(ctx, db, bundle); err != nil {
 		return ImportResult{}, wrapImportFailure("graph_reference_validation_failed", err)
 	}
@@ -704,6 +718,7 @@ func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID st
 	if err != nil {
 		return ImportResult{}, wrapImportFailure("graph_records_write_failed", err)
 	}
+	result.UpdatedCards = updatedCards
 	if err := enqueueNeo4jOutbox(ctx, db, bundle, bundleID); err != nil {
 		return ImportResult{}, wrapImportFailure("graph_outbox_write_failed", err)
 	}
@@ -716,6 +731,145 @@ func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID st
 	transactionOpen = false
 	committed = true
 	return result, nil
+}
+
+func graphBundleID(bundle Record) (string, error) {
+	encoded, err := canonicalJSON(bundle)
+	if err != nil || len(encoded) == 0 || len(encoded) > MaxBundleJSONBytes {
+		return "", errors.New("normalized graph batch exceeds the size limit")
+	}
+	digest := sha256.Sum256(encoded)
+	return "bundle-" + hex.EncodeToString(digest[:]), nil
+}
+
+func reconcileExistingCardProjections(ctx context.Context, db *sql.DB, bundle Record) (int, error) {
+	cards, ok := bundle["cards"].([]Record)
+	if !ok {
+		return 0, wrapImportFailure("graph_card_bundle_invalid", errors.New("BehaviorGraph cards are invalid"))
+	}
+	updated := 0
+	for index, incoming := range cards {
+		id, ok := incoming["id"].(string)
+		if !ok || id == "" {
+			return 0, wrapImportFailure("graph_card_identity_invalid", errors.New("BehaviorGraph card identity is invalid"))
+		}
+		var previous string
+		err := db.QueryRowContext(ctx, "SELECT payload FROM cards WHERE id=?", id).Scan(&previous)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, wrapImportFailure("graph_card_read_failed", errors.New("BehaviorGraph card could not be read"))
+		}
+		stored, err := decodeRecord(previous)
+		if err != nil {
+			return 0, wrapImportFailure("graph_card_existing_invalid", errors.New("stored BehaviorGraph card is invalid"))
+		}
+		merged, changed, err := mergeCardProjection(stored, incoming)
+		if err != nil {
+			return 0, err
+		}
+		cards[index] = merged
+		if !changed {
+			continue
+		}
+		encoded, err := canonicalJSON(merged)
+		if err != nil || len(encoded) == 0 || len(encoded) > maxRecordBytes {
+			return 0, wrapImportFailure("graph_card_projection_invalid", errors.New("updated BehaviorGraph card exceeds the size limit"))
+		}
+		result, err := db.ExecContext(ctx,
+			"UPDATE cards SET payload=? WHERE id=? AND payload=?", string(encoded), id, previous,
+		)
+		if err != nil {
+			return 0, wrapImportFailure("graph_card_update_failed", errors.New("BehaviorGraph card could not be updated"))
+		}
+		rows, err := result.RowsAffected()
+		if err != nil || rows != 1 {
+			return 0, wrapImportFailure("graph_card_update_conflict", errors.New("BehaviorGraph card changed during projection"))
+		}
+		updated++
+	}
+	bundle["cards"] = cards
+	return updated, nil
+}
+
+func mergeCardProjection(stored, incoming Record) (Record, bool, error) {
+	for _, key := range []string{"schema_version", "id", "capture_id", "program", "source_refs"} {
+		if !sameCanonical(stored[key], incoming[key]) {
+			return nil, false, wrapImportFailure("graph_card_identity_conflict", errors.New("BehaviorGraph card identity cannot be reconciled"))
+		}
+	}
+	for _, key := range []string{
+		"endpoint", "context", "request_analysis", "response_analysis",
+		"business_action", "hypotheses", "analysis_state", "missing_evidence",
+	} {
+		if _, exists := stored[key]; !exists {
+			return nil, false, wrapImportFailure("graph_card_existing_invalid", errors.New("stored BehaviorGraph card is incomplete"))
+		}
+		if _, exists := incoming[key]; !exists {
+			return nil, false, wrapImportFailure("graph_card_projection_invalid", errors.New("incoming BehaviorGraph card is incomplete"))
+		}
+	}
+	storedState, stateOK := stored["analysis_state"].(string)
+	if !stateOK || (storedState != "incomplete" && storedState != "needs_review") {
+		return nil, false, wrapImportFailure("graph_card_existing_invalid", errors.New("stored BehaviorGraph card state is invalid"))
+	}
+	if _, actionOK := asRecord(stored["business_action"]); !actionOK {
+		return nil, false, wrapImportFailure("graph_card_existing_invalid", errors.New("stored BehaviorGraph card analysis is invalid"))
+	}
+	if _, ok := stored["hypotheses"].([]any); !ok {
+		return nil, false, wrapImportFailure("graph_card_existing_invalid", errors.New("stored BehaviorGraph card hypotheses are invalid"))
+	}
+	merged := cloneRecord(stored)
+	for _, key := range []string{"endpoint", "context", "request_analysis", "response_analysis"} {
+		merged[key] = incoming[key]
+	}
+	incomingRequest, requestOK := asRecord(incoming["request_analysis"])
+	incomingResponse, responseOK := asRecord(incoming["response_analysis"])
+	if !requestOK || !responseOK {
+		return nil, false, wrapImportFailure("graph_card_projection_invalid", errors.New("incoming BehaviorGraph card analysis is invalid"))
+	}
+	requestParseState, requestParseOK := incomingRequest["parse_state"].(string)
+	responseParseState, responseParseOK := incomingResponse["parse_state"].(string)
+	if !requestParseOK || !responseParseOK || (requestParseState != "complete" && requestParseState != "incomplete") ||
+		(responseParseState != "complete" && responseParseState != "incomplete") {
+		return nil, false, wrapImportFailure("graph_card_projection_invalid", errors.New("incoming BehaviorGraph card parse state is invalid"))
+	}
+	if storedState == "needs_review" && requestParseState == "complete" && responseParseState == "complete" {
+		merged["analysis_state"] = "needs_review"
+	} else {
+		merged["analysis_state"] = incoming["analysis_state"]
+	}
+	missingEvidence, err := mergeMissingEvidence(stored["missing_evidence"], incoming["missing_evidence"])
+	if err != nil {
+		return nil, false, wrapImportFailure("graph_card_evidence_invalid", err)
+	}
+	merged["missing_evidence"] = missingEvidence
+	return merged, !sameCanonical(stored, merged), nil
+}
+
+func mergeMissingEvidence(stored, incoming any) ([]any, error) {
+	storedItems, storedOK := stored.([]any)
+	incomingItems, incomingOK := incoming.([]any)
+	if !storedOK || !incomingOK {
+		return nil, errors.New("BehaviorGraph missing evidence is invalid")
+	}
+	merged := make([]any, 0, len(storedItems)+len(incomingItems))
+	seen := make(map[string]struct{}, len(storedItems)+len(incomingItems))
+	for _, group := range [][]any{storedItems, incomingItems} {
+		for _, item := range group {
+			value, ok := item.(string)
+			if !ok {
+				return nil, errors.New("BehaviorGraph missing evidence is invalid")
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			merged = append(merged, value)
+		}
+	}
+	return merged, nil
 }
 
 func ensureNeo4jOutboxSchema(ctx context.Context, db *sql.DB) error {
