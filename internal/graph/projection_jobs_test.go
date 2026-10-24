@@ -415,6 +415,73 @@ func TestProjectionJobExpiredLeaseCanBeReclaimed(t *testing.T) {
 	}
 }
 
+func TestInterruptedProjectionLeaseCanBeReleasedWithoutConsumingAttempt(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("5", 64)
+	now := time.Date(2026, 10, 23, 16, 30, 0, 0, time.UTC)
+	registerAndEnqueueProjectionJob(t, db, revisionID, "capture-interrupted", now)
+
+	claimTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, found, err := ClaimNextProjectionJob(ctx, claimTx, projectionTestProjectKey, now, time.Minute, 1)
+	if err != nil || !found || claimed.AttemptCount != 1 {
+		_ = claimTx.Rollback()
+		t.Fatalf("claim interrupted projection: job=%+v found=%v err=%v", claimed, found, err)
+	}
+	if err := claimTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	releasedAt := now.Add(2 * time.Second)
+	retryAt := releasedAt.Add(5 * time.Second)
+	releaseTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseLeasedProjectionJob(ctx, releaseTx, projectionTestProjectKey,
+		revisionID, claimed.LeaseToken.String, claimed.PayloadSHA256, releasedAt, retryAt); err != nil {
+		_ = releaseTx.Rollback()
+		t.Fatalf("release interrupted projection: %v", err)
+	}
+	if err := releaseTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || job.State != "pending" || job.AttemptCount != 0 || job.LeaseToken.Valid || job.LeaseUntil.Valid ||
+		job.NextAttemptAt != retryAt.Format(projectionTimestampLayout) || !job.LastErrorCode.Valid || job.LastErrorCode.String != "worker_interrupted" {
+		t.Fatalf("interrupted projection state = %+v err=%v; want pending without attempt consumption", job, err)
+	}
+
+	staleTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseLeasedProjectionJob(ctx, staleTx, projectionTestProjectKey,
+		revisionID, claimed.LeaseToken.String, claimed.PayloadSHA256, releasedAt, retryAt); !errors.Is(err, ErrProjectionJobNotPending) {
+		_ = staleTx.Rollback()
+		t.Fatalf("stale lease release error = %v; want %v", err, ErrProjectionJobNotPending)
+	}
+	_ = staleTx.Rollback()
+
+	reclaimTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, found, err := ClaimNextProjectionJob(ctx, reclaimTx, projectionTestProjectKey, retryAt, time.Minute, 1)
+	if err != nil || !found || reclaimed.AttemptCount != 1 || reclaimed.LeaseToken.String == claimed.LeaseToken.String {
+		_ = reclaimTx.Rollback()
+		t.Fatalf("reclaim released projection: job=%+v found=%v err=%v", reclaimed, found, err)
+	}
+	if err := reclaimTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProjectionJobClaimQuarantinesCorruptJobAndContinues(t *testing.T) {
 	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
 	defer db.Close()

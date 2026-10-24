@@ -473,6 +473,55 @@ func FailLeasedProjectionJob(
 	return nil
 }
 
+// ReleaseLeasedProjectionJob returns an interrupted delivery to the queue
+// without consuming an attempt. The current lease token and payload digest
+// still fence the update, and the caller supplies a short retry delay so a
+// timed-out job cannot be claimed in a tight loop.
+func ReleaseLeasedProjectionJob(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	revisionID string,
+	leaseToken string,
+	payloadSHA256 string,
+	releasedAt time.Time,
+	nextAttemptAt time.Time,
+) error {
+	if ctx == nil || tx == nil || !graphDigestPattern.MatchString(projectKey) || !validProjectionRevisionID(revisionID) ||
+		!validProjectionLeaseToken(leaseToken) || !validProjectionRevisionID(payloadSHA256) ||
+		releasedAt.IsZero() || nextAttemptAt.Before(releasedAt) {
+		return ErrInvalidProjectionJob
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
+		return err
+	}
+	job, err := verifyLeasedProjectionJob(ctx, tx, revisionID, leaseToken, payloadSHA256)
+	if err != nil {
+		return err
+	}
+	if job.AttemptCount < 1 {
+		return ErrInvalidProjectionJob
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE projection_jobs SET state='pending',attempt_count=attempt_count-1,next_attempt_at=?,
+		 last_error_code='worker_interrupted',lease_token=NULL,lease_until=NULL,updated_at=?
+		 WHERE revision_id=? AND state='leased' AND lease_token=? AND payload_sha256=? AND attempt_count>=1`,
+		nextAttemptAt.UTC().Format(projectionTimestampLayout), releasedAt.UTC().Format(projectionTimestampLayout),
+		revisionID, leaseToken, payloadSHA256,
+	)
+	if err != nil {
+		return errors.New("interrupted projection lease could not be released")
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return ErrProjectionJobNotPending
+	}
+	return nil
+}
+
 var projectionErrorCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 func validProjectionLeaseToken(value string) bool {

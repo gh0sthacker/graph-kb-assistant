@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -747,6 +748,49 @@ func TestProjectionWorkerRetriesUnavailableNeo4jAndHonorsBackoff(t *testing.T) {
 		}, deadline.Add(time.Second))
 	if err != nil || succeeded.State != "applied" || succeeded.AttemptCount != 2 {
 		t.Fatalf("retry after backoff: result=%+v err=%v", succeeded, err)
+	}
+}
+
+func TestProjectionWorkerReleasesInterruptedDeliveryWithoutConsumingAttempt(t *testing.T) {
+	setupCtx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(setupCtx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	if _, err := writePendingHistoryRevision(setupCtx, pageWriter,
+		projectionWorkerExchange(selected, "projection-worker-interrupted-request", "")); err != nil {
+		t.Fatalf("accept pending history revision: %v", err)
+	}
+	maintenance, err := projectlock.Acquire(setupCtx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+
+	workerCtx, cancelWorker := context.WithCancel(setupCtx)
+	progress := make([]ProjectionWorkerResult, 0, 1)
+	results, err := runProjectionWorkerBatchWithProgress(workerCtx, projectStore, maintenance,
+		ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 1}, 1,
+		func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error) {
+			cancelWorker()
+			return true, true, nil
+		}, nil, func(result ProjectionWorkerResult) {
+			progress = append(progress, result)
+		})
+	if !errors.Is(err, context.Canceled) || len(results) != 1 || len(progress) != 1 {
+		t.Fatalf("interrupted worker batch: results=%+v progress=%+v err=%v", results, progress, err)
+	}
+	result := results[0]
+	if result.State != "pending" || result.ErrorCode != "worker_interrupted" || result.AttemptCount != 0 ||
+		progress[0].State != "pending" || progress[0].ErrorCode != "worker_interrupted" {
+		t.Fatalf("interrupted delivery result=%+v progress=%+v; want a released pending job", result, progress)
+	}
+	job, err := behaviorgraph.ProjectionJobByRevision(setupCtx, projectStore.Database.DB(), projectStore.ProjectKey, result.RevisionID)
+	if err != nil || job.State != "pending" || job.AttemptCount != 0 || job.LeaseToken.Valid || job.LeaseUntil.Valid ||
+		!job.LastErrorCode.Valid || job.LastErrorCode.String != "worker_interrupted" {
+		t.Fatalf("durable interrupted job = %+v err=%v; want pending with no lease or consumed attempt", job, err)
 	}
 }
 

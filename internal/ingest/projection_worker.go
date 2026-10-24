@@ -23,6 +23,8 @@ const (
 	defaultProjectionMaxAttempts    = 8
 	baseProjectionRetryDelay        = 5 * time.Second
 	maxProjectionRetryDelay         = 15 * time.Minute
+	projectionInterruptedDelay      = 5 * time.Second
+	projectionReleaseTimeout        = 5 * time.Second
 )
 
 type projectionExecutor func(context.Context, *store.ProjectStore, []behaviorgraph.Record) (bool, bool, error)
@@ -269,6 +271,9 @@ func runProjectionWorkerBatchWithProgress(
 		if err != nil {
 			return results, err
 		}
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
 		if result.State == "idle" {
 			break
 		}
@@ -346,7 +351,7 @@ func runProjectionWorkerOnce(
 	materialized, neo4jReady, projectionErr := projector(deliveryCtx, selected, []behaviorgraph.Record{bundle})
 	result.ProjectionDurationMS = time.Since(projectionStarted).Milliseconds()
 	if err := deliveryCtx.Err(); err != nil {
-		return result, err
+		return releaseInterruptedProjectionDelivery(selected, job, result)
 	}
 	if projectionErr != nil || !materialized || !neo4jReady {
 		code := "projection_unavailable"
@@ -541,6 +546,9 @@ func failProjectionDelivery(
 	errorCode string,
 	result ProjectionWorkerResult,
 ) (ProjectionWorkerResult, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return releaseInterruptedProjectionDelivery(selected, job, result)
+	}
 	failedAt := time.Now().UTC()
 	if failedAt.Before(now) {
 		failedAt = now
@@ -574,6 +582,43 @@ func failProjectionDelivery(
 	}
 	result.NextAttempt = nextAttempt.UTC().Format(projectionWorkerTimestampLayout)
 	result.ErrorCode = errorCode
+	return result, nil
+}
+
+func releaseInterruptedProjectionDelivery(
+	selected *store.ProjectStore,
+	job behaviorgraph.ProjectionJob,
+	result ProjectionWorkerResult,
+) (ProjectionWorkerResult, error) {
+	releasedAt := time.Now().UTC()
+	nextAttemptAt := releasedAt.Add(projectionInterruptedDelay)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), projectionReleaseTimeout)
+	defer cancel()
+	conn, err := beginSelectedImmediate(cleanupCtx, selected)
+	if err != nil {
+		return result, errors.New("interrupted projection lease could not be released; lease will expire for recovery")
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		_ = conn.Close()
+	}()
+	if err := behaviorgraph.ReleaseLeasedProjectionJob(
+		cleanupCtx, conn, selected.ProjectKey, job.RevisionID, job.LeaseToken.String,
+		job.PayloadSHA256, releasedAt, nextAttemptAt,
+	); err != nil {
+		return result, errors.New("interrupted projection lease could not be released; lease will expire for recovery")
+	}
+	if err := commitImmediate(cleanupCtx, conn); err != nil {
+		return result, errors.New("interrupted projection lease could not be committed; lease will expire for recovery")
+	}
+	committed = true
+	result.State = "pending"
+	result.AttemptCount = job.AttemptCount - 1
+	result.ErrorCode = "worker_interrupted"
+	result.NextAttempt = nextAttemptAt.UTC().Format(projectionWorkerTimestampLayout)
 	return result, nil
 }
 
