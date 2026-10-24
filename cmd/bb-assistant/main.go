@@ -108,12 +108,14 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
+		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
 	}
 	switch args[0] {
 	case "version":
 		fmt.Println(version)
 		return nil
+	case "status":
+		return runtimeStatus(args[1:])
 	case "db-check":
 		return dbCheck(args[1:])
 	case "project-audit":

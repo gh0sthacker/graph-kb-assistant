@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -47,6 +48,61 @@ func TestAuditProjectReportsCompatibleStoresAndPartialCoverage(t *testing.T) {
 	}
 	if report.OverallState != "partial" || report.HistoryReconciled || report.Coverage.CoverageState != "partial" {
 		t.Errorf("audit overstated completeness: %+v", report)
+	}
+}
+
+func TestAuditProjectReportsProjectionQueueCountsWithoutPayloads(t *testing.T) {
+	root := t.TempDir()
+	ref := project.CaidoProjectRef{InstanceID: "queue-audit-instance", ProjectID: "queue-audit-project"}
+	projectStore, err := store.CreateProject(context.Background(), ref, root)
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	key := projectStore.ProjectKey
+	for index, state := range []string{"pending", "pending", "leased", "applied", "applied", "applied", "dead_letter"} {
+		revisionID := strings.Repeat(strconv.FormatInt(int64(index+1), 16), 64)
+		if _, err := projectStore.Database.DB().ExecContext(context.Background(), `
+			INSERT INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at)
+			VALUES(?,?,?,?)`, revisionID, "observation-"+strconv.Itoa(index), "historical", "2026-10-23T00:00:00Z"); err != nil {
+			_ = projectStore.Close()
+			t.Fatalf("insert revision registry row: %v", err)
+		}
+		var leaseToken, leaseUntil, appliedAt any
+		if state == "leased" {
+			leaseToken, leaseUntil = strings.Repeat("a", 32), "2026-10-23T00:01:00Z"
+		}
+		if state == "applied" {
+			appliedAt = "2026-10-23T00:01:00Z"
+		}
+		if _, err := projectStore.Database.DB().ExecContext(context.Background(), `
+			INSERT INTO projection_jobs(job_id,revision_id,payload_json,payload_sha256,state,attempt_count,
+			 next_attempt_at,lease_token,lease_until,created_at,updated_at,applied_at)
+			VALUES(?,?,?,? ,?,0,?,?,?,?,?,?)`,
+			"job-"+strconv.Itoa(index), revisionID, `{"private":"payload-must-not-be-returned"}`, strings.Repeat("b", 64),
+			state, "2026-10-23T00:00:00Z", leaseToken, leaseUntil, "2026-10-23T00:00:00Z", "2026-10-23T00:00:00Z", appliedAt,
+		); err != nil {
+			_ = projectStore.Close()
+			t.Fatalf("insert projection job: %v", err)
+		}
+	}
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	report, err := AuditProject(context.Background(), root, key)
+	if err != nil {
+		t.Fatalf("AuditProject() error = %v", err)
+	}
+	want := ProjectionQueueStatus{State: "compatible", Pending: 2, Leased: 1, Applied: 3, DeadLetter: 1}
+	if report.ProjectionQueue != want {
+		t.Fatalf("projection queue = %+v, want %+v", report.ProjectionQueue, want)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal audit report: %v", err)
+	}
+	if strings.Contains(string(encoded), "payload-must-not-be-returned") {
+		t.Fatal("audit report exposed projection payload content")
 	}
 }
 

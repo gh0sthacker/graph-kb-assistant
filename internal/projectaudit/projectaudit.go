@@ -38,11 +38,20 @@ type FidelityCounts struct {
 	Unknown           int64 `json:"unknown"`
 }
 
+type ProjectionQueueStatus struct {
+	State      string `json:"state"`
+	Pending    int64  `json:"pending"`
+	Leased     int64  `json:"leased"`
+	Applied    int64  `json:"applied"`
+	DeadLetter int64  `json:"dead_letter"`
+}
+
 type Report struct {
 	ProjectKey           string                      `json:"project_key"`
 	OverallState         string                      `json:"overall_state"`
 	CaptureStore         CaptureStoreStatus          `json:"capture_store"`
 	BehaviorGraph        BehaviorGraphStatus         `json:"behavior_graph"`
+	ProjectionQueue      ProjectionQueueStatus       `json:"projection_queue"`
 	Coverage             capturesearch.ProjectStatus `json:"coverage"`
 	RequestWireFidelity  FidelityCounts              `json:"request_wire_fidelity"`
 	ResponseWireFidelity FidelityCounts              `json:"response_wire_fidelity"`
@@ -84,8 +93,9 @@ func AuditProject(ctx context.Context, dataRoot, projectKey string) (Report, err
 	}
 
 	report := Report{
-		ProjectKey:   projectKey,
-		OverallState: "partial",
+		ProjectKey:      projectKey,
+		OverallState:    "partial",
+		ProjectionQueue: ProjectionQueueStatus{State: "not_checked"},
 		CaptureStore: CaptureStoreStatus{
 			State:                 "unavailable",
 			ExpectedSchemaVersion: expectedCaptureSchemaVersion,
@@ -128,6 +138,12 @@ func AuditProject(ctx context.Context, dataRoot, projectKey string) (Report, err
 		return Report{}, err
 	}
 	report.Coverage = status
+	if err := readProjectionQueueCounts(ctx, tx, &report.ProjectionQueue); err != nil {
+		report.ProjectionQueue.State = "unavailable"
+		report.Coverage.CoverageGaps = append(report.Coverage.CoverageGaps, "Projection queue status could not be read.")
+	} else {
+		report.ProjectionQueue.State = "compatible"
+	}
 	if err := readFidelityCounts(ctx, tx, &report); err != nil {
 		return Report{}, err
 	}
@@ -150,6 +166,40 @@ func AuditProject(ctx context.Context, dataRoot, projectKey string) (Report, err
 		report.Coverage.CoverageGaps = append(report.Coverage.CoverageGaps, "BehaviorGraph compatibility could not be confirmed.")
 	}
 	return report, nil
+}
+
+func readProjectionQueueCounts(ctx context.Context, tx *sql.Tx, status *ProjectionQueueStatus) error {
+	if ctx == nil || tx == nil || status == nil {
+		return errors.New("projection queue snapshot is unavailable")
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT state,count(*) FROM projection_jobs GROUP BY state`)
+	if err != nil {
+		return errors.New("projection queue counts could not be read")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var state string
+		var count int64
+		if err := rows.Scan(&state, &count); err != nil || count < 0 {
+			return errors.New("projection queue counts are malformed")
+		}
+		switch state {
+		case "pending":
+			status.Pending = count
+		case "leased":
+			status.Leased = count
+		case "applied":
+			status.Applied = count
+		case "dead_letter":
+			status.DeadLetter = count
+		default:
+			return errors.New("projection queue contains an unsupported state")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("projection queue counts could not be completed")
+	}
+	return nil
 }
 
 func readFidelityCounts(ctx context.Context, tx *sql.Tx, report *Report) error {

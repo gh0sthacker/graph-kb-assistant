@@ -389,6 +389,57 @@ func TestProjectAuditCLIOutputIsJSON(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusCLIOutputsPartialLocalCapabilitySummary(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	dataRoot := filepath.Join(t.TempDir(), "private-data")
+	ref := project.CaidoProjectRef{InstanceID: "runtime-status-instance", ProjectID: "runtime-status-project"}
+	projectStore, err := store.CreateProject(t.Context(), ref, dataRoot)
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	key := projectStore.ProjectKey
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	originalStdout := os.Stdout
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writeEnd
+	t.Cleanup(func() { os.Stdout = originalStdout })
+	if err := runtimeStatus([]string{"--data-root", dataRoot}); err != nil {
+		_ = writeEnd.Close()
+		t.Fatalf("runtimeStatus() error = %v", err)
+	}
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.NewDecoder(readEnd).Decode(&output); err != nil {
+		t.Fatalf("status output is not JSON: %v", err)
+	}
+	_ = readEnd.Close()
+	if output["overall_state"] != "partial" || output["registered_projects"] != float64(1) || output["audited_projects"] != float64(1) {
+		t.Fatalf("unexpected status output: %+v", output)
+	}
+	projects, ok := output["projects"].([]any)
+	if !ok || len(projects) != 1 || projects[0].(map[string]any)["project_key"] != key {
+		t.Fatalf("status omitted the local project audit: %+v", output["projects"])
+	}
+	capabilities, ok := output["capabilities"].(map[string]any)
+	if !ok || capabilities["caido_live_intake"] != "not checked; Caido was not contacted" || capabilities["model_execution"] != "not invoked" {
+		t.Fatalf("status overstated unverified capabilities: %+v", output["capabilities"])
+	}
+}
+
+func TestRuntimeStatusCLIRejectsUnexpectedArguments(t *testing.T) {
+	if err := runtimeStatus([]string{"unexpected"}); err == nil {
+		t.Fatal("status accepted an unexpected positional argument")
+	}
+}
+
 func TestProjectionWorkerCLIReportsEmptyQueueAsJSON(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "neo4j")
 	dataRoot := filepath.Join(t.TempDir(), "private-data")

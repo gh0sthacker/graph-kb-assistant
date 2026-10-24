@@ -1,5 +1,31 @@
 # Project status and known limitations
 
+## Stage 6 local capability status slice (2026-10-23) — PARTIAL
+
+- Added `bb-assistant status`, a read-only JSON report for graph configuration,
+  registered project schema/coverage, local live/historical counters, and
+  projection-queue states. It labels Neo4j connectivity as unchecked, Caido as
+  not contacted, and model execution as not invoked. It does not read message
+  bodies, vault objects, display names, Caido IDs, or credentials. Overall
+  status stays `partial` while source reconciliation and coverage gaps remain.
+- `project-audit` now includes pending, leased, applied, and dead-letter
+  projection counts from the same read-only SQLite snapshot. The shared Go
+  launcher can run `status` before Neo4j credentials are configured; normal
+  Neo4j-backed commands still require the private runtime file.
+- Added `docs/CURRENT-CAPABILITIES.md` as the current report guide and linked it
+  from the local setup/runbook. The machine-specific JSON remains outside Git
+  and must be regenerated with `./scripts/bb-assistant status` when checking a
+  runtime.
+- Synthetic checks cover exact queue-state counts, private-field omission,
+  partial status, and launcher behavior with or without Neo4j configuration.
+  The CLI was also run once as a read-only audit of the selected local store;
+  it confirmed supported capture/BehaviorGraph schemas and partial coverage.
+  The report omitted per-machine identifiers from committed docs and did not
+  inspect message bodies or contact Caido, Neo4j, or a model provider.
+- Stage 6 remains `PARTIAL`: supervised Go service cutover, backup/restore,
+  runtime live intake, and restart/replay against the selected data still need
+  separate evidence. See [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md).
+
 ## Stage 5 consultation implementation (2026-10-23) — PARTIAL
 
 - Added a project-scoped SQLite consultation store with schema-v1 migration,

@@ -16,6 +16,19 @@ From the repository root:
 
 Open `http://127.0.0.1:8765/`. The interface starts with an empty project list until local project data is registered. Use `--addr` only with a loopback host. Set `BB_ASSISTANT_DATA_HOME` to choose the private runtime-data directory; by default the application uses a user data directory outside the checkout.
 
+The same launcher provides the current local runtime summary:
+
+```sh
+./scripts/bb-assistant status
+```
+
+`status` can run before Neo4j credentials are configured. It reports project
+schema/coverage and projection-queue counts without reading capture bodies or
+contacting Caido, Neo4j, or a model provider. Its overall state remains
+`partial` until source reconciliation and the other coverage gaps are verified.
+See [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) for what the report
+measures and how to read its limits.
+
 ## Connect an assistant over MCP
 
 The project exposes a stdio MCP server. The included launcher is:
@@ -26,7 +39,7 @@ The project exposes a stdio MCP server. The included launcher is:
 
 Configure your MCP client to run that executable from the repository checkout. Keep the data directory and any environment variables private. The default server exposes read-only local project, search, graph, and knowledge-base tools. An opt-in raw-capture tool can return sensitive request or response bytes; keep it disabled unless you need it and understand the data exposure.
 
-The launcher reads the private Neo4j settings from `$XDG_DATA_HOME/bb-graph-assistant/neo4j.env` (or `~/.local/share/bb-graph-assistant/neo4j.env`) and selects Neo4j for graph reads. Set `BB_ASSISTANT_NEO4J_ENV_FILE` to use another private file. The same launcher runs other commands, for example `./scripts/bb-assistant neo4j-check` or `./scripts/bb-assistant web-ui`.
+The launcher reads the private Neo4j settings from `$XDG_DATA_HOME/bb-graph-assistant/neo4j.env` (or `~/.local/share/bb-graph-assistant/neo4j.env`) and selects Neo4j for graph reads. Set `BB_ASSISTANT_NEO4J_ENV_FILE` to use another private file. Operational commands require that file when Neo4j is selected. `status` and `version` work without it; explicit SQLite compatibility mode also does not require it. The same launcher runs other commands, for example `./scripts/bb-assistant neo4j-check`.
 
 ## Use Hermes Agent
 
