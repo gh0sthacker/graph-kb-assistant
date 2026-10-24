@@ -33,6 +33,17 @@
   was not confirmed in this slice. Graph data coverage and the overall
   application remain `PARTIAL`.
 
+## Local API and graph runtime smoke (2026-10-24) — PARTIAL
+
+- Read-only calls to the actual local Juice Shop project returned one
+  registered project and a surface catalog with 131 operations; the catalog
+  correctly reports `partial` coverage.
+- A direct graph request for one catalog seed returned 3 entities and 2
+  assertions with `incomplete=true` and `truncated=false`. This verifies the
+  UI/API/local graph-backend path for one neighborhood, not full graph or
+  Caido-history completeness. The smoke did not read HTTP bodies or contact
+  Caido.
+
 ## Local application and Hermes runtime check (2026-10-24 09:26Z) — PARTIAL
 
 - The Go web UI was restarted at `http://127.0.0.1:8765/` through the updated
