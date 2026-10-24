@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"bb-graph-assistant/internal/appquery"
 )
@@ -35,6 +37,7 @@ type readAPI interface {
 	GraphExplorerProjects(context.Context, string, int) (map[string]any, error)
 	GraphExplorerSurface(context.Context, appquery.SurfaceRequest) (appquery.SurfaceResult, error)
 	Graph(context.Context, appquery.GraphRequest) (appquery.GraphResult, error)
+	CaptureMessageRange(context.Context, appquery.CaptureMessageRangeRequest) (appquery.CaptureMessageRange, error)
 }
 
 // NewHandler constructs the local UI and its narrowly scoped read-only API.
@@ -56,6 +59,7 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	mux.HandleFunc("GET /api/projects", projectsHandler(api))
 	mux.HandleFunc("GET /api/surface", surfaceHandler(api))
 	mux.HandleFunc("GET /api/graph", graphHandler(api))
+	mux.HandleFunc("GET /api/evidence", captureMessageRangeHandler(api))
 	return securityHeaders(localRequestGate(mux)), nil
 }
 
@@ -212,6 +216,67 @@ func graphHandler(api readAPI) http.HandlerFunc {
 	}
 }
 
+func captureMessageRangeHandler(api readAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		allowed := map[string]struct{}{
+			"project_key": {}, "request_id": {}, "revision_id": {}, "side": {}, "offset": {}, "max_bytes": {},
+		}
+		for key := range query {
+			if _, ok := allowed[key]; !ok {
+				writeError(w, http.StatusBadRequest, "capture evidence query contains an unsupported field")
+				return
+			}
+		}
+		value := func(key string, required bool) (string, bool) {
+			values, exists := query[key]
+			if !exists {
+				return "", !required
+			}
+			if len(values) != 1 || required && values[0] == "" {
+				return "", false
+			}
+			return values[0], true
+		}
+		projectKey, projectOK := value("project_key", true)
+		requestID, requestOK := value("request_id", true)
+		revisionID, revisionOK := value("revision_id", false)
+		side, sideOK := value("side", true)
+		offsetValue, offsetOK := value("offset", false)
+		maximumValue, maximumOK := value("max_bytes", false)
+		if !projectOK || !projectKeyPattern.MatchString(projectKey) || !requestOK || len(requestID) > 512 ||
+			!revisionOK || len(revisionID) > 64 || !sideOK || side != "request" && side != "response" || !offsetOK || !maximumOK {
+			writeError(w, http.StatusBadRequest, "capture evidence query is malformed")
+			return
+		}
+		offset := int64(0)
+		if offsetValue != "" {
+			parsed, err := strconv.ParseInt(offsetValue, 10, 64)
+			if err != nil || parsed < 0 {
+				writeError(w, http.StatusBadRequest, "capture evidence offset is malformed")
+				return
+			}
+			offset = parsed
+		}
+		maximum := appquery.MaximumEvidenceRangeBytes
+		if maximumValue != "" {
+			parsed, err := strconv.Atoi(maximumValue)
+			if err != nil || parsed < 1 || parsed > appquery.MaximumEvidenceRangeBytes {
+				writeError(w, http.StatusBadRequest, "capture evidence range limit is malformed")
+				return
+			}
+			maximum = parsed
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+		defer cancel()
+		result, err := api.CaptureMessageRange(ctx, appquery.CaptureMessageRangeRequest{
+			ProjectKey: projectKey, RequestID: requestID, RevisionID: revisionID,
+			Side: side, Offset: offset, Maximum: maximum,
+		})
+		writeEvidenceResult(w, result, err)
+	}
+}
+
 func optionalNonnegativeInt64(value string) (int64, bool, error) {
 	if value == "" {
 		return 0, false, nil
@@ -281,6 +346,67 @@ func writeGraphResult(w http.ResponseWriter, result map[string]any, err error) {
 		return
 	}
 	writeResult(w, result, nil)
+}
+
+func writeEvidenceResult(w http.ResponseWriter, result appquery.CaptureMessageRange, err error) {
+	defer clear(result.Data)
+	if err != nil {
+		var queryErr *appquery.QueryError
+		if errors.As(err, &queryErr) {
+			switch queryErr.Code {
+			case appquery.ErrorInvalidInput:
+				writeError(w, http.StatusBadRequest, "capture evidence request is invalid")
+			case appquery.ErrorProjectNotRegistered:
+				writeError(w, http.StatusNotFound, "selected project is not registered")
+			case appquery.ErrorProjectUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "selected project is unavailable for local evidence reads")
+			case appquery.ErrorEvidenceKeyUnavailable:
+				writeError(w, http.StatusServiceUnavailable, "local vault key is unavailable or invalid; historical bytes cannot be opened")
+			case appquery.ErrorEvidenceUnavailable:
+				writeError(w, http.StatusNotFound, "exact local historical bytes are unavailable for this capture revision")
+			default:
+				writeError(w, http.StatusServiceUnavailable, "local capture evidence is unavailable")
+			}
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "capture evidence could not be read")
+		return
+	}
+	encoding, data := "utf-8", string(result.Data)
+	if !utf8.Valid(result.Data) {
+		encoding, data = "base64", base64.StdEncoding.EncodeToString(result.Data)
+	}
+	var nextOffset any
+	if next := result.Offset + int64(len(result.Data)); next < result.TotalSize {
+		nextOffset = next
+	}
+	payload := map[string]any{
+		"project_key": result.ProjectKey, "request_id": result.RequestID, "revision_id": result.RevisionID,
+		"side": result.Side, "offset": result.Offset, "total_size": result.TotalSize,
+		"returned_size": len(result.Data), "next_offset": nextOffset,
+		"data": data, "encoding": encoding, "sha256": result.SHA256,
+		"captured_at": result.CapturedAt, "parse_state": result.ParseState, "wire_fidelity": result.WireFidelity,
+		"request_truncated": result.RequestTruncated, "response_truncated": result.ResponseTruncated,
+		"sensitive_values_may_be_present": true,
+		"coverage_note":                   "Exact bytes from this locally stored historical revision only; live-tail raw bytes remain in Caido.",
+	}
+	encoded, marshalErr := json.Marshal(payload)
+	if marshalErr == nil && len(encoded) > 2<<20 && encoding != "base64" {
+		clear(encoded)
+		payload["encoding"] = "base64"
+		payload["data"] = base64.StdEncoding.EncodeToString(result.Data)
+		encoded, marshalErr = json.Marshal(payload)
+	}
+	if marshalErr != nil || len(encoded) > 2<<20 {
+		writeError(w, http.StatusRequestEntityTooLarge, "capture evidence range exceeds the local UI limit")
+		return
+	}
+	defer clear(encoded)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, bytes.NewReader(encoded))
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

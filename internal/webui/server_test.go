@@ -1,7 +1,10 @@
 package webui
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,11 +16,14 @@ import (
 )
 
 type explorerAPIFixture struct {
-	direct, full       int
-	graphErr           error
-	lastRequest        appquery.GraphRequest
-	surfaceErr         error
-	lastSurfaceRequest appquery.SurfaceRequest
+	direct, full        int
+	graphErr            error
+	lastRequest         appquery.GraphRequest
+	surfaceErr          error
+	lastSurfaceRequest  appquery.SurfaceRequest
+	evidenceErr         error
+	evidenceResult      appquery.CaptureMessageRange
+	lastEvidenceRequest appquery.CaptureMessageRangeRequest
 }
 
 func (*explorerAPIFixture) GraphExplorerProjects(context.Context, string, int) (map[string]any, error) {
@@ -35,6 +41,118 @@ func (f *explorerAPIFixture) Graph(_ context.Context, request appquery.GraphRequ
 		f.direct++
 	}
 	return appquery.GraphResult{View: request.View, Payload: map[string]any{"view": string(request.View)}}, f.graphErr
+}
+func (f *explorerAPIFixture) CaptureMessageRange(_ context.Context, request appquery.CaptureMessageRangeRequest) (appquery.CaptureMessageRange, error) {
+	f.lastEvidenceRequest = request
+	return f.evidenceResult, f.evidenceErr
+}
+
+func TestEvidenceHandlerReadsOnePinnedBoundedLocalMessageRange(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	revisionID := strings.Repeat("b", 64)
+	api := &explorerAPIFixture{evidenceResult: appquery.CaptureMessageRange{
+		ProjectKey: projectKey, RequestID: "239", RevisionID: revisionID, Side: "request",
+		Offset: 16, TotalSize: 21, Data: []byte("GET /"), SHA256: strings.Repeat("c", 64),
+		ParseState: "complete", WireFidelity: "reconstructed_text",
+	}}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/evidence?project_key="+projectKey+"&request_id=239&revision_id="+revisionID+"&side=request&offset=16&max_bytes=4096", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("sensitive evidence response is cacheable")
+	}
+	if got := api.lastEvidenceRequest; got.ProjectKey != projectKey || got.RequestID != "239" || got.RevisionID != revisionID || got.Side != "request" || got.Offset != 16 || got.Maximum != 4096 {
+		t.Fatalf("evidence request = %#v", got)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result["data"] != "GET /" || result["encoding"] != "utf-8" || result["revision_id"] != revisionID || result["next_offset"] != nil {
+		t.Fatalf("evidence response = %#v", result)
+	}
+}
+
+func TestEvidenceHandlerRejectsDuplicateAndUnknownQueryParameters(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	for _, target := range []string{
+		"/api/evidence?project_key=" + projectKey + "&project_key=" + projectKey + "&request_id=239&side=request",
+		"/api/evidence?project_key=" + projectKey + "&request_id=239&side=request&unexpected=value",
+		"/api/evidence?project_key=" + projectKey + "&request_id=239&side=request&max_bytes=1048577",
+	} {
+		api := &explorerAPIFixture{}
+		handler, _ := NewHandler(api)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+target, nil))
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("target %q status=%d, want 400", target, response.Code)
+		}
+		if api.lastEvidenceRequest.RequestID != "" {
+			t.Errorf("invalid evidence query reached service: %#v", api.lastEvidenceRequest)
+		}
+	}
+}
+
+func TestEvidenceHandlerExplainsUnavailableLocalVaultKey(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	api := &explorerAPIFixture{evidenceErr: &appquery.QueryError{
+		Code: appquery.ErrorEvidenceKeyUnavailable, Message: "local vault key is unavailable or invalid",
+	}}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/evidence?project_key="+projectKey+"&request_id=239&side=request", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "local vault key is unavailable or invalid") {
+		t.Fatalf("missing-key response status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestEvidenceHandlerFallsBackToBase64ForControlHeavyTextWithinResponseLimit(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	revisionID := strings.Repeat("b", 64)
+	data := bytes.Repeat([]byte{0}, appquery.MaximumEvidenceRangeBytes)
+	api := &explorerAPIFixture{evidenceResult: appquery.CaptureMessageRange{
+		ProjectKey: projectKey, RequestID: "239", RevisionID: revisionID, Side: "request",
+		TotalSize: int64(len(data)), Data: data,
+	}}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/evidence?project_key="+projectKey+"&request_id=239&side=request", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d: %s", response.Code, response.Body.String())
+	}
+	if response.Body.Len() > 2<<20 {
+		t.Fatalf("evidence response size=%d, want at most 2 MiB", response.Body.Len())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result["encoding"] != "base64" {
+		t.Fatalf("encoding=%v, want base64 fallback", result["encoding"])
+	}
+	encoded, ok := result["data"].(string)
+	if !ok {
+		t.Fatalf("data type=%T, want string", result["data"])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || !bytes.Equal(decoded, data) {
+		t.Fatalf("base64 fallback did not preserve exact evidence bytes: decode error=%v, got %d bytes", err, len(decoded))
+	}
 }
 
 func TestGraphHandlerLoadsDirectNeighborhoodUnlessFullSliceRequested(t *testing.T) {

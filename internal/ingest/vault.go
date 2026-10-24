@@ -20,18 +20,20 @@ import (
 
 const vaultMagic = "BBA1"
 
+var ErrVaultKeyUnavailable = errors.New("local capture vault key is unavailable or invalid")
+
 func readVaultKey() ([]byte, error) {
 	encoded := os.Getenv("BB_ASSISTANT_VAULT_KEY")
 	if encoded == "" || strings.Trim(encoded, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-=") != "" {
-		return nil, errors.New("BB_ASSISTANT_VAULT_KEY is missing or invalid")
+		return nil, ErrVaultKeyUnavailable
 	}
 	if strings.Contains(strings.TrimRight(encoded, "="), "=") || len(encoded)-len(strings.TrimRight(encoded, "=")) > 2 {
-		return nil, errors.New("BB_ASSISTANT_VAULT_KEY is missing or invalid")
+		return nil, ErrVaultKeyUnavailable
 	}
 	unpadded := strings.TrimRight(encoded, "=")
 	key, err := base64.RawURLEncoding.DecodeString(unpadded)
 	if err != nil || len(key) != 32 {
-		return nil, errors.New("BB_ASSISTANT_VAULT_KEY must encode exactly 32 bytes")
+		return nil, ErrVaultKeyUnavailable
 	}
 	return key, nil
 }

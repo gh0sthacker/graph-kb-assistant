@@ -3,6 +3,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const MAX_GRAPH_ZOOM = 10;
 const MIN_GRAPH_ZOOM = 0.35;
+const MAX_EVIDENCE_PREVIEW_BYTES = 2 << 20;
 const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant"];
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
@@ -12,6 +13,7 @@ const state = {
   graphSeeds: [], graphView: "direct", graphHistory: [], graphRequestId: 0, graphAbort: null,
   loadingGraph: false, hiddenKinds: new Set(OVERVIEW_HIDDEN_KINDS), routeScope: true, edgeLabelsVisible: true,
   renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
+  evidence: null, evidenceRequestId: 0, evidenceTrigger: null,
 };
 
 const elements = {
@@ -28,6 +30,10 @@ const elements = {
   focusGraph: $("#focus-graph"), workspace: $(".workspace"),
   captureSelect: $("#capture-select"), graphBack: $("#graph-back"), graphMore: $("#graph-more"), graphDeeper: $("#graph-deeper"),
   toast: $("#toast"), viewport: $("#graph-viewport"),
+  evidenceDialog: $("#evidence-dialog"), evidenceClose: $("#evidence-close"),
+  evidenceLabel: $("#evidence-capture-label"), evidenceMeta: $("#evidence-meta"), evidenceContent: $("#evidence-content"),
+  evidenceFoot: $("#evidence-foot"), evidenceMore: $("#evidence-more"),
+  evidenceRequest: $("#evidence-request"), evidenceResponse: $("#evidence-response"),
 };
 
 const nodeLabels = {
@@ -96,6 +102,127 @@ async function getJSON(path, signal) {
   return payload;
 }
 
+function clearEvidence(closeDialog = true) {
+  state.evidenceRequestId++;
+  state.evidence = null;
+  const trigger = state.evidenceTrigger;
+  state.evidenceTrigger = null;
+  if (closeDialog && elements.evidenceDialog.open) {
+    elements.evidenceDialog.close();
+    if (trigger?.isConnected) trigger.focus();
+  }
+  elements.evidenceLabel.textContent = "No capture selected";
+  elements.evidenceMeta.textContent = "Select an exact historical capture to inspect its stored message.";
+  elements.evidenceContent.textContent = "";
+  elements.evidenceFoot.textContent = "";
+  elements.evidenceMore.hidden = true;
+  elements.evidenceMore.disabled = true;
+  setEvidenceSideButtons("request");
+}
+
+function setEvidenceSideButtons(side) {
+  for (const [button, value] of [[elements.evidenceRequest, "request"], [elements.evidenceResponse, "response"]]) {
+    const active = side === value;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function openEvidence(item, trigger = null) {
+  const requestId = String(item?.request_id ?? "");
+  if (!state.projectKey || !requestId || requestId.length > 512 || item?.record_source !== "encrypted_local_capture" || item?.raw_stored_locally !== true) {
+    showToast("Exact local HTTP bytes are unavailable for this record.");
+    return Promise.resolve();
+  }
+  clearEvidence(false);
+  const project = state.projectKey;
+  const requestID = ++state.evidenceRequestId;
+  state.evidence = {
+    projectKey: project, requestId, requestID, revisionId: typeof item.revision_id === "string" ? item.revision_id : "",
+    side: "request", nextOffset: 0, totalSize: null, loading: false,
+  };
+  state.evidenceTrigger = trigger;
+  elements.evidenceLabel.textContent = `Request ID ${requestId} · ${state.projects.find(row => row.project_key === project)?.display_name || project}`;
+  elements.evidenceMeta.textContent = "Authenticating the selected local message revision…";
+  elements.evidenceContent.textContent = "";
+  elements.evidenceFoot.textContent = "";
+  elements.evidenceMore.hidden = true;
+  elements.evidenceMore.disabled = true;
+  setEvidenceSideButtons("request");
+  if (!elements.evidenceDialog.open) elements.evidenceDialog.showModal();
+  return loadEvidenceRange(false);
+}
+
+function evidenceText(payload) {
+  if (payload.encoding === "base64") return `[Binary data · ${payload.returned_size} bytes · base64]\n${payload.data || ""}`;
+  return String(payload.data || "");
+}
+
+async function loadEvidenceRange(append) {
+  const evidence = state.evidence;
+  if (!evidence || evidence.loading || evidence.projectKey !== state.projectKey) return;
+  const requestID = evidence.requestID;
+  evidence.loading = true;
+  elements.evidenceMore.disabled = true;
+  elements.evidenceFoot.textContent = append ? "Loading the next authenticated range…" : "Loading the authenticated message range…";
+  const query = new URLSearchParams({
+    project_key: evidence.projectKey, request_id: evidence.requestId, side: evidence.side,
+    offset: String(append ? evidence.nextOffset : 0), max_bytes: String(1 << 20),
+  });
+  if (evidence.revisionId) query.set("revision_id", evidence.revisionId);
+  try {
+    const payload = await getJSON(`/api/evidence?${query}`);
+    if (state.evidence !== evidence || requestID !== state.evidenceRequestId || evidence.projectKey !== state.projectKey) return;
+    evidence.revisionId = payload.revision_id || evidence.revisionId;
+    evidence.totalSize = Number(payload.total_size || 0);
+    evidence.nextOffset = payload.next_offset === null || payload.next_offset === undefined ? null : Number(payload.next_offset);
+    evidence.loadedBytes = (evidence.loadedBytes || 0) + Number(payload.returned_size || 0);
+    const chunk = evidenceText(payload);
+    elements.evidenceContent.textContent = append ? `${elements.evidenceContent.textContent}${chunk}` : chunk;
+    const fidelity = payload.wire_fidelity || "unknown fidelity";
+    const parse = payload.parse_state || "parse state unknown";
+    const size = formatBytes(payload.total_size);
+    const truncated = payload[`${evidence.side}_truncated`] === true ? " · stored message is marked truncated" : "";
+    const capturedAt = payload.captured_at ? ` · captured ${payload.captured_at}` : " · capture time unknown";
+    const digest = payload.sha256 ? ` · SHA-256 ${payload.sha256}` : " · SHA-256 unavailable";
+    elements.evidenceMeta.textContent = `Revision ${evidence.revisionId || "unknown"}${capturedAt} · ${size} · ${fidelity} · parse ${parse}${truncated}${digest}`;
+    const previewCapped = evidence.nextOffset !== null && evidence.loadedBytes >= MAX_EVIDENCE_PREVIEW_BYTES;
+    elements.evidenceMore.hidden = evidence.nextOffset === null || previewCapped;
+    elements.evidenceMore.disabled = evidence.nextOffset === null || previewCapped;
+    elements.evidenceFoot.textContent = previewCapped
+      ? `Local preview capped at ${formatBytes(MAX_EVIDENCE_PREVIEW_BYTES)}. The full stored message size and SHA-256 remain shown; no bytes were sent to a model.`
+      : evidence.nextOffset === null
+        ? "End of this stored message. The displayed bytes are not sent to a model."
+        : `Showing bytes ${payload.offset}–${Number(payload.offset) + Number(payload.returned_size)} of ${payload.total_size}. Load one more bounded range to continue.`;
+  } catch (error) {
+    if (state.evidence !== evidence || requestID !== state.evidenceRequestId) return;
+    elements.evidenceMeta.textContent = "The selected message range could not be read.";
+    elements.evidenceContent.textContent = "";
+    elements.evidenceFoot.textContent = error.message;
+    elements.evidenceMore.hidden = true;
+    showToast(`HTTP evidence unavailable: ${error.message}`);
+  } finally {
+    if (state.evidence === evidence && requestID === state.evidenceRequestId) {
+      evidence.loading = false;
+      if (evidence.nextOffset !== null) elements.evidenceMore.disabled = false;
+    }
+  }
+}
+
+function selectEvidenceSide(side) {
+  if (!state.evidence || (side !== "request" && side !== "response")) return;
+  state.evidence.requestID = ++state.evidenceRequestId;
+  state.evidence.loading = false;
+  state.evidence.side = side;
+  state.evidence.nextOffset = 0;
+  state.evidence.loadedBytes = 0;
+  setEvidenceSideButtons(side);
+  elements.evidenceContent.textContent = "";
+  elements.evidenceMore.hidden = true;
+  elements.evidenceMeta.textContent = `Loading ${side} from the same pinned capture revision…`;
+  void loadEvidenceRange(false);
+}
+
 async function loadProjects(append = false) {
   elements.project.disabled = true;
   if (!append) {
@@ -153,6 +280,7 @@ async function loadProjects(append = false) {
 }
 
 function clearProjectView() {
+  clearEvidence();
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = "";
@@ -182,6 +310,7 @@ async function selectProject(projectKey) {
     clearProjectView();
     return;
   }
+  if (state.projectKey !== projectKey) clearEvidence();
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = projectKey;
@@ -925,7 +1054,7 @@ function renderProvenance(node) {
   const items = (state.graph?.capture_provenance || []).filter(item => item.graph_observation_id === node.id);
   const section = el("section", "detail-section");
   section.append(el("div", "detail-section-title", `Caido references · ${items.length}`));
-  section.append(el("p", "detail-help", "Use the request ID to find the original record in Caido. HTTP content is not shown in this panel."));
+  section.append(el("p", "detail-help", "Open a local historical revision to inspect exact stored bytes. Live content remains in Caido."));
   if (!items.length) {
     section.append(el("div", "provenance-item", "No local link to the source capture is attached."));
   } else {
@@ -933,6 +1062,14 @@ function renderProvenance(node) {
       const line = el("div", "provenance-item");
       line.append(el("b", "", `Request ID · ${item.request_id || "—"}`));
       line.append(el("span", "", `${readableRecordSource(item.record_source)} · ${formatBytes(item.request_size)}${item.first_seen_at ? ` · ${item.first_seen_at}` : ""}`));
+      if (item.record_source === "encrypted_local_capture" && item.raw_stored_locally === true) {
+        const button = el("button", "detail-action evidence-open", "Open stored HTTP →");
+        button.type = "button";
+        button.addEventListener("click", () => { void openEvidence(item, button); });
+        line.append(button);
+      } else {
+        line.append(el("span", "evidence-unavailable", "Raw bytes are not stored in this local project."));
+      }
       section.append(line);
     }
   }
@@ -1080,6 +1217,15 @@ elements.edgeLabels?.addEventListener("click", () => {
   elements.edgeLabels.title = state.edgeLabelsVisible ? "Hide edge labels" : "Show edge labels";
   renderGraph(false);
 });
+elements.evidenceClose.addEventListener("click", () => clearEvidence());
+elements.evidenceDialog.addEventListener("close", () => {
+  const trigger = state.evidenceTrigger;
+  clearEvidence(false);
+  if (trigger?.isConnected) trigger.focus();
+});
+elements.evidenceRequest.addEventListener("click", () => selectEvidenceSide("request"));
+elements.evidenceResponse.addEventListener("click", () => selectEvidenceSide("response"));
+elements.evidenceMore.addEventListener("click", () => { void loadEvidenceRange(true); });
 elements.graphCanvas.addEventListener("pointerdown", event => {
   if (event.target.closest?.(".node-group")) return;
   event.preventDefault();

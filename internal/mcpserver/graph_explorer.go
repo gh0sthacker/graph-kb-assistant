@@ -101,6 +101,17 @@ func (t *Tools) Graph(ctx context.Context, request appquery.GraphRequest) (appqu
 	return t.graphQueries.Graph(ctx, request)
 }
 
+// CaptureMessageRange exposes the exact local evidence resolver to the loopback
+// UI only. It is deliberately absent from the MCP tool catalog and dispatch.
+func (t *Tools) CaptureMessageRange(ctx context.Context, request appquery.CaptureMessageRangeRequest) (appquery.CaptureMessageRange, error) {
+	if t.graphQueries == nil {
+		return appquery.CaptureMessageRange{}, &appquery.QueryError{
+			Code: appquery.ErrorEvidenceUnavailable, Message: "capture evidence service is unavailable",
+		}
+	}
+	return t.graphQueries.CaptureMessageRange(ctx, request)
+}
+
 func (t *Tools) checkGraphWireSize(wire map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(wire)
 	if err != nil {

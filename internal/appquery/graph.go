@@ -92,14 +92,16 @@ func (r GraphResult) WireMap() map[string]any {
 type ErrorCode string
 
 const (
-	ErrorInvalidInput         ErrorCode = "invalid_input"
-	ErrorProjectNotRegistered ErrorCode = "project_not_registered"
-	ErrorProjectUnavailable   ErrorCode = "project_unavailable"
-	ErrorGraphUnavailable     ErrorCode = "graph_unavailable"
-	ErrorSurfaceUnavailable   ErrorCode = "surface_unavailable"
-	ErrorOutputTooLarge       ErrorCode = "output_too_large"
-	ErrorStaleCursor          ErrorCode = "stale_cursor"
-	ErrorCursorUnsupported    ErrorCode = "cursor_unsupported"
+	ErrorInvalidInput           ErrorCode = "invalid_input"
+	ErrorProjectNotRegistered   ErrorCode = "project_not_registered"
+	ErrorProjectUnavailable     ErrorCode = "project_unavailable"
+	ErrorGraphUnavailable       ErrorCode = "graph_unavailable"
+	ErrorSurfaceUnavailable     ErrorCode = "surface_unavailable"
+	ErrorOutputTooLarge         ErrorCode = "output_too_large"
+	ErrorEvidenceUnavailable    ErrorCode = "evidence_unavailable"
+	ErrorEvidenceKeyUnavailable ErrorCode = "evidence_key_unavailable"
+	ErrorStaleCursor            ErrorCode = "stale_cursor"
+	ErrorCursorUnsupported      ErrorCode = "cursor_unsupported"
 )
 
 type QueryError struct {

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"bb-graph-assistant/internal/caido"
+	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
 )
@@ -114,6 +116,149 @@ func TestReadCaptureMessageForGraphRebuildIsAuthenticatedAndBounded(t *testing.T
 		t.Fatal("bounded range read did not return the requested authenticated response prefix")
 	}
 	clear(segment.Data)
+}
+
+func TestReadCaptureRevisionRangePinsPriorRevisionAfterCurrentChanges(t *testing.T) {
+	ctx := context.Background()
+	selected, writable, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, writable)
+	if err != nil {
+		t.Fatalf("OpenPageWriter() error = %v", err)
+	}
+	firstRun, err := pageWriter.BeginRun(ctx)
+	if err != nil {
+		t.Fatalf("BeginRun(first) error = %v", err)
+	}
+	requestID := "revision-pinned-evidence"
+	firstRequest := []byte("GET /items/one HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n")
+	firstResponse := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\none")
+	firstExchange := fixtureHistoricalExchange(selected, requestID, firstRequest, firstResponse)
+	if _, err := pageWriter.WritePage(ctx, HistoryPageInput{RunID: firstRun.RunID, Page: caido.HistoryPage{Exchanges: []caido.HttpExchange{firstExchange}}}); err != nil {
+		t.Fatalf("WritePage(first) error = %v", err)
+	}
+	observationID, err := (project.CaidoExchangeRef{Project: selected, RequestID: requestID}).ObservationID()
+	if err != nil {
+		t.Fatalf("ObservationID() error = %v", err)
+	}
+	var firstRevision string
+	if err := writable.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id FROM captures WHERE observation_id=?", observationID,
+	).Scan(&firstRevision); err != nil {
+		t.Fatalf("read first revision: %v", err)
+	}
+
+	secondRun, err := pageWriter.BeginRun(ctx)
+	if err != nil {
+		t.Fatalf("BeginRun(second) error = %v", err)
+	}
+	secondRequest := []byte("GET /items/two HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n")
+	secondResponse := []byte("HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\n\r\ntwo")
+	secondExchange := fixtureHistoricalExchange(selected, requestID, secondRequest, secondResponse)
+	if _, err := pageWriter.WritePage(ctx, HistoryPageInput{RunID: secondRun.RunID, Page: caido.HistoryPage{Exchanges: []caido.HttpExchange{secondExchange}}}); err != nil {
+		t.Fatalf("WritePage(second) error = %v", err)
+	}
+	var secondRevision string
+	if err := writable.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id FROM captures WHERE observation_id=?", observationID,
+	).Scan(&secondRevision); err != nil {
+		t.Fatalf("read second revision: %v", err)
+	}
+	if firstRevision == secondRevision {
+		t.Fatal("updated message retained the original revision identity")
+	}
+	var busy, logFrames, checkpointed int
+	if err := writable.Database.DB().QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil || busy != 0 {
+		t.Fatal("fixture capture database could not be checkpointed")
+	}
+	pageWriter.Close()
+	if err := writable.Close(); err != nil {
+		t.Fatalf("close writable fixture: %v", err)
+	}
+
+	projectDir, err := store.ProjectDirectory(selected, filepath.Dir(filepath.Dir(writable.Directory)))
+	if err != nil {
+		t.Fatalf("ProjectDirectory() error = %v", err)
+	}
+	lease, err := projectlock.Acquire(ctx, projectDir)
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	t.Cleanup(func() { _ = lease.Close() })
+	if err := removeClosedFixtureSQLiteSidecars(filepath.Join(projectDir, "graph.sqlite3")); err != nil {
+		t.Fatalf("remove closed fixture SQLite sidecars: %v", err)
+	}
+	readonly, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, selected, filepath.Dir(filepath.Dir(projectDir)), lease)
+	if err != nil {
+		t.Fatalf("OpenProjectReadOnlyUnderMaintenance() error = %v", err)
+	}
+	t.Cleanup(func() { _ = readonly.Close() })
+
+	for _, test := range []struct {
+		name, revision string
+		want           []byte
+	}{
+		{name: "prior revision", revision: firstRevision, want: firstRequest},
+		{name: "current revision", revision: secondRevision, want: secondRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ReadCaptureRevisionRange(ctx, readonly, requestID, test.revision, "request", 0, maxRawCaptureRange)
+			if err != nil {
+				t.Fatalf("ReadCaptureRevisionRange() error = %v", err)
+			}
+			if !bytes.Equal(got.Data, test.want) || got.RevisionID == nil || *got.RevisionID != test.revision {
+				t.Fatalf("range = %q at revision %v, want %q at %q", got.Data, got.RevisionID, test.want, test.revision)
+			}
+			if test.name == "prior revision" && got.ParseState != "unknown" {
+				t.Fatalf("prior revision parse state = %q, want unknown because only current parsing state is stored", got.ParseState)
+			}
+			clear(got.Data)
+		})
+	}
+	if _, err := ReadCaptureRevisionRange(ctx, readonly, requestID, strings.Repeat("f", 64), "request", 0, 16); err == nil {
+		t.Fatal("reader accepted a revision not belonging to the selected request")
+	}
+	latest, err := ReadCaptureRange(ctx, readonly, requestID, "request", 0, maxRawCaptureRange)
+	if err != nil || !bytes.Equal(latest.Data, secondRequest) {
+		t.Fatalf("un-pinned range = %q, err %v; want current revision %q", latest.Data, err, secondRequest)
+	}
+	clear(latest.Data)
+}
+
+func TestBoundedCaptureRangeKeepsSequentialUTF8PagesOnRuneBoundaries(t *testing.T) {
+	data := []byte("a€z")
+	first := boundedCaptureRange(data, 0, 3)
+	if string(first) != "a" {
+		t.Fatalf("first page = %q, want complete ASCII prefix", first)
+	}
+	second := boundedCaptureRange(data, int64(len(first)), 3)
+	if string(second) != "€" {
+		t.Fatalf("second page = %q, want complete euro sign", second)
+	}
+	third := boundedCaptureRange(data, int64(len(first)+len(second)), 3)
+	if string(third) != "z" {
+		t.Fatalf("third page = %q, want trailing ASCII byte", third)
+	}
+	if got := append(append(append([]byte(nil), first...), second...), third...); string(got) != string(data) {
+		t.Fatalf("sequential pages = %q, want exact source bytes %q", got, data)
+	}
+
+	// Arbitrary offsets still return the exact requested byte range; callers
+	// outside the sequential text viewer can identify that page as binary.
+	arbitrary := boundedCaptureRange(data, 2, 2)
+	if string(arbitrary) != string(data[2:4]) {
+		t.Fatalf("arbitrary offset page = %v, want %v", arbitrary, data[2:4])
+	}
+}
+
+func fixtureHistoricalExchange(selected project.CaidoProjectRef, requestID string, request, response []byte) caido.HttpExchange {
+	status := 200
+	return caido.HttpExchange{
+		Ref:        caido.ExchangeRef{Project: selected, RequestID: requestID},
+		RequestRaw: request, ResponseRaw: response, HasResponse: true,
+		Method: "GET", Scheme: "https", Host: "api.fixture.invalid", Port: 443,
+		Target: "https://api.fixture.invalid/", ResponseStatus: &status,
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
+	}
 }
 
 func removeClosedFixtureSQLiteSidecars(databasePath string) error {

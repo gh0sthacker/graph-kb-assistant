@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/store"
 )
 
 const (
+	MaximumCaptureEvidenceRangeBytes = 1 << 20
 	maxRawCaptureRange               = 16 << 10
 	maxGraphReprojectionMessageBytes = 1 << 20
 )
@@ -36,7 +38,21 @@ type CaptureRange struct {
 // from the explicitly selected project's private vault, then returns a bounded
 // byte range. Live-tail rows are not copied to the local vault.
 func ReadCaptureRange(ctx context.Context, projectStore *store.ProjectStore, requestID, side string, offset int64, maximum int) (CaptureRange, error) {
-	return readCaptureMessage(ctx, projectStore, requestID, side, offset, maximum, false)
+	return readCaptureMessage(ctx, projectStore, requestID, "", side, offset, maximum, false, maxRawCaptureRange)
+}
+
+// ReadCaptureCurrentRevisionRange reads a bounded range from the selected
+// historical capture's current revision. The returned revision ID pins later
+// pages to this exact message version.
+func ReadCaptureCurrentRevisionRange(ctx context.Context, projectStore *store.ProjectStore, requestID, side string, offset int64, maximum int) (CaptureRange, error) {
+	return readCaptureMessage(ctx, projectStore, requestID, "", side, offset, maximum, false, MaximumCaptureEvidenceRangeBytes)
+}
+
+// ReadCaptureRevisionRange decrypts and authenticates one exact historical
+// revision. The revision is pinned across range requests so a refresh cannot
+// cause a caller to combine bytes from different messages.
+func ReadCaptureRevisionRange(ctx context.Context, projectStore *store.ProjectStore, requestID, revisionID, side string, offset int64, maximum int) (CaptureRange, error) {
+	return readCaptureMessage(ctx, projectStore, requestID, revisionID, side, offset, maximum, false, MaximumCaptureEvidenceRangeBytes)
 }
 
 // ReadCaptureMessageForGraphRebuild decrypts one complete historical message
@@ -44,11 +60,11 @@ func ReadCaptureRange(ctx context.Context, projectStore *store.ProjectStore, req
 // clear Data as soon as the projection has consumed it. Live-tail rows are not
 // copied to the local vault.
 func ReadCaptureMessageForGraphRebuild(ctx context.Context, projectStore *store.ProjectStore, requestID, side string) (CaptureRange, error) {
-	return readCaptureMessage(ctx, projectStore, requestID, side, 0, maxGraphReprojectionMessageBytes, true)
+	return readCaptureMessage(ctx, projectStore, requestID, "", side, 0, maxGraphReprojectionMessageBytes, true, maxGraphReprojectionMessageBytes)
 }
 
-func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, requestID, side string, offset int64, maximum int, fullMessage bool) (CaptureRange, error) {
-	if projectStore == nil || projectStore.Database == nil || projectStore.Database.DB() == nil || !projectStore.Database.ReadOnly() {
+func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, requestID, revisionID, side string, offset int64, maximum int, fullMessage bool, rangeLimit int) (CaptureRange, error) {
+	if ctx == nil || projectStore == nil || projectStore.Database == nil || projectStore.Database.DB() == nil || !projectStore.Database.ReadOnly() {
 		return CaptureRange{}, errors.New("raw capture requires a read-only selected project store")
 	}
 	projectKey, keyErr := projectStore.Project.StorageKey()
@@ -60,8 +76,9 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 		return CaptureRange{}, errors.New("raw capture side is invalid")
 	}
 	if offset < 0 || maximum < 1 || requestID == "" || len(requestID) > 512 ||
+		(revisionID != "" && (len(revisionID) != 64 || strings.Trim(revisionID, "0123456789abcdef") != "")) ||
 		(fullMessage && (offset != 0 || maximum != maxGraphReprojectionMessageBytes)) ||
-		(!fullMessage && maximum > maxRawCaptureRange) {
+		(!fullMessage && (rangeLimit < 1 || maximum > rangeLimit)) {
 		return CaptureRange{}, errors.New("raw capture range is outside its allowed bounds")
 	}
 	selectedRef := project.CaidoExchangeRef{Project: projectStore.Project, RequestID: requestID}
@@ -70,22 +87,28 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 		return CaptureRange{}, errors.New("raw capture identity is invalid")
 	}
 	var row struct {
-		observationID                                               string
+		observationID, currentRevisionID                            string
 		requestHash, responseHash, revision, capturedAt, parseState sql.NullString
 		requestSize, responseSize                                   sql.NullInt64
 		requestRef, responseRef                                     sql.NullString
 		requestTruncated, responseTruncated                         sql.NullInt64
 		requestFidelity, responseFidelity                           sql.NullString
 	}
-	err = projectStore.Database.DB().QueryRowContext(ctx, `
-		SELECT c.observation_id,cr.request_sha256,cr.response_sha256,cr.request_size,cr.response_size,
+	query := `
+		SELECT c.observation_id,c.current_revision_id,cr.request_sha256,cr.response_sha256,cr.request_size,cr.response_size,
 		       cr.request_vault_ref,cr.response_vault_ref,cr.revision_id,cr.captured_at,c.parse_state,
 	       cr.request_truncated,cr.response_truncated,cr.request_wire_fidelity,cr.response_wire_fidelity
 		FROM captures AS c
-		JOIN capture_revisions AS cr ON cr.revision_id=c.current_revision_id AND cr.observation_id=c.observation_id
-		WHERE c.caido_instance_id=? AND c.caido_project_id=? AND c.request_id=?`,
-		projectStore.Project.InstanceID, projectStore.Project.ProjectID, requestID,
-	).Scan(&row.observationID, &row.requestHash, &row.responseHash, &row.requestSize, &row.responseSize,
+		JOIN capture_revisions AS cr ON cr.observation_id=c.observation_id
+		WHERE c.caido_instance_id=? AND c.caido_project_id=? AND c.request_id=? AND `
+	args := []any{projectStore.Project.InstanceID, projectStore.Project.ProjectID, requestID}
+	if revisionID == "" {
+		query += "cr.revision_id=c.current_revision_id"
+	} else {
+		query += "cr.revision_id=?"
+		args = append(args, revisionID)
+	}
+	err = projectStore.Database.DB().QueryRowContext(ctx, query, args...).Scan(&row.observationID, &row.currentRevisionID, &row.requestHash, &row.responseHash, &row.requestSize, &row.responseSize,
 		&row.requestRef, &row.responseRef, &row.revision, &row.capturedAt, &row.parseState,
 		&row.requestTruncated, &row.responseTruncated, &row.requestFidelity, &row.responseFidelity)
 	if err != nil {
@@ -157,7 +180,7 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 	}
 	key, err := readVaultKey()
 	if err != nil {
-		return CaptureRange{}, errors.New("encrypted capture vault key is unavailable")
+		return CaptureRange{}, ErrVaultKeyUnavailable
 	}
 	defer clear(key)
 	if err := ctx.Err(); err != nil {
@@ -188,14 +211,18 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 		block = raw
 		raw = nil
 	} else {
-		start := int(offset)
-		end := min(start+maximum, len(raw))
-		block = append([]byte(nil), raw[start:end]...)
+		block = boundedCaptureRange(raw, offset, maximum)
+	}
+	parseState := defaultString(row.parseState.String, "not_parsed")
+	if row.revision.String != row.currentRevisionID {
+		// Parser state is currently stored only for the capture's current
+		// revision. Do not attribute it to an older exact message revision.
+		parseState = "unknown"
 	}
 	return CaptureRange{
 		Data: block, TotalSize: size.Int64, SHA256: digest.String,
 		RevisionID: stringPointer(row.revision), CapturedAt: stringPointer(row.capturedAt),
-		ParseState:        defaultString(row.parseState.String, "not_parsed"),
+		ParseState:        parseState,
 		RequestTruncated:  nullableStoredBool(row.requestTruncated),
 		ResponseTruncated: nullableStoredBool(row.responseTruncated),
 		WireFidelity:      defaultString(fidelity.String, "unknown"),
@@ -207,6 +234,24 @@ func vaultCiphertextSize(plaintextSize int64) int64 {
 		return -1
 	}
 	return plaintextSize + int64(len(vaultMagic)+12+16)
+}
+
+// boundedCaptureRange preserves exact byte offsets while keeping sequential
+// UTF-8 text pages on rune boundaries. An arbitrary caller-supplied offset or
+// a page too small for one rune still returns its exact requested bytes.
+func boundedCaptureRange(data []byte, offset int64, maximum int) []byte {
+	start := int(offset)
+	end := min(start+maximum, len(data))
+	if utf8.Valid(data) && (start == len(data) || utf8.RuneStart(data[start])) && end < len(data) {
+		pageEnd := end
+		for pageEnd > start && !utf8.RuneStart(data[pageEnd]) {
+			pageEnd--
+		}
+		if pageEnd > start {
+			end = pageEnd
+		}
+	}
+	return append([]byte(nil), data[start:end]...)
 }
 
 func nullableStoredBool(value sql.NullInt64) *bool {

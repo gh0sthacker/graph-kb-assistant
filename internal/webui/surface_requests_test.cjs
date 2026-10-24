@@ -11,12 +11,15 @@ function createApp() {
   const nodes = new Map();
   function node() {
     return {
-      textContent: "", value: "", hidden: false, disabled: false, children: [],
+      textContent: "", value: "", hidden: false, disabled: false, open: false, isConnected: true, focused: false, children: [],
       options: [], listeners: {},
       classList: { add() {}, remove() {}, toggle() {} },
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
       setAttribute() {}, addEventListener(name, callback) { this.listeners[name] = callback; },
+      showModal() { this.open = true; },
+      close() { this.open = false; this.listeners.close?.(); },
+      focus() { this.focused = true; },
       querySelector() { return node(); },
     };
   }
@@ -46,7 +49,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -103,6 +106,86 @@ test("graph continuation merges distinct rows, deduplicates overlaps, and keeps 
   assert.equal(last.truncated, false);
   assert.equal(last.neighborhood_candidate_limit_reached, false);
   assert.deepEqual(snapshot(last.result_page_ids), ["result-1", "result-2", "result-3"]);
+});
+
+test("local evidence viewer pins the exact historical revision and keeps HTTP bytes out of normal graph navigation", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const revisionId = "b".repeat(64);
+  app.state.projectKey = projectKey;
+  const trigger = { isConnected: true, focused: false, focus() { this.focused = true; } };
+  const pending = app.openEvidence({
+    request_id: 239, revision_id: revisionId,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  }, trigger);
+  assert.equal(app.requests.length, 1);
+  const first = app.requests[0];
+  assert.equal(first.url.pathname, "/api/evidence");
+  assert.equal(first.url.searchParams.get("project_key"), projectKey);
+  assert.equal(first.url.searchParams.get("request_id"), "239");
+  assert.equal(first.url.searchParams.get("revision_id"), revisionId);
+  assert.equal(first.url.searchParams.get("side"), "request");
+  assert.equal(first.url.searchParams.get("offset"), "0");
+  assert.equal(first.url.searchParams.get("max_bytes"), String(1 << 20));
+  first.resolve({
+    request_id: "239", revision_id: revisionId, side: "request", offset: 0,
+    total_size: 15, returned_size: 15, next_offset: null, data: "GET /safe HTTP/1.1", encoding: "utf-8",
+    wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
+  });
+  await pending;
+  assert.equal(app.elements.evidenceDialog.open, true);
+  assert.equal(app.elements.evidenceContent.textContent, "GET /safe HTTP/1.1");
+  assert.match(app.elements.evidenceMeta.textContent, new RegExp(revisionId));
+  assert.equal(app.state.evidence.revisionId, revisionId);
+
+  app.selectEvidenceSide("response");
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.requests[1].url.searchParams.get("revision_id"), revisionId);
+  assert.equal(app.requests[1].url.searchParams.get("side"), "response");
+  app.requests[1].resolve({
+    request_id: "239", revision_id: revisionId, side: "response", offset: 0,
+    total_size: 0, returned_size: 0, next_offset: null, data: "", encoding: "utf-8",
+    wire_fidelity: "source_bytes", parse_state: "complete", response_truncated: false,
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(app.elements.evidenceContent.textContent, "");
+  app.clearProjectView();
+  assert.equal(app.state.evidence, null);
+  assert.equal(app.elements.evidenceContent.textContent, "");
+  assert.equal(trigger.focused, true, "closing the evidence dialog should restore focus to its opener");
+});
+
+test("local evidence viewer refuses non-local and live-only records without requesting bytes", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  await app.openEvidence({ request_id: 239, record_source: "caido_history", raw_stored_locally: false });
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.elements.evidenceDialog.open, false);
+});
+
+test("late request bytes cannot replace the response side after a fast tab switch", async () => {
+  const app = createApp();
+  const revisionId = "b".repeat(64);
+  app.state.projectKey = "a".repeat(64);
+  const requestPending = app.openEvidence({
+    request_id: 239, revision_id: revisionId,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  app.selectEvidenceSide("response");
+  assert.equal(app.requests.length, 2);
+  app.requests[1].resolve({
+    revision_id: revisionId, side: "response", total_size: 8, returned_size: 8,
+    next_offset: null, data: "HTTP/1.1", encoding: "utf-8", parse_state: "complete", wire_fidelity: "source_bytes",
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.elements.evidenceContent.textContent, "HTTP/1.1");
+  app.requests[0].resolve({
+    revision_id: revisionId, side: "request", total_size: 11, returned_size: 11,
+    next_offset: null, data: "GET /old HTTP", encoding: "utf-8", parse_state: "complete", wire_fidelity: "source_bytes",
+  });
+  await requestPending;
+  assert.equal(app.elements.evidenceContent.textContent, "HTTP/1.1");
 });
 
 test("stale graph continuation reloads the first page without reusing its cursor", async () => {

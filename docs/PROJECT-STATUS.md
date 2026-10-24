@@ -77,6 +77,71 @@ loop remain `PARTIAL`.
   Hermes analysis loop are still absent. Keep product and coverage claims
   `PARTIAL` until those gaps are closed and verified.
 
+## Stage 4 local evidence preview (2026-10-23 21:31 -0400)
+
+- Added a typed Go evidence-range use case backed by the authenticated local
+  encrypted-vault reader. It can resolve the current historical revision or
+  read a specific immutable revision by ID; callers can page without mixing
+  bytes if a newer revision arrives. It does not contact Caido.
+- The loopback web UI now has an explicit **Open stored HTTP** action on
+  locally encrypted historical provenance. Request and response tabs read at
+  most 1 MiB per range and show no more than 2 MiB per side. The dialog reports
+  revision, full-message SHA-256, size, capture time, wire fidelity, parser
+  state, and truncation; it marks raw values as sensitive. Content uses
+  `textContent`, responses are `no-store`, and the evidence method is absent
+  from MCP dispatch and the Hermes tool catalog. Live-only or unavailable raw
+  messages stay unavailable in this viewer.
+- New tests cover reading an older exact revision after the current capture
+  changes, invalid bounds/project selection, API query validation/cache headers,
+  bounded JSON/base64 fallback, exact revision pinning in the browser, project
+  clearing, and live-only source refusal. Sequential UTF-8 pages now end on
+  rune boundaries while preserving
+  the exact byte sequence; arbitrary offsets still return exact requested
+  bytes. `go test -count=1 ./...`, `go test -race -count=1 ./...`,
+  `go vet ./...`, the 19 browser state tests, `node --check`, and
+  `git diff --check` pass. These checks validate local historical evidence
+  handling only; they do not establish complete response inspection or a
+  two-capture comparison.
+- A browser smoke test with the configured project root and Neo4j settings
+  loaded the local surface (131 operations), opened a focused Juice Shop graph,
+  and displayed the explicit evidence action. The selected stored message could
+  not be decrypted: the existing runtime environment has no
+  `BB_ASSISTANT_VAULT_KEY`. The dialog failed closed, cleared its contents, and
+  now identifies that the local vault key is unavailable or invalid.
+  This confirms the UI path and safe refusal, not successful runtime access to
+  the existing encrypted vault; a local key must be configured before that
+  can be verified.
+- Fresh read-only `project-audit` confirmed capture schema v7 and BehaviorGraph
+  v2 compatible: 1,400 captures, 1,369 graph mappings, 31 unmapped, 444 complete
+  parses, 956 partial parses, and 37 unknown response fidelities. Neo4j
+  `--verify-only` matched the selected local graph digest
+  `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747` at
+  33,366 entities, 33,987 assertions, 1,369 cards, and 1,369 sources. This is
+  parity for the mapped local graph, not Caido source-history completeness.
+- A sequential fresh check repeated the same graph digest and counts. The
+  project audit again reports 1,400 captures, 1,369 mapped, 31 unmapped, zero
+  live-indexed rows, `history_reconciled=false`, and overall `PARTIAL`; its
+  report explicitly covers structural metadata and aggregates only.
+- Caido 0.58.3 lists the Juice Shop project `READY` but inactive; the currently
+  selected project is `sperpravo`. No project switch, history read, body read,
+  replay, or target traffic was performed. Hermes v0.22.4 connected and
+  discovered the configured nine read-only tools; no provider/model is set.
+- The KB MCP `kb_stats` request timed out after 300 seconds, but the existing
+  read-only local fallback completed at 21:19. It reported 15,536 semantic
+  files and 77,864 vectors; 14,660 files and 62,677 vectors match the configured
+  version and source hashes. Integrity is still degraded: 876 rows have a
+  wrong index version and no source hash, and source/vector contents were not
+  validated. The lexical tier has 15,438 files and 67,991 passages, last
+  refreshed 2026-10-13; semantic indexing last completed 2026-10-07. The live
+  KB server/indexer process remains active, so counts are a point-in-time
+  snapshot rather than a completion signal. No competing reindex was started;
+  KB integrity and readiness remain `PARTIAL`.
+- Stage 4 remains `PARTIAL`: the UI only reads bounded local historical ranges.
+  Deterministic two-capture comparison, full evidence coverage, and bounded
+  model packets are still outstanding. Overall project coverage also remains
+  `PARTIAL` because source reconciliation, browser/JavaScript coverage, the
+  model-backed consultation cycle, and managed startup/recovery are not proven.
+
 ## Fresh local verification (2026-10-23, after `b4f460e`)
 
 This checkpoint supersedes earlier runtime claims below where they conflict;

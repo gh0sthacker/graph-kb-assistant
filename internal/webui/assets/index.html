@@ -88,9 +88,27 @@
         <aside class="inspector-panel" aria-label="Selected node details">
           <div class="panel-heading inspector-heading"><div><span class="eyebrow">INSPECTOR</span><h2>Selected node</h2></div><span class="inspect-index" id="inspect-index">—</span></div>
           <div class="inspector-content" id="inspector-content"><div class="inspector-empty"><span class="inspect-target" aria-hidden="true">⌖</span><strong>Nothing selected</strong><span>Select a graph node to view its properties and sources.</span></div></div>
-          <div class="inspector-foot"><span class="read-lock" aria-hidden="true">▣</span><span>HTTP content is not loaded</span></div>
+          <div class="inspector-foot"><span class="read-lock" aria-hidden="true">▣</span><span>Open a stored capture to read its HTTP bytes</span></div>
         </aside>
       </main>
+
+      <dialog class="evidence-dialog" id="evidence-dialog" aria-labelledby="evidence-title">
+        <header class="evidence-heading">
+          <div><span class="eyebrow">LOCAL ENCRYPTED HISTORY</span><h2 id="evidence-title">Captured HTTP message</h2><p id="evidence-capture-label">No capture selected</p></div>
+          <button class="icon-button evidence-close" id="evidence-close" type="button" aria-label="Close HTTP evidence">×</button>
+        </header>
+        <div class="evidence-warning" role="note"><strong>Sensitive values may be present.</strong><span>This view reads only the selected local historical revision. Live-tail bytes remain in Caido and are not sent to a model.</span></div>
+        <div class="evidence-controls">
+          <div class="evidence-sides" role="group" aria-label="Select HTTP message side">
+            <button class="evidence-side active" id="evidence-request" type="button" aria-pressed="true">Request</button>
+            <button class="evidence-side" id="evidence-response" type="button" aria-pressed="false">Response</button>
+          </div>
+          <button class="tool-button" id="evidence-more" type="button" hidden>Load next range</button>
+        </div>
+        <div class="evidence-meta" id="evidence-meta" aria-live="polite">Select an exact historical capture to inspect its stored message.</div>
+        <pre class="evidence-content" id="evidence-content" tabindex="0" aria-label="Stored HTTP message bytes"></pre>
+        <div class="evidence-foot" id="evidence-foot" role="status" aria-live="polite"></div>
+      </dialog>
 
       <footer class="statusbar">
         <div class="status-left"><span class="status-led"></span><span id="status-text">Waiting for data</span><span class="status-separator">/</span><span>127.0.0.1</span></div>
