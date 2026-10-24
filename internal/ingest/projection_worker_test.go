@@ -105,6 +105,59 @@ func TestProjectionWorkerAcknowledgesOlderRevisionWithoutReplacingCurrentMapping
 	}
 }
 
+func TestProjectGraphBundlesWithWriterRetainsOutboxPendingWhenNeo4jIsDisabled(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writePendingHistoryRevision(ctx, pageWriter,
+		projectionWorkerExchange(selected, "projection-writer-reuse-request", "")); err != nil {
+		pageWriter.Close()
+		t.Fatalf("accept pending history revision: %v", err)
+	}
+	pageWriter.Close()
+
+	var revisionID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT revision_id FROM projection_jobs WHERE state='pending'",
+	).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := behaviorgraph.ProjectionJobByRevision(ctx, projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+	if err != nil {
+		t.Fatalf("load fixture projection job: %v", err)
+	}
+	bundle, err := behaviorgraph.DecodeBundleJSON([]byte(job.PayloadJSON))
+	if err != nil {
+		t.Fatalf("decode fixture graph bundle: %v", err)
+	}
+
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	graphWriter, err := behaviorgraph.OpenWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatalf("open one validated graph writer: %v", err)
+	}
+	materialized, neo4jReady, err := projectGraphBundlesWithWriter(ctx, projectStore, graphWriter, []behaviorgraph.Record{bundle})
+	if err != nil || !materialized || neo4jReady {
+		t.Fatalf("materialize through supplied graph writer: materialized=%t neo4j_ready=%t err=%v", materialized, neo4jReady, err)
+	}
+	pending, err := graphWriter.PendingOutbox(ctx, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("disabled Neo4j path must preserve one retryable outbox event: items=%d err=%v", len(pending), err)
+	}
+	applied, err := graphWriter.OutboxBundleApplied(ctx, pending[0].BundleID)
+	if err != nil || applied {
+		t.Fatalf("disabled Neo4j path marked bundle applied: applied=%t err=%v", applied, err)
+	}
+}
+
 func TestProjectionWorkerRecoversAcceptedJobAfterProjectReopen(t *testing.T) {
 	ctx := context.Background()
 	selected, originalStore, _ := newLiveTailFixture(t)

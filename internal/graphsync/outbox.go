@@ -36,6 +36,21 @@ func Drain(ctx context.Context, selected *store.ProjectStore) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	return DrainWithWriter(ctx, selected, writer)
+}
+
+// DrainWithWriter applies pending events through an already validated local
+// graph writer. The caller must hold the selected project's exclusive
+// maintenance lease for the complete operation.
+func DrainWithWriter(ctx context.Context, selected *store.ProjectStore, writer *behaviorgraph.Writer) (Result, error) {
+	if selected == nil || selected.ProjectKey == "" || selected.Database == nil || selected.Database.DB() == nil ||
+		writer == nil || !writer.MatchesProjectStore(selected) {
+		return Result{}, errors.New("graph outbox sync requires a writer for the selected project")
+	}
+	result := Result{State: "disabled", ProjectKey: selected.ProjectKey, Backend: graphaccess.ConfiguredBackend()}
+	if result.Backend != "neo4j" {
+		return result, nil
+	}
 	items, err := writer.PendingOutbox(ctx, maxOutboxBatch)
 	if err != nil {
 		return Result{}, err
@@ -98,9 +113,28 @@ func DrainUntilBundleApplied(ctx context.Context, selected *store.ProjectStore, 
 	if err != nil {
 		return Result{}, err
 	}
+	return DrainUntilBundleAppliedWithWriter(ctx, selected, writer, bundleID)
+}
+
+// DrainUntilBundleAppliedWithWriter reuses a validated graph writer for the
+// exact target check and all ordered outbox pages. The caller must hold the
+// selected project's exclusive maintenance lease for the complete operation.
+func DrainUntilBundleAppliedWithWriter(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	writer *behaviorgraph.Writer,
+	bundleID string,
+) (Result, error) {
+	if selected == nil || selected.ProjectKey == "" || selected.Database == nil || selected.Database.DB() == nil ||
+		writer == nil || !writer.MatchesProjectStore(selected) || bundleID == "" {
+		return Result{}, errors.New("targeted graph outbox sync requires one selected project, matching writer and bundle")
+	}
+	if backend := graphaccess.ConfiguredBackend(); backend != "neo4j" {
+		return Result{State: "disabled", ProjectKey: selected.ProjectKey, Backend: backend}, nil
+	}
 	return drainUntilBundleApplied(ctx, selected.ProjectKey, bundleID,
 		func(ctx context.Context, target string) (bool, error) { return writer.OutboxBundleApplied(ctx, target) },
-		func(ctx context.Context) (Result, error) { return Drain(ctx, selected) },
+		func(ctx context.Context) (Result, error) { return DrainWithWriter(ctx, selected, writer) },
 	)
 }
 

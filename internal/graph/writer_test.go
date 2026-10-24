@@ -65,6 +65,32 @@ func TestOpenShadowWriterRequiresNewPrivatePathOutsideSelectedProject(t *testing
 	}
 }
 
+func TestWriterMatchesProjectStoreChecksStorageDirectory(t *testing.T) {
+	ctx := context.Background()
+	ref := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "writer-storage-binding"}
+	first, err := store.CreateProject(ctx, ref, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := store.CreateProject(ctx, ref, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	writer, err := OpenWriter(ctx, first)
+	if err != nil {
+		t.Fatalf("OpenWriter() error = %v", err)
+	}
+	if !writer.MatchesProjectStore(first) {
+		t.Fatal("writer did not match the store it was opened from")
+	}
+	if writer.MatchesProjectStore(second) {
+		t.Fatal("writer matched a different storage root with the same project key")
+	}
+}
+
 func TestRecordDifferencePathsReportsSchemaPathsWithoutValues(t *testing.T) {
 	left := Record{
 		"id":   "observation-id",

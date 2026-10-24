@@ -44,6 +44,25 @@ type Writer struct {
 	receiptRoot string
 }
 
+// MatchesProjectStore reports whether this writer is bound to the selected
+// project's exact local storage directory and graph files.
+func (w *Writer) MatchesProjectStore(selected *store.ProjectStore) bool {
+	if w == nil || selected == nil || selected.ProjectKey == "" || selected.Database == nil {
+		return false
+	}
+	projectDir, err := filepath.Abs(selected.Directory)
+	if err != nil || filepath.Clean(projectDir) != projectDir {
+		return false
+	}
+	graphPath := filepath.Join(projectDir, "behavior.sqlite3")
+	receiptRoot := filepath.Join(projectDir, "behavior-receipts")
+	return w.program == selected.ProjectKey && w.projectDir == projectDir &&
+		w.graphPath == graphPath && w.receiptRoot == receiptRoot &&
+		selected.Database.Path() == filepath.Join(projectDir, "graph.sqlite3") &&
+		filepath.Clean(selected.BehaviorGraphPath) == graphPath &&
+		filepath.Clean(selected.BehaviorReceiptPath) == receiptRoot
+}
+
 // ImportResult is deliberately limited to structural import accounting.
 type ImportResult struct {
 	SchemaVersion   int            `json:"schema_version"`

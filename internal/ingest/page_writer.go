@@ -707,11 +707,27 @@ func projectGraphBundles(ctx context.Context, selected *store.ProjectStore, bund
 	if err != nil {
 		return false, false, errors.New("selected project graph writer could not be opened")
 	}
+	return projectGraphBundlesWithWriter(ctx, selected, graphWriter, bundles)
+}
+
+func projectGraphBundlesWithWriter(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	graphWriter *behaviorgraph.Writer,
+	bundles []behaviorgraph.Record,
+) (bool, bool, error) {
+	if selected == nil || graphWriter == nil || !graphWriter.MatchesProjectStore(selected) ||
+		len(bundles) == 0 || len(bundles) > maxPageExchanges {
+		return false, false, errors.New("historical graph batch is unavailable")
+	}
+	if err := validateSelectedProject(selected); err != nil {
+		return false, false, err
+	}
 	importResult, importErr := graphWriter.ImportBundles(ctx, bundles)
 	if importErr != nil {
 		return false, false, importErr
 	}
-	syncResult, syncErr := graphsync.DrainUntilBundleApplied(ctx, selected, importResult.BundleID)
+	syncResult, syncErr := graphsync.DrainUntilBundleAppliedWithWriter(ctx, selected, graphWriter, importResult.BundleID)
 	if syncErr != nil {
 		return true, false, syncErr
 	}

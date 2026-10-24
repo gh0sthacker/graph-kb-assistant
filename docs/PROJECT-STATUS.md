@@ -1,5 +1,32 @@
 # Project status and known limitations
 
+## ECC writer-reuse slice and bounded runtime validation (2026-10-24) — PARTIAL
+
+- The historical projection path now reuses one selected-project BehaviorGraph
+  writer across local bundle import and targeted Neo4j outbox confirmation,
+  including ordered outbox pages. Writer reuse checks the project key and exact
+  graph database, BehaviorGraph, and receipt paths. This avoids reopening and
+  fully validating the same graph between the import and its outbox ack.
+- Synthetic tests cover writer/store path mismatch and verify that SQLite-only
+  mode leaves the imported outbox event pending rather than falsely confirming
+  Neo4j readiness. Full `go test -count=1 ./...`, `go vet ./...`, and
+  `git diff --check` passed before the bounded runtime check; a subsequent
+  targeted `go test -race -count=1 ./internal/graph ./internal/graphsync
+  ./internal/ingest ./internal/projectlock` also passed. An ECC static security
+  review found no actionable issue in the changed files; it did not access
+  runtime stores or traffic.
+- `neo4j-check` returned `ready`. One bounded `projection-worker --max-jobs 1`
+  run applied one job with no retry or dead letter (the recovered lease had
+  attempt count 2). A fresh status then reported 1,382 pending, 18 applied,
+  zero leased, and zero dead-lettered. This single job confirms the local
+  projection → Neo4j outbox → acknowledgment path and took about two minutes;
+  the one-job sample is not enough to claim sustained bulk-drain throughput or
+  queue parity.
+- The same status reported capture schema v7 and BehaviorGraph schema v2 as
+  compatible; 1,400 captures, 1,369 graph mappings, and 31 unmapped captures.
+  Overall status remains `PARTIAL`: history is unreconciled, source coverage is
+  incomplete, and Caido intake was not contacted. No capture bodies were read.
+
 ## Stage 6 current runtime and KB recheck (2026-10-24) — PARTIAL
 
 - `bb-assistant status` at 2026-10-24 04:01:52Z reported capture schema v7
