@@ -14,6 +14,11 @@ loop remain `PARTIAL`.
   is unknown for 37. Request text is reconstructed for 1,400 captures,
   response text for 1,363, and no source-byte fidelity was established.
   Historical synchronization and overall coverage are `PARTIAL`.
+- The running loopback web UI returned HTTP 200 for `/api/projects` and the
+  selected project's `/api/surface` API. The surface catalog reports 131 local
+  operations, `coverage_state=partial`, and a continuation cursor. This
+  confirms the current local catalog can be served; it does not establish full
+  Caido coverage or complete browser/JavaScript mapping.
 - A read-only `neo4j-backfill --verify-only`, rerun after reconciliation,
   reports `verified`: local and Neo4j snapshot digests both equal
   `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`, with
