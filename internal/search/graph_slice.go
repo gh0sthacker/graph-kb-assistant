@@ -21,6 +21,7 @@ import (
 
 const maxCaptureProvenanceRows = 1_000
 const maxContinuationExcludedAssertionIDs = 10_000
+const maxContinuationExcludedCardIDs = 10_000
 
 var ErrAnalyticalGenerationChanged = errors.New("Neo4j graph generation changed during analytical continuation")
 
@@ -33,10 +34,10 @@ func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs [
 // GraphSliceWithService runs the shared graph query through a process-owned
 // graph access service.
 func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any) (map[string]any, error) {
-	return graphSliceWithExcludedAssertions(ctx, service, projectStore, seedIDs, maxNodes, maxEdges, maxDepth, selectedContext, nil)
+	return graphSliceWithExclusions(ctx, service, projectStore, seedIDs, maxNodes, maxEdges, maxDepth, selectedContext, nil, nil)
 }
 
-func graphSliceWithExcludedAssertions(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any, excludedAssertionIDs []string) (map[string]any, error) {
+func graphSliceWithExclusions(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any, excludedAssertionIDs, excludedCardIDs []string) (map[string]any, error) {
 	if err := validateGraphProjectStore(projectStore); err != nil {
 		return nil, err
 	}
@@ -49,7 +50,8 @@ func graphSliceWithExcludedAssertions(ctx context.Context, service *graphaccess.
 		reader, err = service.OpenReader(ctx, projectStore)
 	case "neo4j":
 		nativeSlice, err = service.ReadAnalyticalSlice(ctx, projectStore, seedIDs, neo4jstore.AnalyticalSliceOptions{
-			MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth, ExcludedAssertionIDs: excludedAssertionIDs,
+			MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth,
+			ExcludedAssertionIDs: excludedAssertionIDs, ExcludedCardIDs: excludedCardIDs,
 		})
 		if err == nil {
 			reader, err = behaviorgraph.OpenReaderFromSnapshot(ctx, nativeSlice.Snapshot, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
@@ -91,6 +93,18 @@ func graphSliceWithExcludedAssertions(ctx context.Context, service *graphaccess.
 		if nativeSlice.AssertionSeedsTruncated {
 			slice["missing_branches_truncated"] = true
 		}
+		if len(nativeSlice.CandidateCardOwnerIDsOmitted) > 0 {
+			branches, _ := slice["missing_branches"].([]behaviorgraph.Record)
+			for _, id := range nativeSlice.CandidateCardOwnerIDsOmitted {
+				branches = append(branches, behaviorgraph.Record{
+					"frontier_id": id, "reason": "analytical_card_candidate_limit",
+				})
+			}
+			slice["missing_branches"] = branches
+		}
+		if nativeSlice.CardSeedsTruncated {
+			slice["missing_branches_truncated"] = true
+		}
 		slice["analytical_frontier_node_limit_reached"] = nativeSlice.FrontierNodeLimitReached
 		slice["analytical_frontier_nodes_omitted"] = nativeSlice.FrontierNodesOmitted
 		if len(nativeSlice.FrontierNodeIDsOmitted) > 0 {
@@ -125,7 +139,7 @@ func graphSliceWithExcludedAssertions(ctx context.Context, service *graphaccess.
 			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analytical frontier node budget was reached; omitted node branches are available through generation-pinned graph continuation when the bounded queue permits.")
 		}
 		if nativeSlice.CandidateCardsTruncated {
-			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analysis-card candidate budget was reached; additional cards were not loaded.")
+			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analysis-card candidate budget was reached; owner branches can continue through the generation-pinned cursor when the bounded queue permits.")
 		}
 		if nativeSlice.ProvenanceTruncated {
 			slice["limitations"] = append(slice["limitations"].([]string), "Entity source references are deterministically sampled; the listed entities have incomplete provenance.")
@@ -157,7 +171,11 @@ func ContinueGraphSliceWithService(
 	if err != nil {
 		return nil, err
 	}
-	nextPage, err := graphSliceWithExcludedAssertions(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, selectedContext, excludedAssertionIDs)
+	excludedCardIDs, excludedCardsTruncated, err := continuationExcludedCardIDs(accumulated["cards"])
+	if err != nil {
+		return nil, err
+	}
+	nextPage, err := graphSliceWithExclusions(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, selectedContext, excludedAssertionIDs, excludedCardIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +184,13 @@ func ContinueGraphSliceWithService(
 		nextPage["truncated"] = true
 		limitations := graphStringList(nextPage["limitations"])
 		limitations = append(limitations, "Continuation excluded at most 10,000 previously loaded assertions; larger accumulated views may revisit candidates.")
+		nextPage["limitations"] = uniqueStrings(limitations)
+	}
+	if excludedCardsTruncated {
+		nextPage["candidate_card_exclusion_truncated"] = true
+		nextPage["truncated"] = true
+		limitations := graphStringList(nextPage["limitations"])
+		limitations = append(limitations, "Continuation excluded at most 10,000 previously loaded cards; larger accumulated views may revisit candidates.")
 		nextPage["limitations"] = uniqueStrings(limitations)
 	}
 	if generationFromGraphPayload(nextPage) != generationFromGraphPayload(accumulated) {
@@ -203,7 +228,8 @@ func ContinueGraphSliceWithService(
 	slice["candidate_assertion_limit_reached"] = graphPayloadFlag(nextPage, "candidate_assertion_limit_reached")
 	slice["candidate_assertion_exclusion_truncated"] = anyGraphFlag(accumulated, nextPage, "candidate_assertion_exclusion_truncated")
 	slice["analytical_frontier_node_limit_reached"] = graphPayloadFlag(nextPage, "analytical_frontier_node_limit_reached")
-	slice["candidate_card_limit_reached"] = anyGraphFlag(accumulated, nextPage, "candidate_card_limit_reached")
+	slice["candidate_card_limit_reached"] = graphPayloadFlag(nextPage, "candidate_card_limit_reached")
+	slice["candidate_card_exclusion_truncated"] = anyGraphFlag(accumulated, nextPage, "candidate_card_exclusion_truncated")
 	slice["provenance_truncated"] = anyGraphFlag(accumulated, nextPage, "provenance_truncated")
 	branches, branchesTruncated := mergeContinuationBranches(slice["missing_branches"], nextPage["missing_branches"])
 	slice["missing_branches"] = branches
@@ -211,9 +237,9 @@ func ContinueGraphSliceWithService(
 		graphPayloadFlag(nextPage, "missing_branches_truncated") {
 		slice["missing_branches_truncated"] = true
 	}
-	// Renderer omissions may resolve as the cumulative slice grows. Assertion
-	// and frontier flags describe the newest native page; card/provenance limits
-	// remain sticky because this continuation does not page those candidates.
+	// Renderer omissions may resolve as the cumulative slice grows. Assertion,
+	// frontier, and card flags describe the newest native page; provenance limits
+	// remain sticky because this continuation does not page those references.
 	slice["truncated"] = analyticalContinuationTruncated(slice, accumulated, nextPage)
 	truncatedIDs := append(graphStringList(accumulated["provenance_truncated_entity_ids"]), graphStringList(nextPage["provenance_truncated_entity_ids"])...)
 	slice["provenance_truncated_entity_ids"] = uniqueStrings(truncatedIDs)
@@ -305,6 +331,34 @@ func continuationExcludedAssertionIDs(value any) ([]string, bool, error) {
 	return ids, truncated, nil
 }
 
+func continuationExcludedCardIDs(value any) ([]string, bool, error) {
+	records, ok := graphRecordList(value)
+	if !ok {
+		return nil, false, errors.New("analytical graph continuation card list is malformed")
+	}
+	seen := make(map[string]bool, len(records))
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		id, ok := record["id"].(string)
+		if !ok || !strings.HasPrefix(id, "card-") {
+			continue
+		}
+		if !digestPattern.MatchString(strings.TrimPrefix(id, "card-")) {
+			return nil, false, errors.New("analytical graph continuation card identity is malformed")
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	truncated := len(ids) > maxContinuationExcludedCardIDs
+	if truncated {
+		ids = ids[:maxContinuationExcludedCardIDs]
+	}
+	return ids, truncated, nil
+}
+
 func analyticalContinuationTruncated(current, accumulated, nextPage map[string]any) bool {
 	if graphPayloadFlag(current, "truncated") ||
 		graphPayloadFlag(current, "missing_branches_truncated") ||
@@ -313,12 +367,12 @@ func analyticalContinuationTruncated(current, accumulated, nextPage map[string]a
 		graphPayloadFlag(current, "source_integrity_budget_exceeded") {
 		return true
 	}
-	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached"} {
+	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached", "candidate_card_limit_reached"} {
 		if graphPayloadFlag(nextPage, key) {
 			return true
 		}
 	}
-	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_limit_reached", "provenance_truncated"} {
+	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_exclusion_truncated", "provenance_truncated"} {
 		if anyGraphFlag(accumulated, nextPage, key) {
 			return true
 		}

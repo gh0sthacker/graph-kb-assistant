@@ -299,3 +299,15 @@ func TestGraphPayloadGenerationAndNativeCandidateLimits(t *testing.T) {
 		t.Fatal("false candidate limit flag was treated as reached")
 	}
 }
+
+func TestFullContinuationBranchSeedsIncludesCardCandidateOwner(t *testing.T) {
+	owner := "endpoint-" + strings.Repeat("e", 64)
+	payload := map[string]any{
+		"missing_branches": []behaviorgraph.Record{{
+			"frontier_id": owner, "reason": "analytical_card_candidate_limit",
+		}},
+	}
+	if got := fullContinuationBranchSeeds(payload); len(got) != 1 || got[0] != owner {
+		t.Fatalf("card continuation owner seeds = %v, want [%q]", got, owner)
+	}
+}

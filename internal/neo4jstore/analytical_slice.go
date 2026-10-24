@@ -18,6 +18,8 @@ const (
 	maxAnalyticalFrontierNodes        = 128
 	maxAnalyticalFrontierCursorSeeds  = 5_000
 	maxAnalyticalAssertionCursorSeeds = 5_000
+	maxAnalyticalCardCursorSeeds      = 5_000
+	maxAnalyticalExcludedCards        = 10_000
 	analyticalClosureHops             = 2
 )
 
@@ -29,6 +31,7 @@ type AnalyticalSliceOptions struct {
 	MaxEdges             int
 	MaxDepth             int
 	ExcludedAssertionIDs []string
+	ExcludedCardIDs      []string
 }
 
 // AnalyticalSlice is a selected-query projection, not a whole-project
@@ -44,6 +47,8 @@ type AnalyticalSlice struct {
 	AssertionSeedsTruncated      bool
 	CandidateCards               int
 	CandidateCardsTruncated      bool
+	CandidateCardOwnerIDsOmitted []string
+	CardSeedsTruncated           bool
 	FrontierHops                 int
 	FrontierNodeLimitReached     bool
 	FrontierNodesOmitted         int
@@ -64,6 +69,10 @@ func (s *Store) ReadProjectAnalyticalSlice(ctx context.Context, projectKey strin
 		return AnalyticalSlice{}, err
 	}
 	options.ExcludedAssertionIDs, err = analyticalExcludedAssertionIDs(options.ExcludedAssertionIDs)
+	if err != nil {
+		return AnalyticalSlice{}, err
+	}
+	options.ExcludedCardIDs, err = analyticalExcludedCardIDs(options.ExcludedCardIDs)
 	if err != nil {
 		return AnalyticalSlice{}, err
 	}
@@ -118,6 +127,23 @@ func analyticalExcludedAssertionIDs(ids []string) ([]string, error) {
 	for _, id := range ids {
 		if !neighborhoodIDPattern.MatchString(id) || !strings.HasPrefix(id, "assertion-") || seen[id] {
 			return nil, errors.New("Neo4j analytical assertion exclusion identity is invalid")
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func analyticalExcludedCardIDs(ids []string) ([]string, error) {
+	if len(ids) > maxAnalyticalExcludedCards {
+		return nil, errors.New("Neo4j analytical card exclusion list exceeds its limit")
+	}
+	seen := make(map[string]bool, len(ids))
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !neighborhoodIDPattern.MatchString(id) || !strings.HasPrefix(id, "card-") || seen[id] {
+			return nil, errors.New("Neo4j analytical card exclusion identity is invalid")
 		}
 		seen[id] = true
 		result = append(result, id)
@@ -244,11 +270,14 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 	}
 	sort.Strings(ownerIDs)
 	sort.Strings(assertionIDs)
-	cardIDs, cardsTruncated, err := readAnalyticalCardCandidates(ctx, tx, project, read, ownerIDs, maxAnalyticalCandidateCards)
+	cardIDs, cardsTruncated, err := readAnalyticalCardCandidates(ctx, tx, project, read, ownerIDs, options.ExcludedCardIDs, maxAnalyticalCandidateCards)
 	if err != nil {
 		return AnalyticalSlice{}, err
 	}
 	result.CandidateCards, result.CandidateCardsTruncated = len(cardIDs), cardsTruncated
+	if cardsTruncated {
+		result.CandidateCardOwnerIDsOmitted, result.CardSeedsTruncated = analyticalCardContinuationOwners(ownerIDs)
+	}
 	if err := read.load(ctx, tx, cardIDs); err != nil {
 		return AnalyticalSlice{}, err
 	}
@@ -485,7 +514,7 @@ func (r *neighborhoodRead) closeCardEndpointDependencies(ctx context.Context, tx
 	return nil
 }
 
-func readAnalyticalCardCandidates(ctx context.Context, tx neo4j.ManagedTransaction, project string, read *neighborhoodRead, ownerIDs []string, limit int) ([]string, bool, error) {
+func readAnalyticalCardCandidates(ctx context.Context, tx neo4j.ManagedTransaction, project string, read *neighborhoodRead, ownerIDs, excludedIDs []string, limit int) ([]string, bool, error) {
 	if len(ownerIDs) == 0 {
 		return []string{}, false, nil
 	}
@@ -510,15 +539,15 @@ func readAnalyticalCardCandidates(ctx context.Context, tx neo4j.ManagedTransacti
 	sort.Strings(captureIDs)
 	result, err := tx.Run(ctx, `
 		MATCH (card:GraphRecord {project_key: $project_key, record_type: 'card'})
-		WHERE card.card_endpoint_id IN $endpoint_ids OR card.card_capture_id IN $capture_ids OR EXISTS {
+		WHERE (card.card_endpoint_id IN $endpoint_ids OR card.card_capture_id IN $capture_ids OR EXISTS {
 			MATCH (owner:GraphRecord {project_key: $project_key})-[:EVIDENCED_BY {project_key: $project_key}]->(source:GraphRecord {project_key: $project_key, record_type: 'source'})
 			MATCH (card)-[:EVIDENCED_BY {project_key: $project_key}]->(source)
 			WHERE owner.record_id IN $owner_ids
 			RETURN source
-		}
+		}) AND NOT card.record_id IN $excluded_card_ids
 		RETURN DISTINCT card.record_id AS card_id ORDER BY card_id LIMIT $limit`, map[string]any{
 		"project_key": project, "owner_ids": ownerIDs, "endpoint_ids": endpointIDs,
-		"capture_ids": captureIDs, "limit": limit + 1,
+		"capture_ids": captureIDs, "excluded_card_ids": excludedIDs, "limit": limit + 1,
 	})
 	if err != nil {
 		return nil, false, errors.New("Neo4j analytical card frontier is unavailable")
@@ -539,6 +568,16 @@ func readAnalyticalCardCandidates(ctx context.Context, tx neo4j.ManagedTransacti
 		return ids[:limit], true, nil
 	}
 	return ids, false, nil
+}
+
+func analyticalCardContinuationOwners(ownerIDs []string) ([]string, bool) {
+	owners := append([]string(nil), ownerIDs...)
+	sort.Strings(owners)
+	truncated := len(owners) > maxAnalyticalCardCursorSeeds
+	if truncated {
+		owners = owners[:maxAnalyticalCardCursorSeeds]
+	}
+	return owners, truncated
 }
 
 func mapKeys(values map[string]bool) []string {

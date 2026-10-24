@@ -474,7 +474,7 @@ func readProjectNeighborhoodTx(ctx context.Context, tx neo4j.ManagedTransaction,
 	if err := read.checkTopology(ctx, tx, assertionIDs); err != nil {
 		return Neighborhood{}, err
 	}
-	cardIDs, cardsTruncated, err := readAnalyticalCardCandidates(ctx, tx, project, read, ownerIDs, maxNeighborhoodAnalysisCards)
+	cardIDs, cardsTruncated, err := readAnalyticalCardCandidates(ctx, tx, project, read, ownerIDs, nil, maxNeighborhoodAnalysisCards)
 	if err != nil {
 		return Neighborhood{}, err
 	}

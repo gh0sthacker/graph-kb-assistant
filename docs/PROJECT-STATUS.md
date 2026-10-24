@@ -32,6 +32,22 @@
   are bounded; these conditions can leave an explicit `PARTIAL` result.
   Stage 2 remains `PARTIAL`.
 
+## Stage 2 analysis-card candidate continuation (2026-10-24) — PARTIAL
+
+- Neo4j analytical reads now return bounded owner branches when the 200-card
+  candidate page is truncated. Generation-pinned full-view continuation passes
+  the already materialized card IDs back as exclusions, then merges the next
+  card page into the cumulative graph. The page limit flag now clears when the
+  latest page resolves it instead of remaining sticky from the first page.
+- Card exclusions are capped at 10,000 IDs and omitted owner branches at 5,000;
+  queue/attempt limits still leave explicit truncation when exceeded. Provenance
+  sampling still has no continuation and keeps Stage 2 `PARTIAL`.
+- Targeted synthetic unit tests for exclusion validation, bounded owner seeds,
+  continuation branch decoding, and truncation state passed. An opt-in Neo4j
+  fixture for advancing from a full 200-card page to the final two cards was
+  added, but was not run in this check. No working graph database or request
+  bodies were read for the implementation check.
+
 ## Fresh local runtime acceptance (2026-10-24) — PARTIAL
 
 - Reconciled the selected Juice Shop Caido history against the local index for
@@ -39,8 +55,11 @@
   duplicate, or unclassified IDs; the terminal cursor was reached in four
   pages. Caido was restored to `sperpravo` and the selection was verified.
   Since the source has no stable snapshot token, history coverage remains
-  `PARTIAL`. No request/response bodies were read and no target requests were
-  sent.
+  `PARTIAL`. A fresh read-only repeat confirmed 355 historical IDs, zero live
+  index rows, four Caido pages, and the same exact-origin match; the other rows
+  in the 1,400-record project index were outside that origin and excluded from
+  this comparison. No request/response bodies were read and no target requests
+  were sent.
 - The running web UI returned HTTP 200 for projects, surface, and direct graph
   reads on the registered Juice Shop project. The surface read covered 1,400
   observations and 131 operations. A one-seed direct view returned three

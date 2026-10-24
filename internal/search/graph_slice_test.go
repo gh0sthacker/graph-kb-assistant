@@ -10,6 +10,20 @@ import (
 	"bb-graph-assistant/internal/store"
 )
 
+func TestContinuationExcludedCardIDsAreValidatedAndBounded(t *testing.T) {
+	valid := "card-" + strings.Repeat("f", 64)
+	got, truncated, err := continuationExcludedCardIDs([]behaviorgraph.Record{{"id": valid}, {"id": valid}})
+	if err != nil || truncated || len(got) != 1 || got[0] != valid {
+		t.Fatalf("valid card exclusions = %v, truncated %t, err %v", got, truncated, err)
+	}
+	if _, _, err := continuationExcludedCardIDs("malformed"); err == nil {
+		t.Fatal("accepted malformed card exclusion list")
+	}
+	if _, _, err := continuationExcludedCardIDs([]behaviorgraph.Record{{"id": "card-short"}}); err == nil {
+		t.Fatal("accepted malformed card identity")
+	}
+}
+
 func TestCaptureProvenanceRetainsRevisionsAndCurrentParseState(t *testing.T) {
 	ctx := context.Background()
 	ref := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "live-graph-provenance"}
@@ -218,7 +232,7 @@ func TestAnalyticalContinuationTruncationRecomputesResolvedRendererOmissions(t *
 	if analyticalContinuationTruncated(current, prior, nil) {
 		t.Fatal("resolved renderer omissions remained truncated from an earlier page")
 	}
-	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached"} {
+	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached", "candidate_card_limit_reached"} {
 		if analyticalContinuationTruncated(current, map[string]any{key: true}, nil) {
 			t.Errorf("resolved native continuation limit %q remained set from an earlier page", key)
 		}
@@ -226,7 +240,7 @@ func TestAnalyticalContinuationTruncationRecomputesResolvedRendererOmissions(t *
 			t.Errorf("current native continuation limit %q was lost", key)
 		}
 	}
-	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_limit_reached", "provenance_truncated"} {
+	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_exclusion_truncated", "provenance_truncated"} {
 		if !analyticalContinuationTruncated(current, map[string]any{key: true}, nil) {
 			t.Errorf("unpaged or exclusion limit %q was lost", key)
 		}

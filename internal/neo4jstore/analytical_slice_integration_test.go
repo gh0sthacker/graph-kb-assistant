@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -280,6 +282,74 @@ func TestNeo4jAnalyticalSliceUsesGlobalCandidateBudget(t *testing.T) {
 	}
 }
 
+func TestNeo4jAnalyticalSliceContinuesCardCandidatesWithExclusions(t *testing.T) {
+	if os.Getenv("BB_ASSISTANT_NEO4J_TEST") != "1" {
+		t.Skip("set BB_ASSISTANT_NEO4J_TEST=1 to run against a local Neo4j instance")
+	}
+	store, ctx, project := neighborhoodIntegrationStore(t)
+	source := behaviorgraph.Record{
+		"path": "/synthetic/analytical-card-page.json", "sha256": strings.Repeat("e", 64), "record_locator": "$.capture",
+	}
+	seed := neighborhoodTestID("endpoint", "analytical-card-page-seed")
+	entity := behaviorgraph.Record{
+		"id": seed, "kind": "endpoint", "data": map[string]any{"method": "GET"},
+		"source_refs": []behaviorgraph.Record{source},
+	}
+	cards := make([]behaviorgraph.Record, 0, maxAnalyticalCandidateCards+2)
+	for i := 0; i < maxAnalyticalCandidateCards+2; i++ {
+		cards = append(cards, behaviorgraph.Record{
+			"schema_version": json.Number("1"), "id": neighborhoodTestID("card", fmt.Sprintf("analytical-card-page-%d", i)),
+			"capture_id": fmt.Sprintf("capture-analytical-card-page-%d", i), "program": project,
+			"source_refs": []behaviorgraph.Record{source}, "endpoint": map[string]any{"id": seed},
+			"context":           map[string]any{"program": project},
+			"request_analysis":  map[string]any{"parse_state": "incomplete"},
+			"response_analysis": map[string]any{"parse_state": "incomplete", "status": nil},
+			"business_action":   map[string]any{"known_effect": "unknown"},
+			"hypotheses":        []any{}, "missing_evidence": []any{}, "analysis_state": "incomplete",
+		})
+	}
+	fixture := behaviorgraph.Record{
+		"schema_version": json.Number("2"), "program": project,
+		"sources": []behaviorgraph.Record{source}, "entities": []behaviorgraph.Record{entity},
+		"assertions": []behaviorgraph.Record{}, "cards": cards,
+	}
+	if _, err := store.ReplaceProjectSnapshot(ctx, project, fixture); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ReadProjectAnalyticalSlice(ctx, project, []string{seed}, AnalyticalSliceOptions{
+		MaxNodes: 10, MaxEdges: 10, MaxDepth: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.CandidateCardsTruncated || len(first.CandidateCardOwnerIDsOmitted) != 1 || first.CandidateCardOwnerIDsOmitted[0] != seed {
+		t.Fatalf("card candidate limit did not return its owner branch: %#v", first)
+	}
+	firstCards := first.Snapshot["cards"].([]behaviorgraph.Record)
+	if len(firstCards) != maxAnalyticalCandidateCards {
+		t.Fatalf("first card page has %d cards, want %d", len(firstCards), maxAnalyticalCandidateCards)
+	}
+	excluded := make([]string, 0, len(firstCards))
+	for _, card := range firstCards {
+		excluded = append(excluded, card["id"].(string))
+	}
+	second, err := store.ReadProjectAnalyticalSlice(ctx, project, []string{seed}, AnalyticalSliceOptions{
+		MaxNodes: 10, MaxEdges: 10, MaxDepth: 1, ExcludedCardIDs: excluded,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCards := second.Snapshot["cards"].([]behaviorgraph.Record)
+	if second.CandidateCardsTruncated || len(secondCards) != 2 {
+		t.Fatalf("card continuation did not advance to the last two candidates: %#v", second)
+	}
+	for _, card := range secondCards {
+		if slices.Contains(excluded, card["id"].(string)) {
+			t.Fatalf("card continuation repeated an already loaded card %q", card["id"])
+		}
+	}
+}
+
 func analyticalSnapshotContainsAssertion(snapshot behaviorgraph.Record, id string) bool {
 	assertions, _ := snapshot["assertions"].([]behaviorgraph.Record)
 	for _, assertion := range assertions {
@@ -358,4 +428,38 @@ func TestAnalyticalSliceOptionsAreBounded(t *testing.T) {
 	if _, err := analyticalSliceSeeds(project, []string{seed}, AnalyticalSliceOptions{MaxNodes: 10, MaxEdges: 10, MaxDepth: 2}); err != nil {
 		t.Fatalf("rejected bounded analytical slice: %v", err)
 	}
+}
+
+func TestAnalyticalExcludedCardIDsAreBounded(t *testing.T) {
+	valid := analyticalFixtureID("card", "valid")
+	if got, err := analyticalExcludedCardIDs([]string{valid}); err != nil || len(got) != 1 || got[0] != valid {
+		t.Fatalf("valid card exclusions = %v, %v", got, err)
+	}
+	for _, ids := range [][]string{
+		{analyticalFixtureID("assertion", "wrong-kind")},
+		{valid, valid},
+		make([]string, maxAnalyticalExcludedCards+1),
+	} {
+		if _, err := analyticalExcludedCardIDs(ids); err == nil {
+			t.Fatalf("accepted invalid card exclusions: count=%d first=%q", len(ids), firstString(ids))
+		}
+	}
+}
+
+func TestAnalyticalCardContinuationOwnersAreBoundedAndSorted(t *testing.T) {
+	owners := make([]string, maxAnalyticalCardCursorSeeds+1)
+	for i := range owners {
+		owners[i] = analyticalFixtureID("endpoint", fmt.Sprintf("owner-%05d", len(owners)-i))
+	}
+	page, truncated := analyticalCardContinuationOwners(owners)
+	if !truncated || len(page) != maxAnalyticalCardCursorSeeds || !sort.StringsAreSorted(page) {
+		t.Fatalf("card continuation owners have len=%d truncated=%t sorted=%t", len(page), truncated, sort.StringsAreSorted(page))
+	}
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
