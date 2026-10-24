@@ -25,10 +25,18 @@ const (
 var historicalArrayIndexPattern = regexp.MustCompile(`\[[0-9]+\]`)
 
 type historicalParameterField struct {
-	path     string
-	typeName string
-	location string
-	metadata Record
+	path       string
+	typeName   string
+	location   string
+	metadata   Record
+	occurrence *historicalFieldOccurrence
+}
+
+type historicalFieldOccurrence struct {
+	index      int
+	sourceSpan Record
+	valueSpan  Record
+	valueToken string
 }
 
 type historicalBodyAnalysis struct {

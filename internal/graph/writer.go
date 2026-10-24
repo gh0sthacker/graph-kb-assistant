@@ -419,11 +419,15 @@ func (w *Writer) normalizeBundle(bundle Record) (Record, error) {
 		return nil, errors.New("bundle sources are invalid")
 	}
 	sourcesByPair := make(map[string]Record, len(sourceRows))
+	declaredSourceRefs := make(map[string]struct{}, len(sourceRows))
 	for _, source := range sourceRows {
 		if err := validateSource(source); err != nil {
 			return nil, errors.New("bundle source reference is invalid")
 		}
 		sourcesByPair[sourcePair(source)] = source
+		if encoded, err := canonicalJSON(source); err == nil {
+			declaredSourceRefs[string(encoded)] = struct{}{}
+		}
 	}
 	sources := sortedUniqueRefs(sourceRows)
 	declared := make(map[string]Record, len(sourcesByPair))
@@ -458,6 +462,9 @@ func (w *Writer) normalizeBundle(bundle Record) (Record, error) {
 				return nil, errors.New("bundle provenance count exceeds the size limit")
 			}
 			record["source_refs"] = refsAsAny(refs)
+			if requiresExactSourceRefs(record) && !allExactSourceRefsDeclared(refs, declaredSourceRefs) {
+				return nil, errors.New("field correlation provenance does not match an exact source locator")
+			}
 		}
 	}
 	for _, entity := range entities {
@@ -523,6 +530,29 @@ func (w *Writer) normalizeBundle(bundle Record) (Record, error) {
 		"sources": sources, "entities": uniqueEntities,
 		"assertions": uniqueAssertions, "cards": uniqueCards,
 	}, nil
+}
+
+func requiresExactSourceRefs(record Record) bool {
+	if record["kind"] == "field_occurrence" {
+		return true
+	}
+	if record["predicate"] == "has_occurrence" || record["predicate"] == "occurrence_of" || record["predicate"] == "value_used_in" {
+		return true
+	}
+	return false
+}
+
+func allExactSourceRefsDeclared(refs []Record, declared map[string]struct{}) bool {
+	for _, ref := range refs {
+		encoded, err := canonicalJSON(ref)
+		if err != nil {
+			return false
+		}
+		if _, exists := declared[string(encoded)]; !exists {
+			return false
+		}
+	}
+	return len(refs) != 0
 }
 
 func (w *Writer) mergeBundles(bundles []Record) (Record, error) {
@@ -1400,6 +1430,75 @@ func validateBatchReferences(ctx context.Context, db *sql.DB, bundle Record) err
 			parameterData, _ := parameter["data"].(map[string]any)
 			if parameterData["endpoint_id"] != endpointID || parameterData["side"] != "response" {
 				return errors.New("response parameter relation is inconsistent")
+			}
+		case "has_occurrence":
+			if subjectKind != "observation" || objectKind != "field_occurrence" {
+				return errors.New("field occurrence relation has incompatible entity kinds")
+			}
+			observation := entities[subject]
+			if observation == nil {
+				observation = storedEntities[subject]
+			}
+			occurrence := entities[object]
+			if occurrence == nil {
+				occurrence = storedEntities[object]
+			}
+			observationData, _ := observation["data"].(map[string]any)
+			occurrenceData, _ := occurrence["data"].(map[string]any)
+			if occurrenceData["observation_id"] != subject || occurrenceData["capture_id"] != observationData["capture_id"] || occurrenceData["program"] != observationData["program"] {
+				return errors.New("field occurrence does not match its observation")
+			}
+		case "occurrence_of":
+			if subjectKind != "field_occurrence" || objectKind != "parameter" {
+				return errors.New("field schema relation has incompatible entity kinds")
+			}
+			occurrence := entities[subject]
+			if occurrence == nil {
+				occurrence = storedEntities[subject]
+			}
+			parameter := entities[object]
+			if parameter == nil {
+				parameter = storedEntities[object]
+			}
+			occurrenceData, _ := occurrence["data"].(map[string]any)
+			parameterData, _ := parameter["data"].(map[string]any)
+			observationID, okObservationID := occurrenceData["observation_id"].(string)
+			if !okObservationID {
+				return errors.New("field occurrence has no observation reference")
+			}
+			observation := entities[observationID]
+			if observation == nil {
+				observation = storedEntities[observationID]
+			}
+			if observation == nil {
+				return errors.New("field occurrence observation is unavailable")
+			}
+			observationData, _ := observation["data"].(map[string]any)
+			if occurrenceData["parameter_id"] != object || occurrenceData["program"] != parameterData["program"] ||
+				occurrenceData["path"] != parameterData["path"] || occurrenceData["side"] != parameterData["side"] ||
+				observationData["endpoint_id"] != parameterData["endpoint_id"] {
+				return errors.New("field occurrence does not match its parameter")
+			}
+		case "value_used_in":
+			if subjectKind != "value_reference" || objectKind != "field_occurrence" {
+				return errors.New("value equality relation has incompatible entity kinds")
+			}
+			value := entities[subject]
+			if value == nil {
+				value = storedEntities[subject]
+			}
+			occurrence := entities[object]
+			if occurrence == nil {
+				occurrence = storedEntities[object]
+			}
+			valueData, _ := value["data"].(map[string]any)
+			occurrenceData, _ := occurrence["data"].(map[string]any)
+			if valueData["program"] != occurrenceData["program"] || occurrenceData["value_span"] == nil {
+				return errors.New("value equality relation does not match its field occurrence")
+			}
+			context, _ := assertion["context"].(map[string]any)
+			if context["scenario"] != "keyed_value_equality" || context["scenario_step"] != "correlation_only" {
+				return errors.New("value equality relation overstates its evidence")
 			}
 		}
 		if subjectKind == "hypothesis" || objectKind == "hypothesis" {

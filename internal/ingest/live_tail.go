@@ -113,9 +113,10 @@ type liveSourceReceipt struct {
 }
 
 type LiveTailWriter struct {
-	selected    *store.ProjectStore
-	indexKey    []byte
-	responseKey []byte
+	selected      *store.ProjectStore
+	indexKey      []byte
+	responseKey   []byte
+	fieldValueKey []byte
 }
 
 func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*LiveTailWriter, error) {
@@ -131,7 +132,13 @@ func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*Liv
 	if err != nil {
 		return nil, errors.New("live-tail project keys could not be derived")
 	}
-	return &LiveTailWriter{selected: selected, indexKey: indexKey, responseKey: responseKey}, nil
+	fieldValueKey, err := behaviorgraph.DeriveFieldValueKey(indexKey)
+	if err != nil {
+		clear(indexKey)
+		clear(responseKey)
+		return nil, errors.New("live-tail field-value key could not be derived")
+	}
+	return &LiveTailWriter{selected: selected, indexKey: indexKey, responseKey: responseKey, fieldValueKey: fieldValueKey}, nil
 }
 
 func (w *LiveTailWriter) Close() {
@@ -140,13 +147,15 @@ func (w *LiveTailWriter) Close() {
 	}
 	clear(w.indexKey)
 	clear(w.responseKey)
+	clear(w.fieldValueKey)
 	w.indexKey = nil
 	w.responseKey = nil
+	w.fieldValueKey = nil
 }
 
 func (w *LiveTailWriter) validateOpen() error {
 	if w == nil || w.selected == nil || w.selected.Database == nil || w.selected.Database.ReadOnly() ||
-		len(w.indexKey) != 32 || len(w.responseKey) != 32 {
+		len(w.indexKey) != 32 || len(w.responseKey) != 32 || len(w.fieldValueKey) != 32 {
 		return errors.New("live-tail writer is unavailable")
 	}
 	return nil
@@ -868,8 +877,8 @@ func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]
 		if err != nil {
 			return nil, err
 		}
-		bundle, graphObservationID, err := behaviorgraph.BuildLiveBundleWithSignatures(
-			exchange, w.selected.ProjectKey, source, requestSignature, responseSignature,
+		bundle, graphObservationID, err := behaviorgraph.BuildLiveBundleWithSignaturesAndFieldValueKey(
+			exchange, w.selected.ProjectKey, source, requestSignature, responseSignature, w.fieldValueKey, revisionID,
 		)
 		if err != nil || !strings.HasPrefix(graphObservationID, "observation-") {
 			return nil, errors.New("live-tail graph bundle could not be built")

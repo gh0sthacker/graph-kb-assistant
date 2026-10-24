@@ -530,8 +530,15 @@ func buildHistoricalBundles(projectKey string, rootKey []byte, prepared []prepar
 	if err != nil {
 		return nil, nil, errors.New("historical graph signature keys could not be derived")
 	}
+	fieldValueKey, err := behaviorgraph.DeriveFieldValueKey(indexKey)
+	if err != nil {
+		clear(indexKey)
+		clear(responseKey)
+		return nil, nil, errors.New("historical field-value key could not be derived")
+	}
 	defer clear(indexKey)
 	defer clear(responseKey)
+	defer clear(fieldValueKey)
 	bundles := make([]behaviorgraph.Record, 0, len(prepared))
 	graphObservationIDs := make([]string, 0, len(prepared))
 	for index, item := range prepared {
@@ -548,9 +555,9 @@ func buildHistoricalBundles(projectKey string, rootKey []byte, prepared []prepar
 		if responseSignatureValue != "" {
 			responseSignature = &responseSignatureValue
 		}
-		bundle, observationID, err := behaviorgraph.BuildHistoricalBundleWithSignatures(item.exchange, projectKey, behaviorgraph.Record{
+		bundle, observationID, err := behaviorgraph.BuildHistoricalBundleWithSignaturesAndFieldValueKey(item.exchange, projectKey, behaviorgraph.Record{
 			"path": ref.Path, "sha256": ref.SHA256, "record_locator": ref.RecordLocator,
-		}, requestSignature, responseSignature)
+		}, requestSignature, responseSignature, fieldValueKey, item.revisionID)
 		if err != nil || observationID == "" {
 			return nil, nil, errors.New("historical graph bundle could not be built")
 		}

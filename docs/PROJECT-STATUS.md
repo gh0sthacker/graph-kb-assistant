@@ -1,5 +1,29 @@
 # Project status and known limitations
 
+## Stage 3 revision-bound query occurrences and equality references — PARTIAL (2026-10-24)
+
+- The Go historical and live projections now emit capture-specific query
+  `field_occurrence` records with occurrence order, request-message byte spans,
+  wire fidelity, source receipt, and capture revision identity. They create
+  project-keyed `value_reference` links only for complete, nonempty,
+  non-sensitive URL-decoded string values whose request-line query exactly
+  matches the Caido target metadata. The separately domain-derived key is
+  versioned; neither that key nor plaintext values enter graph records.
+- Equality relations are labeled `keyed_value_equality` / `correlation_only`.
+  They establish a same-project keyed value match and do not establish
+  causality, object identity, or ownership. If a source span or revision cannot
+  be bound, the occurrence and equality link are omitted and the analysis card
+  records the gap.
+- Synthetic Go graph-import tests cover repeated query order, percent-encoded
+  byte spans, same-project correlation across fields and captures, separation
+  by key, sensitive-name omission, plaintext absence, writer validation, and
+  unbound-span coverage. The Python graph validator accepts the same schema
+  and rejects spans outside their occurrence. Targeted graph/ingest Go tests
+  and the Python fixtures passed.
+- This is a query-only slice. Request-body, response-side, actor/object
+  annotations, efficient Neo4j correlation lookup, UI navigation, and complete
+  application-map coverage remain unfinished; Stage 3 stays `PARTIAL`.
+
 ## Stage 4 synthetic HTTP evidence acceptance (2026-10-24) — PARTIAL
 
 - A new end-to-end synthetic fixture writes two encrypted HTTP exchanges into
@@ -897,6 +921,10 @@ See [Project backup and restore](PROJECT-BACKUP-RESTORE.md) for operator steps.
   `kb-search` query returned three cited results. Snapshot source coverage is
   still `PARTIAL`; this validates the current snapshot and lookup path, not
   corpus completeness or a model-backed consultation.
+- Revalidated the same private snapshot on 2026-10-24 with
+  `bb-assistant kb-validate`: `validated=true`, 14,300 documents,
+  16,961 chunks, `source_coverage_state=PARTIAL`. The source-family gaps above
+  remain unresolved; validation does not promote them.
 - The separate global KB statistics fallback did not finish during this
   check. Its two launched read-only processes were interrupted after both used
   sustained CPU, and process inspection confirmed they had exited. No KB

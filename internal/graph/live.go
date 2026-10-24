@@ -20,7 +20,13 @@ func BuildLiveBundle(exchange caido.HttpExchange, program string, source Record)
 // BuildLiveBundleWithSignatures adds keyed request and response variants to
 // the redacted live observation. Raw message bytes remain in Caido.
 func BuildLiveBundleWithSignatures(exchange caido.HttpExchange, program string, source Record, requestSignature string, responseSignature *string) (Record, string, error) {
-	bundle, observationID, err := BuildHistoricalBundleWithSignatures(exchange, program, source, requestSignature, responseSignature)
+	return BuildLiveBundleWithSignaturesAndFieldValueKey(exchange, program, source, requestSignature, responseSignature, nil, "")
+}
+
+// BuildLiveBundleWithSignaturesAndFieldValueKey adds safely parsed project-keyed
+// field equality references while retaining the live-capture graph contract.
+func BuildLiveBundleWithSignaturesAndFieldValueKey(exchange caido.HttpExchange, program string, source Record, requestSignature string, responseSignature *string, fieldValueKey []byte, revisionID string) (Record, string, error) {
+	bundle, observationID, err := BuildHistoricalBundleWithSignaturesAndFieldValueKey(exchange, program, source, requestSignature, responseSignature, fieldValueKey, revisionID)
 	if err != nil {
 		return nil, "", errors.New("live graph bundle could not be built")
 	}

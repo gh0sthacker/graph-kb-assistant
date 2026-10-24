@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -40,21 +41,30 @@ var (
 // The returned observation ID is the graph identity to persist beside the
 // immutable capture revision.
 func BuildHistoricalBundle(exchange caido.HttpExchange, program string, source Record) (Record, string, error) {
-	return buildHistoricalBundle(exchange, program, source, "", nil)
+	return buildHistoricalBundle(exchange, program, source, "", nil, nil, "")
 }
 
 // BuildHistoricalBundleWithSignatures adds project-keyed message variants to
 // the historical observation. Signatures are HMACs computed from the selected
 // project's vault key; raw message bytes are never copied into the graph.
 func BuildHistoricalBundleWithSignatures(exchange caido.HttpExchange, program string, source Record, requestSignature string, responseSignature *string) (Record, string, error) {
-	if !graphDigestPattern.MatchString(requestSignature) || exchange.HasResponse != (responseSignature != nil) ||
-		responseSignature != nil && !graphDigestPattern.MatchString(*responseSignature) {
-		return nil, "", errors.New("historical graph message signature is invalid")
-	}
-	return buildHistoricalBundle(exchange, program, source, requestSignature, responseSignature)
+	return BuildHistoricalBundleWithSignaturesAndFieldValueKey(exchange, program, source, requestSignature, responseSignature, nil, "")
 }
 
-func buildHistoricalBundle(exchange caido.HttpExchange, program string, source Record, requestSignature string, responseSignature *string) (Record, string, error) {
+// BuildHistoricalBundleWithSignaturesAndFieldValueKey adds project-keyed
+// equality references for safely parsed field occurrences. The field-value
+// key must be separately derived from the project's index key.
+func BuildHistoricalBundleWithSignaturesAndFieldValueKey(exchange caido.HttpExchange, program string, source Record, requestSignature string, responseSignature *string, fieldValueKey []byte, revisionID string) (Record, string, error) {
+	if !graphDigestPattern.MatchString(requestSignature) || exchange.HasResponse != (responseSignature != nil) ||
+		responseSignature != nil && !graphDigestPattern.MatchString(*responseSignature) ||
+		len(fieldValueKey) != 0 && len(fieldValueKey) != 32 ||
+		(len(fieldValueKey) == 32 || revisionID != "") && !graphDigestPattern.MatchString(revisionID) {
+		return nil, "", errors.New("historical graph message signature is invalid")
+	}
+	return buildHistoricalBundle(exchange, program, source, requestSignature, responseSignature, fieldValueKey, revisionID)
+}
+
+func buildHistoricalBundle(exchange caido.HttpExchange, program string, source Record, requestSignature string, responseSignature *string, fieldValueKey []byte, revisionID string) (Record, string, error) {
 	if !graphDigestPattern.MatchString(program) || validateSource(source) != nil {
 		return nil, "", errors.New("historical graph project or source reference is invalid")
 	}
@@ -81,6 +91,7 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	queryNames := []string{}
 	var queryFields []historicalParameterField
 	queryFieldCount := 0
+	queryOccurrenceSpansAvailable := false
 	pathFieldCount := 0
 	queryParseIncomplete, pathParseIncomplete := true, true
 	var pathField historicalParameterField
@@ -89,7 +100,12 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 		origin = historicalOrigin(target, ref)
 		var graphPathIncomplete bool
 		path, graphPathIncomplete = historicalGraphPath(target, ref)
-		queryNames, queryFields, queryParseIncomplete, queryFieldCount = historicalQueryFields(target, ref)
+		queryTarget, queryOffset, querySpanAvailable := historicalQueryTarget(exchange.RequestRaw, target)
+		querySpanAvailable = querySpanAvailable && graphDigestPattern.MatchString(revisionID)
+		queryOccurrenceSpansAvailable = querySpanAvailable
+		queryNames, queryFields, queryParseIncomplete, queryFieldCount = historicalQueryFields(
+			queryTarget, ref, fieldValueKey, queryOffset, querySpanAvailable, exchange.RequestWireFidelity,
+		)
 		if graphPathIncomplete {
 			queryNames, queryFields, queryParseIncomplete = []string{}, nil, true
 		}
@@ -188,6 +204,9 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	if queryParseIncomplete {
 		cardMissing = append(cardMissing, "Query parameter names or field nodes could not be mapped within the mapper limit.")
 	}
+	if queryFieldCount > 0 && !queryOccurrenceSpansAvailable {
+		cardMissing = append(cardMissing, "Query field occurrences could not be bound to exact request-message byte spans and a capture revision; equality links were omitted.")
+	}
 	if pathParseIncomplete {
 		cardMissing = append(cardMissing, "Request path parameters could not be mapped within the mapper limit.")
 	}
@@ -280,6 +299,7 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 		return candidates[i].field.typeName < candidates[j].field.typeName
 	})
 	parameterIDs := make(map[string]struct{}, len(candidates))
+	valueReferenceIDs := make(map[string]struct{})
 	for _, candidate := range candidates {
 		field := candidate.field
 		parameterData := Record{
@@ -308,6 +328,62 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 		}
 		entities = append(entities, parameter)
 		assertions = append(assertions, hasParameter)
+		if candidate.field.occurrence == nil || candidate.field.occurrence.sourceSpan == nil || candidate.side != "request" {
+			continue
+		}
+		fieldOccurrenceData := Record{
+			"program": program, "capture_id": captureID, "revision_id": revisionID, "observation_id": observationID,
+			"parameter_id": parameterID, "side": candidate.side,
+			"location": field.location, "path": field.path,
+			"occurrence_index": candidate.field.occurrence.index, "type": field.typeName,
+			"source_span": candidate.field.occurrence.sourceSpan,
+			"value_span":  candidate.field.occurrence.valueSpan,
+		}
+		fieldOccurrenceID, occurrenceErr := historicalEntityID("field_occurrence", fieldOccurrenceData)
+		if occurrenceErr != nil {
+			return nil, "", errors.New("historical field occurrence identity could not be computed")
+		}
+		fieldOccurrence := Record{
+			"id": fieldOccurrenceID, "kind": "field_occurrence",
+			"data": fieldOccurrenceData, "source_refs": refs,
+		}
+		observedOccurrence, occurrenceErr := historicalAssertion(program, observationID, "has_occurrence", fieldOccurrenceID, context, refs)
+		if occurrenceErr != nil {
+			return nil, "", errors.New("historical field occurrence provenance could not be computed")
+		}
+		occurrenceOfParameter, occurrenceErr := historicalAssertion(program, fieldOccurrenceID, "occurrence_of", parameterID, context, refs)
+		if occurrenceErr != nil {
+			return nil, "", errors.New("historical field schema provenance could not be computed")
+		}
+		entities = append(entities, fieldOccurrence)
+		assertions = append(assertions, observedOccurrence, occurrenceOfParameter)
+		if candidate.field.occurrence.valueToken == "" {
+			continue
+		}
+		valueData := Record{
+			"program": program, "token_version": "field-equality-v1",
+			"value_type": "string", "normalization": "urlencoded_scalar_v1",
+			"equality_signature": candidate.field.occurrence.valueToken,
+		}
+		valueReferenceID, valueErr := historicalEntityID("value_reference", valueData)
+		if valueErr != nil {
+			return nil, "", errors.New("historical value reference identity could not be computed")
+		}
+		if _, exists := valueReferenceIDs[valueReferenceID]; !exists {
+			valueReferenceIDs[valueReferenceID] = struct{}{}
+			entities = append(entities, Record{
+				"id": valueReferenceID, "kind": "value_reference",
+				"data": valueData, "source_refs": refs,
+			})
+		}
+		valueContext := cloneRecord(context)
+		valueContext["scenario"] = "keyed_value_equality"
+		valueContext["scenario_step"] = "correlation_only"
+		valueUsed, valueErr := historicalAssertion(program, valueReferenceID, "value_used_in", fieldOccurrenceID, valueContext, refs)
+		if valueErr != nil {
+			return nil, "", errors.New("historical value correlation provenance could not be computed")
+		}
+		assertions = append(assertions, valueUsed)
 	}
 	if requestSignature != "" {
 		requestData := messageVariantData(program, "request_signature", exchange.RequestRaw, true, exchange.RequestTruncated, requestSignature)
@@ -592,7 +668,49 @@ func historicalGraphIdentityRouteWord(word string) bool {
 	return known
 }
 
-func historicalQueryFields(target string, source Record) ([]string, []historicalParameterField, bool, int) {
+func historicalQueryTarget(rawRequest []byte, fallback string) (string, int, bool) {
+	rawTarget, rawOffset, ok := historicalRequestTargetSpan(rawRequest)
+	if !ok {
+		return fallback, 0, false
+	}
+	rawURL, rawErr := historicalParseURL(rawTarget)
+	fallbackURL, fallbackErr := historicalParseURL(fallback)
+	if rawErr != nil || fallbackErr != nil || rawURL.RawQuery != fallbackURL.RawQuery {
+		return fallback, 0, false
+	}
+	return rawTarget, rawOffset, true
+}
+
+func historicalRequestTargetSpan(raw []byte) (string, int, bool) {
+	lineEnd := bytes.IndexByte(raw, '\n')
+	if lineEnd < 0 {
+		lineEnd = len(raw)
+	}
+	line := bytes.TrimSuffix(raw[:lineEnd], []byte("\r"))
+	if len(line) == 0 || len(line) > 65_536 {
+		return "", 0, false
+	}
+	index := 0
+	for index < len(line) && (line[index] == ' ' || line[index] == '\t') {
+		index++
+	}
+	for index < len(line) && line[index] != ' ' && line[index] != '\t' {
+		index++
+	}
+	for index < len(line) && (line[index] == ' ' || line[index] == '\t') {
+		index++
+	}
+	start := index
+	for index < len(line) && line[index] != ' ' && line[index] != '\t' {
+		index++
+	}
+	if start == index {
+		return "", 0, false
+	}
+	return string(line[start:index]), start, true
+}
+
+func historicalQueryFields(target string, source Record, fieldValueKey []byte, requestTargetOffset int, sourceSpanAvailable bool, wireFidelity string) ([]string, []historicalParameterField, bool, int) {
 	if len(target) > 65_536 {
 		return []string{}, nil, true, 0
 	}
@@ -615,8 +733,17 @@ func historicalQueryFields(target string, source Record) ([]string, []historical
 	fieldSet := make(map[string][]historicalParameterField, fieldCapacity)
 	fieldIndex := 0
 	fieldLimitExceeded := false
+	queryStart := strings.IndexByte(target, '?')
+	queryValueBase := requestTargetOffset
+	if queryStart >= 0 {
+		queryValueBase += queryStart + 1
+	} else {
+		sourceSpanAvailable = false
+	}
+	pairOffset := 0
 	for _, pair := range pairs {
 		if pair == "" {
+			pairOffset++
 			continue
 		}
 		key, value, hasValue := strings.Cut(pair, "=")
@@ -637,12 +764,35 @@ func historicalQueryFields(target string, source Record) ([]string, []historical
 		fieldIndex++
 		namesSet[safeName] = struct{}{}
 		if fieldIndex <= 2_000 {
+			occurrenceIndex := len(fieldSet[safeName])
+			occurrence := &historicalFieldOccurrence{index: occurrenceIndex}
+			if sourceSpanAvailable {
+				occurrence.sourceSpan = Record{
+					"start": queryValueBase + pairOffset, "end": queryValueBase + pairOffset + len(pair),
+					"unit": "byte", "offset_basis": "request_message", "wire_fidelity": wireFidelity,
+				}
+				if hasValue {
+					valueStart := queryValueBase + pairOffset + len(key) + 1
+					occurrence.valueSpan = Record{
+						"start": valueStart, "end": valueStart + len(value),
+						"unit": "byte", "offset_basis": "request_message", "wire_fidelity": wireFidelity,
+					}
+				}
+			}
+			if hasValue && sourceSpanAvailable && len(fieldValueKey) == 32 && safeName == name &&
+				!secretNamePattern.MatchString(name) && len(value) <= 4_096 {
+				decoded, decodeErr := url.QueryUnescape(value)
+				if decodeErr == nil && len(decoded) > 0 && len(decoded) <= 4_096 && safeEqualityString(decoded) {
+					occurrence.valueToken = fieldValueToken(fieldValueKey, decoded)
+				}
+			}
 			fieldSet[safeName] = append(fieldSet[safeName], historicalParameterField{
-				typeName: "string", location: "query",
+				typeName: "string", location: "query", occurrence: occurrence,
 			})
 		} else {
 			fieldLimitExceeded = true
 		}
+		pairOffset += len(pair) + 1
 	}
 	names := make([]string, 0, len(namesSet))
 	fields := make([]historicalParameterField, 0, minInt(fieldIndex, 2_000))
@@ -654,15 +804,30 @@ func historicalQueryFields(target string, source Record) ([]string, []historical
 			fields = append(fields, occurrences[0])
 			continue
 		}
-		// Parameter values are discarded. The per-name ordinal preserves each
-		// repeated input as a separate graph occurrence without exposing values.
+		// The per-name ordinal preserves each repeated input as a separate
+		// structural field occurrence without exposing the parsed value.
 		for index, occurrence := range occurrences {
 			occurrence.path = "query[\"" + name + "\"][" + strconv.Itoa(index) + "]"
+			if occurrence.occurrence != nil {
+				occurrence.occurrence.index = index
+			}
 			fields = append(fields, occurrence)
 		}
 	}
 	sort.Strings(names)
 	return names, fields, fieldLimitExceeded, fieldIndex
+}
+
+func safeEqualityString(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func historicalSafeQueryName(name string, source Record, index int) (string, error) {

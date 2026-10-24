@@ -22,8 +22,9 @@ from ...project_lock import project_maintenance_read_lock
 
 KINDS = frozenset({"asset", "endpoint", "actor", "session_context", "object",
                    "observation", "parameter", "condition", "flow",
-                   "classifier_signal", "hypothesis", "request_variant", "response_variant"})
-PREDICATES = frozenset({"exposes", "has_parameter", "invokes", "references", "returns",
+                   "classifier_signal", "hypothesis", "request_variant", "response_variant",
+                   "field_occurrence", "value_reference"})
+PREDICATES = frozenset({"exposes", "has_parameter", "has_occurrence", "occurrence_of", "invokes", "references", "returns",
                         "owned_by", "visible_to", "value_used_in", "requires", "produces",
                         "supports", "contradicts", "contains", "precedes",
                         "uses_request_variant", "received_response",
@@ -168,6 +169,16 @@ def _observation_states(value: Any) -> None:
             _observation_states(child)
 
 
+def _field_span(value: Any) -> tuple[int, int]:
+    span = _exact_dict(value, {"start", "end", "unit", "offset_basis", "wire_fidelity"}, "field span")
+    start, end = span["start"], span["end"]
+    if (type(start) is not int or type(end) is not int or start < 0 or end < start or end > (1 << 30)
+            or span["unit"] != "byte" or span["offset_basis"] != "request_message"
+            or span["wire_fidelity"] not in {"source_bytes", "reconstructed_text", "unknown"}):
+        raise BehaviorError("Invalid field source span")
+    return start, end
+
+
 def _entity(record: Any, declared: set[tuple[str, str]], program: str) -> dict:
     _exact_dict(record, {"id", "kind", "data", "source_refs"}, "entity")
     if not isinstance(record["kind"], str) or record["kind"] not in KINDS or not isinstance(record["data"], dict):
@@ -181,6 +192,35 @@ def _entity(record: Any, declared: set[tuple[str, str]], program: str) -> dict:
         _context(data["context"], program)
     if record["kind"] == "observation":
         _observation_states(data)
+    if record["kind"] == "field_occurrence":
+        required = {"program", "capture_id", "revision_id", "observation_id", "parameter_id", "side",
+                    "location", "path", "occurrence_index", "type", "source_span", "value_span"}
+        if set(data) != required or data.get("program") != program:
+            raise BehaviorError("Invalid field occurrence shape")
+        _identifier("capture-" + str(data["capture_id"]), "capture")
+        if not isinstance(data["revision_id"], str) or not _SHA.fullmatch(data["revision_id"]):
+            raise BehaviorError("Invalid field occurrence revision")
+        _identifier(data["observation_id"], "observation")
+        _identifier(data["parameter_id"], "parameter")
+        if (data["side"] != "request" or data["location"] != "query"
+                or not isinstance(data["path"], str) or not data["path"]
+                or type(data["occurrence_index"]) is not int or data["occurrence_index"] < 0
+                or data["type"] != "string"):
+            raise BehaviorError("Invalid field occurrence metadata")
+        source_start, source_end = _field_span(data["source_span"])
+        if data["value_span"] is not None:
+            value_start, value_end = _field_span(data["value_span"])
+            if value_start < source_start or value_end > source_end:
+                raise BehaviorError("Field value span exceeds its occurrence")
+    if record["kind"] == "value_reference":
+        required = {"program", "token_version", "value_type", "normalization", "equality_signature"}
+        if (set(data) != required or data.get("program") != program
+                or data.get("token_version") != "field-equality-v1"
+                or data.get("value_type") != "string"
+                or data.get("normalization") != "urlencoded_scalar_v1"
+                or not isinstance(data.get("equality_signature"), str)
+                or not _SHA.fullmatch(data["equality_signature"])):
+            raise BehaviorError("Invalid project-keyed value reference")
     if record["kind"] == "condition" and "value" in data:
         if not (type(data["value"]) is bool or data["value"] is None or data["value"] == "unknown"):
             raise BehaviorError("Condition value must be true, false or unknown")

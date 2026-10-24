@@ -275,6 +275,24 @@ func DeriveLiveKeys(projectKey string, rootKey []byte) (indexKey, responseKey []
 	return indexKey, responseKey, nil
 }
 
+// DeriveFieldValueKey creates a domain-separated key for within-project field
+// equality tokens. It must never be used as an encryption key or exposed.
+func DeriveFieldValueKey(indexKey []byte) ([]byte, error) {
+	if len(indexKey) != 32 {
+		return nil, errors.New("invalid field-value index key")
+	}
+	return hmacDigest(indexKey, []byte("bb-assistant-field-value-key-v1")), nil
+}
+
+func fieldValueToken(key []byte, value string) string {
+	material := []byte("bb-graph-field-equality-v1\x00urlencoded-string\x00" + value)
+	digest := hmacDigest(key, material)
+	clear(material)
+	token := hex.EncodeToString(digest)
+	clear(digest)
+	return token
+}
+
 func VariantSignature(exchange caido.HttpExchange, request bool, indexKey, responseKey []byte) (string, error) {
 	projectKey, err := exchange.Ref.Project.StorageKey()
 	if err != nil {

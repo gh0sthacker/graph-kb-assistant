@@ -42,6 +42,7 @@ var (
 	allowedKinds       = map[string]struct{}{
 		"asset": {}, "endpoint": {}, "operation": {}, "actor": {}, "session_context": {}, "object": {},
 		"observation": {}, "parameter": {}, "condition": {}, "flow": {},
+		"field_occurrence": {}, "value_reference": {},
 		"classifier_signal": {}, "hypothesis": {}, "request_variant": {}, "response_variant": {},
 	}
 )
@@ -686,6 +687,12 @@ func validateEntity(record Record, schema int, program string) error {
 			return errors.New("parameter ID does not match its content")
 		}
 	}
+	if kind == "field_occurrence" || kind == "value_reference" {
+		expectedID, err := historicalEntityID(kind, Record(data))
+		if err != nil || expectedID != id {
+			return errors.New("field correlation entity ID does not match its content")
+		}
+	}
 	if kind == "operation" {
 		expectedID, err := historicalEntityID(kind, Record(data))
 		if err != nil || expectedID != id {
@@ -731,6 +738,37 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 			!okPath || len(path) == 0 || len(path) > maxRecordBytes || !okType || len(typeName) == 0 || len(typeName) > 128 ||
 			!okLocation || len(location) == 0 || len(location) > 256 {
 			return errors.New("invalid parameter metadata")
+		}
+	case "field_occurrence":
+		if !exactKeys(data, "program", "capture_id", "revision_id", "observation_id", "parameter_id", "side", "location", "path", "occurrence_index", "type", "source_span", "value_span") {
+			return errors.New("invalid field occurrence shape")
+		}
+		selectedProgram, okProgram := data["program"].(string)
+		captureID, okCapture := data["capture_id"].(string)
+		revisionID, okRevision := data["revision_id"].(string)
+		observationID, okObservation := data["observation_id"].(string)
+		parameterID, okParameter := data["parameter_id"].(string)
+		side, okSide := data["side"].(string)
+		location, okLocation := data["location"].(string)
+		path, okPath := data["path"].(string)
+		typeName, okType := data["type"].(string)
+		if !okProgram || selectedProgram != program || !okCapture || !graphDigestPattern.MatchString(captureID) ||
+			!okRevision || !graphDigestPattern.MatchString(revisionID) ||
+			!okObservation || !graphIDPattern.MatchString(observationID) || !okParameter || !strings.HasPrefix(parameterID, "parameter-") || !graphIDPattern.MatchString(parameterID) ||
+			!okSide || side != "request" || !okLocation || location != "query" || !okPath || len(path) == 0 || len(path) > maxRecordBytes ||
+			!okType || typeName != "string" || !validNonnegativeInteger(data["occurrence_index"]) ||
+			!validFieldSourceSpan(data["source_span"]) || !validOptionalFieldValueSpan(data["value_span"], data["source_span"]) {
+			return errors.New("invalid field occurrence metadata")
+		}
+	case "value_reference":
+		if !exactKeys(data, "program", "token_version", "value_type", "normalization", "equality_signature") ||
+			data["program"] != program || data["token_version"] != "field-equality-v1" ||
+			data["value_type"] != "string" || data["normalization"] != "urlencoded_scalar_v1" {
+			return errors.New("invalid project-keyed value reference")
+		}
+		token, okToken := data["equality_signature"].(string)
+		if !okToken || !graphDigestPattern.MatchString(token) {
+			return errors.New("invalid project-keyed value token")
 		}
 	case "request_variant", "response_variant":
 		return validateVariantData(kind, data, program)
@@ -807,6 +845,66 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 		}
 	}
 	return nil
+}
+
+func validNonnegativeInteger(value any) bool {
+	switch number := value.(type) {
+	case int:
+		return number >= 0
+	case int64:
+		return number >= 0
+	case json.Number:
+		integer, ok := new(big.Int).SetString(number.String(), 10)
+		return ok && integer.Sign() >= 0 && integer.IsInt64()
+	default:
+		return false
+	}
+}
+
+func fieldSpanBounds(value any) (int64, int64, bool) {
+	span, ok := value.(map[string]any)
+	if !ok || !exactKeys(span, "start", "end", "unit", "offset_basis", "wire_fidelity") ||
+		span["unit"] != "byte" || span["offset_basis"] != "request_message" {
+		return 0, 0, false
+	}
+	wireFidelity, ok := span["wire_fidelity"].(string)
+	if !ok || (wireFidelity != "source_bytes" && wireFidelity != "reconstructed_text" && wireFidelity != "unknown") {
+		return 0, 0, false
+	}
+	start, startOK := fieldSpanInteger(span["start"])
+	end, endOK := fieldSpanInteger(span["end"])
+	return start, end, startOK && endOK && end >= start && end <= 1<<30
+}
+
+func fieldSpanInteger(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int:
+		return int64(number), number >= 0
+	case int64:
+		return number, number >= 0
+	case json.Number:
+		integer, ok := new(big.Int).SetString(number.String(), 10)
+		if !ok || integer.Sign() < 0 || !integer.IsInt64() {
+			return 0, false
+		}
+		return integer.Int64(), true
+	default:
+		return 0, false
+	}
+}
+
+func validFieldSourceSpan(value any) bool {
+	_, _, valid := fieldSpanBounds(value)
+	return valid
+}
+
+func validOptionalFieldValueSpan(value, sourceSpan any) bool {
+	if value == nil {
+		return true
+	}
+	valueStart, valueEnd, valueOK := fieldSpanBounds(value)
+	sourceStart, sourceEnd, sourceOK := fieldSpanBounds(sourceSpan)
+	return valueOK && sourceOK && valueStart >= sourceStart && valueEnd <= sourceEnd
 }
 
 func validateVariantData(kind string, data map[string]any, program string) error {
