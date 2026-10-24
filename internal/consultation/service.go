@@ -20,7 +20,9 @@ import (
 
 	"bb-graph-assistant/internal/appquery"
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/publicdata"
+	projectstore "bb-graph-assistant/internal/store"
 )
 
 const (
@@ -239,9 +241,34 @@ func (s *Service) Close() error {
 	return result
 }
 
+// acquireProjectReadLease coordinates consultation writes with project-wide
+// maintenance. Maintenance takes the exclusive project lease before taking
+// consistent snapshots, so no session, comparison, receipt, or candidate can
+// change between the project's database snapshots. Platforms without a
+// supported project lease retain the existing consultation behavior; any
+// maintenance operation must fail closed when its exclusive lease is absent.
+func (s *Service) acquireProjectReadLease(ctx context.Context, projectKey string) (*projectlock.Lock, error) {
+	ref, ok := s.projects[projectKey]
+	if !ok {
+		return nil, ErrProjectNotRegistered
+	}
+	directory, err := projectstore.ProjectDirectory(ref, s.dataRoot)
+	if err != nil {
+		return nil, errors.Join(ErrStoreUnavailable, err)
+	}
+	lease, err := projectlock.AcquireRead(ctx, directory)
+	if errors.Is(err, projectlock.ErrUnsupported) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, errors.Join(ErrStoreUnavailable, err)
+	}
+	return lease, nil
+}
+
 // CreateSession stores the exact bounded packet produced by the local evidence
 // service. The idempotency key makes retries safe after a lost MCP response.
-func (s *Service) CreateSession(ctx context.Context, request appquery.EvidencePacketRequest, idempotencyKey string) (Session, error) {
+func (s *Service) CreateSession(ctx context.Context, request appquery.EvidencePacketRequest, idempotencyKey string) (_ Session, retErr error) {
 	if s == nil || ctx == nil || !projectKeyPattern.MatchString(request.ProjectKey) || strings.TrimSpace(request.Question) == "" || !validIdempotencyKey(idempotencyKey) {
 		return Session{}, ErrInvalidInput
 	}
@@ -261,6 +288,15 @@ func (s *Service) CreateSession(ctx context.Context, request appquery.EvidencePa
 	if err != nil {
 		return Session{}, ErrInvalidInput
 	}
+	lease, err := s.acquireProjectReadLease(ctx, request.ProjectKey)
+	if err != nil {
+		return Session{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
 	db, err := s.database(request.ProjectKey, true)
 	if err != nil {
 		return Session{}, errors.Join(ErrStoreUnavailable, err)
@@ -347,10 +383,19 @@ func (s *Service) loadSession(ctx context.Context, projectKey, sessionID string)
 // AcceptReview records the operator's explicit approval for the redacted
 // packet to become visible to Hermes. This transition is only exposed by the
 // loopback web UI, never by MCP.
-func (s *Service) AcceptReview(ctx context.Context, projectKey, sessionID string, expectedVersion int, idempotencyKey string) (Session, error) {
+func (s *Service) AcceptReview(ctx context.Context, projectKey, sessionID string, expectedVersion int, idempotencyKey string) (_ Session, retErr error) {
 	if s == nil || ctx == nil || !validSessionInput(projectKey, sessionID, expectedVersion, idempotencyKey) {
 		return Session{}, ErrInvalidInput
 	}
+	lease, err := s.acquireProjectReadLease(ctx, projectKey)
+	if err != nil {
+		return Session{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
 	db, err := s.database(projectKey, false)
 	if err != nil {
 		return Session{}, errors.Join(ErrStoreUnavailable, err)
@@ -391,7 +436,7 @@ func (s *Service) AcceptReview(ctx context.Context, projectKey, sessionID string
 
 // Compare appends a deterministic comparison only when both exact revisions
 // are represented by available, hash-verified references in the session.
-func (s *Service) Compare(ctx context.Context, projectKey, sessionID string, expectedVersion int, idempotencyKey string, request appquery.CaptureComparisonRequest) (ComparisonRecord, error) {
+func (s *Service) Compare(ctx context.Context, projectKey, sessionID string, expectedVersion int, idempotencyKey string, request appquery.CaptureComparisonRequest) (_ ComparisonRecord, retErr error) {
 	if s == nil || ctx == nil || request.ProjectKey != projectKey || !validSessionInput(projectKey, sessionID, expectedVersion, idempotencyKey) {
 		return ComparisonRecord{}, ErrInvalidInput
 	}
@@ -405,6 +450,15 @@ func (s *Service) Compare(ctx context.Context, projectKey, sessionID string, exp
 	if err != nil {
 		return ComparisonRecord{}, ErrInvalidInput
 	}
+	lease, err := s.acquireProjectReadLease(ctx, projectKey)
+	if err != nil {
+		return ComparisonRecord{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
 	db, err := s.database(projectKey, false)
 	if err != nil {
 		return ComparisonRecord{}, errors.Join(ErrStoreUnavailable, err)
@@ -452,7 +506,7 @@ func (s *Service) Compare(ctx context.Context, projectKey, sessionID string, exp
 
 // RecordProposal stores a redacted, untrusted interpretation. Citation IDs are
 // not trusted or validated until ValidateProposal creates a separate receipt.
-func (s *Service) RecordProposal(ctx context.Context, request RecordProposalRequest) (ProposalRecord, error) {
+func (s *Service) RecordProposal(ctx context.Context, request RecordProposalRequest) (_ ProposalRecord, retErr error) {
 	if s == nil || ctx == nil || !validSessionInput(request.ProjectKey, request.SessionID, request.ExpectedVersion, request.IdempotencyKey) {
 		return ProposalRecord{}, ErrInvalidInput
 	}
@@ -470,6 +524,15 @@ func (s *Service) RecordProposal(ctx context.Context, request RecordProposalRequ
 	if err != nil {
 		return ProposalRecord{}, ErrInvalidInput
 	}
+	lease, err := s.acquireProjectReadLease(ctx, request.ProjectKey)
+	if err != nil {
+		return ProposalRecord{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
 	db, err := s.database(request.ProjectKey, false)
 	if err != nil {
 		return ProposalRecord{}, errors.Join(ErrStoreUnavailable, err)
@@ -520,7 +583,7 @@ func (s *Service) RecordProposal(ctx context.Context, request RecordProposalRequ
 // ValidateProposal re-resolves every cited exact span and recomputes cited
 // comparisons. It proves citation identity and integrity only; it does not
 // establish semantic support, impact, or vulnerability.
-func (s *Service) ValidateProposal(ctx context.Context, request ValidateProposalRequest) (ValidationReceipt, error) {
+func (s *Service) ValidateProposal(ctx context.Context, request ValidateProposalRequest) (_ ValidationReceipt, retErr error) {
 	if s == nil || ctx == nil || !validSessionInput(request.ProjectKey, request.SessionID, request.ExpectedVersion, request.IdempotencyKey) || !sessionIDPattern.MatchString(request.ProposalID) {
 		return ValidationReceipt{}, ErrInvalidInput
 	}
@@ -528,6 +591,15 @@ func (s *Service) ValidateProposal(ctx context.Context, request ValidateProposal
 	if err != nil {
 		return ValidationReceipt{}, ErrInvalidInput
 	}
+	lease, err := s.acquireProjectReadLease(ctx, request.ProjectKey)
+	if err != nil {
+		return ValidationReceipt{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
 	db, err := s.database(request.ProjectKey, false)
 	if err != nil {
 		return ValidationReceipt{}, errors.Join(ErrStoreUnavailable, err)
@@ -572,7 +644,7 @@ func (s *Service) ValidateProposal(ctx context.Context, request ValidateProposal
 
 // SaveCandidate inserts one immutable candidate version after an exact
 // proposal/receipt match. New candidates always start as "candidate".
-func (s *Service) SaveCandidate(ctx context.Context, request SaveCandidateRequest) (CandidateVersion, error) {
+func (s *Service) SaveCandidate(ctx context.Context, request SaveCandidateRequest) (_ CandidateVersion, retErr error) {
 	if s == nil || ctx == nil || !validSessionInput(request.ProjectKey, request.SessionID, request.ExpectedVersion, request.IdempotencyKey) ||
 		!sessionIDPattern.MatchString(request.ProposalID) || !sessionIDPattern.MatchString(request.ReceiptID) ||
 		(request.CandidateID != "" && !sessionIDPattern.MatchString(request.CandidateID)) {
@@ -582,6 +654,15 @@ func (s *Service) SaveCandidate(ctx context.Context, request SaveCandidateReques
 	if err != nil {
 		return CandidateVersion{}, ErrInvalidInput
 	}
+	lease, err := s.acquireProjectReadLease(ctx, request.ProjectKey)
+	if err != nil {
+		return CandidateVersion{}, err
+	}
+	defer func() {
+		if lease != nil {
+			retErr = errors.Join(retErr, lease.Close())
+		}
+	}()
 	db, err := s.database(request.ProjectKey, false)
 	if err != nil {
 		return CandidateVersion{}, errors.Join(ErrStoreUnavailable, err)

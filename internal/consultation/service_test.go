@@ -12,6 +12,7 @@ import (
 
 	"bb-graph-assistant/internal/appquery"
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/publicdata"
 	projectstore "bb-graph-assistant/internal/store"
 )
@@ -630,6 +631,136 @@ func TestCreateSessionFailsClosedWhenEvidenceBuilderFails(t *testing.T) {
 	service := newTestService(t, root, ref, &evidenceBuilderFake{err: errors.New("vault key is unavailable")}, &comparisonBuilderFake{})
 	if _, err := service.CreateSession(ctx, createRequestFor(projectKey, 1), testIdempotencyKey("create-no-evidence")); !errors.Is(err, ErrEvidenceUnavailable) {
 		t.Fatalf("CreateSession error=%v", err)
+	}
+}
+
+func TestCreateSessionWaitsForProjectMaintenanceBarrier(t *testing.T) {
+	root, ref, projectKey := createConsultationProject(t, "maintenance-barrier")
+	evidence := &evidenceBuilderFake{packet: samplePacket(projectKey)}
+	service := newTestService(t, root, ref, evidence, &comparisonBuilderFake{})
+	directory, err := projectstore.ProjectDirectory(ref, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintenance, err := projectlock.Acquire(context.Background(), directory)
+	if err != nil {
+		t.Fatalf("acquire project maintenance lease: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	request := createRequestFor(projectKey, 1)
+	key := testIdempotencyKey("maintenance-barrier-create")
+	if _, err := service.CreateSession(ctx, request, key); !errors.Is(err, ErrStoreUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		_ = maintenance.Close()
+		t.Fatalf("CreateSession during maintenance error=%v; want store-unavailable deadline", err)
+	}
+	if evidence.calls != 0 {
+		_ = maintenance.Close()
+		t.Fatalf("evidence builder ran while project maintenance was active: calls=%d", evidence.calls)
+	}
+	if err := maintenance.Close(); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateSession(context.Background(), request, key)
+	if err != nil || created.ID == "" {
+		t.Fatalf("CreateSession after maintenance release: session=%#v err=%v", created, err)
+	}
+	if evidence.calls != 1 {
+		t.Fatalf("evidence builder calls=%d after retry; want 1", evidence.calls)
+	}
+}
+
+func TestConsultationMutationsWaitForProjectMaintenanceBarrier(t *testing.T) {
+	root, ref, projectKey := createConsultationProject(t, "maintenance-workflow")
+	evidence := &evidenceBuilderFake{packet: samplePacket(projectKey)}
+	comparison := &comparisonBuilderFake{result: sampleComparison()}
+	service := newTestService(t, root, ref, evidence, comparison)
+	directory, err := projectstore.ProjectDirectory(ref, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := func(name string, operation func(context.Context) error) {
+		t.Helper()
+		maintenance, lockErr := projectlock.Acquire(context.Background(), directory)
+		if errors.Is(lockErr, projectlock.ErrUnsupported) {
+			t.Skip("project maintenance locking is unsupported on this platform")
+		}
+		if lockErr != nil {
+			t.Fatalf("%s acquire maintenance lease: %v", name, lockErr)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+		operationErr := operation(ctx)
+		cancel()
+		closeErr := maintenance.Close()
+		if !errors.Is(operationErr, ErrStoreUnavailable) || !errors.Is(operationErr, context.DeadlineExceeded) {
+			t.Fatalf("%s during maintenance error=%v; want store-unavailable deadline", name, operationErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("%s release maintenance lease: %v", name, closeErr)
+		}
+	}
+
+	created, err := service.CreateSession(context.Background(), createRequestFor(projectKey, 2), testIdempotencyKey("workflow-create"))
+	if err != nil {
+		t.Fatalf("create consultation session: %v", err)
+	}
+	acceptKey := testIdempotencyKey("workflow-review")
+	blocked("accept review", func(ctx context.Context) error {
+		_, operationErr := service.AcceptReview(ctx, projectKey, created.ID, 1, acceptKey)
+		return operationErr
+	})
+	if _, err := service.AcceptReview(context.Background(), projectKey, created.ID, 1, acceptKey); err != nil {
+		t.Fatalf("accept review after maintenance: %v", err)
+	}
+
+	comparisonRequest := sampleComparisonRequest(projectKey)
+	compareKey := testIdempotencyKey("workflow-compare")
+	blocked("compare", func(ctx context.Context) error {
+		_, operationErr := service.Compare(ctx, projectKey, created.ID, 2, compareKey, comparisonRequest)
+		return operationErr
+	})
+	comparisonRecord, err := service.Compare(context.Background(), projectKey, created.ID, 2, compareKey, comparisonRequest)
+	if err != nil {
+		t.Fatalf("compare after maintenance: %v", err)
+	}
+
+	proposalRequest := RecordProposalRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: 3, IdempotencyKey: testIdempotencyKey("workflow-proposal"),
+		Proposal: sampleProposal(), EvidenceReferenceIDs: []string{created.References[0].ID, created.References[1].ID},
+		ComparisonIDs: []string{comparisonRecord.ID},
+	}
+	blocked("record proposal", func(ctx context.Context) error {
+		_, operationErr := service.RecordProposal(ctx, proposalRequest)
+		return operationErr
+	})
+	proposal, err := service.RecordProposal(context.Background(), proposalRequest)
+	if err != nil {
+		t.Fatalf("record proposal after maintenance: %v", err)
+	}
+
+	validationRequest := ValidateProposalRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: 4,
+		IdempotencyKey: testIdempotencyKey("workflow-validate"), ProposalID: proposal.ID,
+	}
+	blocked("validate proposal", func(ctx context.Context) error {
+		_, operationErr := service.ValidateProposal(ctx, validationRequest)
+		return operationErr
+	})
+	receipt, err := service.ValidateProposal(context.Background(), validationRequest)
+	if err != nil {
+		t.Fatalf("validate proposal after maintenance: %v", err)
+	}
+
+	candidateRequest := SaveCandidateRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: 5,
+		IdempotencyKey: testIdempotencyKey("workflow-candidate"), ProposalID: proposal.ID, ReceiptID: receipt.ID,
+	}
+	blocked("save candidate", func(ctx context.Context) error {
+		_, operationErr := service.SaveCandidate(ctx, candidateRequest)
+		return operationErr
+	})
+	if _, err := service.SaveCandidate(context.Background(), candidateRequest); err != nil {
+		t.Fatalf("save candidate after maintenance: %v", err)
 	}
 }
 

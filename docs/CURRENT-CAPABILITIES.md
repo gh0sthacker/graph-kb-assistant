@@ -31,6 +31,10 @@ snapshot; it does not migrate stores or drain projection jobs.
 - A reviewed consultation workflow with session persistence, evidence
   comparison, citation checks, candidate versioning, and resume. Its synthetic
   workflow is verified; model-backed use is not.
+- Consultation state changes acquire a shared project lease on Linux. This
+  makes project-wide maintenance wait for in-flight session writes and block
+  new ones; maintenance actions must fail closed on platforms without project
+  lock support.
 - Hermes profile setup and MCP tool discovery. Discovery does not invoke a
   model or send captured content.
 
@@ -38,11 +42,13 @@ snapshot; it does not migrate stores or drain projection jobs.
 
 - Caido project access, new live intake, and restart/replay against the current
   runtime databases.
-- Neo4j connectivity and projection-queue drain on the selected working data.
+- Projection-queue drain and parity on the selected working data. A separate
+  `neo4j-check` returned `ready`; `status` itself remains a local-only report
+  and does not connect.
 - Backup/restore preserving capture revisions, encrypted vault objects,
   BehaviorGraph receipts, consultation state, and required key references.
-- Full KB integrity, authenticated actor/object analysis, model-backed
-  evaluation, and browser/JavaScript application-map coverage.
+- KB source/vector content validation, authenticated actor/object analysis,
+  model-backed evaluation, and browser/JavaScript application-map coverage.
 
 Use [PROJECT-STATUS.md](PROJECT-STATUS.md) for dated implementation evidence
 and known gaps. Older checkpoints in that file describe their own state and

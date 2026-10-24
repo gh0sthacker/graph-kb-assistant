@@ -1,5 +1,45 @@
 # Project status and known limitations
 
+## Stage 6 maintenance barrier and current runtime recheck (2026-10-23) — PARTIAL
+
+- ECC-guided TDD reproduced a consultation write succeeding while the project
+  held its exclusive maintenance lease. All six state-changing consultation
+  operations now hold a shared lease from before opening/accessing their
+  project database through completion: session creation, review acceptance,
+  comparison, proposal, citation validation, and candidate save. A maintenance
+  snapshot therefore waits for in-flight consultation writes and prevents new
+  ones on Linux. Platforms without the lock primitive keep consultation
+  behavior; maintenance operations must fail closed when they cannot acquire
+  the exclusive lease.
+- Synthetic tests verified the timeout under the exclusive lease and retry
+  using the same idempotency key after release. `go test -count=1 ./...`,
+  `go test -race -count=1 ./internal/consultation ./internal/projectlock`,
+  `go vet ./...`, and `git diff --check` passed. This is only the consistency
+  barrier; no backup or restore command exists yet.
+- A fresh `bb-assistant status` read 1,400 captures, 1,369 graph mappings, 31
+  unmapped captures, and 1,385 pending projection jobs (15 applied, none
+  leased or dead-lettered). Capture schema v7 and BehaviorGraph schema v2 were
+  compatible. Coverage and history reconciliation remain `PARTIAL`.
+- `bb-assistant neo4j-check` returned `ready` for the configured Neo4j database
+  and ensured the application's idempotent schema. This verifies connection
+  and schema availability, but not queue parity or drain. The status command
+  intentionally continues to report connectivity as `not_checked`.
+- The local web UI process is running and returned HTTP 200. User-service
+  supervision could not be inspected because this shell has no systemd user
+  bus, so managed startup is unverified. Caido's Juice Shop project is ready
+  but not selected; no project switch, request enumeration, or body fetch was
+  done. The local vault key is absent, so encrypted historical import remains
+  unavailable until that runtime prerequisite is supplied.
+- The local KB fallback reports 15,517 compatible files, 68,878 chunks and
+  vectors, zero missing vectors, and `semantic_degraded=false`. Structural
+  integrity passed, while source and vector content validation are still
+  unverified. MCP `kb_stats` timed out after 300 seconds; the documented local
+  fallback completed successfully. KB remains outside the approved feature
+  scope except for this health audit.
+- Stage 6 remains `PARTIAL`: backup/restore, managed startup, projection queue
+  drain, Caido live intake/restart replay, and restored receipt verification
+  are outstanding. No live Caido request bodies were read.
+
 ## Stage 6 local capability status slice (2026-10-23) — PARTIAL
 
 - Added `bb-assistant status`, a read-only JSON report for graph configuration,
