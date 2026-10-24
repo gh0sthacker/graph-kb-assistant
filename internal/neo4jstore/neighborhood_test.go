@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -310,12 +311,48 @@ func (tx *neighborhoodProvenanceTx) Run(_ context.Context, query string, params 
 				rows = append(rows, row)
 			}
 		}
+	} else if keys, anchors := params["source_ref_keys"].([]string); anchors {
+		for _, key := range keys {
+			parts := strings.Split(key, "|")
+			if len(parts) != 2 {
+				continue
+			}
+			for _, row := range tx.rows[parts[0]] {
+				if row.Values[1] == parts[1] {
+					payload := row.Values[3].(string)
+					rows = append(rows, &neo4j.Record{
+						Keys:   []string{"owner_id", "record_id", "record_type", "payload_char_count", "payload_sha256", "invalid_links"},
+						Values: []any{row.Values[0], row.Values[1], row.Values[2], int64(len([]rune(payload))), row.Values[4], row.Values[5]},
+					})
+					break
+				}
+			}
+		}
 	} else if perOwnerLimit, batched := params["limit_each"].(int); batched {
+		excluded := make(map[string]bool)
+		excludedKeys, _ := params["excluded_source_ref_keys"].([]string)
+		for _, key := range excludedKeys {
+			excluded[key] = true
+		}
 		for _, owner := range params["owner_ids"].([]string) {
 			ownerRows := append([]*neo4j.Record(nil), tx.rows[owner]...)
+			filtered := ownerRows[:0]
+			for _, row := range ownerRows {
+				if !excluded[owner+"|"+fmt.Sprint(row.Values[1])] {
+					filtered = append(filtered, row)
+				}
+			}
+			ownerRows = filtered
 			sort.Slice(ownerRows, func(i, j int) bool { return fmt.Sprint(ownerRows[i].Values[1]) < fmt.Sprint(ownerRows[j].Values[1]) })
 			if len(ownerRows) > perOwnerLimit {
 				ownerRows = ownerRows[:perOwnerLimit]
+			}
+			if len(ownerRows) == 0 {
+				rows = append(rows, &neo4j.Record{
+					Keys:   []string{"owner_id", "record_id", "record_type", "payload_char_count", "payload_sha256", "invalid_links"},
+					Values: []any{owner, nil, nil, nil, nil, false},
+				})
+				continue
 			}
 			rows = append(rows, ownerRows...)
 		}
@@ -385,7 +422,7 @@ func TestNeighborhoodSamplesHighDegreeEntityProvenance(t *testing.T) {
 			tx.rows[id] = append(tx.rows[id], neighborhoodProvenanceRow(id, source))
 		}
 	}
-	if err := read.loadProvenance(context.Background(), tx, owners); err != nil {
+	if err := read.loadProvenance(context.Background(), tx, owners, nil, nil); err != nil {
 		t.Fatalf("small neighborhood failed because common entities have 21,000 provenance links: %v", err)
 	}
 	for _, id := range owners {
@@ -412,6 +449,59 @@ func neighborhoodUnitEntity(owner string) *neighborhoodRead {
 	return &neighborhoodRead{project: strings.Repeat("a", 64), records: map[string]neighborhoodRecord{
 		owner: {id: owner, kind: "entity", value: behaviorgraph.Record{"id": owner, "kind": "endpoint", "data": map[string]any{}}},
 	}}
+}
+
+func TestNeighborhoodEntityProvenanceContinuesAfterExcludedReferences(t *testing.T) {
+	owner := "endpoint-" + strings.Repeat("1", 64)
+	tx := &neighborhoodProvenanceTx{rows: map[string][]*neo4j.Record{owner: neighborhoodUnitProvenance(owner, 5)}}
+	first := neighborhoodUnitEntity(owner)
+	if err := first.loadEntityProvenanceBatch(context.Background(), tx, []string{owner}, 2, maxNeighborhoodBytes, nil, nil); err != nil {
+		t.Fatalf("load first provenance page: %v", err)
+	}
+	firstRefs := first.records[owner].value["source_refs"].([]behaviorgraph.Record)
+	if len(firstRefs) != 2 || first.truncatedEntities[owner] != true {
+		t.Fatalf("first provenance page = %d refs, truncated=%v", len(firstRefs), first.truncatedEntityIDs())
+	}
+	firstIDs := neighborhoodSourceRecordIDs(firstRefs)
+	excluded := []string{owner + "|" + firstIDs[0], owner + "|" + firstIDs[1]}
+	anchor := []string{owner + "|" + firstIDs[0]}
+	second := neighborhoodUnitEntity(owner)
+	if err := second.loadEntityProvenanceBatch(context.Background(), tx, []string{owner}, 3, maxNeighborhoodBytes, excluded, anchor); err != nil {
+		t.Fatalf("load second provenance page: %v", err)
+	}
+	secondRefs := second.records[owner].value["source_refs"].([]behaviorgraph.Record)
+	if len(secondRefs) != 3 || second.truncatedEntities[owner] != true {
+		t.Fatalf("second provenance page = %d refs, truncated=%v", len(secondRefs), second.truncatedEntityIDs())
+	}
+	secondIDs := neighborhoodSourceRecordIDs(secondRefs)
+	if !slices.Contains(secondIDs, firstIDs[0]) || slices.Contains(secondIDs, firstIDs[1]) {
+		t.Fatalf("second page did not retain exactly its anchor: %v", secondIDs)
+	}
+	for _, id := range secondIDs {
+		if id != firstIDs[0] && slices.Contains(firstIDs, id) {
+			t.Fatalf("second page repeated an already loaded reference %q", id)
+		}
+	}
+	allExcluded := append(append([]string(nil), excluded...), owner+"|"+secondIDs[1], owner+"|"+secondIDs[2])
+	last := neighborhoodUnitEntity(owner)
+	if err := last.loadEntityProvenanceBatch(context.Background(), tx, []string{owner}, 3, maxNeighborhoodBytes, allExcluded, anchor); err != nil {
+		t.Fatalf("load final provenance page: %v", err)
+	}
+	lastRefs := last.records[owner].value["source_refs"].([]behaviorgraph.Record)
+	if len(lastRefs) != 2 || last.truncatedEntities[owner] {
+		t.Fatalf("final provenance page = %d refs, truncated=%v", len(lastRefs), last.truncatedEntityIDs())
+	}
+}
+
+func neighborhoodSourceRecordIDs(refs []behaviorgraph.Record) []string {
+	ids := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		payload, _ := json.Marshal(ref)
+		digest := sha256.Sum256(payload)
+		ids = append(ids, "source-"+hex.EncodeToString(digest[:]))
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func TestNeighborhoodEntityProvenanceReportsExactAndExceededLimits(t *testing.T) {
@@ -485,7 +575,7 @@ func TestNeighborhoodProvenanceRetainsAllAssertionRefsBeforeEntitySamples(t *tes
 	tx := &neighborhoodProvenanceTx{rows: map[string][]*neo4j.Record{
 		owner: neighborhoodUnitProvenance(owner, 100), assertion: neighborhoodUnitProvenance(assertion, 100),
 	}}
-	if err := read.loadProvenance(context.Background(), tx, []string{owner, assertion}); err != nil {
+	if err := read.loadProvenance(context.Background(), tx, []string{owner, assertion}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	refs := read.records[assertion].value["source_refs"].([]behaviorgraph.Record)
@@ -500,7 +590,7 @@ func TestNeighborhoodSampledSourceChecksumsRemainMandatory(t *testing.T) {
 	rows := neighborhoodUnitProvenance(owner, 1)
 	rows[0].Values[4] = strings.Repeat("0", 64)
 	tx := &neighborhoodProvenanceTx{rows: map[string][]*neo4j.Record{owner: rows}}
-	if err := read.loadProvenance(context.Background(), tx, []string{owner}); err == nil || !strings.Contains(err.Error(), "checksum") {
+	if err := read.loadProvenance(context.Background(), tx, []string{owner}, nil, nil); err == nil || !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("sampled source corruption was not rejected: %v", err)
 	}
 }

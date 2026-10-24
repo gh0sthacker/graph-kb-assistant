@@ -311,3 +311,15 @@ func TestFullContinuationBranchSeedsIncludesCardCandidateOwner(t *testing.T) {
 		t.Fatalf("card continuation owner seeds = %v, want [%q]", got, owner)
 	}
 }
+
+func TestFullContinuationBranchSeedsIncludesTruncatedProvenanceOwner(t *testing.T) {
+	owner := "endpoint-" + strings.Repeat("e", 64)
+	payload := map[string]any{
+		"missing_branches": []behaviorgraph.Record{{
+			"frontier_id": owner, "reason": "analytical_provenance_limit",
+		}},
+	}
+	if got := fullContinuationBranchSeeds(payload); len(got) != 1 || got[0] != owner {
+		t.Fatalf("provenance continuation owner seeds = %v, want [%q]", got, owner)
+	}
+}

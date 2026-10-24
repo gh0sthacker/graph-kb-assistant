@@ -313,7 +313,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 				}
 				if candidateLimits {
 					payload["continuation_candidate_limits_reached"] = true
-					appendGraphLimitation(payload, "This cursor continues rendered, assertion, frontier, and card-candidate branches. Candidate queues are bounded; provenance limits still need a narrower query or a later continuation feature.")
+					appendGraphLimitation(payload, "This cursor continues rendered, assertion, frontier, card, and provenance branches. Candidate queues and provenance pages are bounded; remaining truncation stays explicit.")
 				}
 			}
 		} else {
@@ -331,7 +331,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 				pagePayload["continuation_scope"] = "rendered_and_native_candidate_branches"
 				if graphCandidateLimitReached(pagePayload) {
 					pagePayload["continuation_candidate_limits_reached"] = true
-					appendGraphLimitation(pagePayload, "This cursor continues rendered, assertion, frontier, and card-candidate branches. Candidate queues are bounded; provenance limits still need a narrower query or a later continuation feature.")
+					appendGraphLimitation(pagePayload, "This cursor continues rendered, assertion, frontier, card, and provenance branches. Candidate queues and provenance pages are bounded; remaining truncation stays explicit.")
 				}
 				return pagePayload, fullContinuationBranchSeeds(pagePayload), graphPayloadGeneration(pagePayload), nil
 			}, func(pagePayload map[string]any) (map[string]any, error) {
@@ -498,7 +498,7 @@ func fullContinuationBranchSeeds(payload map[string]any) []string {
 			if !strings.HasPrefix(id, "assertion-") {
 				continue
 			}
-		case "analytical_frontier_node_limit", "analytical_card_candidate_limit":
+		case "analytical_frontier_node_limit", "analytical_card_candidate_limit", "analytical_provenance_limit":
 			id, _ = branch["frontier_id"].(string)
 			if strings.HasPrefix(id, "source-") || strings.HasPrefix(id, "card-") {
 				continue
@@ -529,7 +529,7 @@ func graphCandidateLimitReached(payload map[string]any) bool {
 	}
 	for _, key := range []string{
 		"candidate_assertion_limit_reached", "candidate_assertion_exclusion_truncated", "analytical_frontier_node_limit_reached",
-		"candidate_card_limit_reached", "provenance_truncated", "source_integrity_budget_exceeded",
+		"candidate_card_limit_reached", "provenance_truncated", "provenance_cursor_truncated", "source_integrity_budget_exceeded",
 	} {
 		if reached, _ := payload[key].(bool); reached {
 			return true

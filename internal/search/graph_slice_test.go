@@ -2,6 +2,8 @@ package search
 
 import (
 	"context"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -21,6 +23,59 @@ func TestContinuationExcludedCardIDsAreValidatedAndBounded(t *testing.T) {
 	}
 	if _, _, err := continuationExcludedCardIDs([]behaviorgraph.Record{{"id": "card-short"}}); err == nil {
 		t.Fatal("accepted malformed card identity")
+	}
+}
+
+func TestContinuationEntitySourceRefStateBuildsBoundedOwnerKeys(t *testing.T) {
+	owner := "endpoint-" + strings.Repeat("1", 64)
+	refs := []behaviorgraph.Record{
+		{"path": "/synthetic/one.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.one"},
+		{"path": "/synthetic/two.json", "sha256": strings.Repeat("b", 64), "record_locator": "$.two"},
+		{"path": "/synthetic/one.json", "sha256": strings.Repeat("a", 64), "record_locator": "$.one"},
+	}
+	entities := []behaviorgraph.Record{{"id": owner, "source_refs": refs}}
+	excluded, anchors, truncated, err := continuationEntitySourceRefState(entities, []string{owner})
+	if err != nil || truncated || len(excluded) != 2 || len(anchors) != 1 {
+		t.Fatalf("source-ref continuation state = %v, %v, truncated=%t, err=%v", excluded, anchors, truncated, err)
+	}
+	if !sort.StringsAreSorted(excluded) || !sort.StringsAreSorted(anchors) || !strings.HasPrefix(anchors[0], owner+"|") {
+		t.Fatalf("source-ref keys are not stable owner pairs: excluded=%v anchors=%v", excluded, anchors)
+	}
+	if _, found := slices.BinarySearch(excluded, anchors[0]); !found {
+		t.Fatalf("anchor key %q is absent from prior refs %v", anchors[0], excluded)
+	}
+}
+
+func TestMergeAnalyticalSnapshotsUnionsEntityProvenancePages(t *testing.T) {
+	project := strings.Repeat("a", 64)
+	owner := "endpoint-" + strings.Repeat("b", 64)
+	first := behaviorgraph.Record{"path": "/synthetic/one.json", "sha256": strings.Repeat("1", 64), "record_locator": "$.one"}
+	second := behaviorgraph.Record{"path": "/synthetic/two.json", "sha256": strings.Repeat("2", 64), "record_locator": "$.two"}
+	page := func(ref behaviorgraph.Record, sourceID string) map[string]any {
+		return map[string]any{
+			"project_key": project,
+			"entities":    []behaviorgraph.Record{{"id": owner, "kind": "endpoint", "data": map[string]any{"method": "GET"}, "source_refs": []behaviorgraph.Record{ref}}},
+			"assertions":  []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{},
+			"sources": []behaviorgraph.Record{{"id": sourceID, "path": ref["path"], "sha256": ref["sha256"], "record_locator": ref["record_locator"]}},
+		}
+	}
+	firstID, err := continuationSourceRecordID(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := continuationSourceRecordID(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _, err := mergeAnalyticalSnapshots(project,
+		page(first, firstID), page(second, secondID))
+	if err != nil {
+		t.Fatalf("merge entity provenance pages: %v", err)
+	}
+	entities := snapshot["entities"].([]behaviorgraph.Record)
+	refs := entities[0]["source_refs"].([]behaviorgraph.Record)
+	if len(refs) != 2 {
+		t.Fatalf("merged entity retains %d refs, want 2: %#v", len(refs), refs)
 	}
 }
 
@@ -232,7 +287,7 @@ func TestAnalyticalContinuationTruncationRecomputesResolvedRendererOmissions(t *
 	if analyticalContinuationTruncated(current, prior, nil) {
 		t.Fatal("resolved renderer omissions remained truncated from an earlier page")
 	}
-	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached", "candidate_card_limit_reached"} {
+	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached", "candidate_card_limit_reached", "provenance_truncated"} {
 		if analyticalContinuationTruncated(current, map[string]any{key: true}, nil) {
 			t.Errorf("resolved native continuation limit %q remained set from an earlier page", key)
 		}
@@ -240,7 +295,7 @@ func TestAnalyticalContinuationTruncationRecomputesResolvedRendererOmissions(t *
 			t.Errorf("current native continuation limit %q was lost", key)
 		}
 	}
-	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_exclusion_truncated", "provenance_truncated"} {
+	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_exclusion_truncated", "provenance_cursor_truncated"} {
 		if !analyticalContinuationTruncated(current, map[string]any{key: true}, nil) {
 			t.Errorf("unpaged or exclusion limit %q was lost", key)
 		}

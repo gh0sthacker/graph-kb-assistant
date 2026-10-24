@@ -1568,10 +1568,29 @@ This repository is an early public alpha. The following boundaries are deliberat
   `internal/graph` package tests, `go vet` for those packages, and
   `git diff --check` passed. Runtime queue health, Neo4j delivery, and Caido
   coverage remain `PARTIAL`.
-- Next local acceptance: extend Stage 2's native full-graph query continuation
-  so frontier, assertion, card, and provenance candidate limits do not hide
-  reachable branches; verify exact-boundary and multi-page closure on
-  synthetic graph fixtures. Focused-view performance on the working dataset
-  still requires a permitted runtime check.
+- Next local acceptance: verify full graph continuation through the HTTP/MCP
+  entry points and on exact-boundary synthetic fixtures. Focused-view
+  performance on the working dataset still requires a permitted runtime check.
+
+## Entity provenance continuation (2026-10-24) — PARTIAL
+
+- Full analytical graph continuation now pages entity source references past
+  the per-read 64-reference bound. It excludes already returned owner/source
+  pairs, retains one validated source anchor per owner so each continuation
+  remains a closed graph snapshot, merges provenance pages only when the
+  entity's non-provenance fields agree, and emits another branch while more
+  references remain. The cursor is bounded at 10,000 previous source-reference
+  keys and 5,000 anchors; exceeding either cap remains explicitly truncated.
+- Focused synthetic Go tests passed for Neo4j page selection and validation,
+  provenance-key construction and merge, branch scheduling, and page-scoped
+  truncation flags. `go vet` passed for `internal/neo4jstore`,
+  `internal/search`, and `internal/appquery` with `TMPDIR=/var/tmp`;
+  `git diff --check` passed. An opt-in 66-reference Neo4j integration fixture
+  was added. Its isolated container attempt could not start the database with
+  the available temporary storage, so real Neo4j query execution remains
+  unverified; the container was stopped and removed.
+- Caido and the working project database were not accessed for this code
+  slice. Runtime graph performance, HTTP/MCP continuation, Caido completeness,
+  and KB coverage remain `PARTIAL`.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.

@@ -1138,7 +1138,7 @@ function updateGraphMoreControl() {
   elements.graphMore.disabled = state.loadingGraph || !canContinue;
   elements.graphMore.textContent = state.graphView === "full" ? "More omitted branches" : "More neighbors";
   elements.graphMore.title = state.graphView === "full"
-    ? "Continue rendered omissions and native assertion, frontier, and card branches in the pinned graph generation"
+    ? "Continue rendered omissions and native assertion, frontier, card, and provenance branches in the pinned graph generation"
     : "Continue with the next generation-pinned neighbor page";
 }
 

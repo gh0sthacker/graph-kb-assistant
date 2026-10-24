@@ -12,26 +12,30 @@ import (
 )
 
 const (
-	maxAnalyticalCandidateAssertions  = 1_000
-	maxAnalyticalExcludedAssertions   = 10_000
-	maxAnalyticalCandidateCards       = 200
-	maxAnalyticalFrontierNodes        = 128
-	maxAnalyticalFrontierCursorSeeds  = 5_000
-	maxAnalyticalAssertionCursorSeeds = 5_000
-	maxAnalyticalCardCursorSeeds      = 5_000
-	maxAnalyticalExcludedCards        = 10_000
-	analyticalClosureHops             = 2
+	maxAnalyticalCandidateAssertions      = 1_000
+	maxAnalyticalExcludedAssertions       = 10_000
+	maxAnalyticalCandidateCards           = 200
+	maxAnalyticalFrontierNodes            = 128
+	maxAnalyticalFrontierCursorSeeds      = 5_000
+	maxAnalyticalAssertionCursorSeeds     = 5_000
+	maxAnalyticalCardCursorSeeds          = 5_000
+	maxAnalyticalExcludedCards            = 10_000
+	maxAnalyticalExcludedEntitySourceRefs = 10_000
+	maxAnalyticalEntitySourceRefAnchors   = 5_000
+	analyticalClosureHops                 = 2
 )
 
 // AnalyticalSliceOptions bounds the local candidate graph loaded for one
 // analysis slice. The shared graph Reader applies the requested node, edge,
 // and depth budgets after the bounded candidates are validated.
 type AnalyticalSliceOptions struct {
-	MaxNodes             int
-	MaxEdges             int
-	MaxDepth             int
-	ExcludedAssertionIDs []string
-	ExcludedCardIDs      []string
+	MaxNodes                    int
+	MaxEdges                    int
+	MaxDepth                    int
+	ExcludedAssertionIDs        []string
+	ExcludedCardIDs             []string
+	ExcludedEntitySourceRefKeys []string
+	EntitySourceRefAnchorKeys   []string
 }
 
 // AnalyticalSlice is a selected-query projection, not a whole-project
@@ -56,6 +60,7 @@ type AnalyticalSlice struct {
 	FrontierSeedsTruncated       bool
 	ProvenanceTruncated          bool
 	TruncatedEntityIDs           []string
+	ProvenanceSeedsTruncated     bool
 	EntitySourceRefLimit         int
 }
 
@@ -74,6 +79,17 @@ func (s *Store) ReadProjectAnalyticalSlice(ctx context.Context, projectKey strin
 	}
 	options.ExcludedCardIDs, err = analyticalExcludedCardIDs(options.ExcludedCardIDs)
 	if err != nil {
+		return AnalyticalSlice{}, err
+	}
+	options.ExcludedEntitySourceRefKeys, err = validateAnalyticalEntitySourceRefKeys(options.ExcludedEntitySourceRefKeys, maxAnalyticalExcludedEntitySourceRefs, false)
+	if err != nil {
+		return AnalyticalSlice{}, err
+	}
+	options.EntitySourceRefAnchorKeys, err = validateAnalyticalEntitySourceRefKeys(options.EntitySourceRefAnchorKeys, maxAnalyticalEntitySourceRefAnchors, true)
+	if err != nil {
+		return AnalyticalSlice{}, err
+	}
+	if err := validateAnalyticalEntitySourceRefAnchors(options.ExcludedEntitySourceRefKeys, options.EntitySourceRefAnchorKeys); err != nil {
 		return AnalyticalSlice{}, err
 	}
 	if s == nil || s.driver == nil {
@@ -150,6 +166,42 @@ func analyticalExcludedCardIDs(ids []string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+func validateAnalyticalEntitySourceRefKeys(keys []string, limit int, onePerOwner bool) ([]string, error) {
+	if len(keys) > limit {
+		return nil, errors.New("Neo4j analytical entity provenance cursor exceeds its limit")
+	}
+	seen := make(map[string]bool, len(keys))
+	owners := make(map[string]bool, len(keys))
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts := strings.Split(key, "|")
+		if len(parts) != 2 || !neighborhoodIDPattern.MatchString(parts[0]) ||
+			strings.HasPrefix(parts[0], "source-") || strings.HasPrefix(parts[0], "card-") ||
+			!neighborhoodIDPattern.MatchString(parts[1]) || !strings.HasPrefix(parts[1], "source-") || seen[key] ||
+			(onePerOwner && owners[parts[0]]) {
+			return nil, errors.New("Neo4j analytical entity provenance cursor is invalid")
+		}
+		seen[key] = true
+		owners[parts[0]] = true
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func validateAnalyticalEntitySourceRefAnchors(excluded, anchors []string) error {
+	excludedSet := make(map[string]bool, len(excluded))
+	for _, key := range excluded {
+		excludedSet[key] = true
+	}
+	for _, key := range anchors {
+		if !excludedSet[key] {
+			return errors.New("Neo4j analytical entity provenance anchor was not previously excluded")
+		}
+	}
+	return nil
 }
 
 func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransaction, project string, seeds []string, options AnalyticalSliceOptions) (AnalyticalSlice, error) {
@@ -294,11 +346,15 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 		}
 	}
 	sort.Strings(allOwners)
-	if err := read.loadProvenance(ctx, tx, allOwners); err != nil {
+	if err := read.loadProvenance(ctx, tx, allOwners, options.ExcludedEntitySourceRefKeys, options.EntitySourceRefAnchorKeys); err != nil {
 		return AnalyticalSlice{}, err
 	}
 	result.TruncatedEntityIDs = read.truncatedEntityIDs()
 	result.ProvenanceTruncated = len(result.TruncatedEntityIDs) != 0
+	if len(result.TruncatedEntityIDs) > maxAnalyticalEntitySourceRefAnchors {
+		result.ProvenanceSeedsTruncated = true
+		result.TruncatedEntityIDs = result.TruncatedEntityIDs[:maxAnalyticalEntitySourceRefAnchors]
+	}
 	result.EntitySourceRefLimit = maxNeighborhoodEntityRefs
 
 	entities := make([]behaviorgraph.Record, 0)

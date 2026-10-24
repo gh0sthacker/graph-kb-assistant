@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -149,6 +149,62 @@ func TestNeo4jAnalyticalSliceReadsBoundedClosureWithoutProjectSnapshot(t *testin
 	}
 	if !foundContradiction {
 		t.Fatalf("analysis slice omitted linked contradiction %q from conflicting evidence: %v", contradictionID, conflictingEvidence)
+	}
+}
+
+func TestNeo4jAnalyticalSliceContinuesEntityProvenanceWithExclusions(t *testing.T) {
+	store, ctx, project := neighborhoodIntegrationStore(t)
+	owner := neighborhoodTestID("endpoint", "analytical-provenance-continuation")
+	sources := make([]behaviorgraph.Record, maxNeighborhoodEntityRefs+2)
+	for i := range sources {
+		sources[i] = behaviorgraph.Record{
+			"path": fmt.Sprintf("/synthetic/provenance/%03d.json", i), "sha256": strings.Repeat("a", 64),
+			"record_locator": fmt.Sprintf("$.records[%d]", i),
+		}
+	}
+	fixture := behaviorgraph.Record{
+		"schema_version": json.Number("2"), "program": project,
+		"sources": sources,
+		"entities": []behaviorgraph.Record{{
+			"id": owner, "kind": "endpoint", "data": map[string]any{"method": "GET"}, "source_refs": sources,
+		}},
+		"assertions": []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{},
+	}
+	if _, err := store.ReplaceProjectSnapshot(ctx, project, fixture); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ReadProjectAnalyticalSlice(ctx, project, []string{owner}, AnalyticalSliceOptions{MaxNodes: 10, MaxEdges: 10, MaxDepth: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEntity := first.Snapshot["entities"].([]behaviorgraph.Record)[0]
+	firstRefs := firstEntity["source_refs"].([]behaviorgraph.Record)
+	if len(firstRefs) != maxNeighborhoodEntityRefs || !first.ProvenanceTruncated || !slices.Contains(first.TruncatedEntityIDs, owner) {
+		t.Fatalf("first provenance page was not marked resumable: refs=%d result=%+v", len(firstRefs), first)
+	}
+	firstIDs := neighborhoodSourceRecordIDs(firstRefs)
+	excluded := make([]string, 0, len(firstIDs))
+	for _, id := range firstIDs {
+		excluded = append(excluded, owner+"|"+id)
+	}
+	anchor := owner + "|" + firstIDs[0]
+	second, err := store.ReadProjectAnalyticalSlice(ctx, project, []string{owner}, AnalyticalSliceOptions{
+		MaxNodes: 10, MaxEdges: 10, MaxDepth: 0,
+		ExcludedEntitySourceRefKeys: excluded, EntitySourceRefAnchorKeys: []string{anchor},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEntity := second.Snapshot["entities"].([]behaviorgraph.Record)[0]
+	secondRefs := secondEntity["source_refs"].([]behaviorgraph.Record)
+	secondIDs := neighborhoodSourceRecordIDs(secondRefs)
+	if second.ProvenanceTruncated || len(secondIDs) != 3 || !slices.Contains(secondIDs, firstIDs[0]) {
+		t.Fatalf("final provenance page did not include one anchor and the remaining sources: refs=%v result=%+v", secondIDs, second)
+	}
+	for _, id := range secondIDs {
+		if id != firstIDs[0] && slices.Contains(firstIDs, id) {
+			t.Fatalf("continued provenance repeated a prior source %q", id)
+		}
 	}
 }
 
@@ -454,6 +510,40 @@ func TestAnalyticalCardContinuationOwnersAreBoundedAndSorted(t *testing.T) {
 	page, truncated := analyticalCardContinuationOwners(owners)
 	if !truncated || len(page) != maxAnalyticalCardCursorSeeds || !sort.StringsAreSorted(page) {
 		t.Fatalf("card continuation owners have len=%d truncated=%t sorted=%t", len(page), truncated, sort.StringsAreSorted(page))
+	}
+}
+
+func TestAnalyticalEntitySourceRefContinuationKeysAreBoundedAndValidated(t *testing.T) {
+	owner := analyticalFixtureID("endpoint", "source-ref-owner")
+	firstSource := analyticalFixtureID("source", "source-ref-first")
+	secondSource := analyticalFixtureID("source", "source-ref-second")
+	valid := owner + "|" + firstSource
+	if got, err := validateAnalyticalEntitySourceRefKeys([]string{valid}, maxAnalyticalExcludedEntitySourceRefs, false); err != nil || len(got) != 1 || got[0] != valid {
+		t.Fatalf("valid excluded refs = %v, err %v", got, err)
+	}
+	if got, err := validateAnalyticalEntitySourceRefKeys([]string{valid}, maxAnalyticalEntitySourceRefAnchors, true); err != nil || len(got) != 1 || got[0] != valid {
+		t.Fatalf("valid anchor refs = %v, err %v", got, err)
+	}
+	if err := validateAnalyticalEntitySourceRefAnchors([]string{valid}, []string{valid}); err != nil {
+		t.Fatalf("accepted an anchor retained in the exclusion set: %v", err)
+	}
+	if err := validateAnalyticalEntitySourceRefAnchors(nil, []string{valid}); err == nil {
+		t.Fatal("accepted an anchor that could be selected twice")
+	}
+	for _, keys := range [][]string{
+		{"malformed"},
+		{"card-" + strings.Repeat("a", 64) + "|" + firstSource},
+		{owner + "|endpoint-" + strings.Repeat("b", 64)},
+		{valid, valid},
+		make([]string, maxAnalyticalExcludedEntitySourceRefs+1),
+	} {
+		if _, err := validateAnalyticalEntitySourceRefKeys(keys, maxAnalyticalExcludedEntitySourceRefs, false); err == nil {
+			t.Fatalf("accepted invalid excluded source refs: count=%d", len(keys))
+		}
+	}
+	anchors := []string{owner + "|" + firstSource, owner + "|" + secondSource}
+	if _, err := validateAnalyticalEntitySourceRefKeys(anchors, maxAnalyticalEntitySourceRefAnchors, true); err == nil {
+		t.Fatal("accepted more than one anchor for the same entity")
 	}
 }
 

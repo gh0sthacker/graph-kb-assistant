@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -22,6 +24,10 @@ import (
 const maxCaptureProvenanceRows = 1_000
 const maxContinuationExcludedAssertionIDs = 10_000
 const maxContinuationExcludedCardIDs = 10_000
+const maxContinuationExcludedEntitySourceRefs = 10_000
+const maxContinuationEntitySourceRefAnchors = 5_000
+
+var continuationEntityRecordIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
 
 var ErrAnalyticalGenerationChanged = errors.New("Neo4j graph generation changed during analytical continuation")
 
@@ -34,10 +40,10 @@ func GraphSlice(ctx context.Context, projectStore *store.ProjectStore, seedIDs [
 // GraphSliceWithService runs the shared graph query through a process-owned
 // graph access service.
 func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any) (map[string]any, error) {
-	return graphSliceWithExclusions(ctx, service, projectStore, seedIDs, maxNodes, maxEdges, maxDepth, selectedContext, nil, nil)
+	return graphSliceWithExclusions(ctx, service, projectStore, seedIDs, maxNodes, maxEdges, maxDepth, selectedContext, nil, nil, nil, nil)
 }
 
-func graphSliceWithExclusions(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any, excludedAssertionIDs, excludedCardIDs []string) (map[string]any, error) {
+func graphSliceWithExclusions(ctx context.Context, service *graphaccess.Service, projectStore *store.ProjectStore, seedIDs []string, maxNodes, maxEdges, maxDepth int, selectedContext map[string]any, excludedAssertionIDs, excludedCardIDs, excludedEntitySourceRefKeys, entitySourceRefAnchorKeys []string) (map[string]any, error) {
 	if err := validateGraphProjectStore(projectStore); err != nil {
 		return nil, err
 	}
@@ -52,6 +58,7 @@ func graphSliceWithExclusions(ctx context.Context, service *graphaccess.Service,
 		nativeSlice, err = service.ReadAnalyticalSlice(ctx, projectStore, seedIDs, neo4jstore.AnalyticalSliceOptions{
 			MaxNodes: maxNodes, MaxEdges: maxEdges, MaxDepth: maxDepth,
 			ExcludedAssertionIDs: excludedAssertionIDs, ExcludedCardIDs: excludedCardIDs,
+			ExcludedEntitySourceRefKeys: excludedEntitySourceRefKeys, EntitySourceRefAnchorKeys: entitySourceRefAnchorKeys,
 		})
 		if err == nil {
 			reader, err = behaviorgraph.OpenReaderFromSnapshot(ctx, nativeSlice.Snapshot, projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
@@ -103,6 +110,18 @@ func graphSliceWithExclusions(ctx context.Context, service *graphaccess.Service,
 			slice["missing_branches"] = branches
 		}
 		if nativeSlice.CardSeedsTruncated {
+			slice["missing_branches_truncated"] = true
+		}
+		if len(nativeSlice.TruncatedEntityIDs) > 0 {
+			branches, _ := slice["missing_branches"].([]behaviorgraph.Record)
+			for _, id := range nativeSlice.TruncatedEntityIDs {
+				branches = append(branches, behaviorgraph.Record{
+					"frontier_id": id, "reason": "analytical_provenance_limit",
+				})
+			}
+			slice["missing_branches"] = branches
+		}
+		if nativeSlice.ProvenanceSeedsTruncated {
 			slice["missing_branches_truncated"] = true
 		}
 		slice["analytical_frontier_node_limit_reached"] = nativeSlice.FrontierNodeLimitReached
@@ -175,7 +194,12 @@ func ContinueGraphSliceWithService(
 	if err != nil {
 		return nil, err
 	}
-	nextPage, err := graphSliceWithExclusions(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, selectedContext, excludedAssertionIDs, excludedCardIDs)
+	excludedEntitySourceRefKeys, entitySourceRefAnchorKeys, provenanceCursorTruncated, err := continuationEntitySourceRefState(accumulated["entities"], branchSeedIDs)
+	if err != nil {
+		return nil, err
+	}
+	nextPage, err := graphSliceWithExclusions(ctx, service, projectStore, branchSeedIDs, maxNodes, maxEdges, maxDepth, selectedContext,
+		excludedAssertionIDs, excludedCardIDs, excludedEntitySourceRefKeys, entitySourceRefAnchorKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +215,13 @@ func ContinueGraphSliceWithService(
 		nextPage["truncated"] = true
 		limitations := graphStringList(nextPage["limitations"])
 		limitations = append(limitations, "Continuation excluded at most 10,000 previously loaded cards; larger accumulated views may revisit candidates.")
+		nextPage["limitations"] = uniqueStrings(limitations)
+	}
+	if provenanceCursorTruncated {
+		nextPage["provenance_cursor_truncated"] = true
+		nextPage["truncated"] = true
+		limitations := graphStringList(nextPage["limitations"])
+		limitations = append(limitations, "Continuation retained at most 10,000 entity source references and 5,000 provenance anchors; larger views may revisit or omit provenance branches.")
 		nextPage["limitations"] = uniqueStrings(limitations)
 	}
 	if generationFromGraphPayload(nextPage) != generationFromGraphPayload(accumulated) {
@@ -230,7 +261,8 @@ func ContinueGraphSliceWithService(
 	slice["analytical_frontier_node_limit_reached"] = graphPayloadFlag(nextPage, "analytical_frontier_node_limit_reached")
 	slice["candidate_card_limit_reached"] = graphPayloadFlag(nextPage, "candidate_card_limit_reached")
 	slice["candidate_card_exclusion_truncated"] = anyGraphFlag(accumulated, nextPage, "candidate_card_exclusion_truncated")
-	slice["provenance_truncated"] = anyGraphFlag(accumulated, nextPage, "provenance_truncated")
+	slice["provenance_truncated"] = graphPayloadFlag(nextPage, "provenance_truncated")
+	slice["provenance_cursor_truncated"] = anyGraphFlag(accumulated, nextPage, "provenance_cursor_truncated")
 	branches, branchesTruncated := mergeContinuationBranches(slice["missing_branches"], nextPage["missing_branches"])
 	slice["missing_branches"] = branches
 	if branchesTruncated || graphPayloadFlag(accumulated, "missing_branches_truncated") ||
@@ -238,11 +270,10 @@ func ContinueGraphSliceWithService(
 		slice["missing_branches_truncated"] = true
 	}
 	// Renderer omissions may resolve as the cumulative slice grows. Assertion,
-	// frontier, and card flags describe the newest native page; provenance limits
-	// remain sticky because this continuation does not page those references.
+	// frontier, card, and provenance flags describe the newest native page;
+	// cursor-cap flags remain sticky because they can affect later pages.
 	slice["truncated"] = analyticalContinuationTruncated(slice, accumulated, nextPage)
-	truncatedIDs := append(graphStringList(accumulated["provenance_truncated_entity_ids"]), graphStringList(nextPage["provenance_truncated_entity_ids"])...)
-	slice["provenance_truncated_entity_ids"] = uniqueStrings(truncatedIDs)
+	slice["provenance_truncated_entity_ids"] = graphStringList(nextPage["provenance_truncated_entity_ids"])
 	slice["entity_source_ref_limit"] = maxIntValue(accumulated["entity_source_ref_limit"], nextPage["entity_source_ref_limit"])
 	limitations := append(graphStringList(accumulated["limitations"]), graphStringList(nextPage["limitations"])...)
 	slice["limitations"] = uniqueStrings(limitations)
@@ -359,6 +390,87 @@ func continuationExcludedCardIDs(value any) ([]string, bool, error) {
 	return ids, truncated, nil
 }
 
+func continuationEntitySourceRefState(value any, ownerIDs []string) ([]string, []string, bool, error) {
+	entities, ok := graphRecordList(value)
+	if !ok {
+		return nil, nil, false, errors.New("analytical graph continuation entity list is malformed")
+	}
+	wanted := make(map[string]bool, len(ownerIDs))
+	for _, id := range ownerIDs {
+		if !continuationEntityRecordIDPattern.MatchString(id) || strings.HasPrefix(id, "source-") || strings.HasPrefix(id, "card-") {
+			continue
+		}
+		wanted[id] = true
+	}
+	pairs := make(map[string]bool)
+	anchors := make([]string, 0, len(wanted))
+	for _, entity := range entities {
+		ownerID, ok := entity["id"].(string)
+		if !ok || !wanted[ownerID] {
+			continue
+		}
+		refs, ok := graphRecordList(entity["source_refs"])
+		if !ok || len(refs) == 0 {
+			return nil, nil, false, errors.New("analytical graph continuation entity provenance is malformed")
+		}
+		sourceIDs := make([]string, 0, len(refs))
+		seenSources := make(map[string]bool, len(refs))
+		for _, ref := range refs {
+			sourceID, err := continuationSourceRecordID(ref)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			if seenSources[sourceID] {
+				continue
+			}
+			seenSources[sourceID] = true
+			sourceIDs = append(sourceIDs, sourceID)
+			pairs[ownerID+"|"+sourceID] = true
+		}
+		sort.Strings(sourceIDs)
+		if len(sourceIDs) > 0 {
+			anchors = append(anchors, ownerID+"|"+sourceIDs[0])
+		}
+	}
+	sort.Strings(anchors)
+	truncated := len(anchors) > maxContinuationEntitySourceRefAnchors
+	if truncated {
+		anchors = anchors[:maxContinuationEntitySourceRefAnchors]
+	}
+	anchorSet := make(map[string]bool, len(anchors))
+	for _, key := range anchors {
+		anchorSet[key] = true
+	}
+	keys := make([]string, 0, len(pairs))
+	for key := range pairs {
+		if !anchorSet[key] {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	keys = append(append([]string(nil), anchors...), keys...)
+	if len(keys) > maxContinuationExcludedEntitySourceRefs {
+		keys = keys[:maxContinuationExcludedEntitySourceRefs]
+		truncated = true
+	}
+	return keys, anchors, truncated, nil
+}
+
+func continuationSourceRecordID(source behaviorgraph.Record) (string, error) {
+	path, pathOK := source["path"].(string)
+	checksum, checksumOK := source["sha256"].(string)
+	locator, locatorOK := source["record_locator"].(string)
+	if len(source) != 3 || !pathOK || path == "" || !checksumOK || !digestPattern.MatchString(checksum) || !locatorOK || locator == "" {
+		return "", errors.New("analytical graph continuation source reference is malformed")
+	}
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		return "", errors.New("analytical graph continuation source reference could not be encoded")
+	}
+	digest := sha256.Sum256(encoded)
+	return "source-" + hex.EncodeToString(digest[:]), nil
+}
+
 func analyticalContinuationTruncated(current, accumulated, nextPage map[string]any) bool {
 	if graphPayloadFlag(current, "truncated") ||
 		graphPayloadFlag(current, "missing_branches_truncated") ||
@@ -367,12 +479,12 @@ func analyticalContinuationTruncated(current, accumulated, nextPage map[string]a
 		graphPayloadFlag(current, "source_integrity_budget_exceeded") {
 		return true
 	}
-	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached", "candidate_card_limit_reached"} {
+	for _, key := range []string{"candidate_assertion_limit_reached", "analytical_frontier_node_limit_reached", "candidate_card_limit_reached", "provenance_truncated"} {
 		if graphPayloadFlag(nextPage, key) {
 			return true
 		}
 	}
-	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_exclusion_truncated", "provenance_truncated"} {
+	for _, key := range []string{"candidate_assertion_exclusion_truncated", "candidate_card_exclusion_truncated", "provenance_cursor_truncated"} {
 		if anyGraphFlag(accumulated, nextPage, key) {
 			return true
 		}
@@ -406,6 +518,14 @@ func mergeAnalyticalSnapshots(projectKey string, pages ...map[string]any) (behav
 				if !ok || id == "" {
 					return nil, nil, errors.New("analytical graph continuation record has no identity")
 				}
+				if previous, exists := merged[field][id]; exists && field == "entities" {
+					combined, mergeErr := mergeEntityProvenanceRecord(previous, record)
+					if mergeErr != nil {
+						return nil, nil, mergeErr
+					}
+					merged[field][id] = combined
+					continue
+				}
 				if previous, exists := merged[field][id]; exists && field != "sources" {
 					previousJSON, previousErr := json.Marshal(previous)
 					recordJSON, recordErr := json.Marshal(record)
@@ -432,6 +552,58 @@ func mergeAnalyticalSnapshots(projectKey string, pages ...map[string]any) (behav
 		counts[field] = len(records)
 	}
 	return snapshot, counts, nil
+}
+
+func mergeEntityProvenanceRecord(previous, current behaviorgraph.Record) (behaviorgraph.Record, error) {
+	previousCore := make(behaviorgraph.Record, len(previous))
+	currentCore := make(behaviorgraph.Record, len(current))
+	for key, value := range previous {
+		if key != "source_refs" {
+			previousCore[key] = value
+		}
+	}
+	for key, value := range current {
+		if key != "source_refs" {
+			currentCore[key] = value
+		}
+	}
+	previousJSON, previousErr := json.Marshal(previousCore)
+	currentJSON, currentErr := json.Marshal(currentCore)
+	if previousErr != nil || currentErr != nil || !bytes.Equal(previousJSON, currentJSON) {
+		return nil, errors.New("analytical graph continuation contains conflicting entity versions")
+	}
+	refsByJSON := make(map[string]behaviorgraph.Record)
+	for _, value := range []any{previous["source_refs"], current["source_refs"]} {
+		refs, ok := graphRecordList(value)
+		if !ok || len(refs) == 0 {
+			return nil, errors.New("analytical graph continuation entity provenance is malformed")
+		}
+		for _, ref := range refs {
+			if _, err := continuationSourceRecordID(ref); err != nil {
+				return nil, err
+			}
+			encoded, err := json.Marshal(ref)
+			if err != nil {
+				return nil, errors.New("analytical graph continuation entity provenance could not be encoded")
+			}
+			refsByJSON[string(encoded)] = ref
+		}
+	}
+	keys := make([]string, 0, len(refsByJSON))
+	for key := range refsByJSON {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	refs := make([]behaviorgraph.Record, 0, len(keys))
+	for _, key := range keys {
+		refs = append(refs, refsByJSON[key])
+	}
+	merged := make(behaviorgraph.Record, len(previous)+1)
+	for key, value := range previous {
+		merged[key] = value
+	}
+	merged["source_refs"] = refs
+	return merged, nil
 }
 
 func graphRecordList(value any) ([]behaviorgraph.Record, bool) {
