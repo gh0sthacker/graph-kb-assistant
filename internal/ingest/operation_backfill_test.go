@@ -1,14 +1,18 @@
 package ingest
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/projectlock"
+	"bb-graph-assistant/internal/store"
 )
 
 func TestOperationBackfillTargetPinsOriginAndKeepsRequestTarget(t *testing.T) {
@@ -34,6 +38,26 @@ func TestOperationBackfillTargetRejectsInvalidOriginAndAsteriskRoute(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			if _, _, _, _, _, ok := operationBackfillTarget([]byte(test.line+"\r\n\r\n"), test.origin); ok {
 				t.Fatal("operationBackfillTarget() accepted an unsupported route")
+			}
+		})
+	}
+}
+
+func TestOperationBackfillCardEndpointSupportsFlatAndNestedShapes(t *testing.T) {
+	for _, fixture := range []struct {
+		name           string
+		endpoint       behaviorgraph.Record
+		expectedOrigin string
+	}{
+		{name: "current flat card", endpoint: behaviorgraph.Record{"id": "endpoint-a", "origin": "https://flat.fixture.invalid"}, expectedOrigin: "https://flat.fixture.invalid"},
+		{name: "legacy nested entity", endpoint: behaviorgraph.Record{
+			"id": "endpoint-b", "data": behaviorgraph.Record{"origin": "https://nested.fixture.invalid"},
+		}, expectedOrigin: "https://nested.fixture.invalid"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			id, data, ok := operationBackfillCardEndpoint(behaviorgraph.Record{"endpoint": fixture.endpoint})
+			if !ok || id != fixture.endpoint["id"] || data["origin"] != fixture.expectedOrigin {
+				t.Fatalf("operationBackfillCardEndpoint() = (%q, %#v, %t)", id, data, ok)
 			}
 		})
 	}
@@ -132,5 +156,157 @@ func TestBuildOperationBackfillBundlesMergesOperationSourcesAndBoundsPages(t *te
 		len(firstEntities[0]["source_refs"].([]behaviorgraph.Record)) != operationBackfillBundleSources ||
 		len(firstAssertions) != operationBackfillBundleSources || len(first["cards"].([]behaviorgraph.Record)) != 0 {
 		t.Fatal("operation bundles did not retain deduplicated nodes and per-capture provenance")
+	}
+}
+
+func TestApplyHistoricalOperationBackfillRequiresPreviewDigestAndQueuesIdempotently(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, liveWriter := newLiveTailFixture(t)
+	defer liveWriter.Close()
+	projectKey := projectStore.ProjectKey
+	exchange := projectionWorkerExchange(selected, "operation-backfill-apply-fixture", "")
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageResult, err := writePendingHistoryRevision(ctx, pageWriter, exchange)
+	pageWriter.Close()
+	if err != nil || len(pageResult.SourceRefs) != 1 {
+		t.Fatalf("write synthetic history: sources=%+v err=%v", pageResult.SourceRefs, err)
+	}
+
+	var encodedBundle []byte
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT payload_json FROM projection_jobs WHERE state='pending' ORDER BY sequence_id LIMIT 1",
+	).Scan(&encodedBundle); err != nil {
+		t.Fatalf("read synthetic projection bundle: %v", err)
+	}
+	var legacyBundle behaviorgraph.Record
+	if err := json.Unmarshal(encodedBundle, &legacyBundle); err != nil {
+		t.Fatalf("decode synthetic projection bundle: %v", err)
+	}
+	entities, ok := operationBackfillRecords(legacyBundle["entities"])
+	if !ok {
+		t.Fatal("legacy graph entities are invalid")
+	}
+	legacyEntities := make([]behaviorgraph.Record, 0, len(entities))
+	for _, entity := range entities {
+		if entity["kind"] != "operation" {
+			legacyEntities = append(legacyEntities, entity)
+		}
+	}
+	legacyBundle["entities"] = legacyEntities
+	assertions, ok := operationBackfillRecords(legacyBundle["assertions"])
+	if !ok {
+		t.Fatal("legacy graph assertions are invalid")
+	}
+	legacyAssertions := make([]behaviorgraph.Record, 0, len(assertions))
+	for _, assertion := range assertions {
+		if assertion["predicate"] != "belongs_to_operation" {
+			legacyAssertions = append(legacyAssertions, assertion)
+		}
+	}
+	legacyBundle["assertions"] = legacyAssertions
+
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	legacyWriter, err := behaviorgraph.OpenWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyWriter.ImportBundle(ctx, legacyBundle); err != nil {
+		t.Fatalf("write legacy endpoint-only graph: %v", err)
+	}
+	dataRoot := filepath.Dir(filepath.Dir(projectStore.Directory))
+	liveWriter.Close()
+	if err := projectStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readOnlyProject, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, selected, dataRoot, maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := PreviewHistoricalOperationBackfill(ctx, readOnlyProject, maintenance, OperationBackfillOptions{})
+	closeReadOnlyErr := readOnlyProject.Close()
+	if err != nil || closeReadOnlyErr != nil || preview.State != "ready" || preview.EligibleCaptures != 1 || len(preview.Bundles) != 1 {
+		t.Fatalf("preview state=%+v err=%v close=%v", preview, err, closeReadOnlyErr)
+	}
+	projectStore, err = store.OpenProjectForWrite(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = projectStore.Close() })
+
+	before, err := legacyWriter.PendingOutbox(ctx, 100)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("legacy pending outbox=%d err=%v", len(before), err)
+	}
+	partialPreview := preview
+	partialPreview.State = "partial"
+	if _, err := ApplyHistoricalOperationBackfill(ctx, projectStore, maintenance, partialPreview, preview.CandidateSHA256); err == nil {
+		t.Fatal("apply accepted a partial preview")
+	}
+	if _, err := ApplyHistoricalOperationBackfill(ctx, projectStore, maintenance, preview, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("apply accepted a candidate digest different from the preview")
+	}
+	stillPending, err := legacyWriter.PendingOutbox(ctx, 100)
+	if err != nil || len(stillPending) != len(before) {
+		t.Fatalf("digest mismatch changed the outbox: before=%d after=%d err=%v", len(before), len(stillPending), err)
+	}
+
+	result, err := ApplyHistoricalOperationBackfill(ctx, projectStore, maintenance, preview, preview.CandidateSHA256)
+	if err != nil || result.State != "committed" || result.BundlesImported != 1 || result.BundlesReplayed != 0 || len(result.BundleIDs) != 1 || result.Neo4jDrain != "not_attempted" {
+		t.Fatalf("apply result=%+v err=%v", result, err)
+	}
+	after, err := legacyWriter.PendingOutbox(ctx, 100)
+	if err != nil || len(after) != len(before)+1 {
+		t.Fatalf("apply did not enqueue one outbox bundle: before=%d after=%d err=%v", len(before), len(after), err)
+	}
+
+	replay, err := ApplyHistoricalOperationBackfill(ctx, projectStore, maintenance, preview, preview.CandidateSHA256)
+	if err != nil || replay.BundlesImported != 0 || replay.BundlesReplayed != 1 || len(replay.BundleIDs) != 1 || replay.BundleIDs[0] != result.BundleIDs[0] {
+		t.Fatalf("idempotent apply replay=%+v err=%v", replay, err)
+	}
+	afterReplay, err := legacyWriter.PendingOutbox(ctx, 100)
+	if err != nil || len(afterReplay) != len(after) {
+		t.Fatalf("replay enqueued a duplicate outbox bundle: before=%d after=%d err=%v", len(after), len(afterReplay), err)
+	}
+
+	graphReader, err := behaviorgraph.OpenReader(ctx, projectStore.BehaviorGraphPath, projectKey, projectStore.BehaviorReceiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := graphReader.Snapshot()
+	closeGraphErr := graphReader.Close()
+	if err != nil || closeGraphErr != nil {
+		t.Fatalf("read synthetic graph after apply: err=%v close=%v", err, closeGraphErr)
+	}
+	operationRecords, ok := operationBackfillRecords(snapshot["entities"])
+	if !ok {
+		t.Fatal("updated graph entities are invalid")
+	}
+	foundOperation := false
+	for _, entity := range operationRecords {
+		if entity["kind"] == "operation" {
+			foundOperation = true
+			break
+		}
+	}
+	assertionRecords, ok := operationBackfillRecords(snapshot["assertions"])
+	if !ok {
+		t.Fatal("updated graph assertions are invalid")
+	}
+	foundLink := false
+	for _, assertion := range assertionRecords {
+		if assertion["predicate"] == "belongs_to_operation" {
+			foundLink = true
+			break
+		}
+	}
+	if !foundOperation || !foundLink {
+		t.Fatalf("backfill graph missing operation/link: operation=%t link=%t", foundOperation, foundLink)
 	}
 }

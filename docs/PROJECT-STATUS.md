@@ -42,11 +42,18 @@
   `PARTIAL`. A synthetic historical-projection fixture, origin/target guards,
   bounded bundle batching/provenance tests, and JSON redaction test pass with
   `TMPDIR=/var/tmp go test -count=1 -p 1 ./internal/ingest ./cmd/bb-assistant`.
-- The preview was not run against the saved Juice Shop graph. The latest
-  verified active graph still has zero operation nodes, so the operation
-  alias editor remains unavailable there. A separate decision is required
-  before importing the previewed bundles through the durable outbox; no live
-  graph or queue was changed for this slice.
+- Added `graph-operation-backfill-apply`. It recomputes the bounded preview
+  under the exclusive project lease and requires the exact candidate digest
+  from the preview command. Only a complete ready candidate is accepted; its
+  bundles are imported idempotently to the local BehaviorGraph and durable
+  outbox. The command does not drain Neo4j. Synthetic end-to-end coverage checks
+  exact-digest rejection, local operation/link materialization, queued outbox
+  state, and idempotent replay. A fixture also found and fixed preview
+  compatibility with current flat endpoint cards and legacy nested cards.
+- Neither preview nor apply has been run against the saved Juice Shop graph.
+  Applying a candidate to working data still requires an explicit operator
+  invocation with its exact preview digest. No live graph or queue was changed
+  for this code slice.
 
 ## Stage 3 project-local operation aliases and live wiring (2026-10-24 12:41Z) — PARTIAL
 

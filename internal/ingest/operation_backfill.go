@@ -64,6 +64,16 @@ type OperationBackfillPreview struct {
 	Bundles                []behaviorgraph.Record    `json:"-"`
 }
 
+type OperationBackfillApplyResult struct {
+	ProjectKey      string   `json:"project_key"`
+	State           string   `json:"state"`
+	CandidateSHA256 string   `json:"candidate_sha256"`
+	BundlesImported int      `json:"bundles_imported"`
+	BundlesReplayed int      `json:"bundles_replayed"`
+	BundleIDs       []string `json:"bundle_ids"`
+	Neo4jDrain      string   `json:"neo4j_drain"`
+}
+
 type operationBackfillAddition struct {
 	source    behaviorgraph.Record
 	operation behaviorgraph.Record
@@ -139,14 +149,8 @@ func PreviewHistoricalOperationBackfill(
 			preview.SkippedUnmapped++
 			continue
 		}
-		endpoint, ok := operationBackfillRecord(card["endpoint"])
+		endpointID, endpointData, ok := operationBackfillCardEndpoint(card)
 		if !ok {
-			preview.SkippedUnmapped++
-			continue
-		}
-		endpointID, _ := endpoint["id"].(string)
-		endpointData, ok := operationBackfillRecord(endpoint["data"])
-		if !ok || endpointID == "" {
 			preview.SkippedUnmapped++
 			continue
 		}
@@ -253,6 +257,83 @@ func PreviewHistoricalOperationBackfill(
 		return preview, err
 	}
 	return preview, nil
+}
+
+// ApplyHistoricalOperationBackfill commits the exact ready preview to the
+// project's local BehaviorGraph and durable Neo4j outbox. The expected digest
+// is an explicit confirmation of the previewed candidate set. This function
+// never contacts Neo4j; the regular outbox worker owns remote projection.
+func ApplyHistoricalOperationBackfill(
+	ctx context.Context,
+	selected *store.ProjectStore,
+	maintenance *projectlock.Lock,
+	preview OperationBackfillPreview,
+	expectedCandidateSHA256 string,
+) (OperationBackfillApplyResult, error) {
+	result := OperationBackfillApplyResult{
+		ProjectKey: preview.ProjectKey, State: "rejected", CandidateSHA256: preview.CandidateSHA256,
+		BundleIDs: []string{}, Neo4jDrain: "not_attempted",
+	}
+	if ctx == nil || selected == nil || selected.Database == nil || selected.Database.DB() == nil ||
+		selected.Database.ReadOnly() || maintenance == nil || !maintenance.CoversExclusiveDirectory(selected.Directory) {
+		return result, errors.New("operation backfill apply requires a writable selected project and matching maintenance lease")
+	}
+	if preview.ProjectKey != selected.ProjectKey || preview.State != "ready" || preview.WriteMode != "preview_only" ||
+		len(preview.CandidateSHA256) != sha256.Size*2 || expectedCandidateSHA256 != preview.CandidateSHA256 ||
+		len(preview.Bundles) > 100 {
+		return result, errors.New("operation backfill apply requires the exact digest of a complete ready preview")
+	}
+	actualDigest, err := operationBackfillDigest(preview.Bundles)
+	if err != nil || actualDigest != preview.CandidateSHA256 {
+		return result, errors.New("operation backfill preview candidate digest is invalid")
+	}
+	for _, bundle := range preview.Bundles {
+		if bundle["program"] != selected.ProjectKey {
+			return result, errors.New("operation backfill candidate contains a different project namespace")
+		}
+	}
+	if len(preview.Bundles) == 0 {
+		result.State = "ready"
+		return result, nil
+	}
+	writer, err := behaviorgraph.OpenWriter(ctx, selected)
+	if err != nil {
+		return result, errors.New("selected project graph writer could not be opened for operation backfill")
+	}
+	result.State = "partial"
+	for _, bundle := range preview.Bundles {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		imported, importErr := writer.ImportBundle(ctx, bundle)
+		if importErr != nil {
+			return result, errors.New("operation backfill stopped with retryable bundles remaining")
+		}
+		result.BundleIDs = append(result.BundleIDs, imported.BundleID)
+		if imported.Replayed {
+			result.BundlesReplayed++
+		} else {
+			result.BundlesImported++
+		}
+	}
+	result.State = "committed"
+	return result, nil
+}
+
+func operationBackfillCardEndpoint(card behaviorgraph.Record) (string, behaviorgraph.Record, bool) {
+	endpoint, ok := operationBackfillRecord(card["endpoint"])
+	if !ok {
+		return "", nil, false
+	}
+	endpointID, _ := endpoint["id"].(string)
+	endpointData, ok := operationBackfillRecord(endpoint["data"])
+	if !ok {
+		// Current historical cards store endpoint identity and fields in one
+		// flat object. Older receipts may contain the graph entity shape with
+		// a nested data object; support both without changing either record.
+		endpointData = endpoint
+	}
+	return endpointID, endpointData, endpointID != ""
 }
 
 type historicalOperationBackfillRow struct{ requestID, observationID string }
