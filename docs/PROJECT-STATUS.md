@@ -187,6 +187,13 @@
   selection was restored. This is exact ID equality for one enumeration, not
   point-in-time proof: Caido has no stable snapshot token, so
   `coverage_reconciled=false` and project coverage remains `PARTIAL`.
+- Repeated the approved exact-host reconciliation on 2026-10-24 at 09:20 UTC:
+  4 pages, 355 Caido IDs, 355 local IDs, all 355 matched, with no Caido-only,
+  local-only, duplicate, or unclassified IDs. The run read metadata only; no
+  request or response bodies were fetched and no target traffic was sent. The
+  Caido project was switched back to `sperpravo` immediately afterward and its
+  active selection was verified. Snapshot completeness remains `PARTIAL` for
+  the same missing stable-snapshot-token limitation.
 - ECC TDD fixtures cover exact-host filter construction, host/port comparison,
   wrong-port exclusion, malformed source URLs, local unclassified rows,
   invalid scope values, and a database digest check proving the reconciler is
