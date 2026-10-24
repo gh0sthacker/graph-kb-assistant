@@ -36,7 +36,7 @@
   changed. Open sessions remain unaccepted and keep the explicit Hermes review
   gate; accepted sessions reopen as accepted. Session contents continue to be
   loaded through the existing local operator-review endpoint.
-- Synthetic verification: `node --check internal/webui/assets/app.js`, all 33
+- Synthetic verification: `node --check internal/webui/assets/app.js`, all 35
   `surface_requests_test.cjs` cases, and `TMPDIR=/var/tmp go test -count=1
   ./internal/webui` passed. The JavaScript transport is mocked; no running
   application, project data, Caido, graph database, KB or model was accessed.

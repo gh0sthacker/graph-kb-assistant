@@ -130,6 +130,36 @@ test("resuming an unaccepted consultation keeps the explicit Hermes review gate"
   assert.match(app.elements.consultationStatus.textContent, /review it before allowing Hermes access/);
 });
 
+test("resume accepts the exact JSON arguments copied for Hermes", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  app.elements.consultationResumeID.value = JSON.stringify({
+    project_key: app.state.projectKey, session_id: "copied-session-789",
+  });
+  const resuming = app.resumeConsultationByID();
+  const request = app.requests.at(-1);
+  assert.equal(request.url.searchParams.get("session_id"), "copied-session-789");
+  request.resolve({
+    consultation_id: "copied-session-789", version: 1, review_accepted: false,
+    question: "Copied resume details.", evidence: {}, evidence_references: [], context_annotations: [],
+  });
+  await resuming;
+  assert.equal(app.state.consultation.id, "copied-session-789");
+  assert.equal(app.elements.consultationResumeID.value, "copied-session-789");
+});
+
+test("resume arguments from a different project never issue a request", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  app.elements.consultationResumeID.value = JSON.stringify({
+    project_key: "b".repeat(64), session_id: "other-project-session",
+  });
+  await app.resumeConsultationByID();
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.state.consultation, null);
+  assert.match(app.elements.consultationStatus.textContent, /Select that project first/);
+});
+
 test("a late consultation resume cannot overwrite a different project", async () => {
   const app = createApp();
   app.state.projectKey = "a".repeat(64);

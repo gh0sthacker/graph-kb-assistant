@@ -573,8 +573,16 @@ function displayConsultationReview(review, session) {
 
 async function resumeConsultationByID() {
   const projectKey = state.projectKey;
-  const sessionID = elements.consultationResumeID.value.trim();
-  if (!projectKey || !sessionID) return;
+  const resumeInput = elements.consultationResumeID.value.trim();
+  if (!projectKey) return;
+  let sessionID;
+  try {
+    sessionID = consultationResumeSessionID(resumeInput, projectKey);
+  } catch (error) {
+    elements.consultationStatus.textContent = `Could not resume this consultation: ${error.message}`;
+    return;
+  }
+  if (!sessionID) return;
   resetConsultationUI("Loading the saved consultation for operator review…");
   const requestID = ++state.consultationResumeRequestId;
   elements.consultationResume.disabled = true;
@@ -582,7 +590,7 @@ async function resumeConsultationByID() {
     const query = new URLSearchParams({ project_key: projectKey, session_id: sessionID });
     const review = await getJSON(`/api/consultation/review?${query}`);
     if (requestID !== state.consultationResumeRequestId || state.projectKey !== projectKey ||
-        elements.consultationResumeID.value.trim() !== sessionID) return;
+        elements.consultationResumeID.value.trim() !== resumeInput) return;
     if (review.consultation_id !== sessionID) throw new Error("The saved review did not match that consultation ID.");
     const preview = { projectKey, question: review.question, selections: [] };
     const session = {
@@ -600,7 +608,7 @@ async function resumeConsultationByID() {
       : `Saved locally · consultation ${session.id} reopened · review it before allowing Hermes access.`;
   } catch (error) {
     if (requestID !== state.consultationResumeRequestId || state.projectKey !== projectKey ||
-        elements.consultationResumeID.value.trim() !== sessionID) return;
+        elements.consultationResumeID.value.trim() !== resumeInput) return;
     elements.consultationStatus.textContent = `Could not resume this consultation: ${error.message}`;
     elements.consultationReview.hidden = true;
   } finally {
@@ -608,6 +616,26 @@ async function resumeConsultationByID() {
       elements.consultationResume.disabled = !elements.consultationResumeID.value.trim();
     }
   }
+}
+
+function consultationResumeSessionID(value, projectKey) {
+  let sessionID = String(value || "").trim();
+  if (!sessionID) return "";
+  if (sessionID.startsWith("{")) {
+    let resumeDetails;
+    try { resumeDetails = JSON.parse(sessionID); }
+    catch { throw new Error("Paste a consultation ID or valid Hermes resume details."); }
+    if (!resumeDetails || Array.isArray(resumeDetails) || typeof resumeDetails !== "object" ||
+        typeof resumeDetails.project_key !== "string" || typeof resumeDetails.session_id !== "string") {
+      throw new Error("Resume details must contain a project key and consultation ID.");
+    }
+    if (resumeDetails.project_key !== projectKey) {
+      throw new Error("Those resume details belong to a different project. Select that project first.");
+    }
+    sessionID = resumeDetails.session_id.trim();
+  }
+  if (sessionID.length > 128) throw new Error("The consultation ID is too long.");
+  return sessionID;
 }
 
 function renderConsultationContext(review, accepted) {
