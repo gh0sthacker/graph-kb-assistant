@@ -1,5 +1,30 @@
 # Project status and known limitations
 
+## Stage 6 bounded project backup and restore (2026-10-24) — SYNTHETICALLY VERIFIED
+
+- Added offline `project-backup` and `project-restore` CLI commands. They use
+  mandatory byte/file budgets, per-file SHA-256 checks, private `0600` archive
+  files, `0700` restore directories, no-overwrite publication, and rebuild the
+  local project registry only after full archive validation. Restored output
+  includes a fresh read-only capability summary; a partial summary stays
+  `PARTIAL`.
+- The versioned tar manifest preserves the project identity and all regular
+  project files, including encrypted vault payloads and evidence/receipt data.
+  Symlinks, special files, unsafe paths, duplicate members, tampering, and
+  budget overruns are rejected. The global registry and `.maintenance.lock`
+  are reconstructed or omitted rather than copied.
+- Synthetic tests verify round-trip identity and file preservation,
+  read-only capture-store open, tamper/traversal/duplicate rejection,
+  symlink rejection, explicit budgets, and refusal to overwrite existing
+  archives or projects. The CLI round-trip also confirms that restore emits a
+  fresh capability summary without exposing vault contents. No working
+  project was backed up or restored. Run `project-audit` on an
+  operator-restored project before resuming service.
+- Stage 6 remains `PARTIAL`: managed startup/restart replay, live intake,
+  working-project restore, and real runtime parity are still unverified.
+
+See [Project backup and restore](PROJECT-BACKUP-RESTORE.md) for operator steps.
+
 ## Approved Caido ID recheck and synthetic MCP consultation cycle (2026-10-24) — PARTIAL
 
 - With the user's approval, Caido was temporarily switched from `sperpravo` to

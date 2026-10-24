@@ -265,6 +265,19 @@ func resolveDataRoot(configured string) (string, error) {
 	return filepath.Clean(root), nil
 }
 
+// ValidateDataRoot resolves a configured runtime root and rejects paths inside
+// the source checkout without creating or modifying the destination.
+func ValidateDataRoot(configured string) (string, error) {
+	root, err := resolveDataRoot(configured)
+	if err != nil {
+		return "", err
+	}
+	if err := rejectSourceCheckoutPath(root); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
 func rejectSourceCheckoutPath(path string) error {
 	_, sourceFile, _, ok := runtime.Caller(0)
 	if !ok {

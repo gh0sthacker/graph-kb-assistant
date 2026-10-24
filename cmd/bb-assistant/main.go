@@ -27,6 +27,7 @@ import (
 	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
 	projectaudit "bb-graph-assistant/internal/projectaudit"
+	"bb-graph-assistant/internal/projectbackup"
 	"bb-graph-assistant/internal/projectlock"
 	capturesearch "bb-graph-assistant/internal/search"
 	"bb-graph-assistant/internal/store"
@@ -108,7 +109,7 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|graph-operation-backfill-preview|graph-operation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
+		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|graph-operation-backfill-preview|graph-operation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
 	}
 	switch args[0] {
 	case "version":
@@ -120,6 +121,10 @@ func run(args []string) error {
 		return dbCheck(args[1:])
 	case "project-audit":
 		return auditProject(args[1:])
+	case "project-backup":
+		return backupProject(args[1:])
+	case "project-restore":
+		return restoreProject(args[1:])
 	case "neo4j-check":
 		return checkNeo4j(args[1:])
 	case "neo4j-backfill":
@@ -380,6 +385,67 @@ func auditProject(args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(report)
+}
+
+func backupProject(args []string) error {
+	flags := flag.NewFlagSet("project-backup", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	output := flags.String("output", "", "new archive path outside the project directory")
+	maxBytes := flags.Int64("max-bytes", 0, "required maximum uncompressed project bytes")
+	maxFiles := flags.Int("max-files", 0, "required maximum project file count")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) || *output == "" || *maxBytes <= 0 || *maxFiles <= 0 {
+		return errors.New("usage: bb-assistant project-backup --project-key <sha256> --output <new-archive> --max-bytes <positive> --max-files <positive> [--data-root path]")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	report, err := projectbackup.Backup(ctx, *root, selectedKeys[0], *output, projectbackup.Limits{MaxBytes: *maxBytes, MaxFiles: *maxFiles})
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(report)
+}
+
+func restoreProject(args []string) error {
+	flags := flag.NewFlagSet("project-restore", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	root := flags.String("data-root", "", "private assistant data root")
+	input := flags.String("input", "", "project archive created by project-backup")
+	maxBytes := flags.Int64("max-bytes", 0, "required maximum uncompressed project bytes")
+	maxFiles := flags.Int("max-files", 0, "required maximum project file count")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *input == "" || *maxBytes <= 0 || *maxFiles <= 0 {
+		return errors.New("usage: bb-assistant project-restore --input <archive> --max-bytes <positive> --max-files <positive> [--data-root path]")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	report, err := projectbackup.Restore(ctx, *input, *root, projectbackup.Limits{MaxBytes: *maxBytes, MaxFiles: *maxFiles})
+	if err != nil {
+		return err
+	}
+	result := struct {
+		Restore                projectbackup.Report `json:"restore"`
+		CapabilitySummary      any                  `json:"capability_summary"`
+		CapabilitySummaryState string               `json:"capability_summary_state"`
+	}{
+		Restore: report, CapabilitySummaryState: "unavailable",
+		CapabilitySummary: map[string]any{
+			"overall_state": "unavailable",
+			"notes":         []string{"Run project-audit against the restored data root to inspect local compatibility."},
+		},
+	}
+	if summary, auditErr := projectaudit.AuditProject(ctx, *root, report.ProjectKey); auditErr == nil {
+		result.CapabilitySummary = &summary
+		result.CapabilitySummaryState = summary.OverallState
+	}
+	return json.NewEncoder(os.Stdout).Encode(result)
 }
 
 type projectionWorkerDrainOutput struct {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -126,6 +127,89 @@ func TestGraphSliceCLIUsesSharedQueryServiceAndPreservesContext(t *testing.T) {
 			t.Fatalf("persistent cursor state %q permissions = %o, want %o", pathMode.path, info.Mode().Perm(), pathMode.mode)
 		}
 	}
+}
+
+func TestProjectBackupCommandsRequireExplicitResourceBudgets(t *testing.T) {
+	if err := run([]string{"project-backup", "--project-key", strings.Repeat("a", 64), "--output", "backup.tar"}); err == nil {
+		t.Fatal("project-backup accepted missing byte and file budgets")
+	}
+	if err := run([]string{"project-restore", "--input", "backup.tar", "--max-bytes", "1024"}); err == nil {
+		t.Fatal("project-restore accepted a missing file budget")
+	}
+}
+
+func TestProjectBackupRestoreCLIEmitsRestoredIdentityAndCapabilitySummary(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	ctx := t.Context()
+	sourceRoot := filepath.Join(t.TempDir(), "source")
+	ref := project.CaidoProjectRef{InstanceID: "backup-cli-fixture", ProjectID: "round-trip"}
+	selected, err := store.CreateProject(ctx, ref, sourceRoot)
+	if err != nil {
+		t.Fatalf("CreateProject(): %v", err)
+	}
+	projectKey, projectDir := selected.ProjectKey, selected.Directory
+	if err := selected.Close(); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(projectDir, "vault")
+	if err := os.MkdirAll(vault, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vault, "synthetic.enc"), []byte("opaque synthetic payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "round-trip.tar")
+	backupOutput := captureCommandStdout(t, func() error {
+		return backupProject([]string{"--data-root", sourceRoot, "--project-key", projectKey, "--output", archive, "--max-bytes", "1048576", "--max-files", "32"})
+	})
+	var backupResult map[string]any
+	if err := json.Unmarshal(backupOutput, &backupResult); err != nil || backupResult["state"] != "complete" {
+		t.Fatalf("project-backup output=%s err=%v", backupOutput, err)
+	}
+
+	targetRoot := filepath.Join(t.TempDir(), "restored")
+	restoreOutput := captureCommandStdout(t, func() error {
+		return restoreProject([]string{"--input", archive, "--data-root", targetRoot, "--max-bytes", "1048576", "--max-files", "32"})
+	})
+	var restoreResult map[string]any
+	if err := json.Unmarshal(restoreOutput, &restoreResult); err != nil {
+		t.Fatalf("project-restore output is not JSON: %s err=%v", restoreOutput, err)
+	}
+	restoreReport, ok := restoreResult["restore"].(map[string]any)
+	if !ok || restoreReport["state"] != "restored" || restoreReport["project_key"] != projectKey {
+		t.Fatalf("restore output lost project identity: %#v", restoreResult)
+	}
+	if _, ok := restoreResult["capability_summary"].(map[string]any); !ok {
+		t.Fatalf("restore output lacks the fresh capability summary: %#v", restoreResult)
+	}
+	if restoreResult["capability_summary_state"] == "unavailable" {
+		t.Fatalf("synthetic restored project did not produce a fresh capability summary: %#v", restoreResult)
+	}
+	if strings.Contains(string(backupOutput)+string(restoreOutput), "opaque synthetic payload") {
+		t.Fatal("backup command output disclosed a vault payload")
+	}
+}
+
+func captureCommandStdout(t *testing.T, invoke func() error) []byte {
+	t.Helper()
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writeEnd
+	invokeErr := invoke()
+	_ = writeEnd.Close()
+	os.Stdout = original
+	output, readErr := io.ReadAll(readEnd)
+	_ = readEnd.Close()
+	if invokeErr != nil {
+		t.Fatalf("command failed: %v", invokeErr)
+	}
+	if readErr != nil {
+		t.Fatalf("read command output: %v", readErr)
+	}
+	return output
 }
 
 type graphSliceCLIServiceFixture struct {
