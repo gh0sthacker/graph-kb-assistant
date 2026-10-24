@@ -1616,18 +1616,10 @@ This repository is an early public alpha. The following boundaries are deliberat
   test fixture was updated to include valid source provenance required by the
   current graph contract.
 - `TMPDIR=/var/tmp go test ./...`, `TMPDIR=/var/tmp go vet ./...`, and
-  `git diff --check` pass. The loopback UI was restarted from the updated source:
-  `/` and `/api/projects` returned 200, and the registered Juice Shop
-  `/api/surface` request returned 200 with 131 operations and 1,400 indexed
-  rows. A read-only `project-audit` also opened successfully and returned
-  `overall_state=partial`. This confirms the observed sidecar-related 503 is
-  cleared for project and surface reads; graph API/Neo4j response, Caido import
-  coverage, queue delivery, KB readiness, and Hermes consultation remain
-  `PARTIAL`.
-- A fresh Caido read-only metadata enumeration reached the terminal cursor
-  with 196,809 unique request IDs; no request bodies were read. `sperpravo` was
-  restored after the temporary Juice Shop comparison. Because Caido exposes
-  no stable history snapshot token, this remains metadata-only evidence and
-  does not establish point-in-time completeness.
+  `git diff --check` pass. This slice was accepted on synthetic fixtures only;
+  no live project database, running UI, Caido history, Neo4j service, or model
+  was used for acceptance. Runtime verification remains `PARTIAL`, as do graph
+  API/Neo4j response, Caido import coverage, queue delivery, KB readiness, and
+  Hermes consultation.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
