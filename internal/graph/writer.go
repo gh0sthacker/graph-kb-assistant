@@ -74,6 +74,46 @@ type ImportResult struct {
 	UpdatedEntities int            `json:"updated_entities"`
 }
 
+type importFailure struct {
+	code  string
+	cause error
+}
+
+func (failure *importFailure) Error() string {
+	if failure == nil || failure.cause == nil {
+		return "BehaviorGraph import failed"
+	}
+	return failure.cause.Error()
+}
+
+func (failure *importFailure) Unwrap() error {
+	if failure == nil {
+		return nil
+	}
+	return failure.cause
+}
+
+// ImportFailureCode returns a fixed diagnostic code for a failed graph import.
+// It never exposes the underlying error text, which may contain local details.
+func ImportFailureCode(err error) string {
+	var failure *importFailure
+	if errors.As(err, &failure) {
+		return failure.code
+	}
+	return ""
+}
+
+func wrapImportFailure(code string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var failure *importFailure
+	if errors.As(err, &failure) {
+		return err
+	}
+	return &importFailure{code: code, cause: err}
+}
+
 // OpenWriter binds a writer to an explicitly selected, schema-validated
 // ProjectStore. The caller must hold the project's exclusive maintenance
 // lease; only BehaviorGraph and its receipts are written by ImportBundles.
@@ -302,45 +342,45 @@ func (w *Writer) ImportBundle(ctx context.Context, bundle Record) (ImportResult,
 // method does not create or modify receipt files.
 func (w *Writer) ImportBundles(ctx context.Context, bundles []Record) (ImportResult, error) {
 	if w == nil || w.graphPath == "" || w.receiptRoot == "" {
-		return ImportResult{}, errors.New("graph writer is unavailable")
+		return ImportResult{}, wrapImportFailure("graph_writer_unavailable", errors.New("graph writer is unavailable"))
 	}
 	if len(bundles) == 0 || len(bundles) > maxWriterBundles {
-		return ImportResult{}, errors.New("graph batch count is outside the allowed limit")
+		return ImportResult{}, wrapImportFailure("bundle_limit_exceeded", errors.New("graph batch count is outside the allowed limit"))
 	}
 	normalizedBundles := make([]Record, 0, len(bundles))
 	var inputBytes int
 	for _, bundle := range bundles {
 		encoded, err := marshalBoundedJSON(bundle, MaxBundleJSONBytes)
 		if err != nil || len(encoded) == 0 {
-			return ImportResult{}, errors.New("graph bundle is invalid or exceeds the size limit")
+			return ImportResult{}, wrapImportFailure("bundle_encode_failed", errors.New("graph bundle is invalid or exceeds the size limit"))
 		}
 		inputBytes += len(encoded)
 		if inputBytes > MaxBundleJSONBytes {
-			return ImportResult{}, errors.New("graph batch exceeds the size limit")
+			return ImportResult{}, wrapImportFailure("bundle_limit_exceeded", errors.New("graph batch exceeds the size limit"))
 		}
 		decoded, err := DecodeBundleJSON(encoded)
 		if err != nil {
-			return ImportResult{}, err
+			return ImportResult{}, wrapImportFailure("bundle_decode_failed", err)
 		}
 		normalized, err := w.normalizeBundle(decoded)
 		if err != nil {
-			return ImportResult{}, err
+			return ImportResult{}, wrapImportFailure("bundle_validation_failed", err)
 		}
 		normalizedBundles = append(normalizedBundles, normalized)
 	}
 	merged, err := w.mergeBundles(normalizedBundles)
 	if err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("bundle_merge_failed", err)
 	}
 	canonical, err := canonicalJSON(merged)
 	if err != nil || len(canonical) > MaxBundleJSONBytes {
-		return ImportResult{}, errors.New("normalized graph batch exceeds the size limit")
+		return ImportResult{}, wrapImportFailure("bundle_digest_failed", errors.New("normalized graph batch exceeds the size limit"))
 	}
 	digest := sha256.Sum256(canonical)
 	bundleID := "bundle-" + hex.EncodeToString(digest[:])
 	sources := merged["sources"].([]Record)
 	if err := w.verifyReceipts(sources); err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("receipt_validation_failed", err)
 	}
 	return w.writeNormalized(ctx, merged, bundleID)
 }
@@ -629,7 +669,7 @@ func (w *Writer) verifyReceipt(path, expectedDigest string, maxBytes int64) (int
 func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID string) (ImportResult, error) {
 	db, created, err := w.openGraphDatabase(ctx)
 	if err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("graph_database_open_failed", err)
 	}
 	transactionOpen := false
 	committed := false
@@ -643,35 +683,35 @@ func (w *Writer) writeNormalized(ctx context.Context, bundle Record, bundleID st
 		}
 	}()
 	if _, err := db.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return ImportResult{}, errors.New("BehaviorGraph transaction could not begin")
+		return ImportResult{}, wrapImportFailure("graph_transaction_begin_failed", errors.New("BehaviorGraph transaction could not begin"))
 	}
 	transactionOpen = true
 	if created {
 		if err := createV2Schema(ctx, db, w.program); err != nil {
-			return ImportResult{}, err
+			return ImportResult{}, wrapImportFailure("graph_schema_create_failed", err)
 		}
 	}
 	if err := validateV2Schema(ctx, db, w.program); err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("graph_schema_invalid", err)
 	}
 	if err := ensureNeo4jOutboxSchema(ctx, db); err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("graph_outbox_schema_failed", err)
 	}
 	if err := validateBatchReferences(ctx, db, bundle); err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("graph_reference_validation_failed", err)
 	}
 	result, err := insertNormalized(ctx, db, bundle, bundleID, w.program)
 	if err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("graph_records_write_failed", err)
 	}
 	if err := enqueueNeo4jOutbox(ctx, db, bundle, bundleID); err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("graph_outbox_write_failed", err)
 	}
 	if err := w.verifyReceipts(bundle["sources"].([]Record)); err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, wrapImportFailure("receipt_validation_failed", err)
 	}
 	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-		return ImportResult{}, errors.New("BehaviorGraph transaction could not commit")
+		return ImportResult{}, wrapImportFailure("graph_transaction_commit_failed", errors.New("BehaviorGraph transaction could not commit"))
 	}
 	transactionOpen = false
 	committed = true
@@ -1254,13 +1294,13 @@ func insertNormalized(ctx context.Context, db *sql.DB, bundle Record, bundleID, 
 	}
 	var existing int
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM imports WHERE id=?", bundleID).Scan(&existing); err != nil {
-		return ImportResult{}, errors.New("BehaviorGraph import identity could not be read")
+		return ImportResult{}, wrapImportFailure("graph_import_identity_read_failed", errors.New("BehaviorGraph import identity could not be read"))
 	}
 	result.Replayed = existing > 0
 	for _, source := range bundle["sources"].([]Record) {
 		inserted := result.Inserted["sources"]
 		if err := insertImmutable(ctx, db, "sources", sourceRefDigest(source), source, &inserted); err != nil {
-			return ImportResult{}, err
+			return ImportResult{}, wrapImportFailure("graph_sources_write_failed", err)
 		}
 		result.Inserted["sources"] = inserted
 	}
@@ -1271,32 +1311,32 @@ func insertNormalized(ctx context.Context, db *sql.DB, bundle Record, bundleID, 
 		delete(base, "source_refs")
 		payload, err := canonicalJSON(base)
 		if err != nil {
-			return ImportResult{}, errors.New("BehaviorGraph entity could not be encoded")
+			return ImportResult{}, wrapImportFailure("graph_entity_encode_failed", errors.New("BehaviorGraph entity could not be encoded"))
 		}
 		var previous string
 		err = db.QueryRowContext(ctx, "SELECT payload FROM entities WHERE id=?", id).Scan(&previous)
 		existed := err == nil
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return ImportResult{}, errors.New("BehaviorGraph entity could not be read")
+			return ImportResult{}, wrapImportFailure("graph_entity_read_failed", errors.New("BehaviorGraph entity could not be read"))
 		}
 		if !existed {
 			if _, err := db.ExecContext(ctx, "INSERT INTO entities(id,payload) VALUES(?,?)", id, string(payload)); err != nil {
-				return ImportResult{}, errors.New("BehaviorGraph entity could not be inserted")
+				return ImportResult{}, wrapImportFailure("graph_entity_insert_failed", errors.New("BehaviorGraph entity could not be inserted"))
 			}
 			result.Inserted["entities"]++
 		} else {
 			stored, err := decodeRecord(previous)
 			if err != nil || (!sameCanonical(stored, base) && !compatibleVariantProjection(stored, base, program)) {
 				if err != nil {
-					return ImportResult{}, errors.New("entity identity collision; graph history cannot be overwritten")
+					return ImportResult{}, wrapImportFailure("graph_entity_identity_conflict", errors.New("entity identity collision; graph history cannot be overwritten"))
 				}
-				return ImportResult{}, fmt.Errorf("entity identity collision for kind %s fields %s; graph history cannot be overwritten", base["kind"], strings.Join(recordDifferencePaths(stored, base, ""), ","))
+				return ImportResult{}, wrapImportFailure("graph_entity_identity_conflict", fmt.Errorf("entity identity collision for kind %s fields %s; graph history cannot be overwritten", base["kind"], strings.Join(recordDifferencePaths(stored, base, ""), ",")))
 			}
 		}
 		addedRefs := 0
 		for _, ref := range refs {
 			if err := insertEntityRef(ctx, db, id, ref, &addedRefs); err != nil {
-				return ImportResult{}, err
+				return ImportResult{}, wrapImportFailure("graph_entity_source_refs_write_failed", err)
 			}
 		}
 		if existed && addedRefs > 0 {
@@ -1306,19 +1346,19 @@ func insertNormalized(ctx context.Context, db *sql.DB, bundle Record, bundleID, 
 	for _, assertion := range bundle["assertions"].([]Record) {
 		inserted := result.Inserted["assertions"]
 		if err := insertImmutable(ctx, db, "assertions", assertion["id"].(string), assertion, &inserted); err != nil {
-			return ImportResult{}, err
+			return ImportResult{}, wrapImportFailure("graph_assertions_write_failed", err)
 		}
 		result.Inserted["assertions"] = inserted
 	}
 	for _, card := range bundle["cards"].([]Record) {
 		inserted := result.Inserted["cards"]
 		if err := insertImmutable(ctx, db, "cards", card["id"].(string), card, &inserted); err != nil {
-			return ImportResult{}, err
+			return ImportResult{}, wrapImportFailure("graph_cards_write_failed", err)
 		}
 		result.Inserted["cards"] = inserted
 	}
 	if _, err := db.ExecContext(ctx, "INSERT OR IGNORE INTO imports(id) VALUES(?)", bundleID); err != nil {
-		return ImportResult{}, errors.New("BehaviorGraph import identity could not be recorded")
+		return ImportResult{}, wrapImportFailure("graph_import_identity_write_failed", errors.New("BehaviorGraph import identity could not be recorded"))
 	}
 	return result, nil
 }
@@ -1448,25 +1488,46 @@ func compatibleNullableMetadata(existing, incoming any) bool {
 func insertImmutable(ctx context.Context, db *sql.DB, table, id string, record Record, inserted *int) error {
 	payload, err := canonicalJSON(record)
 	if err != nil || len(payload) > maxRecordBytes {
-		return errors.New("BehaviorGraph record exceeds the size limit")
+		return wrapImportFailure("graph_immutable_record_invalid", errors.New("BehaviorGraph record exceeds the size limit"))
 	}
 	var previous string
 	err = db.QueryRowContext(ctx, "SELECT payload FROM "+table+" WHERE id=?", id).Scan(&previous)
 	if err == nil {
 		stored, decodeErr := decodeRecord(previous)
 		if decodeErr != nil || !sameCanonical(stored, record) {
-			return errors.New("immutable graph record identity collision")
+			code := immutableRecordConflictCode(table, stored, record, decodeErr)
+			return wrapImportFailure(code, errors.New("immutable graph record identity collision"))
 		}
 		return nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return errors.New("BehaviorGraph record could not be read")
+		return wrapImportFailure("graph_immutable_record_read_failed", errors.New("BehaviorGraph record could not be read"))
 	}
 	if _, err := db.ExecContext(ctx, "INSERT INTO "+table+"(id,payload) VALUES(?,?)", id, string(payload)); err != nil {
-		return errors.New("BehaviorGraph record could not be inserted")
+		return wrapImportFailure("graph_immutable_record_insert_failed", errors.New("BehaviorGraph record could not be inserted"))
 	}
 	*inserted++
 	return nil
+}
+
+func immutableRecordConflictCode(table string, stored, incoming Record, decodeErr error) string {
+	if decodeErr != nil || table != "cards" {
+		return "graph_immutable_record_conflict"
+	}
+	for _, key := range []string{
+		"schema_version", "capture_id", "program", "source_refs", "endpoint", "context",
+		"request_analysis", "response_analysis",
+	} {
+		if !sameCanonical(stored[key], incoming[key]) {
+			return "graph_card_projection_conflict"
+		}
+	}
+	for _, key := range []string{"business_action", "hypotheses", "missing_evidence", "analysis_state"} {
+		if !sameCanonical(stored[key], incoming[key]) {
+			return "graph_card_analysis_conflict"
+		}
+	}
+	return "graph_immutable_record_conflict"
 }
 
 func insertEntityRef(ctx context.Context, db *sql.DB, entityID string, ref Record, added *int) error {

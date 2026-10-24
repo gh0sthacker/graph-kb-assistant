@@ -360,10 +360,7 @@ func runProjectionWorkerOnce(
 		return releaseInterruptedProjectionDelivery(selected, job, result)
 	}
 	if projectionErr != nil || !materialized || !neo4jReady {
-		code := "projection_unavailable"
-		if materialized && !neo4jReady {
-			code = "neo4j_unavailable"
-		}
+		code := projectionFailureCode(projectionErr, materialized, neo4jReady)
 		return failProjectionDelivery(deliveryCtx, selected, job, options.MaxAttempts, now, code, result)
 	}
 
@@ -414,6 +411,16 @@ func runProjectionWorkerOnce(
 	finishAckTiming()
 	result.State = "applied"
 	return result, nil
+}
+
+func projectionFailureCode(err error, materialized, neo4jReady bool) string {
+	if code := behaviorgraph.ImportFailureCode(err); code != "" {
+		return code
+	}
+	if materialized && !neo4jReady {
+		return "neo4j_unavailable"
+	}
+	return "projection_unavailable"
 }
 
 func persistProjectionJobMapping(

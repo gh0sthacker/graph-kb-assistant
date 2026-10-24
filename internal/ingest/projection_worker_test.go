@@ -60,6 +60,33 @@ func TestProjectionWorkerReportsStageDurations(t *testing.T) {
 	}
 }
 
+func TestProjectionFailureCodeUsesSafeGraphImportStage(t *testing.T) {
+	ctx := context.Background()
+	_, projectStore, _ := newLiveTailFixture(t)
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	writer, err := behaviorgraph.OpenWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, importErr := writer.ImportBundles(ctx, []behaviorgraph.Record{{"program": projectStore.ProjectKey}})
+	if importErr == nil {
+		t.Fatal("ImportBundles() accepted an incomplete fixture bundle")
+	}
+	if got := projectionFailureCode(importErr, false, false); got != "bundle_validation_failed" {
+		t.Fatalf("projectionFailureCode() = %q, want bundle_validation_failed", got)
+	}
+	if got := projectionFailureCode(errors.New("private local detail"), false, false); got != "projection_unavailable" {
+		t.Fatalf("unknown projection error = %q, want projection_unavailable", got)
+	}
+	if got := projectionFailureCode(nil, true, false); got != "neo4j_unavailable" {
+		t.Fatalf("materialized graph without Neo4j = %q, want neo4j_unavailable", got)
+	}
+}
+
 func TestProjectionWorkerBatchReusesProjectorForEveryClaimedJob(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)

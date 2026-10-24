@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -143,6 +144,75 @@ func TestOpenWriterValidatesSchemaWithoutLoadingUnrelatedRecords(t *testing.T) {
 	}
 	if _, err := OpenWriter(ctx, selected); err == nil {
 		t.Fatal("OpenWriter() accepted a graph schema version it cannot write")
+	}
+}
+
+func TestImportBundlesReturnsSafeValidationFailureCode(t *testing.T) {
+	writer := &Writer{
+		program:     strings.Repeat("a", 64),
+		graphPath:   "unused.sqlite3",
+		receiptRoot: "unused-receipts",
+	}
+	_, err := writer.ImportBundles(context.Background(), []Record{{"program": writer.program}})
+	if err == nil {
+		t.Fatal("ImportBundles() accepted an incomplete bundle")
+	}
+	if got := ImportFailureCode(err); got != "bundle_validation_failed" {
+		t.Fatalf("ImportFailureCode() = %q, want bundle_validation_failed", got)
+	}
+	if strings.Contains(err.Error(), "unused") {
+		t.Fatal("import failure exposed local paths")
+	}
+}
+
+func TestInsertImmutableReturnsSafeConflictCode(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("CREATE TABLE cards (id TEXT PRIMARY KEY, payload TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+
+	inserted := 0
+	if err := insertImmutable(context.Background(), db, "cards", "card-1", Record{
+		"endpoint": Record{"path": "/same"}, "analysis_state": "candidate",
+	}, &inserted); err != nil {
+		t.Fatal(err)
+	}
+	err = insertImmutable(context.Background(), db, "cards", "card-1", Record{
+		"endpoint": Record{"path": "/same"}, "analysis_state": "incomplete",
+	}, &inserted)
+	if err == nil {
+		t.Fatal("insertImmutable() accepted a conflicting immutable record")
+	}
+	if got := ImportFailureCode(err); got != "graph_card_analysis_conflict" {
+		t.Fatalf("ImportFailureCode() = %q, want graph_card_analysis_conflict", got)
+	}
+	if strings.Contains(err.Error(), "candidate") || strings.Contains(err.Error(), "incomplete") {
+		t.Fatal("immutable conflict error exposed record values")
+	}
+}
+
+func TestImmutableCardConflictClassificationDoesNotExposeValues(t *testing.T) {
+	projectionConflict := immutableRecordConflictCode(
+		"cards",
+		Record{"endpoint": Record{"path": "/private/old"}, "analysis_state": "incomplete"},
+		Record{"endpoint": Record{"path": "/private/new"}, "analysis_state": "incomplete"},
+		nil,
+	)
+	if projectionConflict != "graph_card_projection_conflict" {
+		t.Fatalf("projection conflict code = %q", projectionConflict)
+	}
+	analysisConflict := immutableRecordConflictCode(
+		"cards",
+		Record{"endpoint": Record{"path": "/same"}, "analysis_state": "candidate"},
+		Record{"endpoint": Record{"path": "/same"}, "analysis_state": "incomplete"},
+		nil,
+	)
+	if analysisConflict != "graph_card_analysis_conflict" {
+		t.Fatalf("analysis conflict code = %q", analysisConflict)
 	}
 }
 
