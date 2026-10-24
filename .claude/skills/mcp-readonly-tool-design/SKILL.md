@@ -25,8 +25,11 @@ Use this skill when defining or changing the MCP tools exposed to a harness.
   and check that descriptions, annotations, argument validation, and behavior
   agree.
 - An MCP server's read access does not imply permission to make target requests.
-  The initial facade only reads local Caido history, graph slices, KB sources,
-  and coverage.
+  Keep structural reads separate from explicitly annotated local consultation
+  writes. Consultation operations may persist a redacted session, deterministic
+  comparison, unverified proposal, citation-validation receipt, or candidate;
+  none may change Caido, send target traffic, or promote a candidate to
+  `verified`.
 
 This project-local skill adapts API-contract lessons from the pinned RedAmon
 `mcp-server-tools` source; see `docs/REDAMON-SKILLS-ADOPTION.md`.

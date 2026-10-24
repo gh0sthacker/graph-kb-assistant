@@ -14,9 +14,11 @@ learning loop.
 - Do not start OAuth or configure an unidentified third-party Bridge. Treat
   subscription access and API billing as separate routes and verify any chosen
   provider's data boundary before real capture data is used.
-- Keep the app profile limited to the allowlisted read-only project MCP
-  server. Do not enable Hermes terminal, file, browser, web, or code-execution
-  toolsets for the app runtime.
+- Keep the app profile limited to the allowlisted local project MCP server.
+  Structural tools are read-only; consultation writes are narrowly scoped,
+  idempotent where applicable, and gated by operator review. Do not enable
+  Hermes terminal, file, browser, web, or code-execution toolsets for the app
+  runtime.
 - Load canonical project skills from .claude/skills/ as external skills and
   require approval for every skill write.
 - Start with synthetic or redacted fixtures and a fixed scenario suite covering

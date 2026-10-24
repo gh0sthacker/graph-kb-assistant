@@ -1,5 +1,25 @@
 # Project status and known limitations
 
+## Approved Caido ID recheck and synthetic MCP consultation cycle (2026-10-24) — PARTIAL
+
+- With the user's approval, Caido was temporarily switched from `sperpravo` to
+  the registered Juice Shop project. An unfiltered metadata pass reached its
+  10,000-ID/100-page bound with more records available. A host-filtered pass
+  for `192.168.1.149` reached its terminal cursor in four pages: 355 Caido IDs
+  matched 355 local historical/live IDs, with zero Caido-only, local-only,
+  duplicate, or unclassified IDs. Request and response bodies were not read,
+  and no target traffic was sent. Caido was restored to `sperpravo` and the
+  selection result confirmed. The comparison remains `PARTIAL`: the source has
+  no stable snapshot token, and the 10,000-ID unfiltered pass was bounded.
+- Added a synthetic MCP JSON-RPC integration test for the consultation cycle:
+  create a session, keep content hidden until operator acceptance, resume,
+  compare exact revisions, record a proposal, validate citations, save a
+  `candidate`, then recreate the service and resume. It checks excerpt
+  redaction and persistence across the real MCP dispatch path. No Hermes model
+  call or provider was used; real model-backed evaluation remains pending.
+- This check did not read the KB, alter a working graph/queue/database, or
+  perform active target operations. Overall coverage remains `PARTIAL`.
+
 ## Stage 3/4 annotated evidence preview (2026-10-24) — PARTIAL
 
 - Expanding an actor/session/object/flow label now shows the exact byte span
