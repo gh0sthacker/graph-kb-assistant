@@ -104,7 +104,9 @@
 
   function routeFamilyUncertainty(routeFamily) {
     if (typeof routeFamily !== "string") return null;
-    const maskedSegments = routeFamily.split("/").filter(segment => segment === "{value}").length;
+    const maskedSegments = routeFamily.split("/").filter(segment =>
+      segment === "{value}" || segment === "{parameter}"
+    ).length;
     const message = maskedSegments > 0
       ? `${maskedSegments} masked path segment${maskedSegments === 1 ? " is" : "s are"} unresolved. Each could be a variable value or an unrecognized static route word; this grouping does not confirm parameter behavior.`
       : "No masked path segments are present. Grouping still uses a static-word vocabulary, so route families are heuristic.";

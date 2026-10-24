@@ -2,17 +2,18 @@
 
 ## Stage 3 route-family uncertainty in graph inspector (2026-10-24 10:47Z) — PARTIAL
 
-- Operation nodes now identify route-family grouping as heuristic. The inspector
-  counts `{value}` path segments and explains that each could be a variable
-  value or an unrecognized static route word; it does not claim these are
-  confirmed parameters. Families without masks still disclose the static-word
-  vocabulary limitation.
+- Operation and endpoint nodes now identify route grouping as heuristic. The
+  inspector counts `{value}` and legacy `{parameter}` path segments and explains
+  that each could be a variable value or an unrecognized static route word; it
+  does not claim these are confirmed parameters. Routes without masks still
+  disclose the static-word vocabulary limitation.
 - Added focused UI helper coverage. `node --test
   internal/webui/graph_focus_test.cjs internal/webui/surface_requests_test.cjs`
   passed 36/36 tests; `git diff --check` passed. Existing operation graph data
-  was not reprojected, so the running UI only shows the note for operation
-  nodes already present in its current build and graph data. Route grouping
-  remains heuristic; route aliases and analyst annotations remain outstanding.
+  was not reprojected, so historical graph data still has no new operation
+  nodes. The local `web-ui` was rebuilt and restarted; `/assets/app.js` serves
+  the updated inspector. Route grouping remains heuristic; route aliases and
+  analyst annotations remain outstanding.
 
 ## Stage 3 multipart occurrences and current health check (2026-10-24 10:44Z) — PARTIAL
 

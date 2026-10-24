@@ -28,6 +28,13 @@ test("routeFamilyUncertainty keeps heuristic caveat when no segments are masked"
   assert.match(result.message, /grouping still uses a static-word vocabulary/i);
 });
 
+test("routeFamilyUncertainty also counts legacy endpoint template segments", () => {
+  const result = routeFamilyUncertainty("/rest/user/{parameter}/");
+
+  assert.equal(result.maskedSegments, 1);
+  assert.match(result.message, /variable value or an unrecognized static route word/i);
+});
+
 test("routeFamilyUncertainty rejects missing route-family values", () => {
   assert.equal(routeFamilyUncertainty(undefined), null);
   assert.equal(routeFamilyUncertainty(42), null);

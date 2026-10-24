@@ -1374,11 +1374,13 @@ function renderInspector(node) {
       elements.inspector.append(detail);
     }
   }
-  if (node.kind === "operation") {
-    const uncertainty = BBGraphFocus.routeFamilyUncertainty(node.data?.route_family);
+  if (node.kind === "operation" || node.kind === "endpoint") {
+    const uncertainty = BBGraphFocus.routeFamilyUncertainty(
+      node.kind === "operation" ? node.data?.route_family : node.data?.path
+    );
     if (uncertainty) {
       const note = el("div", "detail-explainer");
-      note.append(el("strong", "", `Route-family grouping · ${uncertainty.maskedSegments} masked`));
+      note.append(el("strong", "", `${node.kind === "operation" ? "Route-family grouping" : "Endpoint route mask"} · ${uncertainty.maskedSegments} masked`));
       note.append(el("span", "", uncertainty.message));
       elements.inspector.append(note);
     }
