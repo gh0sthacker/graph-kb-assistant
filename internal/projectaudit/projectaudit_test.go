@@ -59,7 +59,10 @@ func TestAuditProjectReportsProjectionQueueCountsWithoutPayloads(t *testing.T) {
 		t.Fatalf("CreateProject() error = %v", err)
 	}
 	key := projectStore.ProjectKey
-	for index, state := range []string{"pending", "pending", "leased", "applied", "applied", "applied", "dead_letter"} {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	timestamp := func(value time.Time) string { return value.UTC().Format("2006-01-02T15:04:05.000000000Z") }
+	states := []string{"pending", "pending", "leased", "applied", "applied", "applied", "dead_letter"}
+	for index, state := range states {
 		revisionID := strings.Repeat(strconv.FormatInt(int64(index+1), 16), 64)
 		if _, err := projectStore.Database.DB().ExecContext(context.Background(), `
 			INSERT INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at)
@@ -69,17 +72,33 @@ func TestAuditProjectReportsProjectionQueueCountsWithoutPayloads(t *testing.T) {
 		}
 		var leaseToken, leaseUntil, appliedAt any
 		if state == "leased" {
-			leaseToken, leaseUntil = strings.Repeat("a", 32), "2026-10-23T00:01:00Z"
+			leaseToken, leaseUntil = strings.Repeat("a", 32), timestamp(now.Add(time.Minute))
+			if index == 2 {
+				leaseUntil = timestamp(now.Add(-time.Minute))
+			}
 		}
 		if state == "applied" {
-			appliedAt = "2026-10-23T00:01:00Z"
+			appliedAt = timestamp(now.Add(-time.Minute))
+		}
+		var lastErrorCode any
+		if state == "dead_letter" {
+			lastErrorCode = "private-error-marker"
+		}
+		createdAt := timestamp(now.Add(-30 * time.Minute))
+		nextAttemptAt := timestamp(now.Add(-time.Minute))
+		if index == 0 {
+			createdAt = timestamp(now.Add(-3 * time.Hour))
+		}
+		if index == 1 {
+			createdAt = timestamp(now.Add(-time.Hour))
+			nextAttemptAt = timestamp(now.Add(5 * time.Minute))
 		}
 		if _, err := projectStore.Database.DB().ExecContext(context.Background(), `
 			INSERT INTO projection_jobs(job_id,revision_id,payload_json,payload_sha256,state,attempt_count,
-			 next_attempt_at,lease_token,lease_until,created_at,updated_at,applied_at)
-			VALUES(?,?,?,? ,?,0,?,?,?,?,?,?)`,
+			 next_attempt_at,lease_token,lease_until,last_error_code,created_at,updated_at,applied_at)
+			VALUES(?,?,?,?,?,0,?,?,?,?,?,?,?)`,
 			"job-"+strconv.Itoa(index), revisionID, `{"private":"payload-must-not-be-returned"}`, strings.Repeat("b", 64),
-			state, "2026-10-23T00:00:00Z", leaseToken, leaseUntil, "2026-10-23T00:00:00Z", "2026-10-23T00:00:00Z", appliedAt,
+			state, nextAttemptAt, leaseToken, leaseUntil, lastErrorCode, createdAt, createdAt, appliedAt,
 		); err != nil {
 			_ = projectStore.Close()
 			t.Fatalf("insert projection job: %v", err)
@@ -89,20 +108,23 @@ func TestAuditProjectReportsProjectionQueueCountsWithoutPayloads(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	report, err := AuditProject(context.Background(), root, key)
+	report, err := auditProjectAt(context.Background(), root, key, now)
 	if err != nil {
 		t.Fatalf("AuditProject() error = %v", err)
 	}
-	want := ProjectionQueueStatus{State: "compatible", Pending: 2, Leased: 1, Applied: 3, DeadLetter: 1}
-	if report.ProjectionQueue != want {
-		t.Fatalf("projection queue = %+v, want %+v", report.ProjectionQueue, want)
+	queue := report.ProjectionQueue
+	if queue.State != "compatible" || queue.Pending != 2 || queue.PendingDue != 1 || queue.PendingScheduled != 1 ||
+		queue.OldestPendingAgeSeconds != 10800 || queue.Leased != 1 || queue.ExpiredLeases != 1 || queue.Applied != 3 || queue.DeadLetter != 1 {
+		t.Fatalf("projection queue diagnostics are wrong: %+v", queue)
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		t.Fatalf("marshal audit report: %v", err)
 	}
-	if strings.Contains(string(encoded), "payload-must-not-be-returned") {
-		t.Fatal("audit report exposed projection payload content")
+	for _, marker := range []string{"payload-must-not-be-returned", "private-error-marker"} {
+		if strings.Contains(string(encoded), marker) {
+			t.Fatalf("audit report exposed private queue detail %q", marker)
+		}
 	}
 }
 

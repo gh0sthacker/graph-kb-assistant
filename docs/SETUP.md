@@ -153,6 +153,11 @@ sudo journalctl -u 'bb-assistant-caido-tail@<registered-project-sha256>.service'
 sudo journalctl -u 'bb-assistant-projection-worker@<registered-project-sha256>.service' -f
 ```
 
+The project audit reports pending jobs split into due and retry-scheduled,
+the age in seconds of the oldest pending job, expired worker leases, and
+dead-letter counts. It omits job payloads and raw error codes. An unavailable
+queue diagnostic means its schema or timestamps need operator review.
+
 The live-tail checkpoint and request-ID index are persisted in the project
 SQLite store. A synthetic test now closes and reopens the store between pages,
 resumes the saved cursor, then replays known IDs and confirms no duplicate

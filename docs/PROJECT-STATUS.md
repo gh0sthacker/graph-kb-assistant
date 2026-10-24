@@ -17,6 +17,12 @@
   passed with synthetic data. No Caido instance, existing project,
   production queue, or Neo4j was accessed; test state stayed in a temporary
   synthetic project. Managed runtime and live source parity remain `PARTIAL`.
+- The read-only `project-audit` queue summary now reports due versus delayed
+  pending jobs, the age of the oldest pending job, and expired leases alongside
+  existing applied/dead-letter counts. Malformed queue timestamps leave queue
+  diagnostics unavailable; payloads and raw error codes are not returned.
+  Synthetic audit tests cover due/retry/expired/age calculations and secret
+  omission.
 
 ## Stage 6 bounded project backup and restore (2026-10-24) — SYNTHETICALLY VERIFIED
 

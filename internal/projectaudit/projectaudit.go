@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"regexp"
 	"time"
 
@@ -39,11 +40,15 @@ type FidelityCounts struct {
 }
 
 type ProjectionQueueStatus struct {
-	State      string `json:"state"`
-	Pending    int64  `json:"pending"`
-	Leased     int64  `json:"leased"`
-	Applied    int64  `json:"applied"`
-	DeadLetter int64  `json:"dead_letter"`
+	State                   string `json:"state"`
+	Pending                 int64  `json:"pending"`
+	PendingDue              int64  `json:"pending_due"`
+	PendingScheduled        int64  `json:"pending_scheduled"`
+	OldestPendingAgeSeconds int64  `json:"oldest_pending_age_seconds"`
+	Leased                  int64  `json:"leased"`
+	ExpiredLeases           int64  `json:"expired_leases"`
+	Applied                 int64  `json:"applied"`
+	DeadLetter              int64  `json:"dead_letter"`
 }
 
 type Report struct {
@@ -64,8 +69,12 @@ type Report struct {
 // columns, and aggregate counts are read; capture bodies and vault files are
 // never opened. A completed sync cursor is not treated as complete coverage.
 func AuditProject(ctx context.Context, dataRoot, projectKey string) (Report, error) {
-	if ctx == nil {
-		return Report{}, errors.New("project audit context is required")
+	return auditProjectAt(ctx, dataRoot, projectKey, time.Now().UTC())
+}
+
+func auditProjectAt(ctx context.Context, dataRoot, projectKey string, observedAt time.Time) (Report, error) {
+	if ctx == nil || observedAt.IsZero() {
+		return Report{}, errors.New("project audit context and observation time are required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, maxAuditDuration)
 	defer cancel()
@@ -138,7 +147,7 @@ func AuditProject(ctx context.Context, dataRoot, projectKey string) (Report, err
 		return Report{}, err
 	}
 	report.Coverage = status
-	if err := readProjectionQueueCounts(ctx, tx, &report.ProjectionQueue); err != nil {
+	if err := readProjectionQueueCounts(ctx, tx, &report.ProjectionQueue, observedAt.UTC()); err != nil {
 		report.ProjectionQueue.State = "unavailable"
 		report.Coverage.CoverageGaps = append(report.Coverage.CoverageGaps, "Projection queue status could not be read.")
 	} else {
@@ -168,36 +177,53 @@ func AuditProject(ctx context.Context, dataRoot, projectKey string) (Report, err
 	return report, nil
 }
 
-func readProjectionQueueCounts(ctx context.Context, tx *sql.Tx, status *ProjectionQueueStatus) error {
+func readProjectionQueueCounts(ctx context.Context, tx *sql.Tx, status *ProjectionQueueStatus, observedAt time.Time) error {
 	if ctx == nil || tx == nil || status == nil {
 		return errors.New("projection queue snapshot is unavailable")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT state,count(*) FROM projection_jobs GROUP BY state`)
+	observedAtText := observedAt.UTC().Format(time.RFC3339Nano)
+	var oldestPendingJulian sql.NullFloat64
+	var unsupportedStates, malformedPendingTimes, malformedLeaseTimes int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT
+		  COALESCE(SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state='pending' AND julianday(next_attempt_at)<=julianday(?) THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state='pending' AND julianday(next_attempt_at)>julianday(?) THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state='leased' AND julianday(lease_until)<=julianday(?) THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state='applied' THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state='dead_letter' THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state NOT IN ('pending','leased','applied','dead_letter') THEN 1 ELSE 0 END),0),
+		  MIN(CASE WHEN state='pending' THEN julianday(created_at) END),
+		  COALESCE(SUM(CASE WHEN state='pending' AND (julianday(created_at) IS NULL OR julianday(next_attempt_at) IS NULL) THEN 1 ELSE 0 END),0),
+		  COALESCE(SUM(CASE WHEN state='leased' AND julianday(lease_until) IS NULL THEN 1 ELSE 0 END),0)
+		FROM projection_jobs`, observedAtText, observedAtText, observedAtText).Scan(
+		&status.Pending, &status.PendingDue, &status.PendingScheduled, &status.Leased, &status.ExpiredLeases,
+		&status.Applied, &status.DeadLetter, &unsupportedStates, &oldestPendingJulian,
+		&malformedPendingTimes, &malformedLeaseTimes,
+	)
 	if err != nil {
-		return errors.New("projection queue counts could not be read")
+		return errors.New("projection queue diagnostics could not be read")
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var state string
-		var count int64
-		if err := rows.Scan(&state, &count); err != nil || count < 0 {
-			return errors.New("projection queue counts are malformed")
-		}
-		switch state {
-		case "pending":
-			status.Pending = count
-		case "leased":
-			status.Leased = count
-		case "applied":
-			status.Applied = count
-		case "dead_letter":
-			status.DeadLetter = count
-		default:
-			return errors.New("projection queue contains an unsupported state")
-		}
+	if unsupportedStates != 0 {
+		return errors.New("projection queue contains an unsupported state")
 	}
-	if err := rows.Err(); err != nil {
-		return errors.New("projection queue counts could not be completed")
+	if malformedPendingTimes != 0 || malformedLeaseTimes != 0 {
+		return errors.New("projection queue timestamps are malformed")
+	}
+	if status.Pending < 0 || status.PendingDue < 0 || status.PendingScheduled < 0 || status.Leased < 0 ||
+		status.ExpiredLeases < 0 || status.Applied < 0 || status.DeadLetter < 0 {
+		return errors.New("projection queue counts are malformed")
+	}
+	if status.Pending != status.PendingDue+status.PendingScheduled {
+		return errors.New("projection queue retry schedule is incomplete")
+	}
+	if oldestPendingJulian.Valid {
+		oldestPendingUnix := (oldestPendingJulian.Float64 - 2440587.5) * 86400
+		ageSeconds := float64(observedAt.UTC().Unix()) - oldestPendingUnix
+		if ageSeconds > 0 {
+			status.OldestPendingAgeSeconds = int64(math.Round(ageSeconds))
+		}
 	}
 	return nil
 }
