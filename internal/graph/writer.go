@@ -146,13 +146,22 @@ func OpenWriter(ctx context.Context, selected *store.ProjectStore) (*Writer, err
 		if graphInfo.Mode()&os.ModeSymlink != 0 || !graphInfo.Mode().IsRegular() || graphInfo.Mode().Perm()&0o077 != 0 || graphInfo.Mode().Perm()&0o600 != 0o600 {
 			return nil, errors.New("BehaviorGraph must be an owner-only regular file")
 		}
-		reader, err := OpenReader(ctx, expectedGraph, projectKey, expectedReceipts)
+		// Writer startup needs the graph namespace and schema, not a full
+		// materialization of every payload. OpenReader remains responsible for
+		// validating records when a graph snapshot is actually read.
+		graphURL := (&url.URL{Scheme: "file", Path: expectedGraph}).String() + "?mode=ro"
+		db, err := sql.Open("sqlite", graphURL)
 		if err != nil {
+			return nil, errors.New("BehaviorGraph database could not be opened for schema validation")
+		}
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		if err := validateV2Schema(ctx, db, projectKey); err != nil {
+			_ = db.Close()
 			return nil, err
 		}
-		defer reader.Close()
-		if reader.schema != 2 {
-			return nil, errors.New("Go graph writer supports schema v2 only")
+		if err := db.Close(); err != nil {
+			return nil, errors.New("BehaviorGraph schema validation connection could not close")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("BehaviorGraph path is unavailable")

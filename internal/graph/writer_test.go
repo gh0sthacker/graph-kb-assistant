@@ -91,6 +91,61 @@ func TestWriterMatchesProjectStoreChecksStorageDirectory(t *testing.T) {
 	}
 }
 
+func TestOpenWriterValidatesSchemaWithoutLoadingUnrelatedRecords(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ref := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "writer-schema-only"}
+	selected, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer selected.Close()
+
+	writer, err := OpenWriter(ctx, selected)
+	if err != nil {
+		t.Fatalf("OpenWriter() for a new graph: %v", err)
+	}
+	db, created, err := writer.openGraphDatabase(ctx)
+	if err != nil || !created {
+		t.Fatalf("openGraphDatabase() = created %t, err %v", created, err)
+	}
+	if err := createV2Schema(ctx, db, selected.ProjectKey); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO entities(id,payload) VALUES(?,?)", "unrelated", "not-json"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenReader(ctx, selected.BehaviorGraphPath, selected.ProjectKey, selected.BehaviorReceiptPath); err == nil {
+		t.Fatal("fixture should be rejected by the full graph reader")
+	}
+	if _, err := OpenWriter(ctx, selected); err != nil {
+		t.Fatalf("OpenWriter() should validate the existing graph schema without loading unrelated records: %v", err)
+	}
+	db, created, err = writer.openGraphDatabase(ctx)
+	if err != nil || created {
+		t.Fatalf("openGraphDatabase() for the existing graph = created %t, err %v", created, err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE metadata SET value='1' WHERE key='schema_version'"); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenWriter(ctx, selected); err == nil {
+		t.Fatal("OpenWriter() accepted a graph schema version it cannot write")
+	}
+}
+
 func TestRecordDifferencePathsReportsSchemaPathsWithoutValues(t *testing.T) {
 	left := Record{
 		"id":   "observation-id",

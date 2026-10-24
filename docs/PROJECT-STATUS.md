@@ -25,6 +25,23 @@
   checking current source hashes and was interrupted. It made no index or
   configuration changes; current KB coverage was not revalidated.
 
+## Projection worker startup and local import follow-up (2026-10-24) — PARTIAL
+
+- A bounded run against the registered project spent 491 seconds opening the
+  existing BehaviorGraph because `OpenWriter` used the full snapshot reader
+  just to check the schema. After SIGINT, one leased job returned to pending
+  as `worker_interrupted`; zero jobs were applied.
+- `OpenWriter` now checks only the project namespace and required schema tables
+  through a read-only SQLite connection. A regression fixture proves unrelated
+  malformed records are not loaded by writer startup while unsupported schema
+  versions still fail closed. `internal/graph` and `internal/ingest` tests,
+  `go vet ./...`, and the full `go test -count=1 ./...` passed.
+- A live one-job follow-up reduced graph-writer startup from 491 seconds to
+  2 ms. The job then failed during local graph import in 33 ms, before Neo4j
+  sync, with the existing safe `projection_unavailable` code. Zero jobs were
+  applied and the queue remains `PARTIAL`; the root cause within that import
+  still needs investigation. No more than these two single-job attempts ran.
+
 ## Stage 5 injectable synthetic analyst adapter (2026-10-24) — PARTIAL
 
 - The MCP consultation lifecycle fixture now injects an explicit model-boundary
