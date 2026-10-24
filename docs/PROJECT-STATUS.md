@@ -1,31 +1,5 @@
 # Project status and known limitations
 
-## Fresh local runtime acceptance (2026-10-24) — PARTIAL
-
-- The loopback Go UI is running at `http://127.0.0.1:8765/`. `/` and
-  `/api/projects` returned HTTP 200. The selected Juice Shop surface returned
-  131 operations and 1,400 observations; the bounded first page returned 40
-  operations and correctly reported `partial` coverage.
-- A direct graph request using one live catalog seed returned 3 entities, 2
-  assertions, 1 analysis card, and 1 source from the configured Neo4j-backed
-  query path. The view correctly reports `incomplete=true` and coverage
-  `partial`; this is a focused runtime check, not a complete graph traversal.
-- A fresh read-only project audit found compatible SQLite schema v7 and graph
-  schema v2, 1,400 captures/search-index rows, 1,369 mapped captures, 31
-  unmapped captures, 55 due projection jobs, and 1,345 applied jobs. Historical
-  sync remains partial and live indexing is empty. The audit did not contact
-  Caido or read request/response bodies.
-- `TMPDIR=/var/tmp go test -count=1 ./...`, `TMPDIR=/var/tmp go vet ./...`,
-  `git diff --check`, the focused encrypted-evidence consultation test, and
-  `./scripts/run-hermes mcp test bb_assistant` passed. Hermes connected over
-  stdio and discovered all 15 tools. No model/provider request was made; the
-  real model-backed consultation remains pending the operator's provider
-  choice from the approved architecture plan.
-- Both the KB MCP stats call and the documented local stats fallback exceeded
-  their wait window while checking current source hashes; the fallback was
-  interrupted without refreshing or reindexing. KB coverage remains
-  unverified in this checkpoint.
-
 ## Stage 4 synthetic HTTP evidence acceptance (2026-10-24) — PARTIAL
 
 - A new end-to-end synthetic fixture writes two encrypted HTTP exchanges into
