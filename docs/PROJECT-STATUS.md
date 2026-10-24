@@ -1588,9 +1588,10 @@ This repository is an early public alpha. The following boundaries are deliberat
   truncation flags. `go vet` passed for `internal/neo4jstore`,
   `internal/search`, and `internal/appquery` with `TMPDIR=/var/tmp`;
   `git diff --check` passed. An opt-in 66-reference Neo4j integration fixture
-  was added. Its isolated container attempt could not start the database with
-  the available temporary storage, so real Neo4j query execution remains
-  unverified; the container was stopped and removed.
+  passed against Neo4j Community 2026.10.0 in an isolated disposable
+  container: page one returned 64 references, page two returned the retained
+  anchor and both remaining references without truncation or repeats. The
+  container was stopped and removed.
 - Caido and the working project database were not accessed for this code
   slice. Runtime graph performance, HTTP/MCP continuation, Caido completeness,
   and KB coverage remain `PARTIAL`.
@@ -1598,7 +1599,7 @@ This repository is an early public alpha. The following boundaries are deliberat
   branches, and opaque cursors; the MCP `bb_graph_slice` description now
   documents resumable provenance branches and explicit cursor caps. Targeted
   appquery, MCP contract, and HTTP handler tests passed. These verify adapter
-  contracts only; an end-to-end cursor round trip still needs the disposable
-  Neo4j acceptance run.
+  contracts only; a full cursor round trip through appquery and the HTTP/MCP
+  entry points remains outstanding.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
