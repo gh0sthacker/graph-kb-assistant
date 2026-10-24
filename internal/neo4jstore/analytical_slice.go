@@ -14,7 +14,6 @@ import (
 const (
 	maxAnalyticalCandidateAssertions = 1_000
 	maxAnalyticalCandidateCards      = 200
-	maxAnalyticalAssertionsPerNode   = 100
 	maxAnalyticalFrontierNodes       = 128
 	analyticalClosureHops            = 2
 )
@@ -252,7 +251,10 @@ func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTran
 	if len(frontier) == 0 {
 		return []string{}, false, nil
 	}
-	perNodePageSize := min(remaining, maxAnalyticalAssertionsPerNode)
+	perNodePageSize, err := analyticalAssertionShare(remaining, len(frontier))
+	if err != nil {
+		return nil, false, err
+	}
 	// An assertion may touch the same entity in both endpoint roles. Probe up
 	// to two rows per unique candidate so those duplicate roles do not consume
 	// the per-node candidate page.
@@ -324,6 +326,23 @@ func readAnalyticalAssertionCandidates(ctx context.Context, tx neo4j.ManagedTran
 	}
 	page, pageTruncated, err := analyticalCandidatePage(unique, remaining)
 	return page, truncated || pageTruncated, err
+}
+
+// analyticalAssertionShare spreads the remaining global assertion budget
+// across the current frontier. This avoids silently imposing a second,
+// arbitrary per-node ceiling when the overall candidate budget has room.
+func analyticalAssertionShare(remaining, frontierCount int) (int, error) {
+	if remaining < 0 || frontierCount < 0 {
+		return 0, errors.New("Neo4j analytical assertion budget is invalid")
+	}
+	if remaining == 0 || frontierCount == 0 {
+		return 0, nil
+	}
+	share := remaining / frontierCount
+	if remaining%frontierCount != 0 {
+		share++
+	}
+	return min(share, remaining), nil
 }
 
 func analyticalFrontierPage(ids []string, limit int) ([]string, int) {

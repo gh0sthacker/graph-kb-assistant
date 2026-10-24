@@ -173,6 +173,32 @@ func TestAnalyticalCandidatePageTruncatesOnlyWhenAnotherCandidateExists(t *testi
 	}
 }
 
+func TestAnalyticalAssertionShareDistributesRemainingBudget(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		remaining     int
+		frontierCount int
+		want          int
+		wantError     bool
+	}{
+		{name: "single frontier can use remaining global budget", remaining: 1_000, frontierCount: 1, want: 1_000},
+		{name: "even share", remaining: 1_000, frontierCount: 2, want: 500},
+		{name: "bounded frontier share rounds up", remaining: 1_000, frontierCount: 128, want: 8},
+		{name: "one candidate reaches every frontier", remaining: 1, frontierCount: 128, want: 1},
+		{name: "exhausted budget", remaining: 0, frontierCount: 3, want: 0},
+		{name: "empty frontier", remaining: 1_000, frontierCount: 0, want: 0},
+		{name: "negative budget rejected", remaining: -1, frontierCount: 1, wantError: true},
+		{name: "negative frontier rejected", remaining: 1, frontierCount: -1, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := analyticalAssertionShare(test.remaining, test.frontierCount)
+			if (err != nil) != test.wantError || (!test.wantError && got != test.want) {
+				t.Fatalf("analyticalAssertionShare(%d, %d) = %d, %v; want %d, error=%t", test.remaining, test.frontierCount, got, err, test.want, test.wantError)
+			}
+		})
+	}
+}
+
 func TestAnalyticalFrontierPageReportsOmittedNodes(t *testing.T) {
 	ids := []string{"entity-a", "entity-b", "entity-c"}
 	page, omitted := analyticalFrontierPage(ids, 2)
@@ -185,7 +211,7 @@ func TestAnalyticalFrontierPageReportsOmittedNodes(t *testing.T) {
 	}
 }
 
-func TestNeo4jAnalyticalSliceMarksPerNodeCandidateTruncation(t *testing.T) {
+func TestNeo4jAnalyticalSliceUsesGlobalCandidateBudget(t *testing.T) {
 	if os.Getenv("BB_ASSISTANT_NEO4J_TEST") != "1" {
 		t.Skip("set BB_ASSISTANT_NEO4J_TEST=1 to run against a local Neo4j instance")
 	}
@@ -214,7 +240,7 @@ func TestNeo4jAnalyticalSliceMarksPerNodeCandidateTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.CandidateAssertionsTruncated || result.CandidateAssertions != maxAnalyticalAssertionsPerNode {
+	if !result.CandidateAssertionsTruncated || result.CandidateAssertions != maxAnalyticalCandidateAssertions {
 		t.Fatalf("candidate limit was not surfaced: %#v", result)
 	}
 }
