@@ -1229,7 +1229,8 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
 }
 
 function mergeGraphPages(current, next) {
-  if (current.continuation_scope === "rendered_missing_assertion_branches" || next.continuation_scope === "rendered_missing_assertion_branches") return next;
+  const continuationScopes = new Set(["rendered_missing_assertion_branches", "rendered_and_native_candidate_branches"]);
+  if (continuationScopes.has(current.continuation_scope) || continuationScopes.has(next.continuation_scope)) return next;
   const merged = { ...current, ...next };
   for (const key of new Set([...Object.keys(current), ...Object.keys(next)])) {
     if (!Array.isArray(current[key]) && !Array.isArray(next[key])) continue;

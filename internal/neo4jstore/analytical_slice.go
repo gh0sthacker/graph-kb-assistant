@@ -15,6 +15,7 @@ const (
 	maxAnalyticalCandidateAssertions = 1_000
 	maxAnalyticalCandidateCards      = 200
 	maxAnalyticalFrontierNodes       = 128
+	maxAnalyticalFrontierCursorSeeds = 5_000
 	analyticalClosureHops            = 2
 )
 
@@ -41,6 +42,8 @@ type AnalyticalSlice struct {
 	FrontierHops                 int
 	FrontierNodeLimitReached     bool
 	FrontierNodesOmitted         int
+	FrontierNodeIDsOmitted       []string
+	FrontierSeedsTruncated       bool
 	ProvenanceTruncated          bool
 	TruncatedEntityIDs           []string
 	EntitySourceRefLimit         int
@@ -160,9 +163,16 @@ func readProjectAnalyticalSliceTx(ctx context.Context, tx neo4j.ManagedTransacti
 		sort.Strings(frontier)
 		frontierPage, omitted := analyticalFrontierPage(frontier, maxAnalyticalFrontierNodes)
 		frontier = frontierPage
-		if omitted > 0 {
+		if len(omitted) > 0 {
 			result.FrontierNodeLimitReached = true
-			result.FrontierNodesOmitted += omitted
+			result.FrontierNodesOmitted += len(omitted)
+			remainingSeeds := maxAnalyticalFrontierCursorSeeds - len(result.FrontierNodeIDsOmitted)
+			if remainingSeeds > 0 {
+				result.FrontierNodeIDsOmitted = append(result.FrontierNodeIDsOmitted, omitted[:min(len(omitted), remainingSeeds)]...)
+			}
+			if len(omitted) > remainingSeeds {
+				result.FrontierSeedsTruncated = true
+			}
 		}
 	}
 	for _, record := range read.records {
@@ -345,14 +355,14 @@ func analyticalAssertionShare(remaining, frontierCount int) (int, error) {
 	return min(share, remaining), nil
 }
 
-func analyticalFrontierPage(ids []string, limit int) ([]string, int) {
+func analyticalFrontierPage(ids []string, limit int) ([]string, []string) {
 	if limit < 0 {
-		return []string{}, len(ids)
+		return []string{}, ids
 	}
 	if len(ids) <= limit {
-		return ids, 0
+		return ids, []string{}
 	}
-	return ids[:limit], len(ids) - limit
+	return ids[:limit], ids[limit:]
 }
 
 func analyticalCandidatePage(ids []string, remaining int) ([]string, bool, error) {

@@ -280,7 +280,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 		if request.Cursor == "" {
 			payload, err = search.GraphSliceWithService(ctx, s.graph, selected, request.SeedIDs, budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, request.Context)
 			if err == nil {
-				payload["continuation_scope"] = "rendered_missing_assertion_branches"
+				payload["continuation_scope"] = "rendered_and_native_candidate_branches"
 				branchSeeds := fullContinuationBranchSeeds(payload)
 				candidateLimits := graphCandidateLimitReached(payload)
 				branchListTruncated := graphPayloadBool(payload["missing_branches_truncated"])
@@ -295,14 +295,14 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 						}
 					} else {
 						payload["continuation_state"] = "unavailable"
-						appendGraphLimitation(payload, "Rendered omitted assertion branches could not be queued for continuation; reload and retry this focused slice.")
+						appendGraphLimitation(payload, "Rendered or native frontier branches could not be queued for continuation; reload and retry this focused slice.")
 					}
 				} else if len(branchSeeds) > 0 && graphaccess.ConfiguredBackend() != "neo4j" {
 					payload["continuation_state"] = "unsupported_backend"
-					appendGraphLimitation(payload, "This graph backend cannot pin rendered-branch continuation to a Neo4j generation.")
+					appendGraphLimitation(payload, "This graph backend cannot pin candidate-branch continuation to a Neo4j generation.")
 				} else if len(branchSeeds) > 0 {
 					payload["continuation_state"] = "unavailable"
-					appendGraphLimitation(payload, "Neo4j did not provide a generation for the rendered-branch cursor; reload and retry this focused slice.")
+					appendGraphLimitation(payload, "Neo4j did not provide a generation for the candidate-branch cursor; reload and retry this focused slice.")
 				} else if branchListTruncated {
 					payload["continuation_state"] = "branch_list_truncated"
 					payload["continuation_branches_truncated"] = true
@@ -313,7 +313,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 				}
 				if candidateLimits {
 					payload["continuation_candidate_limits_reached"] = true
-					appendGraphLimitation(payload, "This cursor continues rendered omitted assertion branches only; native assertion, frontier, card, and provenance candidate limits still require a narrower query or a future native continuation page.")
+					appendGraphLimitation(payload, "This cursor continues rendered assertion omissions and queued native frontier omissions. Native global assertion, card, and provenance candidate limits remain bounded and may require a narrower query.")
 				}
 			}
 		} else {
@@ -328,10 +328,10 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 					}
 					return nil, nil, 0, queryError(ErrorGraphUnavailable, "full graph continuation page could not be read", pageErr)
 				}
-				pagePayload["continuation_scope"] = "rendered_missing_assertion_branches"
+				pagePayload["continuation_scope"] = "rendered_and_native_candidate_branches"
 				if graphCandidateLimitReached(pagePayload) {
 					pagePayload["continuation_candidate_limits_reached"] = true
-					appendGraphLimitation(pagePayload, "This cursor continues rendered omitted assertion branches only; native assertion, frontier, card, and provenance candidate limits still require a narrower query or a future native continuation page.")
+					appendGraphLimitation(pagePayload, "This cursor continues rendered assertion omissions and queued native frontier omissions. Native global assertion, card, and provenance candidate limits remain bounded and may require a narrower query.")
 				}
 				return pagePayload, fullContinuationBranchSeeds(pagePayload), graphPayloadGeneration(pagePayload), nil
 			}, func(pagePayload map[string]any) (map[string]any, error) {
@@ -491,11 +491,22 @@ func fullContinuationBranchSeeds(payload map[string]any) []string {
 	unique := make(map[string]struct{}, len(branches))
 	for _, branch := range branches {
 		reason, _ := branch["reason"].(string)
-		if reason != "max_nodes" && reason != "max_edges" && reason != "mandatory_evidence_branch_omitted" {
+		var id string
+		switch reason {
+		case "max_nodes", "max_edges", "mandatory_evidence_branch_omitted":
+			id, _ = branch["assertion_id"].(string)
+			if !strings.HasPrefix(id, "assertion-") {
+				continue
+			}
+		case "analytical_frontier_node_limit":
+			id, _ = branch["frontier_id"].(string)
+			if strings.HasPrefix(id, "source-") || strings.HasPrefix(id, "card-") {
+				continue
+			}
+		default:
 			continue
 		}
-		id, _ := branch["assertion_id"].(string)
-		if !entitySeedPattern.MatchString(id) || !strings.HasPrefix(id, "assertion-") {
+		if !entitySeedPattern.MatchString(id) {
 			continue
 		}
 		unique[id] = struct{}{}
@@ -505,6 +516,10 @@ func fullContinuationBranchSeeds(payload map[string]any) []string {
 		seeds = append(seeds, id)
 	}
 	sort.Strings(seeds)
+	if len(seeds) > maxFullCursorPendingBranches {
+		payload["missing_branches_truncated"] = true
+		seeds = seeds[:maxFullCursorPendingBranches]
+	}
 	return seeds
 }
 

@@ -254,6 +254,28 @@ func TestFullSliceCursorBindsProjectSeedsAndBudget(t *testing.T) {
 	}
 }
 
+func TestFullSliceCursorAcceptsNativeFrontierEntitySeeds(t *testing.T) {
+	store := newFullCursorStore()
+	binding := fullCursorBinding{
+		ProjectKey: strings.Repeat("a", 64), SeedHash: strings.Repeat("b", 64),
+		Budget: GraphBudget{MaxNodes: 80, MaxEdges: 160, MaxDepth: 3},
+	}
+	endpoint := "endpoint-" + strings.Repeat("f", 64)
+	token, err := store.create(binding, 7, []string{endpoint}, map[string]any{"page": 0})
+	if err != nil {
+		t.Fatalf("create native frontier continuation: %v", err)
+	}
+	page, next, pageNo, err := store.next(token, binding, func(seeds []string, _ map[string]any, page int) (map[string]any, []string, int64, error) {
+		if len(seeds) != 1 || seeds[0] != endpoint {
+			t.Fatalf("native frontier seeds = %v, want [%s]", seeds, endpoint)
+		}
+		return map[string]any{"page": page}, nil, 7, nil
+	}, nil)
+	if err != nil || next != "" || pageNo != 1 || page["continuation_branches_complete"] != true {
+		t.Fatalf("native frontier continuation = %#v, next %q, page %d, err %v", page, next, pageNo, err)
+	}
+}
+
 func TestFullSliceCursorRejectsMalformedExpiredAndStaleGeneration(t *testing.T) {
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	store := newFullCursorStore()

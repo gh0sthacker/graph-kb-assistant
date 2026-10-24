@@ -115,6 +115,13 @@ test("graph continuation merges distinct rows, deduplicates overlaps, and keeps 
   assert.deepEqual(snapshot(last.result_page_ids), ["result-1", "result-2", "result-3"]);
 });
 
+test("native candidate continuation displays the cumulative server graph page", () => {
+  const app = createApp();
+  const next = { entities: [{ id: "endpoint-next" }], continuation_scope: "rendered_and_native_candidate_branches" };
+  const merged = app.mergeGraphPages({ entities: [{ id: "endpoint-old" }] }, next);
+  assert.deepEqual(snapshot(merged.entities), [{ id: "endpoint-next" }]);
+});
+
 test("graph operation title prefers the project alias while preserving the original route data", () => {
   const app = createApp();
   const operation = { id: "operation-abc", kind: "operation", data: { method: "POST", route_family: "/api/{value}" } };

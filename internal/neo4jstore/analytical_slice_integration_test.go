@@ -202,12 +202,12 @@ func TestAnalyticalAssertionShareDistributesRemainingBudget(t *testing.T) {
 func TestAnalyticalFrontierPageReportsOmittedNodes(t *testing.T) {
 	ids := []string{"entity-a", "entity-b", "entity-c"}
 	page, omitted := analyticalFrontierPage(ids, 2)
-	if len(page) != 2 || page[0] != "entity-a" || page[1] != "entity-b" || omitted != 1 {
-		t.Fatalf("frontier cap did not identify omitted nodes: page=%v omitted=%d", page, omitted)
+	if len(page) != 2 || page[0] != "entity-a" || page[1] != "entity-b" || len(omitted) != 1 || omitted[0] != "entity-c" {
+		t.Fatalf("frontier cap did not identify omitted nodes: page=%v omitted=%v", page, omitted)
 	}
 	page, omitted = analyticalFrontierPage(ids, len(ids))
-	if len(page) != len(ids) || omitted != 0 {
-		t.Fatalf("exact frontier limit was reported as truncated: page=%v omitted=%d", page, omitted)
+	if len(page) != len(ids) || len(omitted) != 0 {
+		t.Fatalf("exact frontier limit was reported as truncated: page=%v omitted=%v", page, omitted)
 	}
 }
 
@@ -242,6 +242,53 @@ func TestNeo4jAnalyticalSliceUsesGlobalCandidateBudget(t *testing.T) {
 	}
 	if !result.CandidateAssertionsTruncated || result.CandidateAssertions != maxAnalyticalCandidateAssertions {
 		t.Fatalf("candidate limit was not surfaced: %#v", result)
+	}
+}
+
+func TestNeo4jAnalyticalSliceReturnsOmittedFrontierSeeds(t *testing.T) {
+	if os.Getenv("BB_ASSISTANT_NEO4J_TEST") != "1" {
+		t.Skip("set BB_ASSISTANT_NEO4J_TEST=1 to run against a local Neo4j instance")
+	}
+	store, ctx, project := neighborhoodIntegrationStore(t)
+	source := behaviorgraph.Record{
+		"path": "/synthetic/analytical-frontier.json", "sha256": strings.Repeat("d", 64), "record_locator": "$.capture",
+	}
+	seed := neighborhoodTestID("asset", "analytical-frontier-seed")
+	entities := []behaviorgraph.Record{{"id": seed, "kind": "asset", "data": map[string]any{"label": "seed"}, "source_refs": []behaviorgraph.Record{source}}}
+	assertions := make([]behaviorgraph.Record, 0, maxAnalyticalFrontierNodes+20)
+	for i := 0; i < maxAnalyticalFrontierNodes+20; i++ {
+		endpoint := neighborhoodTestID("asset", fmt.Sprintf("analytical-frontier-endpoint-%d", i))
+		entities = append(entities, behaviorgraph.Record{
+			"id": endpoint, "kind": "asset", "data": map[string]any{"label": fmt.Sprintf("endpoint-%d", i)}, "source_refs": []behaviorgraph.Record{source},
+		})
+		assertions = append(assertions, neighborhoodFixtureAssertion(project, seed, endpoint, "references", source))
+	}
+	fixture := behaviorgraph.Record{
+		"schema_version": json.Number("2"), "program": project,
+		"sources": []behaviorgraph.Record{source}, "entities": entities, "assertions": assertions, "cards": []behaviorgraph.Record{},
+	}
+	if _, err := store.ReplaceProjectSnapshot(ctx, project, fixture); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.ReadProjectAnalyticalSlice(ctx, project, []string{seed}, AnalyticalSliceOptions{MaxNodes: 30, MaxEdges: 30, MaxDepth: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.FrontierNodeLimitReached || result.FrontierNodesOmitted < 1 ||
+		len(result.FrontierNodeIDsOmitted) != result.FrontierNodesOmitted || result.FrontierSeedsTruncated {
+		t.Fatalf("native frontier omissions were not resumable: %#v", result)
+	}
+	knownIDs := make(map[string]bool, len(entities)+len(assertions))
+	for _, entity := range entities {
+		knownIDs[entity["id"].(string)] = true
+	}
+	for _, assertion := range assertions {
+		knownIDs[assertion["id"].(string)] = true
+	}
+	for _, id := range result.FrontierNodeIDsOmitted {
+		if !knownIDs[id] {
+			t.Fatalf("frontier continuation exposed unknown candidate %q", id)
+		}
 	}
 }
 

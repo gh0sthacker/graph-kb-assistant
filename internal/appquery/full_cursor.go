@@ -877,8 +877,8 @@ func uniqueContinuationSeeds(values []string) ([]string, map[string]struct{}, er
 	seen := make(map[string]struct{}, len(values))
 	ids := make([]string, 0, len(values))
 	for _, value := range values {
-		if !entitySeedPattern.MatchString(value) || !strings.HasPrefix(value, "assertion-") {
-			return nil, nil, errors.New("full graph continuation branch is malformed")
+		if !entitySeedPattern.MatchString(value) || strings.HasPrefix(value, "source-") || strings.HasPrefix(value, "card-") {
+			return nil, nil, errors.New("full graph continuation seed is malformed")
 		}
 		if _, exists := seen[value]; exists {
 			continue

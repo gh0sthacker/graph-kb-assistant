@@ -83,7 +83,7 @@ func TestCaptureProvenanceRetainsRevisionsAndCurrentParseState(t *testing.T) {
 		t.Fatalf("insert historical capture: %v", err)
 	}
 	for revision, requestSHA := range map[string]string{
-		historicalOldRevision: historicalOldRequestSHA,
+		historicalOldRevision:     historicalOldRequestSHA,
 		historicalCurrentRevision: historicalRequestSHA,
 	} {
 		if _, err := writable.Database.DB().ExecContext(ctx,
@@ -95,7 +95,7 @@ func TestCaptureProvenanceRetainsRevisionsAndCurrentParseState(t *testing.T) {
 		}
 	}
 	for revision, graphID := range map[string]string{
-		historicalOldRevision: historicalOldGraphID,
+		historicalOldRevision:     historicalOldGraphID,
 		historicalCurrentRevision: historicalCurrentGraphID,
 	} {
 		if _, err := writable.Database.DB().ExecContext(ctx,
@@ -233,6 +233,28 @@ func TestAnalyticalContinuationTruncationRecomputesResolvedRendererOmissions(t *
 		if !analyticalContinuationTruncated(map[string]any{key: true}, nil, nil) {
 			t.Errorf("current rendered limit %q was lost", key)
 		}
+	}
+}
+
+func TestMergeContinuationBranchesKeepsNativeFrontierSeeds(t *testing.T) {
+	assertion := "assertion-" + strings.Repeat("a", 64)
+	endpoint := "endpoint-" + strings.Repeat("b", 64)
+	branches, truncated := mergeContinuationBranches(
+		[]behaviorgraph.Record{
+			{"assertion_id": assertion, "reason": "max_edges"},
+			{"frontier_id": endpoint, "reason": "analytical_frontier_node_limit"},
+		},
+		[]any{map[string]any{"frontier_id": endpoint, "reason": "analytical_frontier_node_limit"}},
+	)
+	if truncated || len(branches) != 2 {
+		t.Fatalf("merged continuation branches = %#v, truncated=%t", branches, truncated)
+	}
+	seen := map[string]bool{}
+	for _, branch := range branches {
+		seen[graphBranchSeedID(branch)] = true
+	}
+	if !seen[assertion] || !seen[endpoint] {
+		t.Fatalf("merged continuation seeds = %#v", branches)
 	}
 }
 

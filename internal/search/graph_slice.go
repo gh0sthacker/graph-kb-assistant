@@ -76,6 +76,18 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 		slice["candidate_assertion_limit_reached"] = nativeSlice.CandidateAssertionsTruncated
 		slice["analytical_frontier_node_limit_reached"] = nativeSlice.FrontierNodeLimitReached
 		slice["analytical_frontier_nodes_omitted"] = nativeSlice.FrontierNodesOmitted
+		if len(nativeSlice.FrontierNodeIDsOmitted) > 0 {
+			branches, _ := slice["missing_branches"].([]behaviorgraph.Record)
+			for _, id := range nativeSlice.FrontierNodeIDsOmitted {
+				branches = append(branches, behaviorgraph.Record{
+					"frontier_id": id, "reason": "analytical_frontier_node_limit",
+				})
+			}
+			slice["missing_branches"] = branches
+		}
+		if nativeSlice.FrontierSeedsTruncated {
+			slice["missing_branches_truncated"] = true
+		}
 		slice["candidate_card_count"] = nativeSlice.CandidateCards
 		slice["candidate_card_limit_reached"] = nativeSlice.CandidateCardsTruncated
 		slice["provenance_truncated"] = nativeSlice.ProvenanceTruncated
@@ -93,7 +105,7 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j assertion candidate budget was reached; additional frontier records were not loaded by this analytical request.")
 		}
 		if nativeSlice.FrontierNodeLimitReached {
-			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analytical frontier node budget was reached; omitted nodes require a separate focused neighborhood request.")
+			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analytical frontier node budget was reached; omitted node branches are available through generation-pinned graph continuation when the bounded queue permits.")
 		}
 		if nativeSlice.CandidateCardsTruncated {
 			slice["limitations"] = append(slice["limitations"].([]string), "The Neo4j analysis-card candidate budget was reached; additional cards were not loaded.")
@@ -105,10 +117,10 @@ func GraphSliceWithService(ctx context.Context, service *graphaccess.Service, pr
 	return attachGraphProvenance(ctx, projectStore, slice)
 }
 
-// ContinueGraphSliceWithService adds one bounded set of omitted assertion
-// branches to the accumulated selected records, then reruns the shared Reader
-// from the original seeds. This preserves one cumulative graph interpretation
-// instead of concatenating independently rendered branch slices.
+// ContinueGraphSliceWithService adds one bounded set of omitted renderer or
+// native-frontier branches to the accumulated selected records, then reruns
+// the shared Reader from the original seeds. This preserves one cumulative
+// graph interpretation instead of concatenating independently rendered slices.
 func ContinueGraphSliceWithService(
 	ctx context.Context,
 	service *graphaccess.Service,
@@ -164,6 +176,12 @@ func ContinueGraphSliceWithService(
 	slice["analytical_frontier_node_limit_reached"] = anyGraphFlag(accumulated, nextPage, "analytical_frontier_node_limit_reached")
 	slice["candidate_card_limit_reached"] = anyGraphFlag(accumulated, nextPage, "candidate_card_limit_reached")
 	slice["provenance_truncated"] = anyGraphFlag(accumulated, nextPage, "provenance_truncated")
+	branches, branchesTruncated := mergeContinuationBranches(slice["missing_branches"], nextPage["missing_branches"])
+	slice["missing_branches"] = branches
+	if branchesTruncated || graphPayloadFlag(accumulated, "missing_branches_truncated") ||
+		graphPayloadFlag(nextPage, "missing_branches_truncated") {
+		slice["missing_branches_truncated"] = true
+	}
 	// These are native read limits. Keep them across pages even when the
 	// renderer's earlier omissions are resolved by the larger cumulative slice.
 	slice["truncated"] = analyticalContinuationTruncated(slice, accumulated, nextPage)
@@ -173,6 +191,63 @@ func ContinueGraphSliceWithService(
 	limitations := append(graphStringList(accumulated["limitations"]), graphStringList(nextPage["limitations"])...)
 	slice["limitations"] = uniqueStrings(limitations)
 	return attachGraphProvenance(ctx, projectStore, slice)
+}
+
+const maxMergedContinuationBranches = 5_000
+
+func mergeContinuationBranches(values ...any) ([]behaviorgraph.Record, bool) {
+	merged := make(map[string]behaviorgraph.Record)
+	for _, value := range values {
+		for _, branch := range graphBranchRecords(value) {
+			id := graphBranchSeedID(branch)
+			reason, _ := branch["reason"].(string)
+			if id == "" || reason == "" {
+				continue
+			}
+			merged[reason+"\x00"+id] = branch
+		}
+	}
+	keys := make([]string, 0, len(merged))
+	for key := range merged {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	truncated := len(keys) > maxMergedContinuationBranches
+	if truncated {
+		keys = keys[:maxMergedContinuationBranches]
+	}
+	branches := make([]behaviorgraph.Record, 0, len(keys))
+	for _, key := range keys {
+		branches = append(branches, merged[key])
+	}
+	return branches, truncated
+}
+
+func graphBranchRecords(value any) []behaviorgraph.Record {
+	var records []behaviorgraph.Record
+	switch rows := value.(type) {
+	case []behaviorgraph.Record:
+		return rows
+	case []map[string]any:
+		for _, row := range rows {
+			records = append(records, behaviorgraph.Record(row))
+		}
+	case []any:
+		for _, item := range rows {
+			if row, ok := item.(map[string]any); ok {
+				records = append(records, behaviorgraph.Record(row))
+			}
+		}
+	}
+	return records
+}
+
+func graphBranchSeedID(branch behaviorgraph.Record) string {
+	if id, ok := branch["assertion_id"].(string); ok {
+		return id
+	}
+	id, _ := branch["frontier_id"].(string)
+	return id
 }
 
 func analyticalContinuationTruncated(current, accumulated, nextPage map[string]any) bool {
