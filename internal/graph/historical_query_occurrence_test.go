@@ -1,7 +1,9 @@
 package graph
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"reflect"
 	"sort"
 	"strconv"
@@ -161,6 +163,82 @@ func TestBuildHistoricalBundlePreservesRepeatedFormOccurrencesWithoutValues(t *t
 	if singleIDs[`request.body["mode"][]`] != repeatedIDs[`request.body["mode"][]`] {
 		t.Fatalf("singleton form parameter ID changed: %q != %q", singleIDs[`request.body["mode"][]`], repeatedIDs[`request.body["mode"][]`])
 	}
+}
+
+func TestBuildHistoricalBundlePreservesRepeatedMultipartOccurrencesWithoutValues(t *testing.T) {
+	target := "https://fixture.invalid/upload"
+	singleRequest := multipartOccurrenceRequest(t, [][2]string{
+		{"mode", "MODE_VALUE_17"}, {"tag", "MULTIPART_VALUE_A_31"},
+	})
+	single, _ := buildHistoricalOccurrenceBundle(t, "multipart-single", "POST", target, singleRequest)
+	if paths := parameterPathsByLocation(single, "request.body"); !reflect.DeepEqual(paths, []string{`request.body["mode"][]`, `request.body["tag"][]`}) {
+		t.Fatalf("singleton multipart paths = %#v", paths)
+	}
+
+	repeatedRequest := multipartOccurrenceRequest(t, [][2]string{
+		{"mode", "MODE_VALUE_17"}, {"tag", "MULTIPART_VALUE_A_31"}, {"tag", "MULTIPART_VALUE_B_42"},
+	})
+	repeated, _ := buildHistoricalOccurrenceBundle(t, "multipart-repeated", "POST", target, repeatedRequest)
+	want := []string{`request.body["mode"][]`, `request.body["tag"][0]`, `request.body["tag"][1]`}
+	if paths := parameterPathsByLocation(repeated, "request.body"); !reflect.DeepEqual(paths, want) {
+		t.Fatalf("repeated multipart paths = %#v, want %#v", paths, want)
+	}
+	singleIDs := parameterIDsByLocation(single, "request.body")
+	repeatedIDs := parameterIDsByLocation(repeated, "request.body")
+	if singleIDs[`request.body["mode"][]`] != repeatedIDs[`request.body["mode"][]`] {
+		t.Fatal("adding a repeated multipart field changed an unrelated singleton parameter identity")
+	}
+	if repeatedIDs[`request.body["tag"][0]`] == repeatedIDs[`request.body["tag"][1]`] {
+		t.Fatal("repeated multipart occurrences share a parameter identity")
+	}
+
+	encoded, err := json.Marshal(repeated)
+	if err != nil {
+		t.Fatalf("marshal multipart graph: %v", err)
+	}
+	for _, value := range []string{"MODE_VALUE_17", "MULTIPART_VALUE_A_31", "MULTIPART_VALUE_B_42"} {
+		if strings.Contains(string(encoded), value) {
+			t.Fatalf("multipart graph contains raw field value %q", value)
+		}
+	}
+
+	sensitiveRequest := multipartOccurrenceRequest(t, [][2]string{
+		{"password", "PASSWORD_VALUE_A_53"}, {"password", "PASSWORD_VALUE_B_64"},
+	})
+	sensitive, _ := buildHistoricalOccurrenceBundle(t, "multipart-sensitive", "POST", target, sensitiveRequest)
+	sensitivePaths := parameterPathsByLocation(sensitive, "request.body")
+	if len(sensitivePaths) != 2 || !strings.HasSuffix(sensitivePaths[0], "[0]") || !strings.HasSuffix(sensitivePaths[1], "[1]") ||
+		strings.TrimSuffix(sensitivePaths[0], "[0]") != strings.TrimSuffix(sensitivePaths[1], "[1]") {
+		t.Fatalf("repeated sensitive multipart name lost its shared masked occurrence path: %#v", sensitivePaths)
+	}
+	sensitiveJSON, err := json.Marshal(sensitive)
+	if err != nil {
+		t.Fatalf("marshal sensitive multipart graph: %v", err)
+	}
+	for _, value := range []string{"password", "PASSWORD_VALUE_A_53", "PASSWORD_VALUE_B_64"} {
+		if strings.Contains(string(sensitiveJSON), value) {
+			t.Fatalf("sensitive multipart graph contains raw input %q", value)
+		}
+	}
+}
+
+func multipartOccurrenceRequest(t *testing.T, fields [][2]string) string {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.SetBoundary("BB-GRAPH-FIXTURE-BOUNDARY"); err != nil {
+		t.Fatalf("set multipart boundary: %v", err)
+	}
+	for _, field := range fields {
+		if err := writer.WriteField(field[0], field[1]); err != nil {
+			t.Fatalf("write multipart fixture field: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("finish multipart fixture: %v", err)
+	}
+	return "POST /upload HTTP/1.1\r\nHost: fixture.invalid\r\nContent-Type: " + writer.FormDataContentType() +
+		"\r\nContent-Length: " + strconv.Itoa(body.Len()) + "\r\n\r\n" + body.String()
 }
 
 func TestBuildHistoricalBundlePreservesRepeatedJSONArrayOccurrences(t *testing.T) {

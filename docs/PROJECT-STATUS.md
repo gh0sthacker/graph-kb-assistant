@@ -1,5 +1,34 @@
 # Project status and known limitations
 
+## Stage 3 multipart occurrences and current health check (2026-10-24 10:44Z) — PARTIAL
+
+- Go multipart mapping now retains repeated same-name parts as indexed field
+  occurrences (`[0]`, `[1]`) and keeps singleton paths on their existing `[]`
+  identity. Sensitive multipart field names use source-local aliases; values
+  remain absent from graph bundles. A fixture exposed the prior collapse to
+  `[]`; the regression test now covers occurrence identity and value/name
+  redaction.
+- The local Go capture store and BehaviorGraph schemas are compatible (v7 and
+  v2). The project has 1,400 captures, 1,369 mapped observations, and 31
+  unmapped captures; history and coverage remain `PARTIAL`. The loopback UI
+  serves `/api/projects` and `/api/surface`; the surface reports 131 operations
+  and partial coverage. A read-only direct graph request through the live UI
+  returned 3 entities and 2 edges at generation 982. Its integrity scope is
+  selected records only, with analysis cards and full-project integrity not
+  assessed. The running projection predates this code, so existing data does
+  not yet show the new route-family operation nodes.
+- Caido project metadata shows Juice Shop `READY` but inactive and
+  `sperpravo` current. No project switch or request enumeration was performed.
+- A direct, read-only SQLite aggregate found 15,517 KB file rows, 68,878 chunks,
+  and non-empty source hashes/current index-version metadata on all file rows;
+  stored index metadata names `nomic-embed-text` at 768 dimensions. Full
+  `kb_stats` source-freshness/vector-integrity checks did not complete within
+  the bounded wait, so vector coverage and current source hashes remain
+  unverified. No KB index was written.
+- Projection jobs were not drained or reconciled. Caido coverage, complete
+  source history, KB integrity, browser/JavaScript application coverage, and
+  the Hermes model-backed consultation cycle remain unverified or partial.
+
 ## Stage 3 versioned operation grouping (2026-10-24 10:28Z) — PARTIAL
 
 - Historical imports now add a separate `operation` node keyed by project,

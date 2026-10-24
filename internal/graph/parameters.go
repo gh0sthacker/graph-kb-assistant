@@ -187,14 +187,18 @@ type historicalMultipartField struct {
 func historicalMultipartParameterFields(body []byte, boundary, location string, source Record, remaining int) ([]historicalParameterField, bool) {
 	parts, complete := parseHistoricalMultipart(body, boundary, remaining)
 	fields := make([]historicalParameterField, 0, len(parts))
+	occurrences := make(map[string][]int)
+	maskedNames := make(map[string]string)
 	for _, part := range parts {
 		partLocation := location + ".part[" + strconv.Itoa(part.index) + "]"
-		name, err := historicalSafeFieldName(part.name, source, partLocation)
+		name, err := historicalSafeMultipartFieldName(part.name, source, location, maskedNames)
 		if err != nil {
 			complete = false
 			continue
 		}
-		path := location + "[" + strconv.Quote(name) + "][" + strconv.Itoa(part.index) + "]"
+		occurrence := len(occurrences[name])
+		occurrences[name] = append(occurrences[name], len(fields))
+		path := location + "[" + strconv.Quote(name) + "][" + strconv.Itoa(occurrence) + "]"
 		metadata := Record{"bytes": nil, "content_type": part.contentType}
 		if part.bytes != nil {
 			metadata["bytes"] = *part.bytes
@@ -208,9 +212,15 @@ func historicalMultipartParameterFields(body []byte, boundary, location string, 
 			metadata["filename"] = filename
 		}
 		fields = append(fields, historicalParameterField{
-			path: historicalTemplateParameterPath(path), typeName: part.typeName,
+			path: path, typeName: part.typeName,
 			location: location, metadata: metadata,
 		})
+	}
+	for _, indices := range occurrences {
+		if len(indices) == 1 {
+			index := indices[0]
+			fields[index].path = historicalTemplateParameterPath(fields[index].path)
+		}
 	}
 	return fields, complete
 }
@@ -548,6 +558,21 @@ func historicalSafeFieldName(name string, source Record, location string) (strin
 		return name, nil
 	}
 	return historicalOpaqueLabel(source, location, "field")
+}
+
+func historicalSafeMultipartFieldName(name string, source Record, location string, aliases map[string]string) (string, error) {
+	if fieldNamePattern.MatchString(name) && !historicalRiskNamePattern.MatchString(name) && !secretNamePattern.MatchString(name) {
+		return name, nil
+	}
+	if alias, exists := aliases[name]; exists {
+		return alias, nil
+	}
+	alias, err := historicalOpaqueLabel(source, location+".masked-field["+strconv.Itoa(len(aliases))+"]", "field")
+	if err != nil {
+		return "", err
+	}
+	aliases[name] = alias
+	return alias, nil
 }
 
 func historicalTemplateParameterPath(path string) string {
