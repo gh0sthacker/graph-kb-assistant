@@ -6,46 +6,43 @@ This checkpoint supersedes conflicting runtime measurements in the older
 same-day sections below. The overall runtime, source coverage, and analysis
 loop remain `PARTIAL`.
 
-- A fresh local read-only `project-audit` passed: capture schema v7 and
-  BehaviorGraph v2 are compatible. It found 1,400 captures and search-index
-  entries, 1,369 graph mappings, and 31 unmapped captures. Parsing is complete
-  for 444 and partial for 956; response fidelity is unknown for 37. Request
-  text is reconstructed for 1,400 captures, response text for 1,363, and no
-  source-byte fidelity was established. Historical synchronization and overall
-  coverage are `PARTIAL`.
-- A read-only `neo4j-backfill --verify-only`, rerun after the latest projection
-  job, reports `verified`: local and
-  Neo4j snapshot digests both equal
+- A fresh local read-only `project-audit` passed after verified zero-byte WAL
+  and inactive SHM sidecars were cleared under the exclusive project lock.
+  Capture schema v7 and BehaviorGraph v2 are compatible. It found 1,400
+  captures and search-index entries, 1,369 graph mappings, and 31 unmapped
+  captures. Parsing is complete for 444 and partial for 956; response fidelity
+  is unknown for 37. Request text is reconstructed for 1,400 captures,
+  response text for 1,363, and no source-byte fidelity was established.
+  Historical synchronization and overall coverage are `PARTIAL`.
+- A read-only `neo4j-backfill --verify-only`, rerun after reconciliation,
+  reports `verified`: local and Neo4j snapshot digests both equal
   `6b121586e8b437953019ddb93d50d4e06c00a4bad5fd3b7d0015258899b43747`, with
   33,366 entities, 33,987 assertions, 1,369 cards, and 1,369 sources. This
   verifies graph parity for the mapped local snapshot only; it does not prove
   Caido history completeness or source coverage.
-- The local behavior outbox has 45 applied entries and none pending. The
-  separate graph projection queue is not drained: 7 jobs are applied and 1,393
-  remain pending (about 251 MB of normalized payloads; 77 pending jobs exceed
-  1 MiB). After a prior bounded run applied six jobs, the next single-job run
-  reclaimed an expired lease and applied that job on attempt 2, with no retry
-  or dead letter; it took about 113 seconds. No worker remained running after
-  the check. The queue's low observed throughput makes a full drain a material
-  runtime task. Do not treat Neo4j parity as proof that this queue is complete.
-- A separate read-only reconciliation audit held the project's shared lock and
-  compared every pending job's digest, revision mapping, graph records, and
-  provenance against the current BehaviorGraph. Of 1,393 pending jobs, 1,362
-  had a revision mapping; 1,258 payloads were fully represented in the local
-  graph, while 135 had missing or mismatched records. No job was acknowledged.
-  This is evidence for a future guarded reconciliation path, not a durable
-  queue transition; the pending count remains 1,393 until such a path is
-  implemented and verified against Neo4j parity.
+- ECC added `projection-reconcile`, a dry-run-first CLI that requires full
+  local/Neo4j snapshot parity and only acknowledges exact normalized projection
+  bundles. The live dry-run checked all 1,393 pending jobs (251,157,396 payload
+  bytes): 8 were exact, 31 had missing records, and 1,354 conflicted with
+  current records. Apply acknowledged only the 8 exact jobs; 1,385 remain
+  pending. It also persists their revision mappings. No graph records or Caido
+  data were changed. The local behavior outbox has 45 applied entries and none
+  pending. Neo4j parity is not proof that source history is complete.
+- Synthetic tests cover dry-run non-mutation, exact-only acknowledgement,
+  cursor bounds, parity mismatch, project-lock enforcement, and digest-fenced
+  state changes. `go test -count=1 ./...`, `go test -race -count=1 ./...`,
+  `go vet ./...`, and `git diff --check` passed for this implementation. The
+  queue remains `PARTIAL`; the 1,385 remaining jobs require separate handling.
 - Caido 0.58.3 lists the Juice Shop project as `READY` but inactive; the
   selected project is the unrelated `sperpravo` project. No project switch,
   request enumeration, body read, replay, or target traffic was performed.
   Caido reconciliation remains unverified.
-- The local KB fallback reports 15,374 semantic files and 74,446 vectors;
-  12,829 files and 53,342 vectors match the current version. Semantic integrity
-  is degraded (`ok=false`) with 2,545 wrong-version or unhashed rows. Lexical
+- The local KB fallback reports 15,535 semantic files and 75,930 vectors;
+  13,750 files and 56,935 vectors are compatible. Semantic integrity is
+  degraded (`ok=false`) with 1,785 wrong-version or unhashed rows. Lexical
   search is available with 15,438 files and 67,991 passages; its last refresh
-  was 2026-10-13. The MCP `kb_stats` call timed out. KB readiness remains
-  `PARTIAL`; no reindex was run.
+  was 2026-10-13. Semantic indexing last completed 2026-10-07. The MCP
+  `kb_stats` call timed out. KB readiness remains `PARTIAL`; no reindex was run.
 - `./scripts/run-hermes mcp test bb_assistant` passed and discovered the
   nine-tool read-only local MCP allowlist. The private Hermes profile is mode
   0600 and has no provider/model selection. A model-backed analysis and

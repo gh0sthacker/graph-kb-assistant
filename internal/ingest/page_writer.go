@@ -763,6 +763,17 @@ func validateSelectedProject(selected *store.ProjectStore) error {
 	if selected == nil || selected.Database == nil || selected.Database.DB() == nil || selected.Database.ReadOnly() {
 		return errors.New("historical writer requires a writable selected project store")
 	}
+	return validateSelectedProjectIdentity(selected)
+}
+
+func validateSelectedProjectReadOnly(selected *store.ProjectStore) error {
+	if selected == nil || selected.Database == nil || selected.Database.DB() == nil {
+		return errors.New("selected project store is unavailable")
+	}
+	return validateSelectedProjectIdentity(selected)
+}
+
+func validateSelectedProjectIdentity(selected *store.ProjectStore) error {
 	key, err := selected.Project.StorageKey()
 	if err != nil || key != selected.ProjectKey {
 		return errors.New("selected project identity is inconsistent")

@@ -490,6 +490,51 @@ func TestLeasedProjectionAcknowledgementRequiresPayloadDigest(t *testing.T) {
 	}
 }
 
+func TestReconciledProjectionAcknowledgementRequiresPendingJobDigest(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("4", 64)
+	now := time.Date(2026, 10, 23, 18, 30, 0, 0, time.UTC)
+	registerAndEnqueueProjectionJob(t, db, revisionID, "capture-reconcile-fence", now)
+	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkReconciledProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID,
+		strings.Repeat("f", 64), now.Add(time.Second)); !errors.Is(err, ErrProjectionJobConflict) {
+		_ = tx.Rollback()
+		t.Fatalf("wrong digest reconciliation error=%v", err)
+	}
+	_ = tx.Rollback()
+	current, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || current.State != "pending" {
+		t.Fatalf("wrong digest changed the job: job=%+v err=%v", current, err)
+	}
+
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkReconciledProjectionJobApplied(ctx, tx, projectionTestProjectKey, revisionID,
+		job.PayloadSHA256, now.Add(time.Second)); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("mark exact job reconciled: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	current, err = ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil || current.State != "applied" || current.LastErrorCode.Valid || !current.AppliedAt.Valid {
+		t.Fatalf("reconciled job state = %+v, err=%v", current, err)
+	}
+}
+
 func registerAndEnqueueProjectionJob(t *testing.T, db *sql.DB, revisionID, captureID string, createdAt time.Time) {
 	t.Helper()
 	ctx := context.Background()

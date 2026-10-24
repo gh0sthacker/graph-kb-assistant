@@ -188,6 +188,54 @@ func MarkProjectionJobApplied(
 	return nil
 }
 
+// MarkReconciledProjectionJobApplied acknowledges a pending job whose exact
+// records were verified in an already-matched Neo4j snapshot. The payload
+// digest fences the transition against a different accepted revision payload.
+func MarkReconciledProjectionJobApplied(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	revisionID string,
+	payloadSHA256 string,
+	appliedAt time.Time,
+) error {
+	if ctx == nil || tx == nil || !graphDigestPattern.MatchString(projectKey) ||
+		!validProjectionRevisionID(revisionID) || !validProjectionRevisionID(payloadSHA256) || appliedAt.IsZero() {
+		return ErrInvalidProjectionJob
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
+		return err
+	}
+	job, err := queryProjectionJobByRevision(ctx, tx, projectKey, revisionID)
+	if err != nil {
+		return err
+	}
+	if job.State != "pending" {
+		return ErrProjectionJobNotPending
+	}
+	if job.PayloadSHA256 != payloadSHA256 {
+		return ErrProjectionJobConflict
+	}
+	now := appliedAt.UTC().Format(projectionTimestampLayout)
+	result, err := tx.ExecContext(ctx,
+		`UPDATE projection_jobs SET state='applied',lease_token=NULL,lease_until=NULL,
+		 applied_at=?,updated_at=?,last_error_code=NULL
+		 WHERE revision_id=? AND state='pending' AND payload_sha256=?`,
+		now, now, revisionID, payloadSHA256,
+	)
+	if err != nil {
+		return errors.New("reconciled projection acknowledgment could not be stored")
+	}
+	updated, err := result.RowsAffected()
+	if err != nil || updated != 1 {
+		return ErrProjectionJobNotPending
+	}
+	return nil
+}
+
 // ClaimNextProjectionJob leases the earliest due job inside the caller's
 // transaction. Expired leases are returned to the queue or dead-lettered when
 // their attempt budget is exhausted. Commit before starting projection I/O.

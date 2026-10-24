@@ -18,6 +18,8 @@ In the graph inspector, **Focus on direct relationships** narrows the display to
 
 Caido history intake and graph coverage are measured independently. Missing captures, incomplete parsing, or absent source snapshot guarantees remain `PARTIAL`; graph relationships are evidence navigation, not vulnerability verdicts.
 
+To inspect pending projection jobs that may already be materialized in both graph stores, use [`projection-reconcile`](docs/PROJECTION-RECONCILIATION.md). It defaults to a read-only dry run; `--apply` acknowledges only exact matches after full snapshot parity.
+
 See [docs/SETUP.md](docs/SETUP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for setup, data boundaries, and verified coverage.
 
 ## Development

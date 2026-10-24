@@ -108,7 +108,7 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
+		return errors.New("usage: bb-assistant <version|db-check|project-audit|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
 	}
 	switch args[0] {
 	case "version":
@@ -126,6 +126,8 @@ func run(args []string) error {
 		return syncNeo4j(args[1:])
 	case "projection-worker":
 		return runProjectionWorker(args[1:])
+	case "projection-reconcile":
+		return reconcileProjectionQueue(args[1:])
 	case "caido-reconcile":
 		return reconcileCaidoHistory(args[1:])
 	case "kb-validate":
@@ -503,6 +505,117 @@ drain:
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
 		return errors.New("projection worker result could not be written")
+	}
+	return nil
+}
+
+func reconcileProjectionQueue(args []string) error {
+	flags := flag.NewFlagSet("projection-reconcile", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	maxJobs := flags.Int("max-jobs", ingest.DefaultProjectionReconcileJobs, "maximum pending jobs to scan")
+	maxBytes := flags.Int64("max-bytes", ingest.DefaultProjectionReconcileBytes, "maximum normalized payload bytes to scan")
+	afterSequenceID := flags.Int64("after-sequence-id", 0, "resume after a previously reported sequence ID")
+	apply := flags.Bool("apply", false, "acknowledge exact matches after full local/Neo4j snapshot parity")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
+		return errors.New("usage: bb-assistant projection-reconcile --project-key <sha256> [--apply] [--max-jobs 5000] [--max-bytes 536870912] [--after-sequence-id 0] [--data-root path]")
+	}
+	if *maxJobs < 1 || *maxJobs > 50000 || *maxBytes < 4<<20 || *maxBytes > 1<<30 || *afterSequenceID < 0 {
+		return errors.New("projection reconciliation limits are invalid")
+	}
+	if graphaccess.ConfiguredBackend() != "neo4j" {
+		return errors.New("projection reconciliation requires the Neo4j graph backend")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	refs, err := project.LoadProjectRefsReadOnly(*root)
+	if err != nil {
+		return err
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if key == selectedKeys[0] {
+			copyRef := ref
+			selected = &copyRef
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("selected project is not in the local project registry")
+	}
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	projectStore, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, *selected, *root, maintenance)
+	if err != nil {
+		return err
+	}
+	reader, err := behaviorgraph.OpenReader(ctx, projectStore.BehaviorGraphPath,
+		projectStore.ProjectKey, projectStore.BehaviorReceiptPath)
+	if err != nil {
+		_ = projectStore.Close()
+		return err
+	}
+	localSnapshot, snapshotErr := reader.Snapshot()
+	readerCloseErr := reader.Close()
+	if snapshotErr != nil || readerCloseErr != nil {
+		_ = projectStore.Close()
+		return errors.New("local BehaviorGraph snapshot could not be read")
+	}
+	config, err := neo4jstore.ConfigFromEnv()
+	if err != nil {
+		_ = projectStore.Close()
+		return err
+	}
+	graphStore, err := neo4jstore.New(ctx, config)
+	if err != nil {
+		_ = projectStore.Close()
+		return err
+	}
+	neo4jSnapshot, neo4jErr := graphStore.ReadProjectSnapshot(ctx, projectStore.ProjectKey)
+	closeErr := graphStore.Close(context.Background())
+	if neo4jErr != nil || closeErr != nil {
+		_ = projectStore.Close()
+		return errors.New("Neo4j project snapshot could not be read and closed cleanly")
+	}
+	if *apply {
+		if err := projectStore.Close(); err != nil {
+			return errors.New("read-only project store could not be closed before reconciliation")
+		}
+		projectStore, err = store.OpenProjectForWrite(ctx, *selected, *root)
+		if err != nil {
+			return err
+		}
+	}
+	result, reconcileErr := ingest.RunProjectionReconciliation(ctx, projectStore, maintenance,
+		localSnapshot, neo4jSnapshot, ingest.ProjectionReconcileOptions{
+			MaxJobs: *maxJobs, MaxBytes: *maxBytes, AfterSequenceID: *afterSequenceID, Apply: *apply,
+		},
+	)
+	storeCloseErr := projectStore.Close()
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return errors.New("projection reconciliation result could not be written")
+	}
+	if reconcileErr != nil {
+		return reconcileErr
+	}
+	if storeCloseErr != nil {
+		return errors.New("project store could not be closed after reconciliation")
 	}
 	return nil
 }
