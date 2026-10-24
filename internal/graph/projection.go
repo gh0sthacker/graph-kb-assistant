@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -69,10 +70,7 @@ func ProjectExchange(exchange caido.HttpExchange) (ExchangeProjection, error) {
 	if parsed == nil {
 		parsed = &url.URL{Path: "/"}
 	}
-	host := strings.ToLower(firstNonEmpty(exchange.Host, parsed.Hostname(), "unknown"))
-	if len(host) > 253 || !regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}$`).MatchString(host) {
-		host = "unknown"
-	}
+	host := normalizeProjectionHost(firstNonEmpty(exchange.Host, parsed.Hostname(), "unknown"))
 	scheme := strings.ToLower(firstNonEmpty(exchange.Scheme, parsed.Scheme, "unknown"))
 	if scheme != "http" && scheme != "https" {
 		scheme = "unknown"
@@ -158,6 +156,19 @@ func ProjectExchange(exchange caido.HttpExchange) (ExchangeProjection, error) {
 			HeaderNames: headerNames, CapturedAt: exchange.CapturedAt,
 		},
 	}, nil
+}
+
+func normalizeProjectionHost(raw string) string {
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	} else if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		raw = raw[1 : len(raw)-1]
+	}
+	normalized, err := caido.NormalizeRequestHost(raw)
+	if err != nil {
+		return "unknown"
+	}
+	return normalized
 }
 
 func RouteTemplate(target string) string {
@@ -274,13 +285,15 @@ func NormalizeURL(value, base string) (string, error) {
 		ref = baseURL.ResolveReference(ref)
 	}
 	ref.Scheme = strings.ToLower(ref.Scheme)
-	if ref.Scheme != "http" && ref.Scheme != "https" || ref.Hostname() == "" || ref.User != nil {
+	host, hostErr := caido.NormalizeRequestHost(strings.ToLower(ref.Hostname()))
+	if ref.Scheme != "http" && ref.Scheme != "https" || hostErr != nil || ref.User != nil {
 		return "", errors.New("URL is not an allowed HTTP endpoint")
 	}
-	host := strings.ToLower(ref.Hostname())
 	port := ref.Port()
 	if port != "" && !((ref.Scheme == "http" && port == "80") || (ref.Scheme == "https" && port == "443")) {
-		ref.Host = host + ":" + port
+		ref.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		ref.Host = "[" + host + "]"
 	} else {
 		ref.Host = host
 	}
@@ -306,10 +319,11 @@ func EndpointFromURL(value, base string) (string, int, string, error) {
 	}
 	scheme := strings.ToLower(ref.Scheme)
 	host := strings.ToLower(ref.Hostname())
-	if (scheme != "http" && scheme != "https") || host == "" || ref.User != nil || len(host) > 253 ||
-		!regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}$`).MatchString(host) {
+	normalizedHost, hostErr := caido.NormalizeRequestHost(host)
+	if (scheme != "http" && scheme != "https") || hostErr != nil || ref.User != nil {
 		return "", 0, "", errors.New("URL is not a valid HTTP endpoint")
 	}
+	host = normalizedHost
 	port := 80
 	if scheme == "https" {
 		port = 443

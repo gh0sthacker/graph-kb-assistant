@@ -1,6 +1,6 @@
 # Project status and known limitations
 
-## Caido full-project inventory and scope gap (2026-10-24) — PARTIAL
+## Caido whole-project and exact-scope reconciliation (2026-10-24) — PARTIAL
 
 - Installed the pinned Caido MCP v4.3.0 binary in user-local app data after its
   downloaded Linux amd64 artifact matched the SHA-256 published on the pinned
@@ -14,15 +14,70 @@
   an all-project inventory, not a host-scoped result. Caido provides no stable
   snapshot token, so `coverage_reconciled` remains false.
 - Caido's configured scope allowlists host `192.168.1.149`; its scope name says
-  port 3000 is enforced by the run gate. A separate metadata-only host filter
-  returned 355 IDs for that host, including the previously inspected Request
-  ID 239. The current reconciler cannot compare host/port subsets or classify
-  local historical rows whose parse/search metadata is missing, so the
-  195,409 all-project difference cannot be attributed to this host. The prior
-  Caido project selection was restored. No local database rows were changed.
-- Caido history coverage remains `PARTIAL` pending host-and-port reconciliation,
-  missing local records, source snapshot limitations, and unmapped/partially
-  parsed captures. No request bodies were read.
+  port 3000 is enforced by the run gate. Added `--scope-host` and `--scope-port`
+  to `caido-reconcile`: Caido applies an exact-host HTTPQL filter, the Go client
+  verifies each metadata URL's port, and local IDs come from host/port indexes.
+  Unparseable Caido URLs and local historical rows without host/port index data
+  are counted as unclassified rather than silently treated as outside scope.
+- A scoped read-only run reached the terminal cursor in 4 pages: Caido 355,
+  local 355, matched 355, Caido-only 0, local-only 0, duplicates 0, and
+  unclassified 0. `local_inventory_complete=true`; the prior Caido project
+  selection was restored. This is exact ID equality for one enumeration, not
+  point-in-time proof: Caido has no stable snapshot token, so
+  `coverage_reconciled=false` and project coverage remains `PARTIAL`.
+- ECC TDD fixtures cover exact-host filter construction, host/port comparison,
+  wrong-port exclusion, malformed source URLs, local unclassified rows,
+  invalid scope values, and a database digest check proving the reconciler is
+  read-only. `go test -count=1 ./...`, `go vet ./...`, and
+  `TMPDIR=/var/tmp go test -race -count=1 ./internal/caido
+  ./internal/historyreconcile ./cmd/bb-assistant ./internal/store` all passed.
+- Neither reconciliation wrote local database rows or fetched request bodies.
+  The 195,409 all-project difference above cannot be attributed to this host;
+  31 captures remain unmapped and broader source/browser/JavaScript coverage is
+  still incomplete.
+
+## Scoped reconciliation hardening and fresh runtime audit (2026-10-24 04:55Z) — PARTIAL
+
+- ECC regression review found that equivalent IPv6 host strings could be
+  missed locally, `unknown` and malformed indexed hosts could be omitted from
+  the unclassified count, and scoped zero counters disappeared from JSON. The
+  read-only local scan now walks the historical/live project indexes in
+  request-ID order under a row limit, canonicalizes IPv6 in Go, and classifies
+  missing or malformed host/port records. It does not use `GROUP BY`; the
+  composite project/request indexes plus `LIMIT` bound rows read. Unique-ID
+  overflow and a capped local scan have distinct stop reasons, and both stop
+  before Caido enumeration. All aggregate fields are emitted, including zeroes.
+- The same review showed production projection rejected IPv6 host headers.
+  Exchange projection, endpoint extraction, URL normalization and historical
+  origin construction now canonicalize IPv6. Regression fixtures cover valid
+  expanded/bracketed IPv6, malformed DNS/IPv6 hosts, `unknown` sentinels,
+  unrelated IPv6 candidates, duplicate request IDs across historical/live
+  indexes, unique-ID limits, bounded scans, explicit zero fields, and unchanged
+  local database bytes.
+- The updated implementation passed `go test -count=1 ./...`, `go vet ./...`,
+  and `TMPDIR=/var/tmp go test -race -count=1 ./internal/caido ./internal/graph
+  ./internal/historyreconcile ./cmd/bb-assistant ./internal/store`; `git diff
+  --check` passed. A fresh static follow-up review found no actionable issue;
+  it accessed no runtime store or Caido traffic.
+- Fresh `bb-assistant status` at 2026-10-24 04:55:57Z reports capture schema
+  v7 and BehaviorGraph schema v2 compatible; 1,400 captures, 1,369 mapped,
+  31 unmapped, 1,382 pending projection jobs, 18 applied, zero leased, and
+  zero dead-lettered. `neo4j-check` returned `ready`; the web UI returned HTTP
+  200. Overall coverage remains `PARTIAL`.
+- The project-local KB snapshot `d342e9df…` validated (14,300 documents,
+  16,961 chunks), with source coverage still `PARTIAL`. Global `kb_stats`
+  returned 15,517 compatible files and 68,878 chunks/vectors, with no missing
+  vectors and structural integrity `OK`; the index timestamp is
+  `2026-10-24T03:58:19Z`. Source and vector content validation are false, so
+  corpus completeness remains unverified. The redundant local stats fallback
+  was stopped after 42 seconds of sustained CPU use. No reindex or source
+  change was started.
+- Caido 0.58.3 reports the Juice Shop project `READY`, but `sperpravo` is
+  currently selected. The updated exact-scope command was not rerun against
+  Juice Shop because it requires that project to already be selected; the
+  preceding 355/355 scoped result predates this correction. No request bodies
+  were fetched. The local vault key is still absent, so encrypted historical
+  import is unavailable.
 
 ## ECC writer-reuse slice and bounded runtime validation (2026-10-24) — PARTIAL
 

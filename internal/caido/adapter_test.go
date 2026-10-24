@@ -183,6 +183,45 @@ func TestListRequestPageNoSwitchContextReadsOnlyAlreadySelectedProject(t *testin
 	assertNoProjectMutationOrDetailCalls(t, caller.calls)
 }
 
+func TestListRequestPageNoSwitchHostContextUsesExactHostFilter(t *testing.T) {
+	caller := &noSwitchToolCaller{
+		selectedID: "selected-project",
+		requestPayloads: []map[string]any{{
+			"requests": []any{map[string]any{"id": "scoped-request", "method": "GET", "url": "http://shop.test:3000/"}},
+			"hasMore":  false,
+		}},
+	}
+	source := newNoSwitchSource(t, caller)
+	if _, err := source.ListRequestPageNoSwitchHostContext(context.Background(), selectedProjectRef(), nil, 10, "SHOP.TEST"); err != nil {
+		t.Fatalf("ListRequestPageNoSwitchHostContext() error = %v", err)
+	}
+	var requestArgs map[string]any
+	for _, call := range caller.calls {
+		if call.name == toolListRequests {
+			requestArgs = call.args
+		}
+	}
+	if requestArgs == nil || requestArgs["httpql"] != `req.host.eq:"shop.test"` {
+		t.Errorf("host-filtered request arguments = %#v; want exact host equality", requestArgs)
+	}
+	assertNoProjectMutationOrDetailCalls(t, caller.calls)
+}
+
+func TestListRequestPageNoSwitchHostContextRejectsHTTPQLInjection(t *testing.T) {
+	for _, host := range []string{`shop.test" OR req.method.eq:"POST`, "shop.test/path", "shop.test:3000", "*.shop.test", "shop.test "} {
+		t.Run(host, func(t *testing.T) {
+			caller := &noSwitchToolCaller{selectedID: "selected-project"}
+			source := newNoSwitchSource(t, caller)
+			if _, err := source.ListRequestPageNoSwitchHostContext(context.Background(), selectedProjectRef(), nil, 10, host); err == nil {
+				t.Fatalf("ListRequestPageNoSwitchHostContext() accepted invalid host %q", host)
+			}
+			if caller.requestCalls != 0 {
+				t.Fatalf("invalid host triggered %d request-list calls", caller.requestCalls)
+			}
+		})
+	}
+}
+
 func TestListRequestPageNoSwitchContextRejectsWrongSelectedProjectBeforeListing(t *testing.T) {
 	caller := &noSwitchToolCaller{selectedID: "other-project"}
 	source := newNoSwitchSource(t, caller)

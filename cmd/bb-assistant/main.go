@@ -685,7 +685,7 @@ func reconcileCaidoHistory(args []string) error {
 	}
 	result, err := historyreconcile.Run(ctx, options.dataRoot, options.projectKey, source, historyreconcile.Options{
 		PageSize: options.pageSize, MaxPages: options.maxPages, MaxRequestIDs: options.maxRequests,
-		MaxDuration: options.timeout,
+		MaxDuration: options.timeout, ScopeHost: options.scopeHost, ScopePort: options.scopePort,
 	})
 	if result.State != "" {
 		if encodeErr := json.NewEncoder(os.Stdout).Encode(result); encodeErr != nil {
@@ -708,6 +708,8 @@ type caidoReconcileOptions struct {
 	maxPages    int
 	maxRequests int
 	timeout     time.Duration
+	scopeHost   string
+	scopePort   int
 }
 
 func parseCaidoReconcileOptions(args []string) (caidoReconcileOptions, error) {
@@ -723,11 +725,13 @@ func parseCaidoReconcileOptions(args []string) (caidoReconcileOptions, error) {
 	maxPages := flags.Int("max-pages", 100, "maximum metadata pages (1-10000)")
 	maxRequests := flags.Int("max-requests", 10000, "maximum distinct IDs per inventory (1-1000000)")
 	timeout := flags.Duration("timeout", 30*time.Second, "total reconciliation deadline (1s-30m)")
+	scopeHost := flags.String("scope-host", "", "exact host from the selected Caido scope")
+	scopePort := flags.Int("scope-port", 0, "exact port from the selected Caido scope")
 	if err := flags.Parse(args); err != nil {
 		return caidoReconcileOptions{}, err
 	}
 	if flags.NArg() != 0 {
-		return caidoReconcileOptions{}, errors.New("usage: bb-assistant caido-reconcile --project-key <sha256> [--page-size 50] [--max-pages 100] [--max-requests 10000] [--timeout 30s]")
+		return caidoReconcileOptions{}, errors.New("usage: bb-assistant caido-reconcile --project-key <sha256> [--scope-host <host> --scope-port <port>] [--page-size 50] [--max-pages 100] [--max-requests 10000] [--timeout 30s]")
 	}
 	if len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
 		return caidoReconcileOptions{}, errors.New("select exactly one registered project with --project-key <sha256>")
@@ -736,10 +740,14 @@ func parseCaidoReconcileOptions(args []string) (caidoReconcileOptions, error) {
 		*maxRequests < 1 || *maxRequests > maxCaidoReconcileRequests || *timeout < time.Second || *timeout > 30*time.Minute {
 		return caidoReconcileOptions{}, errors.New("Caido reconciliation limits are invalid")
 	}
+	if err := historyreconcile.ValidateScope(*scopeHost, *scopePort); err != nil {
+		return caidoReconcileOptions{}, err
+	}
 	return caidoReconcileOptions{
 		projectKey: selectedKeys[0], dataRoot: *root, mcpCommand: *mcpCommand,
 		mcpSHA256: *mcpSHA256, tokenFile: *tokenFile, pageSize: *pageSize,
 		maxPages: *maxPages, maxRequests: *maxRequests, timeout: *timeout,
+		scopeHost: *scopeHost, scopePort: *scopePort,
 	}, nil
 }
 

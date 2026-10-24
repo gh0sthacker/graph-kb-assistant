@@ -215,6 +215,20 @@ func (s *MCPReadSource) ListRequestPageNoSwitch(project ProjectRef, cursor *stri
 // Caido call, honors cancellation, and never selects a project or reads
 // request details.
 func (s *MCPReadSource) ListRequestPageNoSwitchContext(ctx context.Context, project ProjectRef, cursor *string, pageSize int) (RequestMetadataPage, error) {
+	return s.listRequestPageNoSwitchContext(ctx, project, cursor, pageSize, nil)
+}
+
+// ListRequestPageNoSwitchHostContext lists one exact-host metadata page while
+// leaving Caido's selected project untouched.
+func (s *MCPReadSource) ListRequestPageNoSwitchHostContext(ctx context.Context, project ProjectRef, cursor *string, pageSize int, host string) (RequestMetadataPage, error) {
+	filter, err := RequestHostHTTPQLFilter(host)
+	if err != nil {
+		return RequestMetadataPage{}, err
+	}
+	return s.listRequestPageNoSwitchContext(ctx, project, cursor, pageSize, &filter)
+}
+
+func (s *MCPReadSource) listRequestPageNoSwitchContext(ctx context.Context, project ProjectRef, cursor *string, pageSize int, httpql *string) (RequestMetadataPage, error) {
 	if ctx == nil {
 		return RequestMetadataPage{}, sanitized("Caido request context is required")
 	}
@@ -247,6 +261,9 @@ func (s *MCPReadSource) ListRequestPageNoSwitchContext(ctx context.Context, proj
 	args := map[string]any{"limit": pageSize}
 	if cursor != nil {
 		args["after"] = *cursor
+	}
+	if httpql != nil {
+		args["httpql"] = *httpql
 	}
 	payload, err := s.payloadContext(ctx, toolListRequests, args, project.ProjectID)
 	if err != nil {

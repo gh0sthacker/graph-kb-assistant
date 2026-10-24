@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,8 @@ import (
 type inventoryFixture struct {
 	project       caido.ProjectRef
 	pages         []caido.RequestMetadataPage
+	scopedHost    string
+	scopedCalls   int
 	currentErr    error
 	pageErrAt     int
 	pageErr       error
@@ -62,6 +65,12 @@ func (s *inventoryFixture) ListRequestPageNoSwitchContext(ctx context.Context, s
 		return caido.RequestMetadataPage{}, errors.New("fixture has no page at this cursor")
 	}
 	return s.pages[index], nil
+}
+
+func (s *inventoryFixture) ListRequestPageNoSwitchHostContext(ctx context.Context, selected caido.ProjectRef, cursor *string, pageSize int, host string) (caido.RequestMetadataPage, error) {
+	s.scopedHost = host
+	s.scopedCalls++
+	return s.ListRequestPageNoSwitchContext(ctx, selected, cursor, pageSize)
 }
 
 type projectFixture struct {
@@ -133,6 +142,75 @@ func (f projectFixture) insertLive(t *testing.T, requestIDs ...string) {
 	}
 }
 
+func (f projectFixture) insertSearchIndex(t *testing.T, requestID, host string, port int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", f.databasePath)
+	if err != nil {
+		t.Fatalf("open fixture capture database: %v", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`INSERT INTO capture_search (
+		observation_id, method, host, port, route, request_content_type,
+		response_content_type, field_names_json, header_names_json
+	) VALUES (?, 'GET', ?, ?, '/', '', '', '[]', '[]')`, "historical-observation-"+requestID, host, port)
+	if err != nil {
+		t.Fatalf("insert search index for %q: %v", requestID, err)
+	}
+}
+
+func (f projectFixture) insertHistoricalSearchRows(t *testing.T, requestIDs, hosts []string, port int) {
+	t.Helper()
+	if len(requestIDs) != len(hosts) {
+		t.Fatal("request ID and host fixtures must have equal lengths")
+	}
+	db, err := sql.Open("sqlite", f.databasePath)
+	if err != nil {
+		t.Fatalf("open fixture capture database: %v", err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin fixture row transaction: %v", err)
+	}
+	defer tx.Rollback()
+	for index, requestID := range requestIDs {
+		_, err := tx.Exec("INSERT INTO captures (\n"+
+			"observation_id, caido_instance_id, caido_project_id, request_id,\n"+
+			"request_sha256, request_size, request_vault_ref\n"+
+			") VALUES (?, ?, ?, ?, 'fixture-digest', 1, 'fixture-vault-ref')",
+			"historical-observation-"+requestID, f.ref.InstanceID, f.ref.ProjectID, requestID)
+		if err != nil {
+			t.Fatalf("insert historical fixture row %d: %v", index, err)
+		}
+		_, err = tx.Exec(`INSERT INTO capture_search (
+			observation_id, method, host, port, route, request_content_type,
+			response_content_type, field_names_json, header_names_json
+		) VALUES (?, 'GET', ?, ?, '/', '', '', '[]', '[]')`, "historical-observation-"+requestID, hosts[index], port)
+		if err != nil {
+			t.Fatalf("insert search fixture row %d: %v", index, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit fixture row transaction: %v", err)
+	}
+}
+
+func (f projectFixture) setLiveHostPort(t *testing.T, requestID, host string, port int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", f.databasePath)
+	if err != nil {
+		t.Fatalf("open fixture capture database: %v", err)
+	}
+	defer db.Close()
+	result, err := db.Exec("UPDATE live_capture_index SET host=?, port=? WHERE request_id=?", host, port, requestID)
+	if err != nil {
+		t.Fatalf("set live scope for %q: %v", requestID, err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("set live scope affected %d rows, err=%v; want 1", affected, err)
+	}
+}
+
 func (f projectFixture) digest(t *testing.T) [32]byte {
 	t.Helper()
 	contents, err := os.ReadFile(f.databasePath)
@@ -144,6 +222,10 @@ func (f projectFixture) digest(t *testing.T) [32]byte {
 
 func fixtureRequest(id string) caido.RequestMetadata {
 	return caido.RequestMetadata{RequestID: id, Method: "GET", URL: "https://fixture.invalid/"}
+}
+
+func fixtureRequestURL(id, url string) caido.RequestMetadata {
+	return caido.RequestMetadata{RequestID: id, Method: "GET", URL: url}
 }
 
 func page(requestIDs []string, next *string, hasMore bool) caido.RequestMetadataPage {
@@ -235,6 +317,229 @@ func TestRunComparesPagesAndHistoricalLiveUnionWithoutChangingDatabase(t *testin
 		"fixture-live-match", "fixture-caido-only-1", "fixture-caido-only-2")
 	if after := fixture.digest(t); after != before {
 		t.Fatal("Run() changed the local capture database")
+	}
+}
+
+func TestRunReconcilesExactHostPortAndReportsUnclassifiedLocalRows(t *testing.T) {
+	fixture := newProjectFixture(t)
+	fixture.insertHistorical(t, "scoped-match", "scoped-other-port", "scoped-unclassified", "scoped-unknown-sentinel", "scoped-malformed-host")
+	fixture.insertSearchIndex(t, "scoped-match", "shop.test", 3000)
+	fixture.insertSearchIndex(t, "scoped-other-port", "shop.test", 8080)
+	fixture.insertSearchIndex(t, "scoped-unknown-sentinel", "unknown", 3000)
+	fixture.insertSearchIndex(t, "scoped-malformed-host", "foo..bar", 3000)
+	fixture.insertLive(t, "scoped-live-match", "scoped-live-other")
+	fixture.setLiveHostPort(t, "scoped-live-match", "shop.test", 3000)
+	fixture.setLiveHostPort(t, "scoped-live-other", "other.test", 3000)
+	source := &inventoryFixture{
+		project: caido.ProjectRef{InstanceID: fixture.ref.InstanceID, ProjectID: fixture.ref.ProjectID},
+		pages: []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{
+			fixtureRequestURL("scoped-match", "http://shop.test:3000/a"),
+			fixtureRequestURL("caido-only", "http://shop.test:3000/b"),
+			fixtureRequestURL("wrong-port", "http://shop.test:8080/a"),
+			fixtureRequestURL("unparseable-url", "shop.test:3000/a"),
+		}}},
+	}
+	options := fixtureOptions()
+	options.PageSize = 10
+	options.ScopeHost = "shop.test"
+	options.ScopePort = 3000
+	before := fixture.digest(t)
+
+	report, err := runFixture(t, fixture, source, options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.State != "partial" || report.CoverageReconciled || !report.EnumerationTerminal {
+		t.Errorf("scoped report = %+v; want terminal but unreconciled PARTIAL", report)
+	}
+	if report.ScopeHost != "shop.test" || report.ScopePort != 3000 || report.CaidoHostFilterCount != 4 ||
+		report.CaidoRequestCount != 2 || report.CaidoScopeExcludedCount != 1 || report.CaidoUnclassifiedCount != 1 ||
+		report.LocalRequestCount != 2 || report.LocalUnclassifiedCount != 3 || report.LocalInventoryComplete ||
+		report.MatchedCount != 1 || report.CaidoOnlyCount != 1 || report.LocalOnlyCount != 1 {
+		t.Errorf("scoped inventory counts = %+v; want exact host/port comparison with explicit unknowns", report)
+	}
+	if source.scopedCalls != 1 || source.scopedHost != "shop.test" || source.pageCalls != 1 {
+		t.Errorf("scoped source calls = %d host=%q total-pages=%d; want one host-filtered page", source.scopedCalls, source.scopedHost, source.pageCalls)
+	}
+	assertNoRequestIDsInReport(t, report, "scoped-match", "caido-only", "wrong-port", "unparseable-url", "scoped-unclassified")
+	if after := fixture.digest(t); after != before {
+		t.Fatal("scoped Run() changed the local capture database")
+	}
+}
+
+func TestRunCanonicalizesEquivalentIPv6HostsInLocalIndexes(t *testing.T) {
+	fixture := newProjectFixture(t)
+	fixture.insertHistorical(t, "ipv6-historical", "ipv6-invalid-index")
+	fixture.insertSearchIndex(t, "ipv6-historical", "2001:0db8:0:0:0:0:0:1", 3000)
+	fixture.insertSearchIndex(t, "ipv6-invalid-index", "2001:db8::ggg", 3000)
+	fixture.insertLive(t, "ipv6-live")
+	fixture.setLiveHostPort(t, "ipv6-live", "2001:0db8:0:0:0:0:0:1", 3000)
+	source := &inventoryFixture{
+		project: caido.ProjectRef{InstanceID: fixture.ref.InstanceID, ProjectID: fixture.ref.ProjectID},
+		pages: []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{
+			fixtureRequestURL("ipv6-historical", "http://[2001:db8::1]:3000/a"),
+			fixtureRequestURL("ipv6-live", "http://[2001:db8::1]:3000/b"),
+		}}},
+	}
+	options := fixtureOptions()
+	options.ScopeHost = "2001:db8::1"
+	options.ScopePort = 3000
+
+	report, err := runFixture(t, fixture, source, options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.ScopeHost != "2001:db8::1" || report.LocalRequestCount != 2 || report.CaidoRequestCount != 2 ||
+		report.MatchedCount != 2 || report.CaidoOnlyCount != 0 || report.LocalOnlyCount != 0 ||
+		report.LocalUnclassifiedCount != 1 || report.LocalInventoryComplete {
+		t.Errorf("IPv6 scoped report = %+v; want canonicalized matches and one unclassified malformed IPv6 host", report)
+	}
+}
+
+func TestIPv6FalsePositiveCandidatesDoNotConsumeRequestLimit(t *testing.T) {
+	fixture := newProjectFixture(t)
+	fixture.insertHistorical(t, "ipv6-limit-one", "ipv6-limit-two", "ipv6-limit-unknown")
+	fixture.insertSearchIndex(t, "ipv6-limit-one", "2001:0db8:0:0:0:0:0:1", 3000)
+	fixture.insertSearchIndex(t, "ipv6-limit-two", "2001:0db8:0:0:0:0:0:2", 3000)
+	fixture.insertSearchIndex(t, "ipv6-limit-unknown", "unknown", 3000)
+	source := &inventoryFixture{
+		project: caido.ProjectRef{InstanceID: fixture.ref.InstanceID, ProjectID: fixture.ref.ProjectID},
+		pages:   []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{fixtureRequestURL("caido-row", "http://[2001:db8::1]:3000/")}}},
+	}
+	options := fixtureOptions()
+	options.MaxRequestIDs = 1
+	options.ScopeHost = "2001:db8::1"
+	options.ScopePort = 3000
+
+	report, err := runFixture(t, fixture, source, options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.StopReason != "terminal_cursor" || report.LocalRequestCount != 1 || report.LocalInventoryComplete || report.LocalUnclassifiedCount != 1 || source.pageCalls != 1 {
+		t.Errorf("IPv6 local report = %+v; page calls=%d; want one canonical in-scope ID, one unclassified record, and completed enumeration", report, source.pageCalls)
+	}
+}
+
+func TestDuplicateLocalRequestAcrossIndexesDoesNotConsumeRequestLimit(t *testing.T) {
+	fixture := newProjectFixture(t)
+	fixture.insertHistorical(t, "shared-local-id")
+	fixture.insertSearchIndex(t, "shared-local-id", "shop.test", 3000)
+	fixture.insertLive(t, "shared-local-id")
+	fixture.setLiveHostPort(t, "shared-local-id", "shop.test", 3000)
+	source := &inventoryFixture{
+		project: caido.ProjectRef{InstanceID: fixture.ref.InstanceID, ProjectID: fixture.ref.ProjectID},
+		pages:   []caido.RequestMetadataPage{{Requests: []caido.RequestMetadata{fixtureRequestURL("shared-local-id", "http://shop.test:3000/")}}},
+	}
+	options := fixtureOptions()
+	options.MaxRequestIDs = 1
+	options.ScopeHost = "shop.test"
+	options.ScopePort = 3000
+
+	report, err := runFixture(t, fixture, source, options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.StopReason != "terminal_cursor" || report.LocalRequestCount != 1 || report.MatchedCount != 1 || report.LocalOnlyCount != 0 {
+		t.Errorf("duplicate-index report = %+v; want one unique local ID and a complete scoped enumeration", report)
+	}
+}
+
+func TestDistinctLocalRequestsEnforceRequestLimit(t *testing.T) {
+	fixture := newProjectFixture(t)
+	fixture.insertHistorical(t, "distinct-local-one", "distinct-local-two")
+	fixture.insertSearchIndex(t, "distinct-local-one", "shop.test", 3000)
+	fixture.insertSearchIndex(t, "distinct-local-two", "shop.test", 3000)
+	source := &inventoryFixture{project: caido.ProjectRef{InstanceID: fixture.ref.InstanceID, ProjectID: fixture.ref.ProjectID}}
+	options := fixtureOptions()
+	options.MaxRequestIDs = 1
+	options.ScopeHost = "shop.test"
+	options.ScopePort = 3000
+
+	report, err := runFixture(t, fixture, source, options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.StopReason != "local_request_limit" || report.LocalRequestCount != 2 || source.pageCalls != 0 {
+		t.Errorf("distinct-ID report = %+v; page calls=%d; want request limit before Caido enumeration", report, source.pageCalls)
+	}
+}
+
+func TestScopedLocalScanLimitHasDistinctStopReason(t *testing.T) {
+	fixture := newProjectFixture(t)
+	requestIDs := make([]string, minLocalScanRows+1)
+	hosts := make([]string, len(requestIDs))
+	for i := range requestIDs {
+		requestIDs[i] = fmt.Sprintf("ipv6-candidate-%04d", i)
+		hosts[i] = "2001:db8::2"
+	}
+	fixture.insertHistoricalSearchRows(t, requestIDs, hosts, 3000)
+	source := &inventoryFixture{project: caido.ProjectRef{InstanceID: fixture.ref.InstanceID, ProjectID: fixture.ref.ProjectID}}
+	options := fixtureOptions()
+	options.MaxRequestIDs = 1
+	options.ScopeHost = "2001:db8::1"
+	options.ScopePort = 3000
+
+	report, err := runFixture(t, fixture, source, options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.StopReason != "local_scan_limit" || report.LocalRequestCount != 0 || source.pageCalls != 0 {
+		t.Errorf("local-scan-limit report = %+v; page calls=%d; want scan limit before Caido enumeration", report, source.pageCalls)
+	}
+}
+
+func TestScopedScanLimitReportsClassificationFromScannedPrefix(t *testing.T) {
+	fixture := newProjectFixture(t)
+	requestIDs := make([]string, minLocalScanRows+1)
+	hosts := make([]string, len(requestIDs))
+	for i := range requestIDs {
+		requestIDs[i] = fmt.Sprintf("classification-row-%04d", i)
+		hosts[i] = fmt.Sprintf("host-%04d.test", i)
+	}
+	hosts[0] = "foo..bar"
+	fixture.insertHistoricalSearchRows(t, requestIDs, hosts, 3000)
+	source := &inventoryFixture{project: caido.ProjectRef{InstanceID: fixture.ref.InstanceID, ProjectID: fixture.ref.ProjectID}}
+	options := fixtureOptions()
+	options.MaxRequestIDs = 1
+	options.ScopeHost = "shop.test"
+	options.ScopePort = 3000
+
+	report, err := runFixture(t, fixture, source, options)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if report.StopReason != "local_scan_limit" || report.LocalUnclassifiedCount != 1 || source.pageCalls != 0 {
+		t.Errorf("local-scan classification report = %+v; page calls=%d; want the observed unclassified row and a partial scan", report, source.pageCalls)
+	}
+}
+
+func TestScopedReportIncludesZeroAggregateCounts(t *testing.T) {
+	encoded, err := json.Marshal(Report{State: "partial", ScopeHost: "shop.test", ScopePort: 3000})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	for _, field := range []string{
+		`"caido_host_filter_count":0`,
+		`"caido_scope_excluded_count":0`,
+		`"caido_unclassified_count":0`,
+		`"local_unclassified_count":0`,
+	} {
+		if !strings.Contains(string(encoded), field) {
+			t.Errorf("scoped JSON %s omits explicit zero field %s", encoded, field)
+		}
+	}
+}
+
+func TestReconcileRequiresScopeHostAndPortTogether(t *testing.T) {
+	options := fixtureOptions()
+	options.ScopeHost = "shop.test"
+	if err := validateOptions(options); err == nil {
+		t.Fatal("validateOptions() accepted a scope host without a port")
+	}
+	options = fixtureOptions()
+	options.ScopePort = 3000
+	if err := validateOptions(options); err == nil {
+		t.Fatal("validateOptions() accepted a scope port without a host")
 	}
 }
 

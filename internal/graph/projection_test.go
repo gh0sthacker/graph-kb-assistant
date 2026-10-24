@@ -105,3 +105,82 @@ func TestProjectExchangeMarksMalformedHeaderNamePartial(t *testing.T) {
 		t.Fatalf("ProjectExchange() parse state = %q, want partial", projection.ParseState)
 	}
 }
+
+func TestProjectExchangeCanonicalizesIPv6AndRejectsMalformedDNSHosts(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		host   string
+		target string
+		want   string
+	}{
+		{
+			name:   "expanded ipv6 host header",
+			host:   "[2001:0db8:0:0:0:0:0:1]",
+			target: "http://[2001:db8::1]:3000/",
+			want:   "2001:db8::1",
+		},
+		{
+			name:   "ipv6 host header with port",
+			host:   "[2001:db8::1]:3000",
+			target: "http://[2001:db8::1]:3000/",
+			want:   "2001:db8::1",
+		},
+		{
+			name:   "malformed dotted dns host",
+			host:   "foo..bar",
+			target: "https://foo..bar/",
+			want:   "unknown",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			exchange := caido.HttpExchange{
+				Ref: caido.ExchangeRef{
+					Project:   caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"},
+					RequestID: "fixture-request",
+				},
+				RequestRaw:           []byte("GET / HTTP/1.1\r\nHost: fixture\r\n\r\n"),
+				Method:               "GET",
+				Scheme:               "http",
+				Host:                 test.host,
+				Port:                 3000,
+				Target:               test.target,
+				RequestWireFidelity:  "unknown",
+				ResponseWireFidelity: "unknown",
+			}
+			projection, err := ProjectExchange(exchange)
+			if err != nil {
+				t.Fatalf("ProjectExchange() error = %v", err)
+			}
+			if projection.Search.Host != test.want {
+				t.Errorf("ProjectExchange() host = %q, want %q", projection.Search.Host, test.want)
+			}
+		})
+	}
+}
+
+func TestEndpointFromURLCanonicalizesIPv6Host(t *testing.T) {
+	host, port, route, err := EndpointFromURL("https://[2001:0db8:0:0:0:0:0:1]:8443/api/items/42", "")
+	if err != nil {
+		t.Fatalf("EndpointFromURL() error = %v", err)
+	}
+	if host != "2001:db8::1" || port != 8443 || route != "/api/items/{value}" {
+		t.Errorf("EndpointFromURL() = host %q port %d route %q; want canonical IPv6 host, port 8443 and templated route", host, port, route)
+	}
+}
+
+func TestNormalizeURLKeepsIPv6AuthorityWellFormed(t *testing.T) {
+	got, err := NormalizeURL("https://[2001:0db8:0:0:0:0:0:1]:8443/a", "")
+	if err != nil {
+		t.Fatalf("NormalizeURL() error = %v", err)
+	}
+	if got != "https://[2001:db8::1]:8443/a" {
+		t.Errorf("NormalizeURL() = %q, want canonical bracketed IPv6 URL", got)
+	}
+}
+
+func TestHistoricalOriginKeepsIPv6HostInsteadOfAliasingIt(t *testing.T) {
+	got := historicalOriginAt("https://[2001:0db8:0:0:0:0:0:1]:8443/a", Record{}, "fixture.host")
+	if got != "https://[2001:db8::1]:8443" {
+		t.Errorf("historicalOriginAt() = %q, want canonical IPv6 origin", got)
+	}
+}

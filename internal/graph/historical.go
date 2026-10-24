@@ -17,7 +17,6 @@ import (
 
 var (
 	historicalRiskNamePattern = regexp.MustCompile(`(?i)(bearer\s|eyJ[A-Za-z0-9_-]{8,}|password\s*[=:]|secret\s*[=:]|token\s*[=:]|api[_-]?key\s*[=:]|@|-----BEGIN|[a-f0-9]{24,}|[A-Za-z0-9_-]{32,})`)
-	historicalHostPattern     = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 	historicalSingleLetter    = regexp.MustCompile(`^[A-Za-z]$`)
 	historicalRouteWords      = map[string]struct{}{
 		"account": {}, "accounts": {}, "admin": {}, "api": {}, "approve": {}, "auth": {},
@@ -472,12 +471,15 @@ func historicalOriginAt(target string, source Record, hostLocation string) strin
 	if (scheme != "http" && scheme != "https") || host == "" {
 		return "unknown"
 	}
-	if !historicalHostPattern.MatchString(host) || historicalRiskNamePattern.MatchString(host) {
+	normalizedHost, hostErr := caido.NormalizeRequestHost(host)
+	if hostErr != nil || historicalRiskNamePattern.MatchString(host) {
 		alias, aliasErr := historicalOpaqueLabel(source, hostLocation, "host")
 		if aliasErr != nil {
 			return "unknown"
 		}
 		host = alias + ".invalid"
+	} else {
+		host = normalizedHost
 	}
 	port := ""
 	if portText := parsed.Port(); portText != "" {
@@ -491,7 +493,11 @@ func historicalOriginAt(target string, source Record, hostLocation string) strin
 	if scheme == "https" {
 		defaultPort = "443"
 	}
-	origin := scheme + "://" + host
+	originHost := host
+	if strings.Contains(host, ":") {
+		originHost = "[" + host + "]"
+	}
+	origin := scheme + "://" + originHost
 	if port != "" && port != defaultPort && port != "0" {
 		origin += ":" + port
 	}

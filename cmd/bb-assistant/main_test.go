@@ -638,6 +638,30 @@ func TestParseCaidoReconcileOptionsAllowsObservedCatalogScale(t *testing.T) {
 	}
 }
 
+func TestParseCaidoReconcileOptionsRequiresExactHostAndPortTogether(t *testing.T) {
+	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	options, err := parseCaidoReconcileOptions([]string{
+		"--project-key", key, "--scope-host", "192.168.1.149", "--scope-port", "3000",
+	})
+	if err != nil {
+		t.Fatalf("parseCaidoReconcileOptions() rejected exact host/port scope: %v", err)
+	}
+	if options.scopeHost != "192.168.1.149" || options.scopePort != 3000 {
+		t.Fatalf("parsed scope = %q:%d; want 192.168.1.149:3000", options.scopeHost, options.scopePort)
+	}
+	for _, args := range [][]string{
+		{"--scope-host", "192.168.1.149"},
+		{"--scope-port", "3000"},
+		{"--scope-host", `192.168.1.149" OR req.method.eq:"POST`, "--scope-port", "3000"},
+		{"--scope-host", "192.168.1.149", "--scope-port", "65536"},
+	} {
+		commandArgs := append([]string{"--project-key", key}, args...)
+		if _, err := parseCaidoReconcileOptions(commandArgs); err == nil {
+			t.Errorf("parseCaidoReconcileOptions() accepted invalid scope %v", args)
+		}
+	}
+}
+
 func TestParseCaidoReconcileOptionsAllowsBoundedLongerDeadline(t *testing.T) {
 	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	options, err := parseCaidoReconcileOptions([]string{"--project-key", key, "--timeout", "5m"})
