@@ -29,6 +29,56 @@
     };
   }
 
+  function layeredGridLayout(entities, assertions, rootId, titleForNode = node => node.id) {
+    if (!Array.isArray(entities) || entities.length === 0) {
+      return { positions: new Map(), width: 960, height: 560 };
+    }
+    const byId = new Map(entities.map(node => [node.id, node]));
+    const neighbors = new Map(entities.map(node => [node.id, []]));
+    for (const edge of assertions) {
+      if (!byId.has(edge.subject) || !byId.has(edge.object)) continue;
+      neighbors.get(edge.subject).push(edge.object);
+      neighbors.get(edge.object).push(edge.subject);
+    }
+    const root = byId.has(rootId) ? rootId : entities[0].id;
+    const distances = new Map([[root, 0]]);
+    const queue = [root];
+    for (let index = 0; index < queue.length; index++) {
+      for (const neighbor of neighbors.get(queue[index]) || []) {
+        if (distances.has(neighbor)) continue;
+        distances.set(neighbor, distances.get(queue[index]) + 1);
+        queue.push(neighbor);
+      }
+    }
+    const byDepth = new Map();
+    for (const node of entities) {
+      const depth = distances.get(node.id) ?? 0;
+      if (!byDepth.has(depth)) byDepth.set(depth, []);
+      byDepth.get(depth).push(node);
+    }
+    for (const group of byDepth.values()) group.sort((a, b) => String(titleForNode(a)).localeCompare(String(titleForNode(b))));
+
+    const layers = [...byDepth].sort(([a], [b]) => a - b).map(([depth, nodes]) => {
+      const columns = Math.ceil(nodes.length / 10);
+      const rows = Math.ceil(nodes.length / columns);
+      return { depth, nodes, columns, rows };
+    });
+    const maxRows = Math.max(...layers.map(layer => layer.rows));
+    const height = Math.max(560, 140 + maxRows * 128);
+    const positions = new Map();
+    let layerX = 120;
+    for (const layer of layers) {
+      const startY = (height - layer.rows * 128) / 2 + 64;
+      layer.nodes.forEach((node, index) => {
+        const column = Math.floor(index / layer.rows);
+        const row = index % layer.rows;
+        positions.set(node.id, { x: layerX + column * 225, y: startY + row * 128 });
+      });
+      layerX += layer.columns * 225;
+    }
+    return { positions, width: Math.max(960, layerX + 120), height };
+  }
+
   function observationNotes(data) {
     const record = data && typeof data === "object" ? data : {};
     const notes = [];
@@ -50,7 +100,7 @@
     return notes;
   }
 
-  const api = { focusedNeighborhood, focusedTransform, observationNotes };
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);

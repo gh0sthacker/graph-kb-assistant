@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { focusedNeighborhood, focusedTransform, observationNotes } = require("./assets/graph-focus.js");
+const { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes } = require("./assets/graph-focus.js");
 
 test("focusedNeighborhood keeps the selected node and its direct neighbors", () => {
   const entities = [
@@ -59,4 +59,26 @@ test("observationNotes do not add uncertainty notes to a complete, annotated cap
     context: { scenario: "checkout" },
     observed_at: "2026-10-24T12:00:00Z",
   }), []);
+});
+
+test("layeredGridLayout wraps a high-degree layer into a bounded grid", () => {
+  const entities = [{ id: "root", kind: "observation" }];
+  const assertions = [];
+  for (let index = 0; index < 99; index++) {
+    const id = `neighbor-${String(index).padStart(2, "0")}`;
+    entities.push({ id, kind: "parameter" });
+    assertions.push({ id: `edge-${index}`, subject: "root", object: id });
+  }
+
+  const layout = layeredGridLayout(entities, assertions, "root", node => node.id);
+  const root = layout.positions.get("root");
+  const leafPoints = entities.slice(1).map(node => layout.positions.get(node.id));
+
+  assert.equal(layout.positions.size, 100);
+  assert.equal(root.x, 120);
+  assert.equal(root.y, layout.height / 2);
+  assert.equal(new Set(leafPoints.map(point => point.x)).size, 10);
+  assert(layout.height < 1600, `layout height ${layout.height} should wrap the 99-node layer`);
+  assert(layout.width < 2800, `layout width ${layout.width} should remain bounded`);
+  assert.equal(new Set(leafPoints.map(point => `${point.x},${point.y}`)).size, 99);
 });

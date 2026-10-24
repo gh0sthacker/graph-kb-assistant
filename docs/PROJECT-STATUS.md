@@ -28,10 +28,22 @@
   the selected node to the center of the graph and raises zoom to at least
   300%, while preserving a higher current zoom. The existing zoom controls can
   then increase magnification further.
-- Pure transform tests cover centering and invalid geometry. The running UI
-  returned HTTP 200 and served the updated JavaScript; browser-level clicking
-  was not confirmed in this slice. Graph data coverage and the overall
-  application remain `PARTIAL`.
+- Pure transform tests cover centering and invalid geometry. A local browser
+  click on the Juice Shop graph kept the selected capture in the inspector and
+  set zoom to 300%. Graph data coverage and the overall application remain
+  `PARTIAL`.
+
+## High-degree graph layout (2026-10-24) — PARTIAL
+
+- Graph layers with more than ten nodes now wrap into columns, keeping the
+  number of rows bounded instead of placing every neighbor in one tall column.
+  The root and each layer remain distinct; node and evidence IDs are unchanged.
+- In the local browser, `GET /rest/products/search` displayed 100 loaded nodes
+  and 99 edges with additional neighbors available. The new layout spanned
+  2,250 by 1,152 layout units; centering the selected capture retained the
+  inspector selection at 300% zoom. No HTTP bodies were opened.
+- All 30 browser-state tests pass. This one-route UI check does not establish
+  complete graph coverage or a project-wide layout/performance result.
 
 ## Local API and graph runtime smoke (2026-10-24) — PARTIAL
 
@@ -48,7 +60,26 @@
   now explains that coverage flag separately from a capture's parser state,
   and explains `incomplete`, unknown context, and missing timestamp on the
   selected observation. All 29 browser-state tests pass; live browser clicks
-  remain unverified because the browser connector did not connect.
+  are now verified on one local route; this remains a focused interaction
+  check rather than full browser/JavaScript coverage.
+
+## Current Go and KB readiness (2026-10-24) — PARTIAL
+
+- The local Go status report generated at 09:41:05Z found one registered
+  project, compatible capture schema v7 and graph schema v2, 1,400 captures,
+  1,369 graph-mapped captures and 31 unmapped. Historical sync remains
+  `partial`; live sync is idle; the projection queue has 448 pending and 952
+  applied jobs. Status did not contact Caido or check Neo4j connectivity.
+  Focused local UI graph queries did read the configured backend, but source
+  history and overall coverage remain `PARTIAL`.
+- The local KB stats fallback completed after a slow read. It reports 15,517
+  indexed files, 68,878 chunks and vectors, no orphan chunks/vectors, and no
+  missing vectors; hybrid semantic/lexical search is available. The index was
+  last refreshed at 2026-10-24 03:58Z. The current-source check counted 15,515
+  compatible files; two indexed files were not counted as current-compatible,
+  and their cause was not isolated. Full vector and source-integrity
+  validation was not run. No KB refresh or reindex was performed; KB readiness
+  remains `PARTIAL` pending that validation.
 
 ## Local application and Hermes runtime check (2026-10-24 09:26Z) — PARTIAL
 

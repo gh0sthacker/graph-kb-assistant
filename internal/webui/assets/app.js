@@ -1282,41 +1282,10 @@ function selectedEndpointNeighborhood(entities, assertions) {
 
 function layoutGraph(entities, assertions) {
   const ids = new Set(entities.map(node => node.id));
-  const neighbors = new Map(entities.map(node => [node.id, []]));
-  for (const edge of assertions) {
-    if (ids.has(edge.subject) && ids.has(edge.object)) {
-      neighbors.get(edge.subject).push(edge.object);
-      neighbors.get(edge.object).push(edge.subject);
-    }
-  }
   const seedIds = (state.graph?.seed_ids || []).filter(id => ids.has(id));
   const selectedEndpoint = entities.find(isSelectedEndpointNode);
   const root = (state.focusedNodeId && ids.has(state.focusedNodeId) ? state.focusedNodeId : null) || seedIds[0] || selectedEndpoint?.id || entities[0]?.id;
-  const distances = new Map([[root, 0]]), queue = [root];
-  for (let i = 0; i < queue.length; i++) {
-    for (const neighbor of neighbors.get(queue[i]) || []) {
-      if (distances.has(neighbor)) continue;
-      distances.set(neighbor, distances.get(queue[i]) + 1); queue.push(neighbor);
-    }
-  }
-  const byDepth = new Map();
-  for (const item of entities) {
-    const depth = distances.get(item.id) ?? 0;
-    if (!byDepth.has(depth)) byDepth.set(depth, []);
-    byDepth.get(depth).push(item);
-  }
-  for (const group of byDepth.values()) group.sort((a, b) => displayTitle(a).localeCompare(displayTitle(b)));
-  const maxDepth = Math.max(...byDepth.keys(), 1);
-  const maxRows = Math.max(...[...byDepth.values()].map(group => group.length), 1);
-  const width = Math.max(960, 240 + maxDepth * 225);
-  const height = Math.max(560, 140 + maxRows * 128);
-  const positions = new Map();
-  for (const [depth, group] of byDepth) {
-    const span = group.length * 128;
-    const startY = (height - span) / 2 + 64;
-    group.forEach((item, index) => positions.set(item.id, { x: 120 + depth * ((width - 240) / Math.max(1, maxDepth)), y: startY + index * 128 }));
-  }
-  return { positions, width, height };
+  return BBGraphFocus.layeredGridLayout(entities, assertions, root, displayTitle);
 }
 
 function renderNode(node, point) {
