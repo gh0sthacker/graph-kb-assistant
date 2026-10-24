@@ -197,7 +197,7 @@ test("local evidence viewer pins the exact historical revision and keeps HTTP by
   assert.equal(first.url.searchParams.get("offset"), "0");
   assert.equal(first.url.searchParams.get("max_bytes"), String(1 << 20));
   first.resolve({
-    request_id: "239", revision_id: revisionId, side: "request", offset: 0,
+    project_key: projectKey, request_id: "239", revision_id: revisionId, side: "request", offset: 0,
     total_size: 15, returned_size: 15, next_offset: null, data: "GET /safe HTTP/1.1", encoding: "utf-8",
     wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
   });
@@ -212,7 +212,7 @@ test("local evidence viewer pins the exact historical revision and keeps HTTP by
   assert.equal(app.requests[1].url.searchParams.get("revision_id"), revisionId);
   assert.equal(app.requests[1].url.searchParams.get("side"), "response");
   app.requests[1].resolve({
-    request_id: "239", revision_id: revisionId, side: "response", offset: 0,
+    project_key: projectKey, request_id: "239", revision_id: revisionId, side: "response", offset: 0,
     total_size: 0, returned_size: 0, next_offset: null, data: "", encoding: "utf-8",
     wire_fidelity: "source_bytes", parse_state: "complete", response_truncated: false,
   });
@@ -225,12 +225,51 @@ test("local evidence viewer pins the exact historical revision and keeps HTTP by
   assert.equal(trigger.focused, true, "closing the evidence dialog should restore focus to its opener");
 });
 
+test("local evidence viewer rejects response provenance and range mismatches", async () => {
+  const projectKey = "a".repeat(64);
+  const revisionId = "b".repeat(64);
+  const valid = {
+    project_key: projectKey, request_id: "239", revision_id: revisionId, side: "request", offset: 0,
+    total_size: 15, returned_size: 15, next_offset: null, data: "GET /wrong HTTP/1.1", encoding: "utf-8",
+  };
+  const mismatches = [
+    ["project", { project_key: "c".repeat(64) }],
+    ["request", { request_id: "240" }],
+    ["revision", { revision_id: "d".repeat(64) }],
+    ["side", { side: "response" }],
+    ["offset", { offset: 1 }],
+    ["range continuation", { total_size: 30, next_offset: null }],
+  ];
+
+  for (const [name, mismatch] of mismatches) {
+    const app = createApp();
+    app.state.projectKey = projectKey;
+    const pending = app.openEvidence({
+      request_id: "239", revision_id: revisionId,
+      record_source: "encrypted_local_capture", raw_stored_locally: true,
+    });
+    app.requests[0].resolve({ ...valid, ...mismatch });
+    await pending;
+    assert.equal(app.elements.evidenceContent.textContent, "", `${name} mismatch must not render bytes`);
+    assert.match(app.elements.evidenceFoot.textContent, /provenance or range/i, `${name} mismatch should be explained`);
+    assert.equal(app.state.evidence.revisionId, revisionId, `${name} mismatch must not replace the pinned revision`);
+  }
+});
+
 test("local evidence viewer refuses non-local and live-only records without requesting bytes", async () => {
   const app = createApp();
   app.state.projectKey = "a".repeat(64);
   await app.openEvidence({ request_id: 239, record_source: "caido_history", raw_stored_locally: false });
   assert.equal(app.requests.length, 0);
   assert.equal(app.elements.evidenceDialog.open, false);
+
+  app.openEvidence({
+    request_id: 239, record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  app.openEvidence({
+    request_id: 239, revision_id: "not-a-revision", record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  assert.equal(app.requests.length, 0, "unversioned records cannot fall back to the mutable current revision");
 });
 
 test("capture comparison pins exact revisions, reports fidelity and truncation, and clears baseline on project switch", async () => {
@@ -309,7 +348,7 @@ test("evidence packet preview accumulates exact spans across captures and resets
     record_source: "encrypted_local_capture", raw_stored_locally: true,
   });
   app.requests[0].resolve({
-    request_id: "239", revision_id: revisionId, side: "request", offset: 0,
+    project_key: projectKey, request_id: "239", revision_id: revisionId, side: "request", offset: 0,
     total_size: 64, returned_size: 64, next_offset: null, data: "GET /items?password=secret HTTP/1.1", encoding: "utf-8",
     wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
   });
@@ -327,7 +366,7 @@ test("evidence packet preview accumulates exact spans across captures and resets
   const loadResponse = app.selectEvidenceSide("response");
   assert.equal(app.requests.length, 2);
   app.requests[1].resolve({
-    request_id: "239", revision_id: revisionId, side: "response", offset: 0,
+    project_key: projectKey, request_id: "239", revision_id: revisionId, side: "response", offset: 0,
     total_size: 64, returned_size: 64, next_offset: null, data: "HTTP/1.1 200 OK\r\nContent-Type: application/json", encoding: "utf-8",
     wire_fidelity: "source_bytes", parse_state: "complete", response_truncated: false,
   });
@@ -343,7 +382,7 @@ test("evidence packet preview accumulates exact spans across captures and resets
     record_source: "encrypted_local_capture", raw_stored_locally: true,
   });
   app.requests[2].resolve({
-    request_id: "240", revision_id: secondRevisionId, side: "request", offset: 0,
+    project_key: projectKey, request_id: "240", revision_id: secondRevisionId, side: "request", offset: 0,
     total_size: 64, returned_size: 64, next_offset: null, data: "GET /profile HTTP/1.1", encoding: "utf-8",
     wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
   });
@@ -416,7 +455,7 @@ test("evidence packet span budget disables additions beyond 8192 bytes", async (
     record_source: "encrypted_local_capture", raw_stored_locally: true,
   });
   app.requests[0].resolve({
-    request_id: "large", revision_id: revisionId, side: "request", offset: 0,
+    project_key: projectKey, request_id: "large", revision_id: revisionId, side: "request", offset: 0,
     total_size: 12000, returned_size: 64, next_offset: 64, data: "GET /large HTTP/1.1", encoding: "utf-8",
     wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
   });
@@ -447,7 +486,7 @@ test("late evidence packet response cannot populate after a project switch", asy
     record_source: "encrypted_local_capture", raw_stored_locally: true,
   });
   app.requests[0].resolve({
-    request_id: "239", revision_id: revisionId, side: "request", offset: 0,
+    project_key: projectKey, request_id: "239", revision_id: revisionId, side: "request", offset: 0,
     total_size: 64, returned_size: 64, next_offset: null, data: "GET /items HTTP/1.1", encoding: "utf-8",
     wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
   });
@@ -486,8 +525,8 @@ test("late request bytes cannot replace the response side after a fast tab switc
   app.selectEvidenceSide("response");
   assert.equal(app.requests.length, 2);
   app.requests[1].resolve({
-    revision_id: revisionId, side: "response", total_size: 8, returned_size: 8,
-    next_offset: null, data: "HTTP/1.1", encoding: "utf-8", parse_state: "complete", wire_fidelity: "source_bytes",
+    project_key: "a".repeat(64), request_id: "239", revision_id: revisionId, side: "response", offset: 0,
+    total_size: 8, returned_size: 8, next_offset: null, data: "HTTP/1.1", encoding: "utf-8", parse_state: "complete", wire_fidelity: "source_bytes",
   });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.elements.evidenceContent.textContent, "HTTP/1.1");

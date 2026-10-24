@@ -1,5 +1,17 @@
 # Project status and known limitations
 
+## Exact evidence range provenance checks (2026-10-24) — PARTIAL
+
+- The local evidence viewer now requires an exact 64-character revision ID and
+  rejects API ranges unless project, request, revision, side, offset, byte
+  counts, and continuation metadata match the pinned selection. Mismatched
+  responses fail closed and are not rendered. This keeps evidence snippets
+  and later consultation references bound to the selected capture revision.
+- Synthetic UI tests first reproduced wrong-project/revision/side/range display
+  and unversioned fallback, then passed after the fix. No real capture was
+  opened and no runtime data was changed; Stage 4 remains `PARTIAL` pending
+  working evidence verification.
+
 ## Hermes managed tool allowlist reconciliation (2026-10-24) — PARTIAL
 
 - `setup-hermes` now removes obsolete MCP tool names from its managed Hermes

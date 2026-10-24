@@ -179,7 +179,9 @@ function setEvidenceSideButtons(side) {
 
 function openEvidence(item, trigger = null) {
   const requestId = String(item?.request_id ?? "");
-  if (!state.projectKey || !requestId || requestId.length > 512 || item?.record_source !== "encrypted_local_capture" || item?.raw_stored_locally !== true) {
+  const revisionId = String(item?.revision_id ?? "");
+  if (!state.projectKey || !requestId || requestId.length > 512 || !/^[a-f0-9]{64}$/.test(revisionId) ||
+      item?.record_source !== "encrypted_local_capture" || item?.raw_stored_locally !== true) {
     showToast("Exact local HTTP bytes are unavailable for this record.");
     return Promise.resolve();
   }
@@ -187,7 +189,7 @@ function openEvidence(item, trigger = null) {
   const project = state.projectKey;
   const requestID = ++state.evidenceRequestId;
   state.evidence = {
-    projectKey: project, requestId, requestID, revisionId: typeof item.revision_id === "string" ? item.revision_id : "",
+    projectKey: project, requestId, requestID, revisionId,
     side: "request", nextOffset: 0, totalSize: null, loading: false, packetPreviewLoading: false, packetDefaultsInitialized: false,
   };
   state.comparison = null;
@@ -223,27 +225,29 @@ function evidenceText(payload) {
 async function loadEvidenceRange(append) {
   const evidence = state.evidence;
   if (!evidence || evidence.loading || evidence.projectKey !== state.projectKey) return;
+  const requestedOffset = append ? evidence.nextOffset : 0;
+  if (!Number.isSafeInteger(requestedOffset) || requestedOffset < 0) return;
   const requestID = evidence.requestID;
   evidence.loading = true;
   elements.evidenceMore.disabled = true;
   elements.evidenceFoot.textContent = append ? "Loading the next authenticated range…" : "Loading the authenticated message range…";
   const query = new URLSearchParams({
     project_key: evidence.projectKey, request_id: evidence.requestId, side: evidence.side,
-    offset: String(append ? evidence.nextOffset : 0), max_bytes: String(1 << 20),
+    offset: String(requestedOffset), max_bytes: String(1 << 20),
   });
-  if (evidence.revisionId) query.set("revision_id", evidence.revisionId);
+  query.set("revision_id", evidence.revisionId);
   try {
     const payload = await getJSON(`/api/evidence?${query}`);
     if (state.evidence !== evidence || requestID !== state.evidenceRequestId || evidence.projectKey !== state.projectKey) return;
-    evidence.revisionId = payload.revision_id || evidence.revisionId;
-    evidence.totalSize = Number(payload.total_size || 0);
+    validateEvidenceRangePayload(payload, evidence, requestedOffset);
+    evidence.totalSize = payload.total_size;
     if (!evidence.packetDefaultsInitialized) {
       elements.evidencePacketOffset.value = "0";
       elements.evidencePacketLength.value = evidence.totalSize > 0 ? String(Math.min(4096, evidence.totalSize)) : "";
       evidence.packetDefaultsInitialized = true;
     }
-    evidence.nextOffset = payload.next_offset === null || payload.next_offset === undefined ? null : Number(payload.next_offset);
-    evidence.loadedBytes = (evidence.loadedBytes || 0) + Number(payload.returned_size || 0);
+    evidence.nextOffset = payload.next_offset;
+    evidence.loadedBytes = (evidence.loadedBytes || 0) + payload.returned_size;
     const chunk = evidenceText(payload);
     elements.evidenceContent.textContent = append ? `${elements.evidenceContent.textContent}${chunk}` : chunk;
     const fidelity = payload.wire_fidelity || "unknown fidelity";
@@ -276,6 +280,23 @@ async function loadEvidenceRange(append) {
       if (evidence.nextOffset !== null) elements.evidenceMore.disabled = false;
       updateEvidencePacketControl();
     }
+  }
+}
+
+function validateEvidenceRangePayload(payload, evidence, requestedOffset) {
+  if (!payload || String(payload.project_key ?? "") !== evidence.projectKey ||
+      String(payload.request_id ?? "") !== evidence.requestId ||
+      payload.revision_id !== evidence.revisionId || payload.side !== evidence.side ||
+      payload.offset !== requestedOffset || !Number.isSafeInteger(payload.total_size) || payload.total_size < 0 ||
+      !Number.isSafeInteger(payload.returned_size) || payload.returned_size < 0 ||
+      payload.offset + payload.returned_size > payload.total_size) {
+    throw new Error("Evidence response provenance or range metadata did not match the selected capture.");
+  }
+  const expectedNextOffset = payload.offset + payload.returned_size < payload.total_size
+    ? payload.offset + payload.returned_size
+    : null;
+  if (payload.returned_size === 0 && payload.offset < payload.total_size || payload.next_offset !== expectedNextOffset) {
+    throw new Error("Evidence response provenance or range metadata did not match the selected capture.");
   }
 }
 
