@@ -56,7 +56,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -83,6 +83,39 @@ test("saved-consultation entry point opens the review panel without selecting an
   app.elements.consultationOpen.listeners.click();
   assert.equal(app.elements.evidenceDialog.open, true);
   assert.equal(app.elements.consultationResumeID.focused, true);
+});
+
+test("field value correlation nodes show exact spans and explain equality without exposing the signature", () => {
+  const app = createApp();
+  const signature = "hmac:synthetic-private-equality-signature";
+  const occurrence = {
+    id: "field_occurrence-" + "a".repeat(64), kind: "field_occurrence",
+    data: {
+      path: "query.account_id", location: "query", occurrence_index: 1,
+      source_span: { start: 12, end: 34 }, value_span: { start: 23, end: 34 },
+    },
+  };
+  const valueMatch = {
+    id: "value_reference-" + "b".repeat(64), kind: "value_reference",
+    data: { equality_signature: signature },
+  };
+
+  assert.equal(app.nodeLabels.field_occurrence, "FIELD OCCURRENCE");
+  assert.equal(app.nodeLabels.value_reference, "VALUE MATCH");
+  assert.equal(app.displayTitle(occurrence), "query.account_id");
+  assert.match(app.displaySubtitle(occurrence), /occurrence 2 · bytes \[23, 34\)/);
+  assert.equal(app.relationLabels.value_used_in, "same project-keyed value; causality unknown");
+  assert.deepEqual(snapshot(app.safeDetails(occurrence)).filter(([label]) => /bytes|Occurrence|Field path/.test(label)), [
+    ["Field path", "query.account_id"], ["Occurrence", "2"],
+    ["Source bytes", "bytes [12, 34)"], ["Value bytes", "bytes [23, 34)"],
+  ]);
+  assert.equal(JSON.stringify(snapshot(app.safeDetails(valueMatch))).includes(signature), false);
+
+  app.renderInspector(valueMatch);
+  const renderedText = JSON.stringify(snapshot(app.elements.inspector.children));
+  assert.match(renderedText, /correlation only/);
+  assert.match(renderedText, /does not establish causality/);
+  assert.equal(renderedText.includes(signature), false);
 });
 
 test("saved consultation resumes by ID after the original evidence selection is gone", async () => {

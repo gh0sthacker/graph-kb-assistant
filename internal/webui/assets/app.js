@@ -4,7 +4,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const MAX_GRAPH_ZOOM = 10;
 const MIN_GRAPH_ZOOM = 0.35;
 const MAX_EVIDENCE_PREVIEW_BYTES = 2 << 20;
-const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant"];
+const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant", "field_occurrence", "value_reference"];
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
   operationAliases: new Map(), operationAliasRequestId: 0,
@@ -58,18 +58,23 @@ const nodeLabels = {
   asset: "HOST", actor: "ACTOR", object: "OBJECT", session_context: "SESSION CONTEXT",
   condition: "CONDITION", flow: "FLOW", classifier_signal: "SIGNAL",
   hypothesis: "HYPOTHESIS", request_variant: "REQUEST SHAPE", response_variant: "RESPONSE SHAPE",
+  field_occurrence: "FIELD OCCURRENCE", value_reference: "VALUE MATCH",
 };
 const filterLabels = {
   observation: "Requests", endpoint: "Endpoints", operation: "Operations", parameter: "Parameters", asset: "Hosts",
   actor: "Actors", object: "Objects", session_context: "Contexts",
   condition: "Conditions", flow: "Flows", classifier_signal: "Signals",
   hypothesis: "Hypotheses", request_variant: "Request shapes", response_variant: "Response shapes",
+  field_occurrence: "Field occurrences", value_reference: "Value matches",
 };
 const relationLabels = {
   belongs_to_operation: "belongs to operation",
   exposes: "serves endpoint",
   invokes: "calls endpoint",
   has_parameter: "has parameter",
+  has_occurrence: "observed field",
+  occurrence_of: "field shape",
+  value_used_in: "same project-keyed value; causality unknown",
   returns: "returns parameter",
   uses_request_variant: "uses request shape",
   received_response: "received response shape",
@@ -1620,6 +1625,8 @@ function displayTitle(node) {
   if (node.kind === "operation") return BBGraphFocus.operationAliasFor(node, state.operationAliases) || `${data.method || "?"} ${displayPath(data.route_family || "/")}`;
   if (node.kind === "observation") return `${data.observation_kind === "live_capture" ? "Live capture" : "Capture"}${data.http_status ? ` · HTTP ${data.http_status}` : ""}`;
   if (node.kind === "parameter") return displayPath(data.path || data.name || "Parameter");
+  if (node.kind === "field_occurrence") return displayPath(data.path || "Field occurrence");
+  if (node.kind === "value_reference") return "Project value match";
   if (node.kind === "request_variant") return "Request shape";
   if (node.kind === "response_variant") return "Response shape";
   if (node.kind === "asset") return data.origin || "Host";
@@ -1632,6 +1639,12 @@ function displaySubtitle(node) {
   if (node.kind === "endpoint") return (data.query_names || []).slice(0, 4).join(" · ") || "Route template · values masked";
   if (node.kind === "operation") return `${data.route_family_version || "unversioned"} · heuristic route family`;
   if (node.kind === "parameter") return [data.type, data.location].filter(Boolean).join(" · ") || "Structural field";
+  if (node.kind === "field_occurrence") {
+    const occurrence = Number.isInteger(data.occurrence_index) ? `occurrence ${data.occurrence_index + 1}` : "occurrence";
+    const span = data.value_span || data.source_span;
+    return [data.location, occurrence, span ? formatSourceSpan(span) : "source span unavailable"].filter(Boolean).join(" · ");
+  }
+  if (node.kind === "value_reference") return "Same decoded value · project scoped";
   if (node.kind === "request_variant" || node.kind === "response_variant") {
     const headers = Array.isArray(data.header_metadata) ? data.header_metadata.length : 0;
     const fields = Array.isArray(data.fields) ? data.fields.length : 0;
@@ -1696,6 +1709,12 @@ function renderInspector(node) {
       note.append(el("span", "", uncertainty.message));
       elements.inspector.append(note);
     }
+  }
+  if (node.kind === "value_reference") {
+    const note = el("div", "detail-explainer");
+    note.append(el("strong", "", "What this link means"));
+    note.append(el("span", "", "The decoded query value matched under this project's keyed equality signature. This is a correlation only; it does not establish causality, object identity, ownership, or data flow."));
+    elements.inspector.append(note);
   }
   if (rows.length) {
     const section = el("section", "detail-section");
@@ -1803,6 +1822,11 @@ function safeDetails(node) {
     ["Parse state", data.parse_state ? readableParseState(data.parse_state) : node.kind === "observation" ? "unknown" : undefined],
     ["Analysis state", data.analysis_state],
     ["Field type", data.type], ["Location", data.location],
+    ["Field path", node.kind === "field_occurrence" ? data.path : undefined],
+    ["Occurrence", node.kind === "field_occurrence" && Number.isInteger(data.occurrence_index) ? data.occurrence_index + 1 : undefined],
+    ["Source bytes", node.kind === "field_occurrence" && data.source_span ? formatSourceSpan(data.source_span) : undefined],
+    ["Value bytes", node.kind === "field_occurrence" && data.value_span ? formatSourceSpan(data.value_span) : undefined],
+    ["Match basis", node.kind === "value_reference" ? "same project-keyed decoded value" : undefined],
     ["Context", data.context?.scenario],
   ];
   return candidates.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => [label, value === "unknown" ? (label === "Time" ? "not specified" : "unknown") : formatValue(value)]);
@@ -1864,6 +1888,13 @@ function formatValue(value) {
   if (Array.isArray(value)) return value.map(item => item === "unknown" ? "unknown" : String(item)).slice(0, 12).join(", ");
   if (typeof value === "object") return "structural context";
   return String(value);
+}
+
+function formatSourceSpan(span) {
+  if (!span || !Number.isInteger(span.start) || !Number.isInteger(span.end) || span.start < 0 || span.end < span.start) {
+    return "unavailable";
+  }
+  return `bytes [${span.start}, ${span.end})`;
 }
 
 function displayPath(value) {
