@@ -49,13 +49,13 @@ loop remain `PARTIAL`.
   request enumeration, body read, replay, or target traffic was performed.
   Caido reconciliation remains unverified.
 - The latest local KB fallback snapshot reports 15,536 semantic files and
-  77,296 vectors; 14,389 files and 60,824 vectors are compatible. Semantic
-  integrity remains degraded (`ok=false`) with 1,147 wrong-version and
+  77,471 vectors; 14,471 files and 61,380 vectors are compatible. Semantic
+  integrity remains degraded (`ok=false`) with 1,065 wrong-version and
   unhashed rows; the stored index version is null and last semantic index is
   2026-10-07. Lexical search is available with 15,438 files and 67,991
   passages; its last refresh was 2026-10-13. The incremental
   `kb_reindex(force=false)` call timed out after 300 seconds, but the KB
-  database continues to grow and compatible-file counts rose by 135 since the
+  database continues to grow and compatible-file counts rose by 82 since the
   prior snapshot. A live indexer still holds the exclusive index lock with
   four worker connections to the configured Ollama endpoint; `/api/tags`
   returned HTTP 200. A duplicate local start was rejected by the lock before
