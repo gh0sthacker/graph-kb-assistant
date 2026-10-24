@@ -15,6 +15,24 @@
   Decryption of the pre-existing vault and full Stage 4 source coverage remain
   unverified; Stage 4 remains `PARTIAL`.
 
+## Stage 5 encrypted-evidence consultation cycle (2026-10-24) — PARTIAL
+
+- A second synthetic project now exercises the actual appquery evidence packet
+  builder and exact-revision comparator inside the MCP consultation lifecycle.
+  Two encrypted captures flow through operator review, MCP resume and compare,
+  a test-only model adapter, proposal citation validation, candidate save, and
+  a fresh service/MCP server restart. The test verifies that unreviewed MCP
+  output withholds question/excerpts, the synthetic bearer value does not cross
+  the accepted model boundary, exact source citations validate, and the saved
+  candidate resumes at the expected version while remaining `candidate`.
+- `go test ./internal/mcpserver -run
+  TestMCPConsultationUsesEncryptedEvidenceAndResumesSavedCandidate -count=1`
+  passed using only `t.TempDir()` project and vault files. No external model or
+  existing project data is used.
+- Hermes/provider selection and real model-backed evaluation remain
+  intentionally unresolved; the complete synthetic consultation contract is
+  covered, while Stage 5 stays `PARTIAL` pending provider/data-boundary review.
+
 ## Stage 2 full-view provenance cursor round trip (2026-10-24) — PARTIAL
 
 - A synthetic end-to-end regression test now traverses the shared
