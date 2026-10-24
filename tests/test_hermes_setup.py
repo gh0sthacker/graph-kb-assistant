@@ -23,6 +23,12 @@ EXPECTED_TOOLS = [
     "bb_kb_search",
     "bb_kb_get_source",
     "bb_get_capture",
+    "bb_consult_create_session",
+    "bb_consult_compare",
+    "bb_consult_record_proposal",
+    "bb_consult_validate_proposal",
+    "bb_candidate_save",
+    "bb_consult_resume",
 ]
 
 
@@ -123,6 +129,8 @@ class HermesSetupTests(unittest.TestCase):
         config_path = self.profile / "config.yaml"
         original = config_path.read_text(encoding="utf-8")
         old_profile = original.replace("        - bb_graph_neighborhood\n", "")
+        for tool in EXPECTED_TOOLS[9:]:
+            old_profile = old_profile.replace(f"        - {tool}\n", "")
         old_profile += "\ncustom_setting: keep-me\n"
         config_path.write_text(old_profile, encoding="utf-8")
 
@@ -131,12 +139,48 @@ class HermesSetupTests(unittest.TestCase):
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
         updated = config_path.read_text(encoding="utf-8")
         self.assertEqual(updated.count("        - bb_graph_neighborhood\n"), 1)
+        mcp_block = updated.split("  bb_assistant:\n", 1)[1].split("\nskills:\n", 1)[0]
+        self.assertEqual(
+            re.findall(r"^        - ([a-z0-9_]+)$", mcp_block, flags=re.MULTILINE),
+            EXPECTED_TOOLS,
+        )
         self.assertTrue(updated.endswith("\ncustom_setting: keep-me\n"))
+
+        def remove_allowlist_entries(text: str) -> str:
+            return re.sub(r"(?m)^        - bb_[a-z0-9_]+\n", "", text)
+
+        self.assertEqual(
+            remove_allowlist_entries(updated), remove_allowlist_entries(old_profile)
+        )
         self.assertIn("Updated managed Hermes profile", upgraded.stdout)
 
         repeated = self.run_setup()
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
         self.assertEqual(config_path.read_text(encoding="utf-8"), updated)
+
+    def test_refuses_malformed_or_duplicate_managed_allowlists_without_editing(self) -> None:
+        created = self.run_setup()
+        self.assertEqual(created.returncode, 0, created.stderr)
+        config_path = self.profile / "config.yaml"
+        original = config_path.read_text(encoding="utf-8")
+
+        malformed = original.replace(
+            "        - bb_surface_map\n", "        - bb surface map\n", 1
+        )
+        config_path.write_text(malformed, encoding="utf-8")
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("allowlist is ambiguous", result.stderr)
+        self.assertEqual(config_path.read_text(encoding="utf-8"), malformed)
+
+        duplicate = original.replace(
+            "        - bb_surface_map\n", "        - bb_surface_map\n        - bb_surface_map\n", 1
+        )
+        config_path.write_text(duplicate, encoding="utf-8")
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("allowlist is ambiguous", result.stderr)
+        self.assertEqual(config_path.read_text(encoding="utf-8"), duplicate)
 
 
 if __name__ == "__main__":

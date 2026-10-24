@@ -21,7 +21,7 @@
         <div class="topbar-title"><span class="eyebrow">LOCAL DATA</span><h1>Request Graph</h1></div>
         <div class="topbar-controls">
           <label class="project-control" for="project-select"><span>Project</span><select id="project-select" aria-label="Select a local project"><option value="">Loading…</option></select></label>
-          <span class="local-badge"><i></i>Read only</span>
+          <span class="local-badge"><i></i>Local only</span>
           <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh data" title="Refresh data">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 9a6.2 6.2 0 0 0-10.7-3L4 7.4M4 4v3.5h3.5M4 11a6.2 6.2 0 0 0 10.7 3l1.3-1.4M16 16v-3.5h-3.5"/></svg>
           </button>
@@ -122,6 +122,16 @@
           </div>
           <p class="evidence-packet-note">Add up to 4 spans from captures in this project, with a 4 KiB limit per span and 8 KiB total. Local preview only; nothing is sent to a model. Review every excerpt because heuristic redaction can miss sensitive values.</p>
           <pre class="evidence-packet-content" id="evidence-packet-content" tabindex="0" aria-label="Redacted evidence packet preview" hidden></pre>
+          <div class="consultation-actions">
+            <button class="tool-button" id="consultation-create" type="button" disabled>Save session for review</button>
+            <button class="tool-button" id="consultation-copy-id" type="button" hidden>Copy Hermes resume arguments</button>
+            <p id="consultation-status" role="status" aria-live="polite">Preview the selected evidence before creating a consultation.</p>
+          </div>
+          <section class="consultation-review" id="consultation-review" aria-label="Operator review before assistant access" hidden>
+            <p><strong>Operator review required.</strong> Check the saved redacted question and excerpts below. Hermes cannot read them until you accept this exact packet.</p>
+            <pre id="consultation-review-content" tabindex="0" aria-label="Saved redacted packet for operator review"></pre>
+            <button class="tool-button" id="consultation-accept" type="button" disabled>I reviewed this packet — allow Hermes access</button>
+          </section>
         </section>
         <div class="evidence-meta" id="evidence-meta" aria-live="polite">Select an exact historical capture to inspect its stored message.</div>
         <pre class="evidence-content" id="evidence-content" tabindex="0" aria-label="Stored HTTP message bytes"></pre>

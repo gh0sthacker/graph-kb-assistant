@@ -1,4 +1,4 @@
-// Package webui serves the local, read-only graph explorer.
+// Package webui serves the local graph explorer and consultation workspace.
 package webui
 
 import (
@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/consultation"
 )
 
 const (
@@ -32,6 +33,12 @@ const (
 var (
 	projectKeyPattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
 	captureRevisionRegex = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	sameOriginPostRoutes = map[string]struct{}{
+		"/api/evidence/packet-preview": {}, "/api/consultation/session": {},
+		"/api/consultation/accept-review": {}, "/api/consultation/compare": {},
+		"/api/consultation/proposal": {}, "/api/consultation/validate": {},
+		"/api/consultation/candidate": {},
+	}
 )
 
 //go:embed assets/*
@@ -46,7 +53,18 @@ type readAPI interface {
 	BuildEvidencePacket(context.Context, appquery.EvidencePacketRequest) (appquery.EvidencePacket, error)
 }
 
-// NewHandler constructs the local UI and its narrowly scoped read-only API.
+type consultationAPI interface {
+	CreateSession(context.Context, appquery.EvidencePacketRequest, string) (consultation.Session, error)
+	Resume(context.Context, string, string) (consultation.Session, error)
+	ReviewSession(context.Context, string, string) (consultation.Session, error)
+	AcceptReview(context.Context, string, string, int, string) (consultation.Session, error)
+	Compare(context.Context, string, string, int, string, appquery.CaptureComparisonRequest) (consultation.ComparisonRecord, error)
+	RecordProposal(context.Context, consultation.RecordProposalRequest) (consultation.ProposalRecord, error)
+	ValidateProposal(context.Context, consultation.ValidateProposalRequest) (consultation.ValidationReceipt, error)
+	SaveCandidate(context.Context, consultation.SaveCandidateRequest) (consultation.CandidateVersion, error)
+}
+
+// NewHandler constructs the local UI and its narrowly scoped API.
 func NewHandler(api readAPI) (http.Handler, error) {
 	if api == nil {
 		return nil, errors.New("graph explorer API is unavailable")
@@ -68,6 +86,16 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	mux.HandleFunc("GET /api/evidence", captureMessageRangeHandler(api))
 	mux.HandleFunc("GET /api/compare", captureComparisonHandler(api))
 	mux.HandleFunc("POST /api/evidence/packet-preview", evidencePacketPreviewHandler(api))
+	if consultations, ok := api.(consultationAPI); ok {
+		mux.HandleFunc("GET /api/consultation/session", consultationResumeHandler(consultations))
+		mux.HandleFunc("GET /api/consultation/review", consultationReviewHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/session", consultationCreateHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/accept-review", consultationAcceptReviewHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/compare", consultationCompareHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/proposal", consultationProposalHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/validate", consultationValidateHandler(consultations))
+		mux.HandleFunc("POST /api/consultation/candidate", consultationCandidateHandler(consultations))
+	}
 	return securityHeaders(localRequestGate(mux)), nil
 }
 
@@ -575,10 +603,10 @@ func localRequestGate(next http.Handler) http.Handler {
 			}
 			sameOrigin = true
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead &&
-			!(r.Method == http.MethodPost && r.URL.Path == "/api/evidence/packet-preview" && sameOrigin) {
-			w.Header().Set("Allow", "GET, HEAD")
-			writeError(w, http.StatusMethodNotAllowed, "read-only graph explorer")
+		_, allowedPost := sameOriginPostRoutes[r.URL.Path]
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && allowedPost && sameOrigin) {
+			w.Header().Set("Allow", "GET, HEAD, POST")
+			writeError(w, http.StatusMethodNotAllowed, "unsupported local graph explorer method")
 			return
 		}
 		next.ServeHTTP(w, r)

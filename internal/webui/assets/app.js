@@ -15,6 +15,7 @@ const state = {
   renderedEntities: [], renderedAssertions: [], zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
   evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
+  evidencePacketPreview: null, consultation: null, consultationCreateKey: "",
 };
 
 const elements = {
@@ -40,6 +41,9 @@ const elements = {
   evidencePacketAdd: $("#evidence-packet-add"), evidencePacketSelectionCount: $("#evidence-packet-selection-count"),
   evidencePacketSelectionList: $("#evidence-packet-selection-list"), evidencePacketClear: $("#evidence-packet-clear"),
   evidencePacketPreview: $("#evidence-packet-preview"), evidencePacketContent: $("#evidence-packet-content"),
+  consultationCreate: $("#consultation-create"), consultationCopyID: $("#consultation-copy-id"), consultationStatus: $("#consultation-status"),
+  consultationReview: $("#consultation-review"), consultationReviewContent: $("#consultation-review-content"),
+  consultationAccept: $("#consultation-accept"),
   evidenceRequest: $("#evidence-request"), evidenceResponse: $("#evidence-response"),
 };
 
@@ -129,6 +133,8 @@ function clearEvidence(closeDialog = true) {
   state.packetPreviewRequestId++;
   state.evidence = null;
   state.comparison = null;
+  state.evidencePacketPreview = null;
+  resetConsultationUI("Preview the selected evidence before creating a consultation.");
   const trigger = state.evidenceTrigger;
   state.evidenceTrigger = null;
   if (closeDialog && elements.evidenceDialog.open) {
@@ -292,6 +298,8 @@ function selectEvidenceSide(side) {
 function invalidateEvidencePacketPreview() {
   state.packetPreviewRequestId++;
   if (state.evidence) state.evidence.packetPreviewLoading = false;
+  state.evidencePacketPreview = null;
+  resetConsultationUI("Preview the selected evidence before creating a consultation.");
   elements.evidencePacketContent.textContent = "";
   elements.evidencePacketContent.hidden = true;
   updateEvidencePacketControl();
@@ -333,6 +341,26 @@ function updateEvidencePacketControl() {
   elements.evidencePacketAdd.disabled = !validSpan || evidence.loading || selections.length >= 4 || selectedBytes + length > 8192 || duplicate;
   elements.evidencePacketPreview.disabled = !evidence || evidence.loading || evidence.packetPreviewLoading ||
     !draft.question.trim() || selections.length === 0;
+  elements.consultationCreate.disabled = !state.evidencePacketPreview || evidence?.packetPreviewLoading || Boolean(state.consultation?.reviewLoaded);
+  elements.consultationCreate.textContent = state.consultation ? "Reload saved review" : "Save session for review";
+}
+
+function newIdempotencyKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+
+function resetConsultationUI(message) {
+  state.consultation = null;
+  state.consultationCreateKey = "";
+  elements.consultationStatus.textContent = message;
+  elements.consultationReview.hidden = true;
+  elements.consultationReviewContent.textContent = "";
+  elements.consultationAccept.disabled = true;
+  elements.consultationAccept.hidden = false;
+  elements.consultationCopyID.hidden = true;
+  elements.consultationCreate.disabled = true;
+  elements.consultationCreate.textContent = "Save session for review";
 }
 
 function addCurrentEvidenceSpan() {
@@ -388,6 +416,9 @@ async function previewEvidencePacket() {
     });
     if (state.evidence !== evidence || previewRequestId !== state.packetPreviewRequestId || evidence.projectKey !== state.projectKey ||
         question !== state.evidencePacketDraft.question || selectionsKey !== JSON.stringify(state.evidencePacketDraft.selections)) return;
+    state.evidencePacketPreview = { question, selections, projectKey: evidence.projectKey };
+    resetConsultationUI("Review every redacted excerpt, then save the session for a separate operator review.");
+    state.consultationCreateKey = newIdempotencyKey();
     elements.evidencePacketContent.textContent = JSON.stringify(packet, null, 2);
   } catch (error) {
     if (state.evidence !== evidence || previewRequestId !== state.packetPreviewRequestId) return;
@@ -398,6 +429,69 @@ async function previewEvidencePacket() {
       evidence.packetPreviewLoading = false;
       updateEvidencePacketControl();
     }
+  }
+}
+
+async function createOrReviewConsultation() {
+  const preview = state.evidencePacketPreview;
+  if (!preview || preview.projectKey !== state.projectKey) return;
+  const key = state.consultationCreateKey || (state.consultationCreateKey = newIdempotencyKey());
+  elements.consultationCreate.disabled = true;
+  elements.consultationStatus.textContent = "Saving the redacted packet locally…";
+  try {
+    if (!state.consultation) {
+      const created = await postJSON("/api/consultation/session", {
+        project_key: preview.projectKey, question: preview.question, selections: preview.selections,
+        idempotency_key: key,
+      });
+      if (state.evidencePacketPreview !== preview || state.projectKey !== preview.projectKey) return;
+      state.consultation = { id: created.consultation_id, version: created.version, accepted: false, reviewLoaded: false, acceptKey: newIdempotencyKey() };
+    }
+    const session = state.consultation;
+    const query = new URLSearchParams({ project_key: preview.projectKey, session_id: session.id });
+    const review = await getJSON(`/api/consultation/review?${query}`);
+    if (state.evidencePacketPreview !== preview || state.projectKey !== preview.projectKey || state.consultation !== session) return;
+    session.version = review.version;
+    session.accepted = Boolean(review.review_accepted);
+    session.reviewLoaded = true;
+    elements.consultationReviewContent.textContent = JSON.stringify({
+      consultation_id: review.consultation_id, version: review.version,
+      question: review.question, evidence: review.evidence,
+    }, null, 2);
+    elements.consultationReview.hidden = false;
+    elements.consultationAccept.hidden = session.accepted;
+    elements.consultationAccept.disabled = session.accepted;
+    elements.consultationCopyID.hidden = false;
+    elements.consultationStatus.textContent = session.accepted
+      ? `Accepted · consultation ${session.id} · Hermes can now resume this session.`
+      : `Saved locally · consultation ${session.id} · Hermes cannot read this packet until you accept it below.`;
+    updateEvidencePacketControl();
+  } catch (error) {
+    elements.consultationStatus.textContent = `Could not load the saved review: ${error.message}`;
+    elements.consultationCreate.disabled = false;
+    if (state.consultation) elements.consultationCreate.textContent = "Reload saved review";
+  }
+}
+
+async function acceptConsultationReview() {
+  const preview = state.evidencePacketPreview;
+  const session = state.consultation;
+  if (!preview || !session || !session.reviewLoaded || session.accepted || preview.projectKey !== state.projectKey) return;
+  elements.consultationAccept.disabled = true;
+  elements.consultationStatus.textContent = "Recording your approval for Hermes to read this saved packet…";
+  try {
+    const accepted = await postJSON("/api/consultation/accept-review", {
+      project_key: preview.projectKey, session_id: session.id, expected_version: session.version,
+      idempotency_key: session.acceptKey,
+    });
+    if (state.consultation !== session || state.projectKey !== preview.projectKey) return;
+    session.version = accepted.version;
+    session.accepted = Boolean(accepted.review_accepted);
+    elements.consultationAccept.hidden = true;
+    elements.consultationStatus.textContent = `Accepted · consultation ${session.id} · Hermes can now resume this session.`;
+  } catch (error) {
+    elements.consultationStatus.textContent = `Approval was not recorded: ${error.message}`;
+    elements.consultationAccept.disabled = false;
   }
 }
 
@@ -1534,6 +1628,18 @@ elements.evidencePacketLength.addEventListener("input", invalidateEvidencePacket
 elements.evidencePacketAdd.addEventListener("click", addCurrentEvidenceSpan);
 elements.evidencePacketClear.addEventListener("click", clearEvidencePacketDraft);
 elements.evidencePacketPreview.addEventListener("click", () => { void previewEvidencePacket(); });
+elements.consultationCreate.addEventListener("click", () => { void createOrReviewConsultation(); });
+elements.consultationAccept.addEventListener("click", () => { void acceptConsultationReview(); });
+elements.consultationCopyID.addEventListener("click", async () => {
+  if (!state.consultation?.id) return;
+  const resumeArguments = JSON.stringify({ project_key: state.projectKey, session_id: state.consultation.id });
+  try {
+    await navigator.clipboard.writeText(resumeArguments);
+    showToast("Resume arguments copied. In Hermes, call bb_consult_resume with them.");
+  } catch {
+    showToast(`Hermes resume arguments: ${resumeArguments}`);
+  }
+});
 elements.graphCanvas.addEventListener("pointerdown", event => {
   if (event.target.closest?.(".node-group")) return;
   event.preventDefault();

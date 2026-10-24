@@ -1,5 +1,51 @@
 # Project status and known limitations
 
+## Stage 5 consultation implementation (2026-10-23) — PARTIAL
+
+- Added a project-scoped SQLite consultation store with schema-v1 migration,
+  explicit operator-review events, immutable comparisons/proposals/receipts,
+  and stable candidate IDs with per-candidate version sequences. The migration
+  preserves older candidate history and restores append-only application
+  triggers. These triggers are not a tamper-evident protection against direct
+  local filesystem edits.
+- The local UI now creates a session from the reviewed packet preview, shows
+  the saved redacted question and excerpts, and requires a separate operator
+  acceptance action. Before acceptance Hermes sees neither the question nor
+  excerpts, hashes, or redaction spans; MCP has no acceptance tool and all
+  assistant write operations remain blocked. After acceptance the user can
+  copy the project/session arguments for `bb_consult_resume`.
+- MCP now exposes create, exact compare, proposal, citation validation,
+  candidate save, and resume operations. Compare summaries bind their nested
+  request/response sides to the selected revision IDs and validate bounded
+  hashes/sizes. Unavailable comparisons cannot claim equality or carry
+  malformed partial metadata; valid oversized-source metadata remains visible.
+  Citation validation rereads exact selected spans and reruns cited
+  comparisons; a receipt proves reference integrity only, not semantic support
+  or impact. Sessions are currently limited to one project.
+- Migrated version-1 sessions remain unreviewed. Until an operator accepts the
+  saved packet, Hermes responses also hide any legacy comparisons, proposals,
+  receipts and candidate rows, and all assistant mutations reject before
+  idempotency replay. Legacy candidate-save replays resolve the stable ID from
+  the canonical append-only candidate row.
+- Synthetic tests ran the complete create → review → accept → compare →
+  proposal → revalidate → candidate → resume cycle. A separate encrypted
+  fixture used the real appquery resolver: exact evidence validated, then
+  validation failed after the fixture's exact vault blob was removed. A v1→v2
+  migration fixture resumes an unreviewed legacy session, checks its operator
+  preview, then validates canonical candidate-ID recovery on an old idempotent
+  save. These checks use synthetic data and do not validate the existing
+  runtime vault, local Caido databases, or Caido synchronization.
+- `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`,
+  `PYTHONPATH=src python3 -m pytest -q` (110 passed, 8 subtests), the four
+  Hermes setup tests, JS/shell syntax checks and `git diff --check` pass. The
+  private Hermes profile was reconfigured and `./scripts/run-hermes mcp test
+  bb_assistant` discovered 15 tools. No provider/model is set, no model call
+  occurred, and no real captured content was sent to Hermes.
+- Overall remains `PARTIAL`: current runtime database compatibility, complete
+  Caido synchronization, KB integrity, authenticated actor/object analysis,
+  model-backed evaluation, and managed startup/recovery are unverified. See
+  [CONSULTATION.md](CONSULTATION.md) for the workflow and data boundary.
+
 ## Latest verified checkpoint (2026-10-23)
 
 This checkpoint supersedes conflicting runtime measurements in the older

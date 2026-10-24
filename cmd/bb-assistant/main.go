@@ -1355,7 +1355,7 @@ func serveWebUI(args []string) (retErr error) {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	fmt.Fprintf(os.Stderr, "Graph explorer: http://%s/ (read-only, loopback only)\n", *address)
+	fmt.Fprintf(os.Stderr, "Graph explorer: http://%s/ (local-only, loopback listener)\n", *address)
 	err = server.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil

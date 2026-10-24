@@ -1,5 +1,5 @@
-// Package mcpserver exposes a narrow, read-only MCP facade over local project
-// search, BehaviorGraph slices, and the local knowledge index.
+// Package mcpserver exposes a narrow MCP facade over local project search,
+// BehaviorGraph slices, consultation records, and the local knowledge index.
 package mcpserver
 
 import (
@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/consultation"
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/kb"
@@ -49,6 +50,7 @@ type Tools struct {
 	projectsByKey map[string]project.CaidoProjectRef
 	graphService  *graphaccess.Service
 	graphQueries  *appquery.Service
+	consultations *consultation.Service
 	kbIndex       *kb.Index
 	allowRawReads bool
 }
@@ -96,9 +98,15 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 		_ = graphService.Close(context.Background())
 		return nil, errors.New("graph query service could not be initialized")
 	}
+	consultations, err := consultation.NewService(root, projects, graphQueries, graphQueries)
+	if err != nil {
+		_ = graphQueries.Close(context.Background())
+		_ = graphService.Close(context.Background())
+		return nil, errors.New("consultation service could not be initialized")
+	}
 	tools := &Tools{
 		root: root, projects: projects, projectsByKey: byKey,
-		graphService: graphService, graphQueries: graphQueries,
+		graphService: graphService, graphQueries: graphQueries, consultations: consultations,
 		allowRawReads: os.Getenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1",
 	}
 	index, indexErr := kb.OpenIndex(kbIndexPath)
@@ -113,6 +121,9 @@ func (t *Tools) Close() error {
 		return nil
 	}
 	var closeErr error
+	if t.consultations != nil {
+		closeErr = errors.Join(closeErr, t.consultations.Close())
+	}
 	if t.graphQueries != nil {
 		closeErr = errors.Join(closeErr, t.graphQueries.Close(context.Background()))
 	}
@@ -367,6 +378,8 @@ func (t *Tools) call(ctx context.Context, name string, arguments json.RawMessage
 			return nil, err
 		}
 		return t.getKBSource(ctx, args)
+	case "bb_consult_create_session", "bb_consult_compare", "bb_consult_record_proposal", "bb_consult_validate_proposal", "bb_candidate_save", "bb_consult_resume":
+		return t.callConsultation(ctx, name, arguments)
 	default:
 		return nil, errors.New("unknown assistant tool")
 	}
@@ -977,6 +990,7 @@ func toolCatalog(includeRaw bool) []toolSpec {
 			"request_id":  stringSchema(512, map[string]any{"minLength": 1}),
 		}, "project_key", "request_id"), Annotations: readOnly(),
 	})
+	catalog = append(catalog, consultationToolCatalog()...)
 	if includeRaw {
 		catalog = append(catalog, toolSpec{
 			Name: "bb_get_capture_raw", Title: "Read a bounded stored message range",

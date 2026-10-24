@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/consultation"
 )
 
 type explorerAPIFixture struct {
@@ -30,6 +31,46 @@ type explorerAPIFixture struct {
 	packetErr           error
 	packetResult        appquery.EvidencePacket
 	lastPacketRequest   appquery.EvidencePacketRequest
+}
+
+type consultationAPIFixture struct {
+	*explorerAPIFixture
+	reviewSession   consultation.Session
+	resumed         consultation.Session
+	accepted        consultation.Session
+	acceptErr       error
+	acceptCalls     int
+	lastProject     string
+	lastSession     string
+	lastVersion     int
+	lastIdempotency string
+}
+
+func (f *consultationAPIFixture) CreateSession(_ context.Context, _ appquery.EvidencePacketRequest, _ string) (consultation.Session, error) {
+	return consultation.Session{}, nil
+}
+func (f *consultationAPIFixture) Resume(_ context.Context, _, _ string) (consultation.Session, error) {
+	return f.resumed, nil
+}
+func (f *consultationAPIFixture) ReviewSession(_ context.Context, _, _ string) (consultation.Session, error) {
+	return f.reviewSession, nil
+}
+func (f *consultationAPIFixture) AcceptReview(_ context.Context, projectKey, sessionID string, version int, idempotencyKey string) (consultation.Session, error) {
+	f.acceptCalls++
+	f.lastProject, f.lastSession, f.lastVersion, f.lastIdempotency = projectKey, sessionID, version, idempotencyKey
+	return f.accepted, f.acceptErr
+}
+func (f *consultationAPIFixture) Compare(context.Context, string, string, int, string, appquery.CaptureComparisonRequest) (consultation.ComparisonRecord, error) {
+	return consultation.ComparisonRecord{}, nil
+}
+func (f *consultationAPIFixture) RecordProposal(context.Context, consultation.RecordProposalRequest) (consultation.ProposalRecord, error) {
+	return consultation.ProposalRecord{}, nil
+}
+func (f *consultationAPIFixture) ValidateProposal(context.Context, consultation.ValidateProposalRequest) (consultation.ValidationReceipt, error) {
+	return consultation.ValidationReceipt{}, nil
+}
+func (f *consultationAPIFixture) SaveCandidate(context.Context, consultation.SaveCandidateRequest) (consultation.CandidateVersion, error) {
+	return consultation.CandidateVersion{}, nil
 }
 
 func (*explorerAPIFixture) GraphExplorerProjects(context.Context, string, int) (map[string]any, error) {
@@ -430,5 +471,77 @@ func TestSurfaceHandlerRejectsDuplicateOrOversizedInputsAndMapsStaleCursor(t *te
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/surface?project_key="+strings.Repeat("a", 64)+"&cursor=stale", nil))
 	if response.Code != http.StatusConflict {
 		t.Fatalf("stale surface status=%d, want 409: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConsultationReviewAndAcceptanceAreLocalNoStoreAndSameOrigin(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	sessionID := strings.Repeat("b", 43)
+	preview := consultation.Session{
+		ID: sessionID, ProjectKey: projectKey, Version: 1, Question: "Compare two responses", State: consultation.SessionOpen,
+		Evidence: appquery.EvidencePacket{ProjectKey: projectKey, Question: "Compare two responses", Evidence: []appquery.EvidencePacketEvidence{{Excerpt: "HTTP/1.1 200 OK"}}},
+	}
+	accepted := preview
+	accepted.Version = 2
+	accepted.ReviewAccepted = true
+	api := &consultationAPIFixture{
+		explorerAPIFixture: &explorerAPIFixture{}, reviewSession: preview,
+		accepted: accepted,
+	}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "/api/consultation/review?project_key=" + projectKey + "&session_id=" + sessionID
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+target, nil))
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || !strings.Contains(response.Body.String(), "HTTP/1.1 200 OK") {
+		t.Fatalf("review response status=%d cache=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+
+	body := `{"project_key":"` + projectKey + `","session_id":"` + sessionID + `","expected_version":1,"idempotency_key":"accept-review-0123456789"}`
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/accept-review", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || !strings.Contains(response.Body.String(), `"review_accepted":true`) {
+		t.Fatalf("accept response status=%d cache=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+	if api.acceptCalls != 1 || api.lastProject != projectKey || api.lastSession != sessionID || api.lastVersion != 1 || api.lastIdempotency != "accept-review-0123456789" {
+		t.Fatalf("accept call was not routed exactly: %#v", api)
+	}
+}
+
+func TestConsultationMutationsRejectMissingOrForeignOriginAndMalformedBodies(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	sessionID := strings.Repeat("b", 43)
+	body := `{"project_key":"` + projectKey + `","session_id":"` + sessionID + `","expected_version":1,"idempotency_key":"accept-review-0123456789"}`
+	for _, test := range []struct {
+		name        string
+		origin      string
+		contentType string
+		body        string
+		want        int
+	}{
+		{name: "missing origin", contentType: "application/json", body: body, want: http.StatusMethodNotAllowed},
+		{name: "foreign origin", origin: "http://evil.example", contentType: "application/json", body: body, want: http.StatusForbidden},
+		{name: "wrong media type", origin: "http://127.0.0.1", contentType: "text/plain", body: body, want: http.StatusUnsupportedMediaType},
+		{name: "unknown field", origin: "http://127.0.0.1", contentType: "application/json", body: strings.TrimSuffix(body, "}") + `,"unexpected":true}`, want: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api := &consultationAPIFixture{explorerAPIFixture: &explorerAPIFixture{}}
+			handler, _ := NewHandler(api)
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/accept-review", strings.NewReader(test.body))
+			request.Header.Set("Content-Type", test.contentType)
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.want || api.acceptCalls != 0 {
+				t.Fatalf("status=%d calls=%d body=%s", response.Code, api.acceptCalls, response.Body.String())
+			}
+		})
 	}
 }
