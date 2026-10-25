@@ -473,6 +473,7 @@ async function loadEvidenceRange(append) {
     const payload = await getJSON(`/api/evidence?${query}`);
     if (state.evidence !== evidence || requestID !== state.evidenceRequestId || evidence.projectKey !== state.projectKey) return;
     validateEvidenceRangePayload(payload, evidence, requestedOffset);
+    if (payload.source_integrity_status === "verified") setEvidenceVaultPresentation("verified");
     evidence.totalSize = payload.total_size;
     if (!evidence.packetDefaultsInitialized) {
       elements.evidencePacketOffset.value = "0";
@@ -1686,16 +1687,17 @@ async function loadProjects(append = false) {
 async function loadRuntimeCapabilities() {
   try {
     const capabilities = await getJSON("/api/runtime-capabilities");
-    const presentation = BBRuntimeCapabilities.evidenceVaultPresentation(capabilities.evidence_vault_key_state);
-    elements.evidenceVaultStatus.textContent = presentation.label;
-    elements.evidenceVaultStatus.title = presentation.title;
-    elements.evidenceVaultStatus.dataset.state = presentation.state;
+    setEvidenceVaultPresentation(capabilities.evidence_vault_key_state);
   } catch {
-    const presentation = BBRuntimeCapabilities.evidenceVaultPresentation("unknown");
-    elements.evidenceVaultStatus.textContent = presentation.label;
-    elements.evidenceVaultStatus.title = presentation.title;
-    elements.evidenceVaultStatus.dataset.state = presentation.state;
+    setEvidenceVaultPresentation("unknown");
   }
+}
+
+function setEvidenceVaultPresentation(state) {
+  const presentation = BBRuntimeCapabilities.evidenceVaultPresentation(state);
+  elements.evidenceVaultStatus.textContent = presentation.label;
+  elements.evidenceVaultStatus.title = presentation.title;
+  elements.evidenceVaultStatus.dataset.state = presentation.state;
 }
 
 function clearProjectView() {

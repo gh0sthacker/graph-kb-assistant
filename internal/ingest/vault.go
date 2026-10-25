@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"bb-graph-assistant/internal/caido"
@@ -23,19 +24,41 @@ const vaultMagic = "BBA1"
 const (
 	vaultKeyStateMissingOrInvalid      = "missing_or_invalid"
 	vaultKeyStateConfiguredNotVerified = "configured_not_verified"
+	vaultKeyStateVerified              = "verified"
 )
 
 var ErrVaultKeyUnavailable = errors.New("local capture vault key is unavailable or invalid")
 
-// VaultKeyConfigurationState checks only whether the current process has a
-// syntactically valid key. It does not read or decrypt any vault object.
+var verifiedVaultKey struct {
+	sync.RWMutex
+	fingerprint [32]byte
+	verified    bool
+}
+
+// VaultKeyConfigurationState distinguishes a syntactically valid key from a
+// key that authenticated at least one stored object during this process.
 func VaultKeyConfigurationState() string {
 	key, err := readVaultKey()
 	if err != nil {
 		return vaultKeyStateMissingOrInvalid
 	}
+	fingerprint := sha256.Sum256(key)
 	clear(key)
+	verifiedVaultKey.RLock()
+	verified := verifiedVaultKey.verified && verifiedVaultKey.fingerprint == fingerprint
+	verifiedVaultKey.RUnlock()
+	if verified {
+		return vaultKeyStateVerified
+	}
 	return vaultKeyStateConfiguredNotVerified
+}
+
+func markVaultKeyVerified(key []byte) {
+	fingerprint := sha256.Sum256(key)
+	verifiedVaultKey.Lock()
+	verifiedVaultKey.fingerprint = fingerprint
+	verifiedVaultKey.verified = true
+	verifiedVaultKey.Unlock()
 }
 
 func readVaultKey() ([]byte, error) {
@@ -142,6 +165,7 @@ func verifyExistingVaultObject(path string, info os.FileInfo, observationID, sid
 	if decodeErr != nil || !equalBytes(decoded, raw) || sha256Hex(decoded) != digest {
 		return "", "", errors.New("existing vault object failed integrity verification")
 	}
+	markVaultKeyVerified(key)
 	return filepath.Base(path), digest, nil
 }
 

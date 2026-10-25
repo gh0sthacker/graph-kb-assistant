@@ -611,7 +611,8 @@ func writeEvidenceResult(w http.ResponseWriter, result appquery.CaptureMessageRa
 		"returned_size": len(result.Data), "next_offset": nextOffset,
 		"data": data, "encoding": encoding, "sha256": result.SHA256,
 		"captured_at": result.CapturedAt, "parse_state": result.ParseState, "wire_fidelity": result.WireFidelity,
-		"request_truncated": result.RequestTruncated, "response_truncated": result.ResponseTruncated,
+		"source_integrity_status": result.IntegrityStatus,
+		"request_truncated":       result.RequestTruncated, "response_truncated": result.ResponseTruncated,
 		"sensitive_values_may_be_present": true,
 		"coverage_note":                   "Exact bytes from this locally stored historical revision only; live-tail raw bytes remain in Caido.",
 	}

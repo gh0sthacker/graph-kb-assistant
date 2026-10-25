@@ -18,6 +18,10 @@ import (
 func TestReadCaptureMessageForGraphRebuildIsAuthenticatedAndBounded(t *testing.T) {
 	ctx := context.Background()
 	selected, writable, _ := newLiveTailFixture(t)
+	resetVaultKeyVerificationForTest(t)
+	if got := VaultKeyConfigurationState(); got != vaultKeyStateConfiguredNotVerified {
+		t.Fatalf("vault key state before authenticated capture read = %q; want unverified", got)
+	}
 	pageWriter, err := OpenPageWriter(ctx, writable)
 	if err != nil {
 		t.Fatalf("OpenPageWriter() error = %v", err)
@@ -77,6 +81,9 @@ func TestReadCaptureMessageForGraphRebuildIsAuthenticatedAndBounded(t *testing.T
 	}
 	if !bytes.Equal(full.Data, request) || int64(len(full.Data)) != full.TotalSize || full.SHA256 != sha256Hex(request) {
 		t.Fatal("full historical request did not match its authenticated fixture")
+	}
+	if got := VaultKeyConfigurationState(); got != vaultKeyStateVerified {
+		t.Fatalf("vault key state after authenticated capture read = %q; want verified", got)
 	}
 	clear(full.Data)
 	if got, want := vaultCiphertextSize(int64(len(request))), int64(len(request)+len(vaultMagic)+12+16); got != want {

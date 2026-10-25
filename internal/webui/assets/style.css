@@ -20,6 +20,7 @@
 .evidence-vault-status{white-space:nowrap;font:8px var(--mono)}
 .evidence-vault-status[data-state="locked"]{color:var(--amber)}
 .evidence-vault-status[data-state="unverified"]{color:var(--cyan)}
+.evidence-vault-status[data-state="verified"]{color:var(--green)}
 .evidence-vault-status[data-state="unknown"]{color:var(--muted)}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 .load-more[hidden]{display:none}.detail-kind.kind-observation i{background:var(--cyan)!important}.detail-kind.kind-endpoint i{background:var(--amber)!important}.detail-kind.kind-parameter i{background:var(--violet)!important}.detail-kind.kind-asset i{background:var(--green)!important}

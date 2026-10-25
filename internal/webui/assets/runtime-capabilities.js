@@ -16,6 +16,13 @@
         state: "unverified",
       };
     }
+    if (state === "verified") {
+      return {
+        label: "Evidence key verified",
+        title: "The key authenticated and checksum-verified a stored capture in this run. Other captures are verified individually when opened.",
+        state: "verified",
+      };
+    }
     return {
       label: "Evidence status unknown",
       title: "The local evidence key status could not be checked.",

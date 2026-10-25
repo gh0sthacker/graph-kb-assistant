@@ -228,6 +228,7 @@ func readCaptureMessage(ctx context.Context, projectStore *store.ProjectStore, r
 	if int64(len(raw)) != size.Int64 || sha256Hex(raw) != digest.String {
 		return CaptureRange{}, errors.New("raw capture vault content failed integrity verification")
 	}
+	markVaultKeyVerified(key)
 	var block []byte
 	if fullMessage {
 		block = raw

@@ -24,8 +24,9 @@ model boundary. It receives only the accepted resume result and sanitized
 deterministic comparison, derives a proposal and exact citation IDs, then sends
 that proposal through the same MCP persistence and validation path. The fixture
 rejects unreviewed sessions, unavailable comparisons, and raw excerpt markers.
-It is test-only; Hermes still has no configured model/provider and no captured
-project data has been sent to a model.
+It is test-only. Hermes is configured with `gpt-6-luna`, and a model-backed
+synthetic consultation/resume has passed. No captured project packet has been
+sent to the model; its handling of real capture content remains unverified.
 
 Version-1 sessions migrate as unaccepted. Before operator acceptance, Hermes
 also receives no prior comparison, proposal, receipt, or candidate records from
@@ -59,8 +60,9 @@ prior session-wide version chain one stable candidate ID. Existing sessions
 remain unaccepted until an operator reviews them under the new boundary.
 
 The first implementation is single-project and uses local historical data.
-Cross-project sessions, live Caido fetches, actor-aware comparisons, a
-configured Hermes model/provider, and a model-backed evaluation remain
-unimplemented or unverified. Overall coverage stays `PARTIAL` until the
+Cross-project sessions, live Caido fetches, actor-aware comparisons, and a
+model-backed evaluation on reviewed real capture content remain unimplemented
+or unverified. The Hermes provider itself is configured and its synthetic
+workflow passed. Overall coverage stays `PARTIAL` until the
 project-specific synchronization, runtime compatibility, KB, and full
 consultation gates are verified.

@@ -39,6 +39,7 @@ type CaptureMessageRange struct {
 	CapturedAt        *string
 	ParseState        string
 	WireFidelity      string
+	IntegrityStatus   string
 	RequestTruncated  *bool
 	ResponseTruncated *bool
 }
@@ -87,7 +88,7 @@ func (s *Service) CaptureMessageRange(ctx context.Context, request CaptureMessag
 		ProjectKey: request.ProjectKey, RequestID: request.RequestID, RevisionID: *raw.RevisionID,
 		Side: request.Side, Offset: request.Offset, TotalSize: raw.TotalSize,
 		Data: raw.Data, SHA256: raw.SHA256, CapturedAt: raw.CapturedAt,
-		ParseState: raw.ParseState, WireFidelity: raw.WireFidelity,
+		ParseState: raw.ParseState, WireFidelity: raw.WireFidelity, IntegrityStatus: string(raw.IntegrityStatus),
 		RequestTruncated: raw.RequestTruncated, ResponseTruncated: raw.ResponseTruncated,
 	}, nil
 }

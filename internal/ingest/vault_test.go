@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+func resetVaultKeyVerificationForTest(t *testing.T) {
+	t.Helper()
+	verifiedVaultKey.Lock()
+	previousFingerprint, previouslyVerified := verifiedVaultKey.fingerprint, verifiedVaultKey.verified
+	verifiedVaultKey.fingerprint, verifiedVaultKey.verified = [32]byte{}, false
+	verifiedVaultKey.Unlock()
+	t.Cleanup(func() {
+		verifiedVaultKey.Lock()
+		verifiedVaultKey.fingerprint, verifiedVaultKey.verified = previousFingerprint, previouslyVerified
+		verifiedVaultKey.Unlock()
+	})
+}
+
 func TestReadVaultKeyReportsUnavailableWithoutReturningKeyMaterial(t *testing.T) {
 	for _, test := range []struct{ name, value string }{
 		{name: "missing", value: ""},
@@ -21,7 +34,7 @@ func TestReadVaultKeyReportsUnavailableWithoutReturningKeyMaterial(t *testing.T)
 	}
 }
 
-func TestVaultKeyConfigurationStateNeverClaimsDecryptionWasVerified(t *testing.T) {
+func TestVaultKeyConfigurationStateRequiresMatchingAuthenticatedObject(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_VAULT_KEY", "")
 	if got := VaultKeyConfigurationState(); got != vaultKeyStateMissingOrInvalid {
 		t.Fatalf("missing key state = %q", got)

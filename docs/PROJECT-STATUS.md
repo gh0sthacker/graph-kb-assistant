@@ -2,6 +2,19 @@
 
 ## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 
+- A browser walkthrough through the LAN address loaded the running app and
+  selected a retained operation. Its bounded Neo4j view rendered 100 nodes and
+  99 edges with further continuation available. Opening an exact encrypted
+  historical capture and comparing it with another sample worked in the UI;
+  the request sides were byte-identical, while the response sides differed.
+  Message contents and evidence identifiers are intentionally omitted here.
+- That successful authenticated read exposed a stale UI indicator: the
+  configured vault key continued to appear unverified after a capture had
+  already decrypted and passed its checksum. The status now becomes verified
+  only for the current key after a successful authenticated read, and the
+  interface explains that other objects are verified individually. The
+  browser smoke confirmed the indicator changes after opening a stored capture.
+  This does not claim every vault object was checked.
 - After `dcbfe07`, the local maintenance preview scanned all 1,400 retained
   historical captures without truncation. It selected 1,393 eligible captures,
   reconstructed 31 request-derived endpoint entities and 31 operation links,

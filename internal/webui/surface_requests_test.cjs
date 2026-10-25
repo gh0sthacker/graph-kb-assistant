@@ -5,6 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 const BBGraphFocus = require("./assets/graph-focus.js");
+const BBRuntimeCapabilities = require("./assets/runtime-capabilities.js");
 
 // Exercise the shipped request/state functions, including their real rendering
 // calls, with an in-memory DOM and a manually completed fetch transport. The
@@ -53,7 +54,7 @@ function createApp() {
   };
   const requests = [];
   const context = vm.createContext({
-    document, URLSearchParams, AbortController, crypto: webcrypto, BBGraphFocus, setTimeout, clearTimeout,
+    document, URLSearchParams, AbortController, crypto: webcrypto, BBGraphFocus, BBRuntimeCapabilities, setTimeout, clearTimeout,
     fetch(url, options) {
       const parsedURL = new URL(url, "http://local.test");
       if (parsedURL.pathname === "/api/consultation/operation-aliases") {
@@ -604,13 +605,14 @@ test("local evidence viewer pins the exact historical revision and keeps HTTP by
   first.resolve({
     project_key: projectKey, request_id: "239", revision_id: revisionId, side: "request", offset: 0,
     total_size: 15, returned_size: 15, next_offset: null, data: "GET /safe HTTP/1.1", encoding: "utf-8",
-    wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false,
+    wire_fidelity: "source_bytes", parse_state: "complete", request_truncated: false, source_integrity_status: "verified",
   });
   await pending;
   assert.equal(app.elements.evidenceDialog.open, true);
   assert.equal(app.elements.evidenceContent.textContent, "GET /safe HTTP/1.1");
   assert.match(app.elements.evidenceMeta.textContent, new RegExp(revisionId));
   assert.equal(app.state.evidence.revisionId, revisionId);
+  assert.equal(app.elements.evidenceVaultStatus.textContent, "Evidence key verified");
 
   app.selectEvidenceSide("response");
   assert.equal(app.requests.length, 2);

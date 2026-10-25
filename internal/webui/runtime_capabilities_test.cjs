@@ -22,6 +22,14 @@ test("configured key remains unverified until stored data decrypts", () => {
   assert.match(view.title, /not been verified/i);
 });
 
+test("verified key status explains that verification is per run and per capture", () => {
+  const view = evidenceVaultPresentation("verified");
+  assert.equal(view.label, "Evidence key verified");
+  assert.equal(view.state, "verified");
+  assert.match(view.title, /authenticated and checksum-verified/i);
+  assert.match(view.title, /other captures are verified individually/i);
+});
+
 test("unknown readiness data does not claim evidence access", () => {
   const view = evidenceVaultPresentation("unexpected");
   assert.equal(view.label, "Evidence status unknown");

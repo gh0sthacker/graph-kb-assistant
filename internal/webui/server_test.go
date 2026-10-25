@@ -153,6 +153,7 @@ func TestEvidenceHandlerReadsOnePinnedBoundedLocalMessageRange(t *testing.T) {
 		ProjectKey: projectKey, RequestID: "239", RevisionID: revisionID, Side: "request",
 		Offset: 16, TotalSize: 21, Data: []byte("GET /"), SHA256: strings.Repeat("c", 64),
 		ParseState: "complete", WireFidelity: "reconstructed_text",
+		IntegrityStatus: "verified",
 	}}
 	handler, err := NewHandler(api)
 	if err != nil {
@@ -174,7 +175,7 @@ func TestEvidenceHandlerReadsOnePinnedBoundedLocalMessageRange(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if result["data"] != "GET /" || result["encoding"] != "utf-8" || result["revision_id"] != revisionID || result["next_offset"] != nil {
+	if result["data"] != "GET /" || result["encoding"] != "utf-8" || result["revision_id"] != revisionID || result["next_offset"] != nil || result["source_integrity_status"] != "verified" {
 		t.Fatalf("evidence response = %#v", result)
 	}
 }
