@@ -17,7 +17,8 @@ const state = {
   renderedEntities: [], renderedAssertions: [], layoutPositions: new Map(), zoom: 1, panX: 0, panY: 0, drag: null, toastTimer: null,
   evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
-  evidencePacketPreview: null, consultation: null, consultationCreateKey: "", contextAnnotationKey: "", consultationResumeRequestId: 0,
+  evidencePacketPreview: null, consultation: null,
+  consultationCreateKey: "", contextAnnotationKey: "", consultationResumeRequestId: 0,
 };
 
 const elements = {
@@ -197,13 +198,16 @@ async function postJSON(path, body) {
   return payload;
 }
 
-function clearEvidence(closeDialog = true) {
+function clearEvidence(closeDialog = true, preserveAcceptedConsultation = false) {
+  const consultationToPreserve = preserveAcceptedConsultation && state.consultation?.accepted === true &&
+    state.consultation.reviewLoaded === true ? state.consultation : null;
   state.evidenceRequestId++;
   state.packetPreviewRequestId++;
   state.evidence = null;
   state.comparison = null;
   state.evidencePacketPreview = null;
   resetConsultationUI("Preview the selected evidence before creating a consultation.");
+  if (consultationToPreserve?.projectKey === state.projectKey) state.consultation = consultationToPreserve;
   const trigger = state.evidenceTrigger;
   state.evidenceTrigger = null;
   if (closeDialog && elements.evidenceDialog.open) {
@@ -650,6 +654,7 @@ function displayConsultationReview(review, session) {
     : `Saved locally · consultation ${session.id} · Hermes cannot read this packet until you accept it below.`;
   updateEvidencePacketControl();
   updateComparisonAttachmentControl();
+  renderCurrentCaptureComparison();
 }
 
 async function resumeConsultationByID() {
@@ -859,6 +864,7 @@ async function acceptConsultationReview() {
     elements.consultationStatus.textContent = `Accepted · consultation ${session.id} · Hermes can now resume this session.`;
     renderConsultationCandidate(session);
     updateComparisonAttachmentControl();
+    renderCurrentCaptureComparison();
   } catch (error) {
     elements.consultationStatus.textContent = `Approval was not recorded: ${error.message}`;
     elements.consultationAccept.disabled = false;
@@ -1236,7 +1242,10 @@ function setComparisonBaseline(item, button) {
     showToast("An exact local historical revision is required as the comparison baseline.");
     return;
   }
-  state.comparisonBaseline = { projectKey: state.projectKey, requestId, revisionId };
+  state.comparisonBaseline = {
+    projectKey: state.projectKey, requestId, revisionId,
+    graphObservationID: String(item?.graph_observation_id || ""),
+  };
   if (state.selectedNode?.kind === "observation") {
     renderInspector(state.selectedNode);
   } else {
@@ -1261,10 +1270,11 @@ async function openComparison(item, trigger = null) {
     showToast("Choose a different capture from the comparison baseline.");
     return;
   }
-  clearEvidence(false);
+  clearEvidence(false, true);
   const comparison = {
     projectKey: state.projectKey, leftRequestId: baseline.requestId, leftRevisionId: baseline.revisionId,
-    rightRequestId, rightRevisionId,
+    leftGraphObservationID: baseline.graphObservationID || "",
+    rightRequestId, rightRevisionId, rightGraphObservationID: String(item?.graph_observation_id || ""),
   };
   state.comparison = comparison;
   updateComparisonAttachmentControl();
@@ -1296,7 +1306,7 @@ async function openComparison(item, trigger = null) {
     if (state.comparison !== comparison || requestID !== state.evidenceRequestId || comparison.projectKey !== state.projectKey) return;
     comparison.result = result;
     elements.evidenceMeta.textContent = `Exact revisions · ${comparison.leftRevisionId} → ${comparison.rightRevisionId}`;
-    elements.evidenceCompareContent.textContent = formatCaptureComparison(result);
+    renderCurrentCaptureComparison();
     elements.evidenceFoot.textContent = result.coverage_note || "Exact local byte comparison; unavailable or incomplete messages are identified per side.";
     updateComparisonAttachmentControl();
   } catch (error) {
@@ -1308,7 +1318,43 @@ async function openComparison(item, trigger = null) {
   }
 }
 
-function formatCaptureComparison(result) {
+function renderCurrentCaptureComparison() {
+  const comparison = state.comparison;
+  if (!comparison?.result || comparison.projectKey !== state.projectKey) return;
+  elements.evidenceCompareContent.textContent = formatCaptureComparison(comparison.result, comparison);
+}
+
+function acceptedComparisonContextForSide(comparison, side) {
+  const isLeft = side === "left";
+  const graphObservationID = isLeft ? comparison.leftGraphObservationID : comparison.rightGraphObservationID;
+  const requestId = isLeft ? comparison.leftRequestId : comparison.rightRequestId;
+  const revisionId = isLeft ? comparison.leftRevisionId : comparison.rightRevisionId;
+  if (!graphObservationID || !requestId || !revisionId) return [];
+  const node = { id: graphObservationID, kind: "observation" };
+  const provenance = (state.graph?.capture_provenance || []).filter(item =>
+    item?.graph_observation_id === graphObservationID && String(item.request_id) === requestId &&
+    item.revision_id === revisionId);
+  return BBGraphFocus.contextAnnotationsForObservation(node, provenance, state.consultation, comparison.projectKey);
+}
+
+function formatComparisonAnalystContext(comparison, side, title) {
+  const annotations = acceptedComparisonContextForSide(comparison, side);
+  const lines = [`${title} ANALYST CONTEXT`];
+  if (!annotations.length) {
+    lines.push("No analyst-provided context is linked to this exact revision in the accepted consultation.");
+    return lines.join("\n");
+  }
+  for (const annotation of annotations) {
+    const annotationVersion = annotation.annotationVersion === null ? "unknown" : String(annotation.annotationVersion);
+    lines.push(`${annotation.kind}: ${annotation.label} · analyst-provided · consultation ${annotation.sessionID} · accepted version ${annotation.sessionVersion} · annotation version ${annotationVersion}`);
+    for (const reference of annotation.evidenceReferences) {
+      lines.push(`Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido request ${reference.requestId} · revision ${reference.revisionId} · reference ${reference.referenceID}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatCaptureComparison(result, comparison = state.comparison) {
   const renderRevision = (label, revision) => {
     if (!revision?.sha256) return null;
     const truncation = revision.truncated === true ? "yes" : revision.truncated === false ? "no" : "unknown";
@@ -1331,7 +1377,16 @@ function formatCaptureComparison(result) {
     if (right) lines.push(right);
     return lines.join("\n");
   };
-  return [renderSide("Request", result.request), renderSide("Response", result.response)].join("\n\n");
+  const sections = [renderSide("Request", result.request), renderSide("Response", result.response)];
+  const session = state.consultation;
+  if (comparison?.projectKey === state.projectKey && session?.projectKey === state.projectKey &&
+      session.accepted === true && session.reviewLoaded === true) {
+    sections.push(
+      formatComparisonAnalystContext(comparison, "left", "BASELINE (A)"),
+      formatComparisonAnalystContext(comparison, "right", "SELECTED (B)"),
+    );
+  }
+  return sections.join("\n\n");
 }
 
 async function loadProjects(append = false) {

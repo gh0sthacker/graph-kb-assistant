@@ -1,5 +1,23 @@
 # Project status and known limitations
 
+## Stage 4 accepted context in exact capture comparison — PARTIAL (2026-10-25)
+
+- Exact capture comparison now shows accepted analyst context in separate
+  Baseline (A) and Selected (B) sections. It resolves each side through the
+  graph's exact observation provenance and the shared context matcher, which
+  requires the selected project's loaded accepted consultation, exact request
+  and revision IDs, and the annotation's selected evidence-reference ID.
+- The comparison view shows analyst-provided labels, consultation and
+  annotation versions, and evidence-reference provenance. It adds no excerpts
+  or raw HTTP values to the context display and sends no annotation fields to
+  the comparison endpoint or Hermes packet. Mismatched revisions and
+  unaccepted reviews show no labels.
+- `node --test internal/webui/graph_focus_test.cjs
+  internal/webui/surface_requests_test.cjs` passed 69/69 synthetic UI tests;
+  `git diff --check` passed. No Go build/tests, Neo4j, containers, runtime,
+  working databases, Caido, or live browser were used. Runtime coverage remains
+  `PARTIAL`.
+
 ## Stage 3 accepted analyst context in graph inspector — PARTIAL (2026-10-25)
 
 - The observation inspector can display context labels from the currently

@@ -162,6 +162,7 @@ test("accepted analyst context rejects unaccepted, foreign, or mismatched eviden
   const empty = [];
 
   assert.deepEqual(contextAnnotationsForObservation(observation, exactProvenance, { ...session, accepted: false }, "project-a"), empty);
+  assert.deepEqual(contextAnnotationsForObservation(observation, exactProvenance, { ...session, reviewLoaded: false }, "project-a"), empty);
   assert.deepEqual(contextAnnotationsForObservation(observation, exactProvenance, session, "project-b"), empty);
   assert.deepEqual(contextAnnotationsForObservation(observation, [
     { graph_observation_id: observation.id, request_id: "239", revision_id: "b".repeat(64) },

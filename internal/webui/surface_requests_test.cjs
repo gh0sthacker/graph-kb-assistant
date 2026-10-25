@@ -614,7 +614,7 @@ test("capture comparison pins exact revisions, reports fidelity and truncation, 
   assert.ok(baselineButton, "the graph inspector should offer a baseline action");
   baselineButton.listeners.click();
   assert.deepEqual(snapshot(app.state.comparisonBaseline), {
-    projectKey, requestId: "239", revisionId: baselineRevision,
+    projectKey, requestId: "239", revisionId: baselineRevision, graphObservationID: observation.id,
   });
   const renderedButtons = allChildren(app.elements.inspector);
   const baselineCompare = renderedButtons.find(item => item.className === "detail-action capture-compare" && item.disabled);
@@ -656,6 +656,75 @@ test("capture comparison pins exact revisions, reports fidelity and truncation, 
   assert.equal(app.state.comparisonBaseline, null, "a project switch clears the pinned baseline");
   app.requests[1].resolve(page("b.test"));
   await switchProject;
+});
+
+test("capture comparison shows accepted context per exact side without changing the compare request", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const leftRevision = "b".repeat(64);
+  const rightRevision = "c".repeat(64);
+  const mismatchedRevision = "d".repeat(64);
+  app.state.projectKey = projectKey;
+  app.state.comparisonBaseline = {
+    projectKey, requestId: "239", revisionId: leftRevision, graphObservationID: "observation-left",
+  };
+  app.state.graph = { capture_provenance: [
+    { graph_observation_id: "observation-left", request_id: "239", revision_id: leftRevision },
+    { graph_observation_id: "observation-right", request_id: "240", revision_id: rightRevision },
+  ] };
+  app.state.consultation = {
+    id: "consultation-compare", projectKey, version: 6, accepted: true, reviewLoaded: true,
+    evidenceReferences: [
+      { evidence_reference_id: "ref-left", evidence_index: 0, side: "request", request_id: "239", revision_id: leftRevision },
+      { evidence_reference_id: "ref-right", evidence_index: 1, side: "response", request_id: "240", revision_id: rightRevision },
+      { evidence_reference_id: "ref-mismatch", evidence_index: 2, side: "request", request_id: "240", revision_id: mismatchedRevision },
+    ],
+    contextAnnotations: [
+      { context_annotation_id: "annotation-left", session_version: 4, kind: "actor", label: "actor-a", evidence_reference_ids: ["ref-left"], origin: "analyst", evidence_state: "analyst_provided" },
+      { context_annotation_id: "annotation-right", session_version: 5, kind: "flow", label: "flow-b", evidence_reference_ids: ["ref-right"], origin: "analyst", evidence_state: "analyst_provided", excerpt: "PRIVATE_CONTEXT_EXCERPT" },
+      { context_annotation_id: "annotation-mismatch", session_version: 5, kind: "actor", label: "wrong-revision-label", evidence_reference_ids: ["ref-mismatch"], origin: "analyst", evidence_state: "analyst_provided" },
+    ],
+  };
+
+  const pending = app.openComparison({
+    request_id: "240", revision_id: rightRevision, graph_observation_id: "observation-right",
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  const compareRequest = app.requests[0];
+  assert.deepEqual([...compareRequest.url.searchParams.keys()].sort(), [
+    "left_request_id", "left_revision_id", "project_key", "right_request_id", "right_revision_id",
+  ]);
+  compareRequest.resolve({
+    request: {
+      available: true, equal: false, compared_bytes: 12, first_difference_offset: 7,
+      left_excerpt: "baseline excerpt", right_excerpt: "selected excerpt",
+      left: { request_id: "239", revision_id: leftRevision, sha256: "e".repeat(64), size: 12 },
+      right: { request_id: "240", revision_id: rightRevision, sha256: "f".repeat(64), size: 12 },
+    },
+    response: { available: false, reason: "Exact response bytes are unavailable." },
+    coverage_note: "Stored bytes only.",
+  });
+  await pending;
+
+  const shown = app.elements.evidenceCompareContent.textContent;
+  assert.match(shown, /BASELINE \(A\) ANALYST CONTEXT/);
+  assert.match(shown, /actor: actor-a · analyst-provided/);
+  assert.match(shown, /accepted version 6 · annotation version 4/);
+  assert.match(shown, /ref-left/);
+  assert.match(shown, /SELECTED \(B\) ANALYST CONTEXT/);
+  assert.match(shown, /flow: flow-b · analyst-provided/);
+  assert.match(shown, /accepted version 6 · annotation version 5/);
+  assert.match(shown, /ref-right/);
+  assert.doesNotMatch(shown, /wrong-revision-label|PRIVATE_CONTEXT_EXCERPT/);
+
+  app.state.consultation.evidenceReferences[1].revision_id = mismatchedRevision;
+  const mismatch = app.formatCaptureComparison(app.state.comparison.result, app.state.comparison);
+  assert.match(mismatch, /actor: actor-a · analyst-provided/);
+  assert.doesNotMatch(mismatch, /flow: flow-b · analyst-provided|ref-right/);
+
+  app.state.consultation.accepted = false;
+  const unaccepted = app.formatCaptureComparison(app.state.comparison.result, app.state.comparison);
+  assert.doesNotMatch(unaccepted, /ANALYST CONTEXT|actor-a|flow-b/);
 });
 
 test("a graph comparison can be attached to a resumed accepted consultation only for its exact evidence revisions", async () => {
