@@ -428,7 +428,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if utf8.RuneCountInString(query) > 4096 {
 		return SearchResult{}, errors.New("KB query exceeds the 4096-character limit")
 	}
-	terms := redAmonFullTextTerms(query)
+	matchExpression := redAmonFullTextExpression(query)
 	if len(options.SourceNames) > maximumSourceFilters {
 		return SearchResult{}, errors.New("select no more than 32 KB source families")
 	}
@@ -457,18 +457,11 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	}
 	result.Hits = []Hit{}
 	result.RetrievalMode = "fulltext"
-	if len(terms) == 0 {
+	if matchExpression == "" {
 		if err := tx.Commit(); err != nil {
 			return SearchResult{}, errors.New("KB read transaction could not finish")
 		}
 		return result, nil
-	}
-	match := make([]string, 0, len(terms))
-	for _, term := range terms {
-		// RedAmon's Neo4j/Lucene full-text query matches complete analyzed
-		// terms. Prefix expansion here (for example auth*) returns candidates
-		// RedAmon would not, changing the hybrid RRF pool and final results.
-		match = append(match, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
 	}
 	statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
 		substr(c.source_id,1,1025),substr(c.title,1,2049),substr(c.text,1,?),
@@ -480,7 +473,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
 		WHERE chunk_search MATCH ?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
-	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, strings.Join(match, " OR ")}
+	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, matchExpression}
 	candidateLimit := max(options.TopK*6, 30)
 	statement += " ORDER BY 16 LIMIT ?"
 	args = append(args, candidateLimit)
@@ -1012,7 +1005,7 @@ func queryTerms(input string) []string {
 	terms := make([]string, 0, maximumSearchTerms)
 	current := make([]rune, 0, 64)
 	flush := func() {
-		if len(current) >= 2 && len(terms) < maximumSearchTerms {
+		if len(current) > 0 && len(terms) < maximumSearchTerms {
 			terms = append(terms, string(current))
 		}
 		current = current[:0]
@@ -1036,11 +1029,10 @@ func queryTerms(input string) []string {
 	return terms
 }
 
-// redAmonFullTextTerms mirrors RedAmon's Lucene query sanitization before
-// producing exact FTS5 terms. In particular, punctuation in identifiers such
-// as CVE-2024-12345 must separate terms rather than turn the whole value into
-// a phrase that Lucene would not require.
-func redAmonFullTextTerms(input string) []string {
+// redAmonFullTextExpression mirrors RedAmon's Lucene special-character cleanup,
+// default OR behavior, and explicit boolean operators. Terms are quoted for
+// FTS5 after the same punctuation has been removed from the input.
+func redAmonFullTextExpression(input string) string {
 	var sanitized strings.Builder
 	for _, character := range input {
 		switch character {
@@ -1052,7 +1044,51 @@ func redAmonFullTextTerms(input string) []string {
 	}
 	query := strings.ReplaceAll(sanitized.String(), "&&", " ")
 	query = strings.ReplaceAll(query, "||", " ")
-	return queryTerms(query)
+	items := make([]string, 0, maximumSearchTerms+4)
+	termCount := 0
+	for _, word := range strings.Fields(query) {
+		if word == "AND" || word == "OR" || word == "NOT" {
+			items = append(items, word)
+			continue
+		}
+		for _, term := range queryTerms(word) {
+			if termCount == maximumSearchTerms {
+				break
+			}
+			items = append(items, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+			termCount++
+		}
+		if termCount == maximumSearchTerms {
+			break
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	var expression strings.Builder
+	previousWasTerm := false
+	for index, item := range items {
+		switch item {
+		case "AND", "OR", "NOT":
+			if !previousWasTerm || index+1 == len(items) || items[index+1] == "AND" || items[index+1] == "OR" || items[index+1] == "NOT" {
+				return ""
+			}
+			expression.WriteByte(' ')
+			expression.WriteString(item)
+			expression.WriteByte(' ')
+			previousWasTerm = false
+		default:
+			if previousWasTerm {
+				expression.WriteString(" OR ")
+			}
+			expression.WriteString(item)
+			previousWasTerm = true
+		}
+	}
+	if !previousWasTerm {
+		return ""
+	}
+	return expression.String()
 }
 
 func pointerTooLong(value *string, maximum int) bool {

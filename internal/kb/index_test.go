@@ -193,6 +193,48 @@ func TestSearchSanitizesLucenePunctuationLikeRedAmon(t *testing.T) {
 	}
 }
 
+func TestSearchHonorsLuceneBooleanOperatorsAndSingleCharacterTerms(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "C is a programming language with alpha beta examples"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("d", 64)
+	secondText := "alpha appears without the other term"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "synthetic", "document-2", "Alpha only", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, secondID, "synthetic", "Alpha only", secondText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("add synthetic boolean-operator document: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{query: "alpha AND beta", want: 1},
+		{query: "C++", want: 1},
+	} {
+		result, err := index.Search(context.Background(), test.query, SearchOptions{TopK: 5})
+		if err != nil || len(result.Hits) != test.want {
+			t.Fatalf("Search(%q) = %d hits, %v; want %d", test.query, len(result.Hits), err, test.want)
+		}
+	}
+}
+
 func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
 	content := "first vector candidate content"

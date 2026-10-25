@@ -11,17 +11,17 @@
   manifest uses RedAmon's retrieval constants: hybrid RRF (`k=60`), the same per-source
   boosts, BGE cross-encoder reranking over 30 candidates, sigmoid score mapping,
   and MMR (`lambda=0.65`). The E5/BGE model revisions are pinned. Go full-text
-  search now sanitizes Lucene punctuation, matches complete terms instead of
-  prefixes, and applies source filters after global top-k for full-text and
-  vector candidates, matching RedAmon's query order more closely. E5 candidates
-  use float32 inner-product ordering like RedAmon's normalized FAISS
-  `IndexFlatIP` vectors. SQLite FTS5 and Neo4j/Lucene analyzers still differ;
-  end-to-end output parity has not been measured.
+  search now sanitizes Lucene punctuation, honors uppercase Boolean operators,
+  includes single-character terms, matches complete terms instead of prefixes,
+  and applies source filters after global top-k for full-text and vector
+  candidates. E5 candidates use float32 inner-product ordering like RedAmon's
+  normalized FAISS `IndexFlatIP` vectors. SQLite FTS5 and Neo4j/Lucene analyzers
+  still differ; end-to-end output parity has not been measured.
 - The active local snapshot is `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`:
   161,240 source documents and 162,413 chunks. It currently contains six
   populated families; ExploitDB has no imported rows. Full NVD data is already
   imported (146,940 records). E5 vector generation is active and resumable;
-  5,792 of 162,395 eligible content-chunk vectors were present at this
+  6,048 of 162,395 eligible content-chunk vectors were present at this
   checkpoint. Retrieval parity is unverified until vector generation and
   source-level comparisons finish.
 - ExploitDB remains blocked for this build. The pinned GitLab repository carries
