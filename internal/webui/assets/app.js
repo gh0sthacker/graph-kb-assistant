@@ -236,8 +236,8 @@ function renderOperationBackfillPreview(result) {
     ["Scanned", result.scanned], ["Eligible captures", result.eligible_captures],
     ["New operations", result.new_operation_groups], ["New endpoint entities", result.new_endpoint_entities],
     ["New links", result.new_assertion_links],
-    ["Skipped", Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0) + Number(result.skipped_endpoint_identity_mismatch || 0)],
-    ["Endpoint identity mismatches", Number(result.skipped_endpoint_identity_mismatch || 0)],
+    ["Skipped", Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0)],
+    ["Legacy endpoint ID differences", Number(result.endpoint_identity_mismatches || 0)],
     ["Request bytes inspected", formatBytes(result.request_bytes)],
   ];
   const list = el("ul");
@@ -291,8 +291,11 @@ async function applyOperationBackfill() {
   const preview = state.operationBackfillPreview;
   if (!preview || preview.projectKey !== state.projectKey || !preview.result.candidate_sha256 || preview.result.state !== "ready") return;
   const result = preview.result;
-  const skipped = Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0) + Number(result.skipped_endpoint_identity_mismatch || 0);
-  const coverageNote = result.coverage_state === "partial" ? `\n${skipped} captures are excluded; only eligible captures will be applied.\n` : "";
+  const skipped = Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0);
+  const identityMismatches = Number(result.endpoint_identity_mismatches || 0);
+  const coverageNote = result.coverage_state === "partial"
+    ? `\n${identityMismatches} legacy endpoint IDs differ from the canonical request-derived IDs; ${skipped} captures remain excluded.\n`
+    : "";
   const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${Number(result.new_endpoint_entities || 0)} endpoints · ${result.new_assertion_links} links${coverageNote}\nThis commits the local graph and then syncs its selected-project Neo4j outbox in order. Earlier graph events for this project may be applied first. It does not contact Caido or send data to Hermes.`;
   if (!window.confirm(message)) return;
   const requestId = ++state.operationBackfillRequestId;
