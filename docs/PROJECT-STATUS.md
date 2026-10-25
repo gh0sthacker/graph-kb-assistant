@@ -22,18 +22,17 @@
   not ready. The ExploitDB provider is
   implemented but the source is still excluded while its dataset reuse terms
   are unresolved.
-- The existing resumable vector process (PID 1121967) had entered Linux's
-  stopped state (`T`) while its transient systemd unit was inactive. It was
-  resumed once and is currently running (`S`/`R` observed); no new worker was
-  started. The count remained 7,392 during a 45-second observation while the
-  next batch was processing.
+- The existing resumable vector process (PID 1121967) repeatedly entered
+  Linux's stopped state (`T`) even while its transient systemd unit reports
+  active/running. It was resumed once; `S`/`R` was observed briefly, then it
+  returned to `T`. No new worker was started and the durable count remains
+  7,392. The cause of the repeated stop is not yet identified.
   Resuming the existing worker increased the stored count from 6,752 to 7,072;
   a later 64-row batch brought it to 7,392 before the process stopped again.
   A 256-row batch experiment committed one batch in 5:54 but left the next
   batch uncommitted after a further 2:36; the 64-row worker committed 64 in
   2:12. These samples cover different chunk lengths, so the throughput
-  comparison is inconclusive. The transient unit itself is inactive although
-  the resumed process is running. Monitor that process and the durable vector
+  comparison is inconclusive. Monitor the same process and durable vector
   count; do not start a duplicate worker. The index remains readable through
   its available lexical path while vector publication is incomplete.
 - No deployed RedAmon instance was found on Proxmox2: its read-only inventory
