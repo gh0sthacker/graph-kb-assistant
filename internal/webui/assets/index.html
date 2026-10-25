@@ -197,7 +197,7 @@
           <div><span class="eyebrow">BOUNDED LOCAL MAINTENANCE</span><h2 id="operation-backfill-title">Repair operation graph</h2></div>
           <button class="icon-button" id="operation-backfill-close" type="button" aria-label="Close operation graph repair">×</button>
         </header>
-        <p class="maintenance-note">Preview reads and decrypts bounded historical request bytes locally to build missing operation links. It does not read responses, contact Caido, or send data to Hermes. Applying a ready preview writes graph bundles and a retryable Neo4j outbox; it does not drain the queue.</p>
+        <p class="maintenance-note">Preview reads and decrypts bounded historical request bytes locally to build missing operation links. It does not read responses, contact Caido, or send data to Hermes. Applying a ready preview writes graph bundles, then advances the selected project's ordered Neo4j outbox through those bundles. Earlier queued graph events in this project may be applied first. If Neo4j is unavailable, the local graph stays committed and the outbox remains retryable.</p>
         <div class="maintenance-fields">
           <label for="operation-backfill-max-captures">Maximum captures<input id="operation-backfill-max-captures" type="number" min="1" max="20000" value="5000"></label>
           <label for="operation-backfill-max-bytes">Maximum request bytes<input id="operation-backfill-max-bytes" type="number" min="1048576" max="1073741824" value="536870912"></label>

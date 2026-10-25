@@ -286,7 +286,7 @@ async function applyOperationBackfill() {
   const preview = state.operationBackfillPreview;
   if (!preview || preview.projectKey !== state.projectKey || !preview.result.candidate_sha256 || preview.result.state !== "ready") return;
   const result = preview.result;
-  const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${result.new_assertion_links} links\n\nThis writes the local graph and retryable Neo4j outbox. It does not contact Caido or send data to Hermes.`;
+  const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${result.new_assertion_links} links\n\nThis commits the local graph and then syncs its selected-project Neo4j outbox in order. Earlier graph events for this project may be applied first. It does not contact Caido or send data to Hermes.`;
   if (!window.confirm(message)) return;
   const requestId = ++state.operationBackfillRequestId;
   elements.operationBackfillPreview.disabled = true;
@@ -298,7 +298,14 @@ async function applyOperationBackfill() {
     });
     if (requestId !== state.operationBackfillRequestId || state.projectKey !== preview.projectKey) return;
     state.operationBackfillPreview = null;
-    elements.operationBackfillStatus.textContent = `Applied ${applied.bundles_imported} new bundles; ${applied.bundles_replayed} replayed. Neo4j outbox sync remains pending.`;
+    const neo4jStatus = applied.neo4j_drain === "ready"
+      ? "Neo4j sync complete."
+      : applied.neo4j_drain === "disabled"
+        ? "Neo4j sync is disabled; local outbox remains pending."
+        : applied.neo4j_drain === "not_applicable"
+          ? "No graph updates were needed."
+          : "Local graph committed; Neo4j outbox remains retryable and sync is pending.";
+    elements.operationBackfillStatus.textContent = `Applied ${applied.bundles_imported} new bundles; ${applied.bundles_replayed} replayed. ${neo4jStatus}`;
     renderOperationBackfillPreview(result);
     elements.operationBackfillApply.disabled = true;
     await loadSurface(false);

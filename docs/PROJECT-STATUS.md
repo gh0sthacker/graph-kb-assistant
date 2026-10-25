@@ -34,22 +34,22 @@
   candidate digest; it does not return the request bytes or candidate bundles.
 - Apply requires the exact digest from a complete preview, reacquires the
   project maintenance lease, recomputes the candidate, and writes idempotent
-  BehaviorGraph bundles plus the durable Neo4j outbox. It does not call Caido,
-  send data to Hermes, or drain unrelated queued jobs. The UI explains that
-  Neo4j delivery remains pending until a projection worker handles the outbox.
-  The installed web-only systemd unit starts with no `--project-key`, so it
-  starts no projection worker; entries created through this UI remain pending
-  until an operator separately configures a selected-project worker or runs an
-  explicit sync. This UI does not claim Neo4j repair is complete.
+  BehaviorGraph bundles plus the durable Neo4j outbox. It then advances that
+  selected project's ordered outbox through each exact imported bundle ID;
+  earlier events in the same project may be applied first. If Neo4j sync fails,
+  the local graph remains committed and the outbox stays retryable. It does not
+  call Caido or send data to Hermes. The installed web-only systemd unit starts
+  with no `--project-key`, so it starts no continuous projection worker for
+  future intake jobs. This UI reports local commit and Neo4j sync separately.
   The maintenance operations are web-only and were not added to the MCP tool
   catalog.
 - Synthetic web-handler tests cover bounded input, response redaction,
   same-origin enforcement, exact-digest conflict handling, and project scope.
   Focused Go packages passed: `internal/webui`, `internal/mcpserver`,
-  `internal/ingest`, and `cmd/bb-assistant`; 81 JavaScript tests and the app
-  JavaScript syntax check passed. No backfill preview or graph write was run
-  against the retained project, so operation-node recovery and Neo4j delivery
-  remain unverified.
+  `internal/ingest`, `internal/graphsync`, and `cmd/bb-assistant`; 81 JavaScript
+  tests and the app JavaScript syntax check passed. No backfill preview, graph
+  write, or Neo4j sync was run against the retained project, so operation-node
+  recovery and real-project delivery remain unverified.
 
 ## Current delivery checkpoint (2026-10-25, vault configuration and LAN reachability)
 
