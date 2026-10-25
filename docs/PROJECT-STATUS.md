@@ -2417,11 +2417,11 @@ This repository is an early public alpha. The following boundaries are deliberat
 ## Latest local delivery checkpoint (2026-10-25, verified runtime state)
 
 - The installed local UI's read-only `/api/runtime-capabilities` endpoint
-  returned HTTP 200 and reported `evidence_vault_key_state=verified`. No
-  existing capture body or project database was opened in this check. This
-  supersedes earlier checkpoints that described the vault key as missing or
-  invalid, but does not prove completeness or integrity of every retained
-  capture.
+  returned HTTP 200. Before the later service restart, it reported
+  `evidence_vault_key_state=verified`; the current process after restart
+  reports `configured_not_verified`. The vault key is configured, but its
+  ability to decrypt the existing vault has not been confirmed in this process.
+  No existing capture body or project database was opened to check it.
 - The current imported KB snapshot is
   `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`, with
   161,240 documents and 162,413 chunks. Six source families are `done`; the
