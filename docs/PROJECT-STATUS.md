@@ -1,5 +1,24 @@
 # Project status and known limitations
 
+## Current delivery checkpoint (2026-10-25, vault configuration and LAN reachability)
+
+- The existing vault key was found in the private file
+  `/home/max/.local/share/bb-graph-assistant/graph-kb-assistant/runtime.env`
+  (mode `0600`). Its value is not recorded here. The web service had been
+  started without this file, so its capability endpoint incorrectly reported
+  the key as missing. The user service now explicitly selects this runtime
+  file and has been restarted through the managed launcher.
+- Both the local and Proxmox-forwarded capability endpoints now report
+  `configured_not_verified`; this confirms key syntax/length only, not that
+  historical encrypted objects decrypt. No project database, vault object, or
+  captured HTTP body was read for this configuration fix.
+- The UI returned HTTP 200 at `http://192.168.1.148:8765/` after the persistent
+  Proxmox NAT rules were reloaded. This reachability check ran from the app
+  host; access from a separate client device remains unconfirmed.
+- Remaining evidence gaps include actual vault-object decryption, project
+  history reconciliation, and graph/coverage review against retained project
+  data. Caido intake remains off and no real capture was sent to Hermes.
+
 ## Current delivery checkpoint (2026-10-25, after synthetic Hermes consultation)
 
 - The managed Graph Assistant Hermes profile now uses the OpenAI Codex
