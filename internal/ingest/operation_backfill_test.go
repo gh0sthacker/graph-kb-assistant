@@ -77,6 +77,27 @@ func TestOperationBackfillPreviewJSONDoesNotExposeBundles(t *testing.T) {
 	}
 }
 
+func TestOperationBackfillCoverageAllowsCompleteCandidateWithExplicitGaps(t *testing.T) {
+	preview := OperationBackfillPreview{
+		HistoricalCaptures: 1400, Scanned: 1400, EligibleCaptures: 1362,
+		SkippedNoOperation: 7, SkippedEndpointMissing: 31,
+	}
+	finalizeOperationBackfillCoverage(&preview)
+	if preview.State != "ready" || preview.CoverageState != "partial" {
+		t.Fatalf("complete candidate with gaps state=%q coverage=%q", preview.State, preview.CoverageState)
+	}
+	preview.Truncated = true
+	finalizeOperationBackfillCoverage(&preview)
+	if preview.State != "partial" || preview.CoverageState != "partial" {
+		t.Fatalf("truncated candidate state=%q coverage=%q", preview.State, preview.CoverageState)
+	}
+	preview = OperationBackfillPreview{HistoricalCaptures: 10, Scanned: 10}
+	finalizeOperationBackfillCoverage(&preview)
+	if preview.State != "empty" || preview.CoverageState != "complete" {
+		t.Fatalf("empty candidate state=%q coverage=%q", preview.State, preview.CoverageState)
+	}
+}
+
 func TestOperationBackfillExtractsOperationFromHistoricalProjectionFixture(t *testing.T) {
 	projectRef := project.CaidoProjectRef{InstanceID: "fixture-instance", ProjectID: "operation-backfill"}
 	exchangeRef := caido.ExchangeRef{Project: projectRef, RequestID: "fixture-request"}

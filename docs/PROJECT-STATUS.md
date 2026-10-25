@@ -30,8 +30,12 @@
   running a separate command-line workflow.
 - Preview is user-triggered, project-scoped, read-only, and bounded to the
   existing 5,000-capture/512 MiB defaults (with the existing 20,000-capture/
-  1 GiB hard limits). It reports counts, masked route-family samples, and a
-  candidate digest; it does not return the request bytes or candidate bundles.
+  1 GiB hard limits). A complete scan may still have partial coverage when an
+  observation has no safe endpoint/operation relation; those exclusions are
+  reported separately while the eligible candidate remains explicitly
+  applyable. A scan truncated by a count or byte limit remains non-applyable.
+  Preview reports counts, masked route-family samples, and a candidate digest;
+  it does not return the request bytes or candidate bundles.
 - Apply requires the exact digest from a complete preview, reacquires the
   project maintenance lease, recomputes the candidate, and writes idempotent
   BehaviorGraph bundles plus the durable Neo4j outbox. It then advances that
@@ -45,6 +49,8 @@
   catalog.
 - Synthetic web-handler tests cover bounded input, response redaction,
   same-origin enforcement, exact-digest conflict handling, and project scope.
+  Synthetic coverage tests distinguish a complete candidate with explicit
+  exclusions from a truncated, non-applyable scan.
   Focused Go packages passed: `internal/webui`, `internal/mcpserver`,
   `internal/ingest`, `internal/graphsync`, and `cmd/bb-assistant`; 81 JavaScript
   tests and the app JavaScript syntax check passed. No backfill preview, graph

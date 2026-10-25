@@ -232,7 +232,8 @@ function operationBackfillOptions() {
 
 function renderOperationBackfillPreview(result) {
   const details = [
-    ["State", result.state], ["Scanned", result.scanned], ["Eligible captures", result.eligible_captures],
+    ["State", result.state], ["Coverage", result.coverage_state || "unknown"],
+    ["Scanned", result.scanned], ["Eligible captures", result.eligible_captures],
     ["New operations", result.new_operation_groups], ["New links", result.new_assertion_links],
     ["Skipped", Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0) + Number(result.skipped_endpoint_missing || 0)],
     ["Request bytes inspected", formatBytes(result.request_bytes)],
@@ -270,7 +271,9 @@ async function previewOperationBackfill() {
     const ready = result.state === "ready" && !!result.candidate_sha256 && Number(result.eligible_captures) > 0;
     elements.operationBackfillApply.disabled = !ready;
     elements.operationBackfillStatus.textContent = ready
-      ? "Ready. Review the counts, then explicitly apply this exact preview."
+      ? result.coverage_state === "partial"
+        ? "Candidate is fully scanned but coverage is partial. Review excluded captures, then explicitly apply only the eligible records."
+        : "Ready. Review the counts, then explicitly apply this exact preview."
       : result.state === "partial"
         ? "Preview is partial; it cannot be applied. Reduce the limits or resolve the reported coverage gaps."
         : "No operation changes are ready to apply.";
@@ -286,7 +289,9 @@ async function applyOperationBackfill() {
   const preview = state.operationBackfillPreview;
   if (!preview || preview.projectKey !== state.projectKey || !preview.result.candidate_sha256 || preview.result.state !== "ready") return;
   const result = preview.result;
-  const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${result.new_assertion_links} links\n\nThis commits the local graph and then syncs its selected-project Neo4j outbox in order. Earlier graph events for this project may be applied first. It does not contact Caido or send data to Hermes.`;
+  const skipped = Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0) + Number(result.skipped_endpoint_missing || 0);
+  const coverageNote = result.coverage_state === "partial" ? `\n${skipped} captures are excluded; only eligible captures will be applied.\n` : "";
+  const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${result.new_assertion_links} links${coverageNote}\nThis commits the local graph and then syncs its selected-project Neo4j outbox in order. Earlier graph events for this project may be applied first. It does not contact Caido or send data to Hermes.`;
   if (!window.confirm(message)) return;
   const requestId = ++state.operationBackfillRequestId;
   elements.operationBackfillPreview.disabled = true;

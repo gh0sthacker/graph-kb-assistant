@@ -47,6 +47,7 @@ type OperationBackfillSample struct {
 type OperationBackfillPreview struct {
 	ProjectKey             string                    `json:"project_key"`
 	State                  string                    `json:"state"`
+	CoverageState          string                    `json:"coverage_state"`
 	WriteMode              string                    `json:"write_mode"`
 	HistoricalCaptures     int                       `json:"historical_captures"`
 	Scanned                int                       `json:"scanned"`
@@ -108,7 +109,7 @@ func PreviewHistoricalOperationBackfill(
 	}
 
 	preview := OperationBackfillPreview{
-		ProjectKey: selected.ProjectKey, State: "ready", WriteMode: "preview_only",
+		ProjectKey: selected.ProjectKey, WriteMode: "preview_only",
 		OperationSamples: []OperationBackfillSample{},
 	}
 	reader, err := behaviorgraph.OpenReader(ctx, selected.BehaviorGraphPath, selected.ProjectKey, selected.BehaviorReceiptPath)
@@ -131,7 +132,6 @@ func PreviewHistoricalOperationBackfill(
 	preview.HistoricalCaptures = total
 	if total > options.MaxCaptures {
 		preview.Truncated = true
-		preview.State = "partial"
 	}
 
 	additions := make([]operationBackfillAddition, 0, len(rows))
@@ -168,7 +168,6 @@ func PreviewHistoricalOperationBackfill(
 		if captured.TotalSize > options.MaxBytes-bytesRead {
 			clear(captured.Data)
 			preview.Truncated = true
-			preview.State = "partial"
 			break
 		}
 		bytesRead += captured.TotalSize
@@ -251,14 +250,33 @@ func PreviewHistoricalOperationBackfill(
 	if len(preview.OperationSamples) > 10 {
 		preview.OperationSamples = preview.OperationSamples[:10]
 	}
-	if preview.SkippedUnmapped+preview.SkippedOversized+preview.SkippedNoOperation+preview.SkippedEndpointMissing > 0 {
-		preview.State = "partial"
-	}
+	finalizeOperationBackfillCoverage(&preview)
 	preview.CandidateSHA256, err = operationBackfillDigest(bundles)
 	if err != nil {
 		return preview, err
 	}
 	return preview, nil
+}
+
+func finalizeOperationBackfillCoverage(preview *OperationBackfillPreview) {
+	if preview == nil {
+		return
+	}
+	coveragePartial := preview.Truncated || preview.SkippedUnmapped+preview.SkippedOversized+
+		preview.SkippedNoOperation+preview.SkippedEndpointMissing > 0
+	if coveragePartial {
+		preview.CoverageState = "partial"
+	} else {
+		preview.CoverageState = "complete"
+	}
+	switch {
+	case preview.Truncated:
+		preview.State = "partial"
+	case preview.EligibleCaptures == 0:
+		preview.State = "empty"
+	default:
+		preview.State = "ready"
+	}
 }
 
 // ApplyHistoricalOperationBackfill commits the exact ready preview to the
