@@ -14,7 +14,7 @@ function createApp() {
   function node() {
     return {
       textContent: "", value: "", hidden: false, disabled: false, open: false, isConnected: true, focused: false, children: [],
-      options: [], listeners: {},
+      options: [], listeners: {}, dataset: {},
       classList: { add() {}, remove() {}, toggle() {} },
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
@@ -306,6 +306,73 @@ test("expanded field-value seed IDs are retained across direct graph continuatio
   });
   await secondPage;
   assert.deepEqual(snapshot(app.state.graphSeeds), expandedSeeds);
+});
+
+test("field-value traversal states are visible and described as correlation only", async () => {
+  const app = createApp();
+  app.state.projectKey = "project-a";
+  const cases = [
+    { state: "expanded", traversal: { state: "expanded", truncated: false, path_node_count: 3 }, text: /Value correlation expanded · 3 path nodes/ },
+    { state: "bounded", traversal: { state: "bounded", truncated: true, path_node_count: 4 }, text: /Value correlation bounded · 4 path nodes · more may exist/ },
+    { state: "bounded", traversal: { state: "expanded", truncated: true, path_node_count: 2 }, text: /Value correlation bounded · 2 path nodes · more may exist/ },
+    { state: "index_unavailable", traversal: { state: "index_unavailable", truncated: false, path_node_count: 0 }, text: /Value index unavailable · direct graph only/ },
+    { state: "no_matches", traversal: { state: "no_matches", truncated: false, path_node_count: 0 }, text: /No matching same-project value correlations/ },
+    { state: "not_applicable", traversal: { state: "not_applicable", truncated: false, path_node_count: 0 }, text: /Field-value traversal not applicable/ },
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const loading = app.loadGraph([`observation-${index}`], { view: "direct" });
+    app.requests.at(-1).resolve({
+      entities: [], assertions: [], seed_ids: [`observation-${index}`],
+      field_value_traversal: item.traversal,
+    });
+    await loading;
+    assert.equal(app.elements.fieldValueStatus.dataset.state, item.state);
+    assert.match(app.elements.fieldValueStatus.textContent, item.text);
+    assert.match(app.elements.fieldValueStatus.title, /correlation only; it does not establish causality/);
+  }
+});
+
+test("field-value traversal status survives continuation and clears on project switch", async () => {
+  const app = createApp();
+  app.state.projectKey = "project-a";
+  const seed = `observation-${"a".repeat(64)}`;
+  const firstPage = app.loadGraph([seed], { view: "direct" });
+  app.requests.at(-1).resolve({
+    entities: [], assertions: [], seed_ids: [seed], next_cursor: "field-cursor",
+    truncated: true, incomplete: true,
+    field_value_traversal: { state: "expanded", truncated: false, path_node_count: 3 },
+  });
+  await firstPage;
+  const expectedStatus = "Value correlation expanded · 3 path nodes";
+  assert.equal(app.elements.fieldValueStatus.textContent, expectedStatus);
+
+  const nextPage = app.loadGraph(app.state.graphSeeds, {
+    view: "direct", cursor: app.state.graph.next_cursor, appendPage: true,
+  });
+  app.requests.at(-1).resolve({
+    entities: [], assertions: [], seed_ids: [seed], truncated: false, incomplete: false,
+    field_value_traversal: { state: "not_applicable", truncated: false, path_node_count: 0 },
+  });
+  await nextPage;
+  assert.equal(app.elements.fieldValueStatus.textContent, expectedStatus);
+  assert.equal(app.state.graph.field_value_traversal.state, "expanded");
+
+  const lateGraph = app.loadGraph([seed], { view: "direct" });
+  const lateGraphRequest = app.requests.at(-1);
+  const switching = app.selectProject("B");
+  assert.equal(app.state.graph, null);
+  assert.equal(app.elements.fieldValueStatus.hidden, true);
+  lateGraphRequest.resolve({
+    entities: [], assertions: [], seed_ids: [seed],
+    field_value_traversal: { state: "bounded", truncated: true, path_node_count: 4 },
+  });
+  await lateGraph;
+  const surfaceRequest = app.requests.findLast(request => request.url.pathname === "/api/surface");
+  surfaceRequest.resolve({ operations: [], total_operations: 0, coverage_state: "partial", coverage_gaps: [] });
+  await switching;
+  assert.equal(app.elements.fieldValueStatus.hidden, true);
+  assert.equal(app.elements.fieldValueStatus.textContent, "");
 });
 
 test("native candidate continuation displays the cumulative server graph page", () => {

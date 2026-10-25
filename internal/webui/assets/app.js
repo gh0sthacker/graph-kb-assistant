@@ -4,6 +4,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const MAX_GRAPH_ZOOM = 10;
 const MIN_GRAPH_ZOOM = 0.35;
 const MAX_EVIDENCE_PREVIEW_BYTES = 2 << 20;
+const FIELD_VALUE_TRAVERSAL_STATES = new Set(["expanded", "bounded", "index_unavailable", "no_matches", "not_applicable"]);
 const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant", "field_occurrence", "value_reference"];
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
@@ -24,6 +25,7 @@ const elements = {
   filter: $("#endpoint-filter"), loadMore: $("#load-more"), surfaceFoot: $("#surface-foot-text"),
   graphCanvas: $("#graph-canvas"), graphScene: $("#graph-scene"), canvasEmpty: $("#canvas-empty"),
   emptyTitle: $("#canvas-empty-title"), emptyCopy: $("#canvas-empty-copy"), graphState: $("#graph-state"),
+  fieldValueStatus: $("#field-value-status"),
   graphTitle: $("#graph-title"), graphSubtitle: $("#graph-subtitle"), graphProject: $("#graph-project-label"),
   graphCounts: $("#graph-counts"), inspector: $("#inspector-content"), inspectIndex: $("#inspect-index"),
   graphFilters: $("#graph-filters"), graphFilterSummary: $("#graph-filter-summary"),
@@ -113,6 +115,52 @@ function setStatus(message, kind = "") {
   elements.graphState.className = `graph-state ${kind}`.trim();
   const statusLabel = elements.graphState.querySelector("span:last-child");
   if (statusLabel) statusLabel.textContent = message;
+}
+
+function fieldValueTraversalPresentation(traversal) {
+  let state = FIELD_VALUE_TRAVERSAL_STATES.has(traversal?.state) ? traversal.state : "not_applicable";
+  if (state === "expanded" && traversal?.truncated === true) state = "bounded";
+  const pathNodeCount = Number.isSafeInteger(traversal?.path_node_count) && traversal.path_node_count >= 0
+    ? traversal.path_node_count : null;
+  const countLabel = pathNodeCount === null || pathNodeCount === 0 ? "" : ` · ${pathNodeCount} path nodes`;
+  const correlationNote = "Same-project keyed value equality is correlation only; it does not establish causality, identity, or ownership.";
+
+  switch (state) {
+    case "expanded":
+      return { state, label: `Value correlation expanded${countLabel}`, title: correlationNote };
+    case "bounded":
+      return { state, label: `Value correlation bounded${countLabel} · more may exist`, title: `${correlationNote} This traversal is bounded, so additional matching paths may exist.` };
+    case "index_unavailable":
+      return {
+        state, label: "Value index unavailable · direct graph only",
+        title: `The project field-value index is unavailable or stale; only direct graph neighbors are shown. ${correlationNote}`,
+      };
+    case "no_matches":
+      return { state, label: "No matching same-project value correlations", title: correlationNote };
+    default:
+      return { state: "not_applicable", label: "Field-value traversal not applicable", title: "This graph slice does not include field-value traversal. " + correlationNote };
+  }
+}
+
+function renderFieldValueTraversalStatus(traversal) {
+  const status = elements.fieldValueStatus;
+  if (!status) return;
+  const presentation = fieldValueTraversalPresentation(traversal);
+  status.hidden = false;
+  status.dataset.state = presentation.state;
+  status.textContent = presentation.label;
+  status.title = presentation.title;
+  status.setAttribute("aria-label", `${presentation.label}. ${presentation.title}`);
+}
+
+function clearFieldValueTraversalStatus() {
+  const status = elements.fieldValueStatus;
+  if (!status) return;
+  status.hidden = true;
+  status.textContent = "";
+  status.title = "";
+  status.dataset.state = "";
+  status.setAttribute("aria-label", "");
 }
 
 function showToast(message) {
@@ -1375,6 +1423,7 @@ function clearProjectView() {
   state.totalOperations = 0;
   state.surfaceGaps = [];
   state.graph = null;
+  clearFieldValueTraversalStatus();
   state.selectedEndpoint = null;
   state.selectedNode = null;
   state.focusedNodeId = null;
@@ -1412,6 +1461,7 @@ async function selectProject(projectKey) {
   state.totalOperations = 0;
   state.surfaceGaps = [];
   state.graph = null;
+  clearFieldValueTraversalStatus();
   state.selectedEndpoint = null;
   state.selectedNode = null;
   state.focusedNodeId = null;
@@ -1662,6 +1712,7 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
     state.graph = appendPage && previous.graph && view === "direct"
       ? mergeGraphPages(previous.graph, graph)
       : graph;
+    renderFieldValueTraversalStatus(state.graph.field_value_traversal);
     state.graphSeeds = Array.isArray(graph.seed_ids) ? [...graph.seed_ids] : [...seeds];
     state.graphView = view;
     state.focusedNodeId = appendPage ? previous.focus : focusNodeId;
@@ -1707,6 +1758,7 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
       return;
     }
     state.graph = null;
+    clearFieldValueTraversalStatus();
     renderEmpty("Could not build the graph", error.message || "Check compatibility with the local BehaviorGraph database.");
     elements.graphCounts.replaceChildren(countText(0, "nodes"), el("b"), countText(0, "edges"));
     elements.inspector.replaceChildren(emptyList("Graph unavailable", "Select another endpoint or check graph database integrity."));
@@ -1723,8 +1775,15 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
 
 function mergeGraphPages(current, next) {
   const continuationScopes = new Set(["rendered_missing_assertion_branches", "rendered_and_native_candidate_branches"]);
-  if (continuationScopes.has(current.continuation_scope) || continuationScopes.has(next.continuation_scope)) return next;
-  const merged = { ...current, ...next };
+  const currentTraversal = current.field_value_traversal;
+  const nextTraversal = next.field_value_traversal;
+  const fieldValueTraversal = nextTraversal?.state === "not_applicable" &&
+    currentTraversal?.state && currentTraversal.state !== "not_applicable"
+    ? currentTraversal : nextTraversal || currentTraversal;
+  if (continuationScopes.has(current.continuation_scope) || continuationScopes.has(next.continuation_scope)) {
+    return { ...next, field_value_traversal: fieldValueTraversal };
+  }
+  const merged = { ...current, ...next, field_value_traversal: fieldValueTraversal };
   for (const key of new Set([...Object.keys(current), ...Object.keys(next)])) {
     if (!Array.isArray(current[key]) && !Array.isArray(next[key])) continue;
     const values = [...(current[key] || []), ...(next[key] || [])];
