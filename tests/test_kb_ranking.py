@@ -35,7 +35,32 @@ class _FailOnSecondBatchEmbedder(_FixtureEmbedder):
         return super().embed_documents_batch(texts, batch_size=batch_size)
 
 
+class _RecordingEmbedder(_FixtureEmbedder):
+    def __init__(self):
+        self.texts = []
+
+    def embed_documents_batch(self, texts, *, batch_size=64):
+        self.texts.extend(texts)
+        return super().embed_documents_batch(texts, batch_size=batch_size)
+
+
 class RetrievalRankingTests(unittest.TestCase):
+    def test_embedding_batches_process_shorter_chunks_first(self) -> None:
+        documents = tuple(
+            SourceDocument.create(
+                source_name="nvd", source_id=f"CVE-2026-{index:05d}", title=f"CVE-{index}",
+                text=text, metadata={"document_role": "content"},
+            )
+            for index, text in enumerate(("long " * 100, "tiny", "medium " * 10))
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-embed-order-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "c" * 64, sources=documents)
+            embedder = _RecordingEmbedder()
+            self.assertEqual(index.rebuild_embeddings(embedder, batch_size=3), 3)
+            self.assertEqual(embedder.texts, sorted((chunk.text for chunk in chunks), key=len))
+
     def test_persisted_vectors_retrieve_semantic_candidate_without_lexical_match(self) -> None:
         documents = (
             SourceDocument.create(

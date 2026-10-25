@@ -12,7 +12,9 @@
   first ten CPE criteria, including RedAmon's 480-token atomic-record clipping
   and ellipsis. Full upstream JSON remains locally preserved with a separate
   digest; model-facing KB source reads expose only normalized text.
-  Offline provider and SQLite snapshot checks cover this split.
+  Offline provider and SQLite snapshot checks cover this split. E5 ingestion
+  batches shorter chunks first to avoid padding every batch to its longest CVE
+  record.
 - These code-level matches do **not** make the corpus identical. The approved
   seven-family source manifest still has unresolved source coverage, including
   ExploitDB dataset rights. A full NVD snapshot is being fetched; import and

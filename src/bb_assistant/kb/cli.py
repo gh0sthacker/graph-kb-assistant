@@ -116,6 +116,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--download-model", action="store_true",
         help="allow downloading the pinned E5 model; otherwise use local model files only",
     )
+    embed.add_argument(
+        "--batch-size", type=int, default=64, choices=range(1, 257),
+        help="embedding batch size (1-256); shorter chunks are batched together to reduce padding",
+    )
     models = commands.add_parser("models", help="prepare pinned local RedAmon retrieval models")
     models.add_argument(
         "--download", action="store_true",
@@ -202,7 +206,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"embedded {done}/{total} KB chunks", file=sys.stderr, flush=True)
                 last_progress = done
 
-        count = index.rebuild_embeddings(embedder, progress_callback=report_progress)
+        count = index.rebuild_embeddings(embedder, batch_size=args.batch_size, progress_callback=report_progress)
         print(json.dumps({"embedded_chunks": count, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     index = KBIndex(_configured_index_path(args.index_path))
