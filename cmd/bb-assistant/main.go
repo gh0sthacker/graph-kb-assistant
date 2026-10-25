@@ -109,7 +109,7 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|graph-operation-backfill-preview|graph-operation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
+		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
 	}
 	switch args[0] {
 	case "version":
@@ -139,6 +139,10 @@ func run(args []string) error {
 		return previewOperationBackfill(args[1:])
 	case "graph-operation-backfill-apply":
 		return applyOperationBackfill(args[1:])
+	case "graph-navigation-backfill-preview":
+		return previewNavigationBackfill(args[1:])
+	case "graph-navigation-backfill-apply":
+		return applyNavigationBackfill(args[1:])
 	case "caido-reconcile":
 		return reconcileCaidoHistory(args[1:])
 	case "kb-validate":
@@ -858,6 +862,161 @@ func applyOperationBackfill(args []string) error {
 	}
 	if storeCloseErr != nil {
 		return errors.New("selected project store could not be closed after operation backfill")
+	}
+	return nil
+}
+
+func previewNavigationBackfill(args []string) error {
+	flags := flag.NewFlagSet("graph-navigation-backfill-preview", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	maxCaptures := flags.Int("max-captures", ingest.DefaultNavigationBackfillMaxCaptures, "maximum historical captures to inspect")
+	maxBytes := flags.Int64("max-bytes", ingest.DefaultNavigationBackfillMaxBytes, "maximum total locally decrypted request and response bytes")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
+		return errors.New("usage: bb-assistant graph-navigation-backfill-preview --project-key <sha256> [--max-captures 5000] [--max-bytes 536870912] [--data-root path]")
+	}
+	if *maxCaptures < 1 || *maxCaptures > ingest.MaximumNavigationBackfillMaxCaptures ||
+		*maxBytes < 1<<20 || *maxBytes > ingest.MaximumNavigationBackfillMaxBytes {
+		return errors.New("navigation backfill preview limits are invalid")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	refs, err := project.LoadProjectRefsReadOnly(*root)
+	if err != nil {
+		return err
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if key == selectedKeys[0] {
+			copyRef := ref
+			selected = &copyRef
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("selected project is not in the local project registry")
+	}
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	projectStore, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, *selected, *root, maintenance)
+	if err != nil {
+		return err
+	}
+	preview, previewErr := ingest.PreviewHistoricalNavigationBackfill(ctx, projectStore, maintenance, ingest.NavigationBackfillOptions{
+		MaxCaptures: *maxCaptures, MaxBytes: *maxBytes,
+	})
+	closeErr := projectStore.Close()
+	preview.Bundles = nil
+	if encodeErr := json.NewEncoder(os.Stdout).Encode(preview); encodeErr != nil {
+		return errors.New("navigation backfill preview result could not be written")
+	}
+	if previewErr != nil {
+		return previewErr
+	}
+	if closeErr != nil {
+		return errors.New("selected project store could not be closed after preview")
+	}
+	return nil
+}
+
+func applyNavigationBackfill(args []string) error {
+	flags := flag.NewFlagSet("graph-navigation-backfill-apply", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	candidateSHA256 := flags.String("candidate-sha256", "", "exact SHA-256 digest returned by the preview command")
+	maxCaptures := flags.Int("max-captures", ingest.DefaultNavigationBackfillMaxCaptures, "maximum historical captures to inspect")
+	maxBytes := flags.Int64("max-bytes", ingest.DefaultNavigationBackfillMaxBytes, "maximum total locally decrypted request and response bytes")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) ||
+		!validProjectKey(*candidateSHA256) || *maxCaptures < 1 || *maxCaptures > ingest.MaximumNavigationBackfillMaxCaptures ||
+		*maxBytes < 1<<20 || *maxBytes > ingest.MaximumNavigationBackfillMaxBytes {
+		return errors.New("usage: bb-assistant graph-navigation-backfill-apply --project-key <sha256> --candidate-sha256 <preview-sha256> [--max-captures 5000] [--max-bytes 536870912] [--data-root path]")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	refs, err := project.LoadProjectRefsReadOnly(*root)
+	if err != nil {
+		return err
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if key == selectedKeys[0] {
+			copyRef := ref
+			selected = &copyRef
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("selected project is not in the local project registry")
+	}
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	readOnlyProject, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, *selected, *root, maintenance)
+	if err != nil {
+		return err
+	}
+	preview, previewErr := ingest.PreviewHistoricalNavigationBackfill(ctx, readOnlyProject, maintenance, ingest.NavigationBackfillOptions{
+		MaxCaptures: *maxCaptures, MaxBytes: *maxBytes,
+	})
+	closeReadOnlyErr := readOnlyProject.Close()
+	if previewErr != nil || closeReadOnlyErr != nil || preview.State != "ready" || preview.CandidateSHA256 != *candidateSHA256 {
+		preview.Bundles = nil
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(preview); encodeErr != nil {
+			return errors.New("navigation backfill preview result could not be written")
+		}
+		if previewErr != nil {
+			return previewErr
+		}
+		if closeReadOnlyErr != nil {
+			return errors.New("selected project store could not be closed after preview")
+		}
+		return errors.New("navigation backfill preview is partial or its digest differs from the explicit candidate confirmation")
+	}
+	projectStore, err := store.OpenProjectForWrite(ctx, *selected, *root)
+	if err != nil {
+		return err
+	}
+	result, applyErr := ingest.ApplyHistoricalNavigationBackfill(ctx, projectStore, maintenance, preview, *candidateSHA256)
+	storeCloseErr := projectStore.Close()
+	if encodeErr := json.NewEncoder(os.Stdout).Encode(result); encodeErr != nil {
+		return errors.New("navigation backfill apply result could not be written")
+	}
+	if applyErr != nil {
+		return applyErr
+	}
+	if storeCloseErr != nil {
+		return errors.New("selected project store could not be closed after navigation backfill")
 	}
 	return nil
 }

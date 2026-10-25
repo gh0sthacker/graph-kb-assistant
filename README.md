@@ -20,6 +20,10 @@ Caido history intake and graph coverage are measured independently. Missing capt
 
 To inspect pending projection jobs that may already be materialized in both graph stores, use [`projection-reconcile`](docs/PROJECTION-RECONCILIATION.md). It defaults to a read-only dry run; `--apply` acknowledges only exact matches after full snapshot parity.
 
+Add URL navigation to previously retained captures using the separate
+[`graph-navigation-backfill-preview` and `graph-navigation-backfill-apply`](docs/NAVIGATION-BACKFILL.md)
+commands. They preserve accepted projection jobs and require an exact candidate digest.
+
 Create and restore bounded, private project archives with [`project-backup` and `project-restore`](docs/PROJECT-BACKUP-RESTORE.md). Restore emits a fresh local capability summary; it does not establish Caido-history completeness or Neo4j parity.
 
 See [docs/SETUP.md](docs/SETUP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for setup, data boundaries, and verified coverage.

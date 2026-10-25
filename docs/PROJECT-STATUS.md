@@ -1,5 +1,37 @@
 # Project status and known limitations
 
+## Current delivery checkpoint (2026-10-25)
+
+- The chat named «Разработка» is idle. Current product work is coordinated in
+  the supervising chat; its last stale report was corrected against Git HEAD.
+  An earlier unrelated disk scan occupied about 20 minutes. Repeated conflicting
+  stop/continue instructions also disrupted ownership; use one explicit owner
+  and completion criterion per assignment.
+- The user-facing product is not declared complete. Local code and synthetic
+  acceptance do not establish working-data readiness or model-backed analysis.
+- The next delivery work is a common launch/configuration path, followed by one
+  browser evidence → comparison → saved/resumed consultation acceptance. Current
+  runtime Neo4j delivery and existing-vault use remain unverified in this check;
+  model-backed Hermes additionally needs the user's provider/data boundary.
+  KB expansion and target recon coverage are outside this delivery criterion.
+
+## Stage 3 retained-capture navigation backfill — PARTIAL (2026-10-25)
+
+- Added a versioned navigation preview/apply path for current locally retained
+  capture revisions. Preview authenticates bounded request and response bytes,
+  resolves exact revision mappings and builds project-keyed URL references in
+  memory. It reports counters and a candidate digest without message values.
+- Apply reauthenticates the current candidate under the same exclusive project
+  lease before adding local graph bundles and durable Neo4j outbox entries.
+  Partial/stale/altered candidates are rejected. Accepted capture/job payloads
+  remain unchanged; retry reuses stable bundle identities.
+- This closes the additive historical URL-projection code gap noted below.
+  Runtime delivery remains unverified. See
+  [NAVIGATION-BACKFILL.md](NAVIGATION-BACKFILL.md) for limits and semantics.
+- Focused Go checks passed for navigation CLI/backfill and accepted historical
+  projection replay (`./internal/ingest` and `./cmd/bb-assistant`). These use
+  synthetic temporary stores only; `git diff --check` passed.
+
 ## Stage 3 project URL references across import pages — PARTIAL (2026-10-25)
 
 - New historical and live projections include versioned `url_reference`
