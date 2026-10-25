@@ -1,5 +1,20 @@
 # Project status and known limitations
 
+## Stage 3 request ordering in observation inspector — PARTIAL (2026-10-25)
+
+- The observation inspector shows direction only for a current-slice
+  `precedes` assertion whose exact subject and object both resolve to
+  observation entities and which carries complete source references with an
+  observed or corroborated evidence state. It displays the subject/object IDs,
+  assertion ID, origin/evidence basis, and source SHA-256 plus record locator.
+- Missing edges, omitted endpoints, missing/invalid source references, and
+  proposed or contested assertions leave the initiating request unknown in the
+  current slice. Timestamps and graph proximity are never used to infer order
+  or causality. No graph schema or working data changed.
+- Pure Node UI tests cover incoming and outgoing edges, no edge/incomplete
+  slices, and missing provenance. Runtime and live graph coverage remain
+  `PARTIAL`.
+
 ## Stage 4 accepted context in exact capture comparison — PARTIAL (2026-10-25)
 
 - Exact capture comparison now shows accepted analyst context in separate

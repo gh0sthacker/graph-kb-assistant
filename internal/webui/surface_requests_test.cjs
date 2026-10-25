@@ -593,6 +593,59 @@ test("graph inspector shows analyst context only for an accepted exact evidence 
   assert.equal(allChildren(app.elements.inspector).filter(item => item.className?.split(/\s+/).includes("context-annotation-item")).length, 0);
 });
 
+test("observation inspector shows request order only for a source-backed exact precedes assertion", () => {
+  const app = createApp();
+  const prior = { id: "observation-prior", kind: "observation", data: { observed_at: "2026-10-24T10:00:00Z" } };
+  const selected = { id: "observation-selected", kind: "observation", data: { observed_at: "2026-10-24T10:01:00Z" } };
+  const next = { id: "observation-next", kind: "observation" };
+  const assertionID = `assertion-${"a".repeat(64)}`;
+  const sha256 = "b".repeat(64);
+  const assertion = {
+    id: assertionID, subject: prior.id, predicate: "precedes", object: selected.id,
+    origin_kind: "operator_asserted", evidence_state: "observed",
+    source_refs: [{ path: "/tmp/synthetic-source.jsonl", sha256, record_locator: "line:17" }],
+  };
+  const allChildren = root => [root, ...(root.children || []).flatMap(child => allChildren(child))];
+  const inspectorText = () => allChildren(app.elements.inspector).map(item => item.textContent || "").join(" ");
+
+  app.state.graph = { entities: [prior, selected, next], assertions: [assertion] };
+  app.renderInspector(selected);
+  const incoming = inspectorText();
+  assert.match(incoming, /Request ordering/);
+  assert.match(incoming, /observation-prior → observation-selected/);
+  assert.match(incoming, /Basis · precedes · operator_asserted \/ observed/);
+  assert.match(incoming, new RegExp(assertionID));
+  assert.match(incoming, new RegExp(`SHA-256 ${sha256}`));
+  assert.match(incoming, /record locator line:17/);
+  assert.match(incoming, /Earlier request in recorded order · observation-prior/);
+  assert.match(incoming, /timestamps and graph proximity do not prove causality/i);
+  assert.doesNotMatch(incoming, /synthetic-source\.jsonl/);
+
+  app.state.graph = { entities: [selected, next], assertions: [assertion] };
+  app.renderInspector(selected);
+  const incomplete = inspectorText();
+  assert.match(incomplete, /Initiating request unknown in this graph slice/);
+  assert.doesNotMatch(incomplete, /observation-prior → observation-selected/);
+
+  app.state.graph = { entities: [prior, selected, next], assertions: [{ ...assertion, source_refs: [] }] };
+  app.renderInspector(selected);
+  assert.match(inspectorText(), /Initiating request unknown in this graph slice/);
+
+  app.state.graph = { entities: [prior, selected, next], assertions: [] };
+  app.renderInspector(selected);
+  const noEdge = inspectorText();
+  assert.match(noEdge, /Initiating request unknown in this graph slice/);
+  assert.match(noEdge, /timestamps and graph proximity do not prove causality/i);
+
+  app.state.graph = { entities: [selected, next], assertions: [{
+    ...assertion, id: `assertion-${"c".repeat(64)}`, subject: selected.id, object: next.id,
+  }] };
+  app.renderInspector(selected);
+  const outgoing = inspectorText();
+  assert.match(outgoing, /observation-selected → observation-next/);
+  assert.match(outgoing, /Initiating request unknown in this graph slice/);
+});
+
 test("capture comparison pins exact revisions, reports fidelity and truncation, and clears baseline on project switch", async () => {
   const app = createApp();
   const projectKey = "a".repeat(64);

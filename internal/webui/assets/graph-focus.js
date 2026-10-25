@@ -102,6 +102,53 @@
     return notes;
   }
 
+  function observationRequestOrder(node, entities, assertions) {
+    const unknown = { status: "unknown", initiatingRequestIDs: [], relations: [] };
+    if (!node || node.kind !== "observation" || typeof node.id !== "string" || !node.id) return null;
+    const entityByID = new Map((Array.isArray(entities) ? entities : [])
+      .filter(entity => typeof entity?.id === "string" && entity.id && typeof entity.kind === "string")
+      .map(entity => [entity.id, entity]));
+    if (entityByID.get(node.id)?.kind !== "observation") return unknown;
+
+    const relations = [];
+    const seenAssertions = new Set();
+    for (const assertion of Array.isArray(assertions) ? assertions : []) {
+      if (assertion?.predicate !== "precedes" || typeof assertion.id !== "string" ||
+          !/^assertion-[a-f0-9]{64}$/.test(assertion.id) || seenAssertions.has(assertion.id)) continue;
+      const subjectID = assertion.subject;
+      const objectID = assertion.object;
+      if (typeof subjectID !== "string" || typeof objectID !== "string" || subjectID === objectID ||
+          (subjectID !== node.id && objectID !== node.id) ||
+          entityByID.get(subjectID)?.kind !== "observation" || entityByID.get(objectID)?.kind !== "observation") continue;
+      const sourceIDs = [];
+      const seenSources = new Set();
+      if (Array.isArray(assertion.source_refs)) {
+        for (const source of assertion.source_refs) {
+          if (typeof source?.path !== "string" || !source.path.trim() ||
+              typeof source.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(source.sha256) ||
+              typeof source.record_locator !== "string" || !source.record_locator.trim()) continue;
+          const key = `${source.sha256}\u0000${source.record_locator}`;
+          if (seenSources.has(key)) continue;
+          seenSources.add(key);
+          sourceIDs.push({ sha256: source.sha256, recordLocator: source.record_locator });
+        }
+      }
+      if (!sourceIDs.length || !["observed", "corroborated"].includes(assertion.evidence_state) ||
+          !["parsed", "operator_asserted", "check_result"].includes(assertion.origin_kind)) continue;
+      seenAssertions.add(assertion.id);
+      relations.push({
+        assertionID: assertion.id, subjectID, objectID,
+        direction: subjectID === node.id ? "outgoing" : "incoming",
+        originKind: assertion.origin_kind, evidenceState: assertion.evidence_state, sourceIDs,
+      });
+    }
+    relations.sort((left, right) => left.assertionID.localeCompare(right.assertionID));
+    const initiatingRequestIDs = [...new Set(relations
+      .filter(relation => relation.direction === "incoming")
+      .map(relation => relation.subjectID))].sort();
+    return relations.length ? { status: "supported", initiatingRequestIDs, relations } : unknown;
+  }
+
   function routeFamilyUncertainty(routeFamily) {
     if (typeof routeFamily !== "string") return null;
     const maskedSegments = routeFamily.split("/").filter(segment =>
@@ -259,7 +306,7 @@
       });
   }
 
-  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, analysisCardsForNode, contextAnnotationEvidenceReferences, contextAnnotationsForObservation, routeFamilyUncertainty, withObservationParseState };
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, observationRequestOrder, operationAliasFor, analysisCardsForNode, contextAnnotationEvidenceReferences, contextAnnotationsForObservation, routeFamilyUncertainty, withObservationParseState };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);

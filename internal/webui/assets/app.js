@@ -2248,6 +2248,7 @@ function renderInspector(node) {
   if (node.kind === "operation") renderOperationAliasEditor(node);
   if (node.kind === "observation") {
     renderProvenance(node);
+    renderObservationRequestOrder(node);
     renderAcceptedContextAnnotations(node);
   }
   renderAnalysisCards(node);
@@ -2411,6 +2412,34 @@ function renderAcceptedContextAnnotations(node) {
     }
     section.append(item);
   }
+  elements.inspector.append(section);
+}
+
+function renderObservationRequestOrder(node) {
+  const order = BBGraphFocus.observationRequestOrder(node, state.graph?.entities, state.graph?.assertions);
+  if (!order) return;
+  const section = el("section", "detail-section request-order-section");
+  section.append(el("div", "detail-section-title", "Request ordering"));
+  if (order.status === "supported") {
+    for (const relation of order.relations) {
+      const item = el("div", "provenance-item request-order-item");
+      item.append(el("b", "", `Direction · ${relation.subjectID} → ${relation.objectID}`));
+      item.append(el("span", "", `Basis · precedes · ${relation.originKind} / ${relation.evidenceState} · assertion ${relation.assertionID}`));
+      for (const source of relation.sourceIDs) {
+        item.append(el("span", "", `Source ID · SHA-256 ${source.sha256} · record locator ${source.recordLocator}`));
+      }
+      section.append(item);
+    }
+  }
+  if (order.initiatingRequestIDs.length) {
+    section.append(el("p", "detail-help", `Earlier request in recorded order · ${order.initiatingRequestIDs.join(", ")}`));
+  } else {
+    section.append(el("p", "detail-help", "Initiating request unknown in this graph slice"));
+    section.append(el("p", "detail-help", order.status === "supported"
+      ? "This slice has source-backed outgoing precedes links but no incoming link that identifies an earlier request."
+      : "No source-backed precedes assertion with both exact observation IDs is available in this slice."));
+  }
+  section.append(el("p", "detail-help", "A precedes assertion records request order only. Timestamps and graph proximity do not prove causality."));
   elements.inspector.append(section);
 }
 

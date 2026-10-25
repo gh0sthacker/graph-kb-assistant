@@ -9,6 +9,7 @@ const {
   layeredGridLayout,
   contextAnnotationEvidenceReferences,
   contextAnnotationsForObservation,
+  observationRequestOrder,
   observationNotes,
   operationAliasFor,
   analysisCardsForNode,
@@ -240,6 +241,72 @@ test("observationNotes do not add uncertainty notes to a complete, annotated cap
     context: { scenario: "checkout" },
     observed_at: "2026-10-24T12:00:00Z",
   }), []);
+});
+
+test("observationRequestOrder reports a source-backed exact precedes edge", () => {
+  const prior = { id: "observation-prior", kind: "observation", data: { observed_at: "2026-10-24T10:00:00Z" } };
+  const selected = { id: "observation-selected", kind: "observation", data: { observed_at: "2026-10-24T10:01:00Z" } };
+  const assertionID = `assertion-${"a".repeat(64)}`;
+  const sha256 = "b".repeat(64);
+  const assertion = {
+    id: assertionID, subject: prior.id, predicate: "precedes", object: selected.id,
+    origin_kind: "operator_asserted", evidence_state: "observed",
+    source_refs: [{ path: "/tmp/synthetic-source.jsonl", sha256, record_locator: "line:17" }],
+  };
+
+  assert.deepEqual(observationRequestOrder(selected, [prior, selected], [assertion]), {
+    status: "supported",
+    initiatingRequestIDs: [prior.id],
+    relations: [{
+      assertionID, subjectID: prior.id, objectID: selected.id, direction: "incoming",
+      originKind: "operator_asserted", evidenceState: "observed",
+      sourceIDs: [{ sha256, recordLocator: "line:17" }],
+    }],
+  });
+
+  const next = { id: "observation-next", kind: "observation" };
+  const outgoing = observationRequestOrder(selected, [prior, selected, next], [{
+    ...assertion, id: `assertion-${"c".repeat(64)}`, subject: selected.id, object: next.id,
+  }]);
+  assert.deepEqual(outgoing.initiatingRequestIDs, []);
+  assert.equal(outgoing.relations[0].direction, "outgoing");
+  assert.equal(outgoing.relations[0].subjectID, selected.id);
+  assert.equal(outgoing.relations[0].objectID, next.id);
+});
+
+test("observationRequestOrder stays unknown when the graph slice lacks an exact endpoint", () => {
+  const selected = { id: "observation-selected", kind: "observation", data: { observed_at: "2026-10-24T10:01:00Z" } };
+  const assertion = {
+    id: `assertion-${"a".repeat(64)}`, subject: "observation-omitted", predicate: "precedes", object: selected.id,
+    origin_kind: "parsed", evidence_state: "observed",
+    source_refs: [{ path: "/tmp/synthetic-source.jsonl", sha256: "b".repeat(64), record_locator: "line:17" }],
+  };
+
+  assert.deepEqual(observationRequestOrder(selected, [selected], [assertion]), {
+    status: "unknown", initiatingRequestIDs: [], relations: [],
+  });
+  assert.deepEqual(observationRequestOrder(selected, [selected], []), {
+    status: "unknown", initiatingRequestIDs: [], relations: [],
+  });
+  assert.deepEqual(observationRequestOrder(selected, undefined, undefined), {
+    status: "unknown", initiatingRequestIDs: [], relations: [],
+  });
+});
+
+test("observationRequestOrder rejects missing source refs and proposed or contested edges", () => {
+  const prior = { id: "observation-prior", kind: "observation" };
+  const selected = { id: "observation-selected", kind: "observation" };
+  const source = { path: "/tmp/synthetic-source.jsonl", sha256: "b".repeat(64), record_locator: "line:17" };
+  const base = {
+    id: `assertion-${"a".repeat(64)}`, subject: prior.id, predicate: "precedes", object: selected.id,
+    origin_kind: "operator_asserted", evidence_state: "observed", source_refs: [source],
+  };
+  const unknown = { status: "unknown", initiatingRequestIDs: [], relations: [] };
+
+  assert.deepEqual(observationRequestOrder(selected, [prior, selected], [{ ...base, source_refs: [] }]), unknown);
+  assert.deepEqual(observationRequestOrder(selected, [prior, selected], [{ ...base, source_refs: [{ ...source, sha256: "invalid" }] }]), unknown);
+  assert.deepEqual(observationRequestOrder(selected, [prior, selected], [{ ...base, evidence_state: "proposed" }]), unknown);
+  assert.deepEqual(observationRequestOrder(selected, [prior, selected], [{ ...base, evidence_state: "contested" }]), unknown);
 });
 
 test("analysis state does not masquerade as parse completeness", () => {
