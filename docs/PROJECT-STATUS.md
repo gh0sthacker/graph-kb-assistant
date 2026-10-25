@@ -46,6 +46,17 @@
   was used. Browser acceptance does not establish production deployment or
   model-backed readiness.
 
+## Neo4j projection integration — VERIFIED IN DISPOSABLE CONTAINER (2026-10-25)
+
+- Ran the complete `internal/neo4jstore` integration package against a fresh,
+  isolated Neo4j Community 2026.10.0 container using generated synthetic
+  project keys. The package passed in 124 seconds; its fixtures clean up their
+  own project records. The container was stopped and removed afterward.
+- No working project database, Caido history, or real capture was accessed.
+  This verifies the current Neo4j writer/query integration tests, not migration
+  or parity of the selected working database, production queue delivery, or
+  project-level coverage.
+
 ## Shared launcher runtime configuration — FIXED IN SOURCE (2026-10-25)
 
 - The default launcher previously searched for `runtime.env` in an extra
