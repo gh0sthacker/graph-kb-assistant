@@ -1,5 +1,31 @@
 # Project status and known limitations
 
+## Current KB parity update (2026-10-25 19:28 EDT) — still PARTIAL
+
+- Committed and pushed `fe6a290` (`feat(kb): add RedAmon metadata search filters`).
+  The live KB search/MCP contract now accepts validated `min_cvss` and
+  `severity` filters. They are applied after the merged FTS/vector candidate
+  pool, and chunks without those metadata fields remain eligible, matching
+  RedAmon's null-tolerant filter behavior. `go test ./internal/kb
+  ./internal/mcpserver` and `git diff --check` pass.
+- The active index remains snapshot
+  `0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216` with
+  162,398 chunks across six families and `PARTIAL` source coverage. At this
+  check 7,648 of 162,390 eligible content chunks have E5 vectors; no complete
+  vector snapshot is published. The single resumable worker (PID 1130154) is
+  confirmed running. It is CPU-bound on the Ryzen 5 3500U (about four cores at
+  full use); do not start a duplicate job.
+- ExploitDB is still absent while reuse rights for its dataset remain
+  unresolved. RedAmon source declares it in `full`, but its installed profile
+  defaults to `lite`; there is no verified deployed RedAmon snapshot to compare
+  against. Therefore source/content equality and search-result equality remain
+  unproven. Do not claim that the KB is identical yet.
+- The official Exploit Database Terms restrict copying/reproduction of its
+  Service content without express written permission, while its pinned GitLab
+  repository carries GPL-2.0-or-later. The dataset-specific relationship
+  between these terms remains unresolved, so keep the existing import gate in
+  place pending an authoritative dataset-specific resolution.
+
 ## RedAmon KB parity re-check (2026-10-25 23:22 UTC) — PARTIAL
 
 - Compared this checkout with RedAmon upstream master at
