@@ -43,7 +43,7 @@ The launcher reads the private Neo4j settings from `$XDG_DATA_HOME/bb-graph-assi
 
 The launcher also loads the optional private application file
 `$BB_ASSISTANT_DATA_HOME/runtime.env`; by default this is
-`$XDG_DATA_HOME/bb-graph-assistant/graph-kb-assistant/runtime.env` (or the
+`$XDG_DATA_HOME/bb-graph-assistant/runtime.env` (or the
 equivalent path under `~/.local/share`). Set `BB_ASSISTANT_RUNTIME_ENV_FILE` to
 choose another file. Keep it owner-only (`0600`); it can contain the vault key
 used by explicit local evidence-view actions. Values supplied directly in the

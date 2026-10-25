@@ -15,6 +15,21 @@
   model-backed Hermes additionally needs the user's provider/data boundary.
   KB expansion and target recon coverage are outside this delivery criterion.
 
+## Shared launcher runtime configuration — FIXED IN SOURCE (2026-10-25)
+
+- The default launcher previously searched for `runtime.env` in an extra
+  `graph-kb-assistant` subdirectory, while Go storage and Hermes used the parent
+  `bb-graph-assistant` data root. Web and Hermes MCP could therefore see different
+  vault configuration. The launcher now uses the same canonical default root.
+- Explicit runtime-file, data-root, graph-backend and vault-key overrides retain
+  their precedence. No runtime files were moved or private settings inspected.
+  An installation using the old nested file must select it explicitly with
+  `BB_ASSISTANT_RUNTIME_ENV_FILE` or place its configuration in the documented
+  canonical location; the launcher does not silently select two different files.
+- All 7 synthetic launcher tests passed, including XDG/HOME defaults, an obsolete
+  nested-file decoy, explicit file selection and override precedence. This fixes
+  configuration resolution, not current service or evidence readiness.
+
 ## Stage 3 retained-capture navigation backfill — PARTIAL (2026-10-25)
 
 - Added a versioned navigation preview/apply path for current locally retained
