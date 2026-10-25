@@ -200,8 +200,18 @@ class RedAmonSourceAdapter:
             try:
                 batch = provider(request)
             except Exception as exc:  # suppress provider messages that may contain secrets
+                safe_code = getattr(exc, "coverage_code", None)
+                if (
+                    family != "nvd"
+                    or type(exc).__module__ != "bb_assistant.kb.nvd"
+                    or type(exc).__name__ != "NVDProviderError"
+                    or not isinstance(safe_code, str)
+                    or not safe_code.startswith(f"{family}_")
+                    or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", safe_code)
+                ):
+                    safe_code = type(exc).__name__
                 coverage.append(self._coverage(
-                    family, "partial", blockers=(f"provider_failed:{type(exc).__name__}",),
+                    family, "partial", blockers=(f"provider_failed:{safe_code}",),
                     requested_filters=filters, source_metadata=details,
                     fetched_count=None, parsed_count=None, rejected_count=None,
                 ))

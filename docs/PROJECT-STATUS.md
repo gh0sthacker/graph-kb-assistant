@@ -1,5 +1,23 @@
 # Project status and known limitations
 
+## KB diagnostics after parity review (2026-10-25)
+
+- The approved RedAmon-derived source profile declares seven families, but the
+  last verified source snapshot remains `PARTIAL`; the corpus and retrieval
+  behavior are not yet equivalent to RedAmon. The latest documented source
+  snapshot had five completed families, NVD partial, and ExploitDB blocked on
+  dataset terms. Retrieval in this application is FTS5-only; RedAmon's pinned
+  retrieval pipeline also uses semantic candidates and ranking stages.
+- NVD source failures now retain a fixed, non-sensitive `coverage_code` in the
+  per-source coverage blockers while provider messages and response contents
+  remain suppressed. This makes a later controlled source attempt diagnosable
+  without logging response bodies or raw exception text. Synthetic NVD and
+  source-adapter checks passed (7 and 8 tests respectively).
+- A fresh read-only MCP `kb_stats` request timed out after 300 seconds. No
+  source fetch, snapshot build, index replacement, or reindex was run for this
+  change. Current KB integrity and source parity remain unverified and
+  `PARTIAL`.
+
 ## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 
 - A browser walkthrough through the LAN address loaded the running app and

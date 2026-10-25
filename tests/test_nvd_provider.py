@@ -140,6 +140,21 @@ class NVDProviderTests(unittest.TestCase):
         self.assertEqual(nvd_coverage["state"], "blocked")
         self.assertFalse(called)
 
+    def test_adapter_reports_safe_nvd_failure_code_without_provider_message(self) -> None:
+        provider = RedAmonNVDProvider(fetcher=lambda _params: b"not-json-private-body", min_interval_seconds=0)
+        adapter = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [_source_spec(eligible=True)]},
+            {"nvd": provider},
+            source_manifest_sha256="c" * 64,
+        )
+
+        snapshot = adapter.build()
+        nvd_coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "nvd")
+
+        self.assertEqual(nvd_coverage["state"], "partial")
+        self.assertEqual(nvd_coverage["blockers"], ["provider_failed:nvd_api_page_is_not_valid_utf_8_json"])
+        self.assertNotIn("not-json-private-body", repr(snapshot.coverage_report()))
+
     def test_public_domain_label_alone_cannot_bypass_cve_notice_gate(self) -> None:
         called = False
 
