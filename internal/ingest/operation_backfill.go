@@ -26,7 +26,7 @@ const (
 	DefaultOperationBackfillMaxBytes          = int64(512 << 20)
 	MaximumOperationBackfillMaxBytes          = int64(1 << 30)
 	operationBackfillBundleSources            = 900
-	operationBackfillReasonInvalidLine        = "invalid_request_line"
+	operationBackfillMaxRequestLineBytes      = 65_536
 	operationBackfillReasonInvalidOrigin      = "invalid_origin"
 	operationBackfillReasonInvalidTarget      = "invalid_request_target"
 	operationBackfillReasonCrossOrigin        = "cross_origin_request_target"
@@ -44,6 +44,9 @@ const (
 	operationBackfillReasonRouteInvalid       = "canonical_route_invalid"
 	operationBackfillReasonRouteSegments      = "canonical_route_segments_exceeded"
 	operationBackfillReasonRouteUnparseable   = "canonical_route_unparseable"
+	operationBackfillReasonLineTooLong        = "request_line_too_long"
+	operationBackfillReasonLineMalformed      = "request_line_malformed"
+	operationBackfillReasonInvalidMethod      = "request_method_invalid"
 )
 
 var ErrOperationBackfillCandidateChanged = errors.New("operation backfill preview changed")
@@ -537,12 +540,15 @@ func operationBackfillTargetWithReason(raw []byte, origin string) (method, targe
 		line = line[:lineEnd]
 	}
 	line = bytes.TrimSpace(bytes.TrimSuffix(line, []byte("\r")))
-	if len(line) > 4096 {
-		return "", "", "", "", 0, operationBackfillReasonInvalidLine, false
+	if len(line) > operationBackfillMaxRequestLineBytes {
+		return "", "", "", "", 0, operationBackfillReasonLineTooLong, false
 	}
 	parts := strings.Fields(string(line))
-	if len(parts) != 3 || !validOperationBackfillMethod(parts[0]) {
-		return "", "", "", "", 0, operationBackfillReasonInvalidLine, false
+	if len(parts) != 3 {
+		return "", "", "", "", 0, operationBackfillReasonLineMalformed, false
+	}
+	if !validOperationBackfillMethod(parts[0]) {
+		return "", "", "", "", 0, operationBackfillReasonInvalidMethod, false
 	}
 	base, err := url.Parse(origin)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" ||

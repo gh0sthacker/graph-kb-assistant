@@ -232,7 +232,9 @@ function operationBackfillOptions() {
 
 function operationBackfillSkipReasonDetails(reasons) {
   const labels = {
-    invalid_request_line: "Malformed or unsupported HTTP request line",
+    request_line_too_long: "Request line exceeds the safe parsing limit",
+    request_line_malformed: "Request line does not have three HTTP fields",
+    request_method_invalid: "HTTP method token is invalid",
     invalid_origin: "Capture origin is not a valid HTTP origin",
     invalid_request_target: "Request target is malformed or unsupported",
     cross_origin_request_target: "Absolute request target does not match the captured origin",

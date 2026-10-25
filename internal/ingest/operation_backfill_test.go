@@ -33,7 +33,9 @@ func TestOperationBackfillTargetRejectsInvalidOriginAndAsteriskRoute(t *testing.
 		{name: "asterisk", line: "OPTIONS * HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonUnsupported},
 		{name: "network path", line: "GET //other.invalid/api HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonUnsupported},
 		{name: "cross-origin absolute target", line: "GET https://other.invalid/api HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonCrossOrigin},
-		{name: "bad request line", line: "not-http", origin: "http://example.invalid", wantReason: operationBackfillReasonInvalidLine},
+		{name: "malformed request line", line: "not-http", origin: "http://example.invalid", wantReason: operationBackfillReasonLineMalformed},
+		{name: "invalid method", line: "GE(T /api HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonInvalidMethod},
+		{name: "request line over limit", line: "GET /" + strings.Repeat("a", operationBackfillMaxRequestLineBytes) + " HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonLineTooLong},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, _, _, _, _, reason, ok := operationBackfillTargetWithReason([]byte(test.line+"\r\n\r\n"), test.origin)
@@ -49,10 +51,10 @@ func TestOperationBackfillTargetRejectsInvalidOriginAndAsteriskRoute(t *testing.
 
 func TestOperationBackfillNoOperationReasonCountsStayRedactedAndAdditive(t *testing.T) {
 	preview := OperationBackfillPreview{}
-	countOperationBackfillNoOperation(&preview, operationBackfillReasonInvalidLine)
-	countOperationBackfillNoOperation(&preview, operationBackfillReasonInvalidLine)
+	countOperationBackfillNoOperation(&preview, operationBackfillReasonLineMalformed)
+	countOperationBackfillNoOperation(&preview, operationBackfillReasonLineMalformed)
 	countOperationBackfillNoOperation(&preview, operationBackfillReasonCrossOrigin)
-	if preview.SkippedNoOperation != 3 || preview.SkippedNoOperationReasons[operationBackfillReasonInvalidLine] != 2 ||
+	if preview.SkippedNoOperation != 3 || preview.SkippedNoOperationReasons[operationBackfillReasonLineMalformed] != 2 ||
 		preview.SkippedNoOperationReasons[operationBackfillReasonCrossOrigin] != 1 {
 		t.Fatalf("unexpected no-operation breakdown: %+v", preview)
 	}

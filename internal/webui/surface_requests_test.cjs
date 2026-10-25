@@ -99,7 +99,7 @@ function renderedText(root) {
 test("operation backfill preview explains safe skip categories without echoing unknown input", () => {
   const app = createApp();
   const detail = app.operationBackfillSkipReasonDetails({
-    invalid_request_line: 2,
+    request_line_malformed: 2,
     cross_origin_request_target: 1,
     canonical_assertion_missing: 2,
     canonical_origin_unknown: 1,
@@ -108,7 +108,7 @@ test("operation backfill preview explains safe skip categories without echoing u
     invalid_origin: -1,
   });
   assert.deepEqual(snapshot(detail), [
-    ["Malformed or unsupported HTTP request line", 2],
+    ["Request line does not have three HTTP fields", 2],
     ["Absolute request target does not match the captured origin", 1],
     ["Canonical operation link was not produced", 2],
     ["Operation origin could not be normalized", 1],
@@ -118,10 +118,10 @@ test("operation backfill preview explains safe skip categories without echoing u
   app.renderOperationBackfillPreview({
     state: "ready", coverage_state: "partial", scanned: 3, eligible_captures: 0,
     skipped_no_operation: 3,
-    skipped_no_operation_reasons: { invalid_request_line: 2, cross_origin_request_target: 1, canonical_assertion_missing: 2, canonical_origin_unknown: 1, canonical_route_path_too_long: 2, attacker_supplied_reason: 99 },
+    skipped_no_operation_reasons: { request_line_malformed: 2, cross_origin_request_target: 1, canonical_assertion_missing: 2, canonical_origin_unknown: 1, canonical_route_path_too_long: 2, attacker_supplied_reason: 99 },
   });
   const text = renderedText(app.elements.operationBackfillResult);
-  assert.ok(text.includes("No safe operation · Malformed or unsupported HTTP request line: 2"));
+  assert.ok(text.includes("No safe operation · Request line does not have three HTTP fields: 2"));
   assert.ok(text.includes("No safe operation · Absolute request target does not match the captured origin: 1"));
   assert.ok(text.includes("No safe operation · Canonical operation link was not produced: 2"));
   assert.ok(text.includes("No safe operation · Operation origin could not be normalized: 1"));

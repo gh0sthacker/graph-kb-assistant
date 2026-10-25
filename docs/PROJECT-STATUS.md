@@ -1,6 +1,6 @@
 # Project status and known limitations
 
-## Current delivery checkpoint (2026-10-25, bounded route grouping and graph repair)
+## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 
 - After `dcbfe07`, the local maintenance preview scanned all 1,400 retained
   historical captures without truncation. It selected 1,393 eligible captures,
@@ -31,22 +31,24 @@
   The session trace confirms that MCP tool invocation followed Hermes'
   dynamic tool-search/description steps. No graph, capture, or message body
   was read; model-backed analysis remains verified only on synthetic evidence.
-- Route-family grouping now accepts paths up to 4,096 bytes, matching the
-  already enforced request-line input cap while remaining bounded. The former
-  2,048-byte cap excluded two otherwise valid historical operations. Both were
-  imported through the exact preview/apply digest flow: two bundles, two
-  `belongs_to_operation` links, and one new operation group; Neo4j drain
-  returned `ready`. A fresh post-apply read-only preview scanned all 1,400
-  captures, selected 1,395, and found zero new groups, endpoints, or links.
-- The preview now breaks down `skipped_no_operation` with fixed, non-sensitive
+- Route-family grouping accepts paths up to 4,096 bytes, and backfill request
+  lines up to 65,536 bytes; both limits are bounded. The former 2,048-byte
+  route cap excluded two valid historical operations, and the former 4,096-byte
+  request-line cap excluded five more operation links. Two exact preview/apply
+  digest flows repaired the graph: the first imported two bundles, two
+  `belongs_to_operation` links, and one operation group; the second imported
+  two bundles with five additional links. Both Neo4j drains returned `ready`.
+  The final read-only preview scanned all 1,400 captures and reported all 1,400
+  eligible, zero skipped, zero new groups/endpoints/links, and no truncation.
+- The preview breaks down `skipped_no_operation` with fixed, non-sensitive
   reason codes. The UI displays only known codes and ignores unknown input; it
-  never echoes a request line or origin. Five captures still have invalid
-  request lines and remain an explicit coverage gap. The default 2,000-route
-  catalog page and graph coverage remain partial.
+  never echoes a request line or origin. Graph backfill now covers every
+  retained capture that this bounded parser can safely associate. The default
+  2,000-route catalog page and overall project coverage remain partial.
 - This supersedes the earlier Stage 3 preview below, which reported 31 legacy
-  endpoint-ID differences as excluded. Remaining gaps include the five invalid
-  request lines, external-device reachability, and complete browser/
-  JavaScript/application-map coverage. A browser smoke-test could not start
+  endpoint-ID differences as excluded. Remaining gaps include external-device
+  reachability and complete browser/JavaScript/application-map coverage. A
+  browser smoke-test could not start
   because the available Chrome DevTools connector has no Chrome binary; no UI
   click-path result is claimed. Overall delivery remains `PARTIAL`.
 
