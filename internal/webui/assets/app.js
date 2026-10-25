@@ -36,6 +36,8 @@ const elements = {
   evidenceDialog: $("#evidence-dialog"), evidenceClose: $("#evidence-close"),
   evidenceLabel: $("#evidence-capture-label"), evidenceMeta: $("#evidence-meta"), evidenceContent: $("#evidence-content"),
   evidenceFoot: $("#evidence-foot"), evidenceMore: $("#evidence-more"), evidenceCompareContent: $("#evidence-compare-content"),
+  comparisonAttach: $("#consultation-comparison-link"), comparisonAttachButton: $("#consultation-comparison-attach"),
+  comparisonAttachStatus: $("#consultation-comparison-status"),
   evidenceTitle: $("#evidence-title"), evidenceSides: $(".evidence-sides"),
   evidencePacketControls: $("#evidence-packet-controls"), evidencePacketQuestion: $("#evidence-packet-question"),
   evidencePacketOffset: $("#evidence-packet-offset"), evidencePacketLength: $("#evidence-packet-length"),
@@ -443,6 +445,7 @@ function resetConsultationUI(message) {
   elements.consultationCreate.disabled = true;
   elements.consultationCreate.textContent = "Save session for review";
   updateConsultationResumeControl();
+  updateComparisonAttachmentControl();
 }
 
 function updateConsultationResumeControl() {
@@ -557,13 +560,18 @@ async function createOrReviewConsultation() {
 
 function displayConsultationReview(review, session) {
   session.version = review.version;
+  session.projectKey = state.projectKey;
   session.accepted = Boolean(review.review_accepted);
   session.reviewLoaded = true;
   session.contextAnnotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
+  session.evidenceReferences = Array.isArray(review.evidence_references) ? review.evidence_references : [];
+  session.comparisons = Array.isArray(review.comparisons) ? review.comparisons : [];
+  if (state.comparison) delete state.comparison.attachError;
   elements.consultationContextLabel.value = "";
   elements.consultationReviewContent.textContent = JSON.stringify({
-    consultation_id: review.consultation_id, version: review.version,
+    consultation_id: review.consultation_id, version: review.version, review_accepted: Boolean(review.review_accepted),
     question: review.question, evidence: review.evidence, context_annotations: review.context_annotations || [],
+    comparisons: review.comparisons || [],
   }, null, 2);
   renderConsultationContext(review, session.accepted);
   elements.consultationReview.hidden = false;
@@ -574,6 +582,7 @@ function displayConsultationReview(review, session) {
     ? `Accepted · consultation ${session.id} · Hermes can now resume this session.`
     : `Saved locally · consultation ${session.id} · Hermes cannot read this packet until you accept it below.`;
   updateEvidencePacketControl();
+  updateComparisonAttachmentControl();
 }
 
 async function resumeConsultationByID() {
@@ -599,7 +608,7 @@ async function resumeConsultationByID() {
     if (review.consultation_id !== sessionID) throw new Error("The saved review did not match that consultation ID.");
     const preview = { projectKey, question: review.question, selections: [] };
     const session = {
-      id: review.consultation_id, version: review.version, accepted: Boolean(review.review_accepted),
+      id: review.consultation_id, projectKey, version: review.version, accepted: Boolean(review.review_accepted),
       reviewLoaded: true, acceptKey: newIdempotencyKey(), contextAnnotations: [],
     };
     state.evidencePacketPreview = preview;
@@ -781,10 +790,95 @@ async function acceptConsultationReview() {
     for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = true;
     elements.consultationContextSave.hidden = true;
     elements.consultationStatus.textContent = `Accepted · consultation ${session.id} · Hermes can now resume this session.`;
+    updateComparisonAttachmentControl();
   } catch (error) {
     elements.consultationStatus.textContent = `Approval was not recorded: ${error.message}`;
     elements.consultationAccept.disabled = false;
     updateEvidencePacketControl();
+  }
+}
+
+function comparisonIsReferencedBySession(session, comparison) {
+  const references = Array.isArray(session?.evidenceReferences) ? session.evidenceReferences : [];
+  const hasExactVerifiedRevision = (requestId, revisionId) => references.some(reference =>
+    reference?.request_id === requestId && reference?.revision_id === revisionId &&
+    reference?.source_integrity_status === "verified" && /^[a-f0-9]{64}$/.test(String(reference?.sha256 || "")));
+  return hasExactVerifiedRevision(comparison.leftRequestId, comparison.leftRevisionId) &&
+    hasExactVerifiedRevision(comparison.rightRequestId, comparison.rightRevisionId);
+}
+
+function updateComparisonAttachmentControl() {
+  const comparison = state.comparison;
+  const session = state.consultation;
+  const visible = Boolean(comparison?.result);
+  elements.comparisonAttach.hidden = !visible;
+  if (!visible) {
+    elements.comparisonAttachButton.disabled = true;
+    elements.comparisonAttachStatus.textContent = "";
+    return;
+  }
+  const stored = comparison.attachedComparisonId || (session?.comparisons || []).find(record =>
+    record?.result?.left_request_id === comparison.leftRequestId &&
+    record?.result?.left_revision_id === comparison.leftRevisionId &&
+    record?.result?.right_request_id === comparison.rightRequestId &&
+    record?.result?.right_revision_id === comparison.rightRevisionId)?.comparison_id;
+  if (stored) {
+    comparison.attachedComparisonId = stored;
+    elements.comparisonAttachButton.disabled = true;
+    elements.comparisonAttachStatus.textContent = `Saved in consultation ${session?.id || ""} as ${stored}. Hermes receives the bounded comparison metadata, not the displayed raw excerpts.`;
+    return;
+  }
+  if (!session || !session.reviewLoaded) {
+    elements.comparisonAttachButton.disabled = true;
+    elements.comparisonAttachStatus.textContent = comparison.attachError || "Resume an accepted consultation for this project. Both exact captures must be included in its evidence packet.";
+    return;
+  }
+  if (session.projectKey !== state.projectKey || !session.accepted) {
+    elements.comparisonAttachButton.disabled = true;
+    elements.comparisonAttachStatus.textContent = "Review and accept this project's saved consultation before attaching a comparison.";
+    return;
+  }
+  if (!comparisonIsReferencedBySession(session, comparison)) {
+    elements.comparisonAttachButton.disabled = true;
+    elements.comparisonAttachStatus.textContent = "This session does not contain verified references to both exact capture revisions.";
+    return;
+  }
+  elements.comparisonAttachButton.disabled = false;
+  elements.comparisonAttachStatus.textContent = comparison.attachError || `Ready to save this exact comparison to accepted consultation ${session.id}.`;
+}
+
+async function attachComparisonToConsultation() {
+  const comparison = state.comparison;
+  const session = state.consultation;
+  if (!comparison?.result || !session || elements.comparisonAttachButton.disabled) return;
+  const projectKey = state.projectKey;
+  const comparisonKey = session.comparisonKey || (session.comparisonKey = newIdempotencyKey());
+  elements.comparisonAttachButton.disabled = true;
+  elements.comparisonAttachStatus.textContent = "Saving the bounded comparison metadata to the accepted consultation…";
+  try {
+    const record = await postJSON("/api/consultation/compare", {
+      project_key: projectKey, session_id: session.id, expected_version: session.version,
+      idempotency_key: comparisonKey,
+      left_request_id: comparison.leftRequestId, left_revision_id: comparison.leftRevisionId,
+      right_request_id: comparison.rightRequestId, right_revision_id: comparison.rightRevisionId,
+    });
+    if (state.comparison !== comparison || state.consultation !== session || state.projectKey !== projectKey) return;
+    session.version = record.session_version;
+    session.comparisonKey = "";
+    session.comparisons = [...(session.comparisons || []), record];
+    comparison.attachedComparisonId = record.comparison_id;
+    delete comparison.attachError;
+    updateComparisonAttachmentControl();
+  } catch (error) {
+    if (state.comparison !== comparison || state.consultation !== session || state.projectKey !== projectKey) return;
+    comparison.attachError = error.status === 409
+      ? "The saved consultation changed. Resume it again to refresh the version before retrying."
+      : `Comparison was not saved: ${error.message}`;
+    if (error.status === 409) {
+      session.reviewLoaded = false;
+      session.comparisonKey = "";
+    }
+    updateComparisonAttachmentControl();
   }
 }
 
@@ -827,6 +921,7 @@ async function openComparison(item, trigger = null) {
     rightRequestId, rightRevisionId,
   };
   state.comparison = comparison;
+  updateComparisonAttachmentControl();
   const requestID = ++state.evidenceRequestId;
   state.evidenceTrigger = trigger;
   elements.evidenceTitle.textContent = "Capture comparison";
@@ -853,9 +948,11 @@ async function openComparison(item, trigger = null) {
   try {
     const result = await getJSON(`/api/compare?${query}`);
     if (state.comparison !== comparison || requestID !== state.evidenceRequestId || comparison.projectKey !== state.projectKey) return;
+    comparison.result = result;
     elements.evidenceMeta.textContent = `Exact revisions · ${comparison.leftRevisionId} → ${comparison.rightRevisionId}`;
     elements.evidenceCompareContent.textContent = formatCaptureComparison(result);
     elements.evidenceFoot.textContent = result.coverage_note || "Exact local byte comparison; unavailable or incomplete messages are identified per side.";
+    updateComparisonAttachmentControl();
   } catch (error) {
     if (state.comparison !== comparison || requestID !== state.evidenceRequestId) return;
     elements.evidenceMeta.textContent = "The selected revisions could not be compared.";
@@ -1267,7 +1364,7 @@ async function loadGraph(seeds, { view = "direct", focusNodeId = null, remember 
     state.graph = appendPage && previous.graph && view === "direct"
       ? mergeGraphPages(previous.graph, graph)
       : graph;
-    state.graphSeeds = [...seeds];
+    state.graphSeeds = Array.isArray(graph.seed_ids) ? [...graph.seed_ids] : [...seeds];
     state.graphView = view;
     state.focusedNodeId = appendPage ? previous.focus : focusNodeId;
     state.routeScope = false;
@@ -2035,6 +2132,7 @@ elements.evidenceDialog.addEventListener("close", () => {
 elements.evidenceRequest.addEventListener("click", () => selectEvidenceSide("request"));
 elements.evidenceResponse.addEventListener("click", () => selectEvidenceSide("response"));
 elements.evidenceMore.addEventListener("click", () => { void loadEvidenceRange(true); });
+elements.comparisonAttachButton.addEventListener("click", () => { void attachComparisonToConsultation(); });
 elements.evidencePacketQuestion.addEventListener("input", () => {
   state.evidencePacketDraft.question = elements.evidencePacketQuestion.value;
   invalidateEvidencePacketPreview();

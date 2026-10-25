@@ -84,6 +84,139 @@ func TestHistoricalQueryValuesUseProjectKeyedReferencesAndSourceSpans(t *testing
 	}
 }
 
+func TestGraphSliceTraversesProjectValueMatchToSecondCapture(t *testing.T) {
+	ctx := context.Background()
+	projectID := "slice-field-value-links"
+	projectKey := fieldValueKeyForProject(t, projectID)
+	defer clear(projectKey)
+	root := t.TempDir()
+	receiptRoot := filepath.Join(root, "receipts")
+	if err := os.Mkdir(receiptRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rawA := "GET /items?id=SYNTHETIC_SHARED_601 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n"
+	rawB := "GET /cart?item=SYNTHETIC_SHARED_601 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n"
+	bundleA := buildFieldValueBundleInReceiptRoot(t, projectID, "capture-a", rawA, projectKey, receiptRoot)
+	bundleB := buildFieldValueBundleInReceiptRoot(t, projectID, "capture-b", rawB, projectKey, receiptRoot)
+	snapshot := mergeFieldValueBundles(bundleA, bundleB)
+	reader, err := OpenReaderFromSnapshot(ctx, snapshot, snapshot["program"].(string), receiptRoot)
+	if err != nil {
+		t.Fatalf("open synthetic graph snapshot: %v", err)
+	}
+	defer reader.Close()
+
+	observationA := entitiesByKind(bundleA, "observation")[0]["id"].(string)
+	observationB := entitiesByKind(bundleB, "observation")[0]["id"].(string)
+	fieldA := entitiesByKind(bundleA, "field_occurrence")[0]["id"].(string)
+	fieldB := entitiesByKind(bundleB, "field_occurrence")[0]["id"].(string)
+	valueMatch := entitiesByKind(bundleA, "value_reference")[0]["id"].(string)
+	seeds, truncated, err := reader.FieldValueTraversalSeeds(observationA, MaxFieldValueTraversalPaths)
+	if err != nil || truncated {
+		t.Fatalf("expand field value traversal: seeds=%v truncated=%t err=%v", seeds, truncated, err)
+	}
+	for _, want := range []string{observationA, fieldA, valueMatch, fieldB, observationB} {
+		if !containsString(seeds, want) {
+			t.Errorf("expanded traversal omitted %s: %v", want, seeds)
+		}
+	}
+
+	slice, err := reader.Slice(ctx, SliceOptions{SeedIDs: seeds, MaxNodes: 40, MaxEdges: 60, MaxDepth: 1})
+	if err != nil {
+		t.Fatalf("read focused traversal slice: %v", err)
+	}
+	seenPredicates := map[string]bool{}
+	seenEntities := map[string]bool{}
+	for _, entity := range slice["entities"].([]Record) {
+		seenEntities[entity["id"].(string)] = true
+	}
+	for _, assertion := range slice["assertions"].([]Record) {
+		seenPredicates[assertion["predicate"].(string)] = true
+	}
+	for _, want := range []string{observationA, fieldA, valueMatch, fieldB, observationB} {
+		if !seenEntities[want] {
+			t.Errorf("focused graph slice omitted path node %s", want)
+		}
+	}
+	for _, predicate := range []string{"has_occurrence", "occurrence_of", "value_used_in"} {
+		if !seenPredicates[predicate] {
+			t.Errorf("focused graph slice omitted %q", predicate)
+		}
+	}
+	encoded, err := json.Marshal(slice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("SYNTHETIC_SHARED_601")) {
+		t.Fatal("field value traversal exposed the raw query value")
+	}
+
+	otherProject := "slice-field-value-other-project"
+	otherKey := fieldValueKeyForProject(t, otherProject)
+	defer clear(otherKey)
+	otherBundle := buildFieldValueBundleInReceiptRoot(t, otherProject, "other-project-capture", rawA, otherKey, receiptRoot)
+	otherObservation := entitiesByKind(otherBundle, "observation")[0]["id"].(string)
+	if _, _, err := reader.FieldValueTraversalSeeds(otherObservation, MaxFieldValueTraversalPaths); err == nil {
+		t.Fatal("selected project graph resolved an observation from another project")
+	}
+}
+
+func buildFieldValueBundleInReceiptRoot(t *testing.T, projectID, requestID, raw string, fieldValueKey []byte, receiptRoot string) Record {
+	t.Helper()
+	project := caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: projectID}
+	projectKey, err := project.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(receiptRoot, requestID+".json")
+	receiptBytes := []byte("synthetic receipt " + requestID)
+	if err := os.WriteFile(receiptPath, receiptBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptDigest := sha256.Sum256(receiptBytes)
+	status, notTruncated := 200, false
+	exchange := caido.HttpExchange{
+		Ref: caido.ExchangeRef{Project: project, RequestID: requestID}, RequestRaw: []byte(raw),
+		ResponseRaw: []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"), HasResponse: true,
+		Method: "GET", Scheme: "https", Host: "fixture.invalid", Port: 443,
+		Target: requestTargetFromFixture(raw), ResponseStatus: &status,
+		RequestTruncated: &notTruncated, ResponseTruncated: &notTruncated,
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
+	}
+	bundle, _, err := BuildHistoricalBundleWithSignaturesAndFieldValueKey(exchange, projectKey, Record{
+		"path": receiptPath, "sha256": hex.EncodeToString(receiptDigest[:]), "record_locator": "$.records[0]",
+	}, strings.Repeat("b", 64), ptrString(strings.Repeat("c", 64)), fieldValueKey, strings.Repeat("d", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle
+}
+
+func mergeFieldValueBundles(bundles ...Record) Record {
+	sources := make([]Record, 0)
+	entitiesByID := make(map[string]Record)
+	assertions := make([]Record, 0)
+	cards := make([]Record, 0)
+	for _, bundle := range bundles {
+		sources = append(sources, bundle["sources"].([]Record)...)
+		for _, entity := range bundle["entities"].([]Record) {
+			id := entity["id"].(string)
+			if _, exists := entitiesByID[id]; !exists {
+				entitiesByID[id] = entity
+			}
+		}
+		assertions = append(assertions, bundle["assertions"].([]Record)...)
+		cards = append(cards, bundle["cards"].([]Record)...)
+	}
+	entities := make([]Record, 0, len(entitiesByID))
+	for _, entity := range entitiesByID {
+		entities = append(entities, entity)
+	}
+	return Record{
+		"schema_version": json.Number("2"), "program": bundles[0]["program"],
+		"sources": sources, "entities": entities, "assertions": assertions, "cards": cards,
+	}
+}
+
 func TestHistoricalQueryValueReferencesRequireAProjectKey(t *testing.T) {
 	project := caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
 	projectKey, err := project.StorageKey()

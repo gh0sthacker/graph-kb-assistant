@@ -140,6 +140,76 @@ func TestPrepareSnapshotPromotesVariantSignaturesForIndexedLookup(t *testing.T) 
 	}
 }
 
+func TestPrepareSnapshotPromotesFieldEqualitySignatureForProjectScopedTraversal(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	equalitySignature := strings.Repeat("b", 64)
+	occurrenceID := "field_occurrence-" + strings.Repeat("c", 64)
+	valueReferenceID := "value_reference-" + strings.Repeat("d", 64)
+	snapshot := testSnapshot(projectKey)
+	source := snapshot["sources"].([]behaviorgraph.Record)[0]
+	entities := snapshot["entities"].([]behaviorgraph.Record)
+	entities = append(entities,
+		behaviorgraph.Record{
+			"id": occurrenceID, "kind": "field_occurrence", "data": map[string]any{"path": "query.id"},
+			"source_refs": []behaviorgraph.Record{source},
+		},
+		behaviorgraph.Record{
+			"id": valueReferenceID, "kind": "value_reference",
+			"data":        map[string]any{"equality_signature": equalitySignature},
+			"source_refs": []behaviorgraph.Record{source},
+		},
+	)
+	snapshot["entities"] = entities
+	assertions := snapshot["assertions"].([]behaviorgraph.Record)
+	assertions = append(assertions, behaviorgraph.Record{
+		"id": "assertion-" + strings.Repeat("e", 64), "subject": valueReferenceID,
+		"predicate": "value_used_in", "object": occurrenceID,
+		"context":     map[string]any{"scenario": "keyed_value_equality", "scenario_step": "correlation_only"},
+		"source_refs": []behaviorgraph.Record{source},
+	})
+	snapshot["assertions"] = assertions
+
+	prepared, err := prepareSnapshot(projectKey, snapshot)
+	if err != nil {
+		t.Fatalf("prepare synthetic field-value snapshot: %v", err)
+	}
+	var occurrence, valueReference preparedRecord
+	for _, record := range prepared.Records {
+		switch record.Kind {
+		case "field_occurrence":
+			occurrence = record
+		case "value_reference":
+			valueReference = record
+		}
+	}
+	if occurrence.ID != occurrenceID || valueReference.ID != valueReferenceID || valueReference.FieldEqualitySignature != equalitySignature {
+		t.Fatalf("prepared field-value records lost typed keys: occurrence=%#v reference=%#v", occurrence, valueReference)
+	}
+	rows := recordRows([]preparedRecord{valueReference})
+	if rows[0]["field_equality_signature"] != equalitySignature {
+		t.Fatalf("Neo4j row omitted the private lookup property: %#v", rows[0])
+	}
+	if strings.Contains(valueReference.Payload, "RAW_FIELD_VALUE") || strings.Contains(valueReference.Payload, "field_equality_signature") {
+		t.Fatalf("Neo4j public payload contains raw or promoted index-only data: %s", valueReference.Payload)
+	}
+}
+
+func TestFieldValueTraversalQueryIsProjectScopedBoundedAndDoesNotReturnSignature(t *testing.T) {
+	query := fieldValueTraversalSeedsQuery
+	if strings.Count(query, "project_key: $project_key") < 10 ||
+		!strings.Contains(query, "predicate: 'has_occurrence'") ||
+		!strings.Contains(query, "predicate: 'value_used_in'") ||
+		!strings.Contains(query, "field_equality_signature: equality_signature") ||
+		!strings.Contains(query, "LIMIT $limit_plus_one") || strings.Contains(query, "payload_json") ||
+		strings.Contains(query, "RETURN equality_signature") {
+		t.Fatalf("field-value traversal query lacks its project/index bounds or exposes a signature: %s", query)
+	}
+	if !validGraphRecordID("field_occurrence-"+strings.Repeat("a", 64), "field_occurrence") ||
+		validGraphRecordID("value_reference-"+strings.Repeat("a", 64), "field_occurrence") {
+		t.Fatal("field-value query result identity validation is not type-specific")
+	}
+}
+
 func TestObservationIDsByVariantSignaturesQueryUsesScopedIndexedProperties(t *testing.T) {
 	requestOnly := observationIDsByVariantSignaturesQuery(true, false)
 	responseOnly := observationIDsByVariantSignaturesQuery(false, true)

@@ -246,8 +246,42 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 	responsePrepared := false
 	switch request.View {
 	case GraphViewDirect:
-		page, pageErr := search.GraphNeighborhoodPageWithService(ctx, s.graph, selected, request.SeedIDs, backendCursor)
+		querySeeds := append([]string(nil), request.SeedIDs...)
+		fieldValueState := "not_applicable"
+		fieldValueTruncated := false
+		traversalGeneration := int64(0)
+		if request.Cursor == "" && len(querySeeds) == 1 && strings.HasPrefix(querySeeds[0], "observation-") {
+			fieldValueState = "no_matches"
+			expanded, truncated, generation, expandErr := s.graph.FieldValueTraversalSeeds(
+				ctx, selected, querySeeds[0], behaviorgraph.MaxFieldValueTraversalPaths,
+			)
+			switch {
+			case expandErr == nil:
+				querySeeds = expanded
+				fieldValueTruncated = truncated
+				traversalGeneration = generation
+				if len(expanded) > 1 {
+					fieldValueState = "expanded"
+				}
+				if truncated {
+					fieldValueState = "bounded"
+				}
+			case errors.Is(expandErr, graphaccess.ErrFieldValueIndexUnavailable):
+				fieldValueState = "index_unavailable"
+			default:
+				return GraphResult{}, queryError(ErrorGraphUnavailable, "project field-value traversal could not be read", expandErr)
+			}
+		}
+		page, pageErr := search.GraphNeighborhoodPageWithService(ctx, s.graph, selected, querySeeds, backendCursor)
 		err, payload = pageErr, page.Payload
+		if err == nil && traversalGeneration > 0 && page.Generation != traversalGeneration {
+			return GraphResult{}, queryError(ErrorStaleCursor, "Neo4j project changed while field-value relationships were read; reload the graph", neo4jstore.ErrNeighborhoodCursorStale)
+		}
+		if err == nil {
+			// The UI must preserve the expanded, bounded seed set when it asks
+			// for the next page bound to this graph generation.
+			payload["seed_ids"] = append([]string(nil), querySeeds...)
+		}
 		if errors.Is(err, neo4jstore.ErrNeighborhoodCursorStale) {
 			return GraphResult{}, queryError(ErrorStaleCursor, "graph continuation cursor is stale; reload the first page", err)
 		}
@@ -256,7 +290,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 		}
 		if err == nil && page.NextCursor != nil {
 			token, tokenErr := encodeGraphCursor(graphCursorData{
-				Version: 1, ProjectKey: request.ProjectKey, SeedHash: graphSeedHash(request.SeedIDs),
+				Version: 1, ProjectKey: request.ProjectKey, SeedHash: graphSeedHash(querySeeds),
 				Generation: page.NextCursor.Generation, Priority: page.NextCursor.Priority,
 				AfterAssertionID: page.NextCursor.AfterAssertionID,
 			})
@@ -266,6 +300,18 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 			payload["next_cursor"] = token
 		} else if err == nil {
 			delete(payload, "next_cursor")
+		}
+		if err == nil {
+			payload["field_value_traversal"] = map[string]any{
+				"state": fieldValueState, "truncated": fieldValueTruncated,
+				"path_node_count": max(0, len(querySeeds)-len(request.SeedIDs)),
+			}
+			if fieldValueTruncated {
+				appendGraphLimitation(payload, "Field-value traversal is bounded to a small number of matching captures; additional matching paths may remain.")
+			}
+			if fieldValueState == "index_unavailable" {
+				appendGraphLimitation(payload, "Project field-value index is unavailable or stale; this view shows only direct graph neighbors.")
+			}
 		}
 		version = "behavior-graph-direct-v1"
 		coverage = "Direct structural neighborhood; coverage and full-project evidence integrity remain partial."

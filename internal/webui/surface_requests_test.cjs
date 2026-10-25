@@ -56,7 +56,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -273,6 +273,39 @@ test("graph continuation merges distinct rows, deduplicates overlaps, and keeps 
   assert.equal(last.truncated, false);
   assert.equal(last.neighborhood_candidate_limit_reached, false);
   assert.deepEqual(snapshot(last.result_page_ids), ["result-1", "result-2", "result-3"]);
+});
+
+test("expanded field-value seed IDs are retained across direct graph continuation", async () => {
+  const app = createApp();
+  const observationA = `observation-${"a".repeat(64)}`;
+  const occurrenceA = `field_occurrence-${"b".repeat(64)}`;
+  const valueMatch = `value_reference-${"c".repeat(64)}`;
+  const occurrenceB = `field_occurrence-${"d".repeat(64)}`;
+  const observationB = `observation-${"e".repeat(64)}`;
+  const expandedSeeds = [observationA, occurrenceA, valueMatch, occurrenceB, observationB];
+  const cursor = "synthetic-field-value-cursor";
+  app.state.projectKey = "f".repeat(64);
+
+  const firstPage = app.loadGraph([observationA], { view: "direct" });
+  assert.deepEqual(app.requests[0].url.searchParams.getAll("seed"), [observationA]);
+  app.requests[0].resolve({
+    entities: [], assertions: [], seed_ids: expandedSeeds,
+    next_cursor: cursor, truncated: true, incomplete: true, result_id: "field-value-page-1",
+  });
+  await firstPage;
+  assert.deepEqual(snapshot(app.state.graphSeeds), expandedSeeds);
+
+  const secondPage = app.loadGraph(app.state.graphSeeds, {
+    view: "direct", cursor: app.state.graph.next_cursor, appendPage: true,
+  });
+  assert.deepEqual(app.requests[1].url.searchParams.getAll("seed"), expandedSeeds);
+  assert.equal(app.requests[1].url.searchParams.get("cursor"), cursor);
+  app.requests[1].resolve({
+    entities: [], assertions: [], seed_ids: expandedSeeds,
+    truncated: false, incomplete: false, result_id: "field-value-page-2",
+  });
+  await secondPage;
+  assert.deepEqual(snapshot(app.state.graphSeeds), expandedSeeds);
 });
 
 test("native candidate continuation displays the cumulative server graph page", () => {
@@ -502,6 +535,68 @@ test("capture comparison pins exact revisions, reports fidelity and truncation, 
   assert.equal(app.state.comparisonBaseline, null, "a project switch clears the pinned baseline");
   app.requests[1].resolve(page("b.test"));
   await switchProject;
+});
+
+test("a graph comparison can be attached to a resumed accepted consultation only for its exact evidence revisions", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const baselineRevision = "b".repeat(64);
+  const selectedRevision = "c".repeat(64);
+  app.state.projectKey = projectKey;
+  app.state.comparisonBaseline = { projectKey, requestId: "239", revisionId: baselineRevision };
+  app.elements.consultationResumeID.value = "session-accepted";
+
+  const comparison = app.openComparison({
+    request_id: "240", revision_id: selectedRevision,
+    record_source: "encrypted_local_capture", raw_stored_locally: true,
+  });
+  app.requests[0].resolve({
+    request: {
+      available: true, equal: false, compared_bytes: 28, first_difference_offset: 14,
+      left_excerpt: '"GET /item?id=1"', right_excerpt: '"GET /item?id=2"',
+      left: { request_id: "239", revision_id: baselineRevision, size: 28, sha256: "d".repeat(64) },
+      right: { request_id: "240", revision_id: selectedRevision, size: 28, sha256: "e".repeat(64) },
+    },
+    response: { available: false, reason: "Exact response bytes are unavailable." },
+    coverage_note: "Stored bytes only.",
+  });
+  await comparison;
+  assert.equal(app.elements.comparisonAttach.hidden, false);
+  assert.equal(app.elements.comparisonAttachButton.disabled, true);
+  assert.match(app.elements.comparisonAttachStatus.textContent, /Resume an accepted consultation/);
+
+  const resume = app.resumeConsultationByID();
+  assert.equal(app.requests[1].url.pathname, "/api/consultation/review");
+  app.requests[1].resolve({
+    consultation_id: "session-accepted", version: 3, review_accepted: true,
+    question: "Compare the selected synthetic captures.", evidence: [], context_annotations: [], comparisons: [],
+    evidence_references: [
+      { evidence_reference_id: "ref-left", request_id: "239", revision_id: baselineRevision, source_integrity_status: "verified", sha256: "d".repeat(64) },
+      { evidence_reference_id: "ref-right", request_id: "240", revision_id: selectedRevision, source_integrity_status: "verified", sha256: "e".repeat(64) },
+    ],
+  });
+  await resume;
+  assert.equal(app.elements.comparisonAttachButton.disabled, false);
+  const attach = app.attachComparisonToConsultation();
+  assert.equal(app.requests[2].method, "POST");
+  assert.equal(app.requests[2].url.pathname, "/api/consultation/compare");
+  const request = JSON.parse(app.requests[2].body);
+  assert.equal(request.project_key, projectKey);
+  assert.equal(request.session_id, "session-accepted");
+  assert.equal(request.expected_version, 3);
+  assert.equal(request.left_request_id, "239");
+  assert.equal(request.left_revision_id, baselineRevision);
+  assert.equal(request.right_request_id, "240");
+  assert.equal(request.right_revision_id, selectedRevision);
+  assert.ok(request.idempotency_key);
+
+  app.requests[2].resolve({ comparison_id: "comparison-saved", session_version: 4 });
+  await attach;
+  assert.equal(app.state.consultation.version, 4);
+  assert.equal(app.elements.comparisonAttachButton.disabled, true);
+  assert.match(app.elements.comparisonAttachStatus.textContent, /comparison-saved/);
+  assert.equal(app.elements.comparisonAttachStatus.textContent.includes("GET /item?id=1"), false);
+  assert.equal(app.elements.consultationReview.hidden, false);
 });
 
 test("evidence packet preview accumulates exact spans across captures and resets on project switch", async () => {

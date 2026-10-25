@@ -24,16 +24,18 @@ const (
 	// The full-data occurrence projection measured 227,626 records. Keep
 	// bounded headroom for that verified local shape; the 256 MiB aggregate
 	// payload limit remains the primary size bound.
-	maxSnapshotRecords       = 300_000
-	maxSnapshotBytes         = 256 << 20
-	writeBatchSize           = 500
-	maxSignatureObservations = behaviorgraph.MaxVariantObservations
+	maxSnapshotRecords          = 300_000
+	maxSnapshotBytes            = 256 << 20
+	writeBatchSize              = 500
+	maxSignatureObservations    = behaviorgraph.MaxVariantObservations
+	maxFieldValueTraversalPaths = behaviorgraph.MaxFieldValueTraversalPaths
 )
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var signatureDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 var ErrSignatureIndexUnavailable = errors.New("Neo4j project signature index is unavailable")
+var ErrFieldValueIndexUnavailable = errors.New("Neo4j project field-value index is unavailable")
 
 // Config contains connection settings only. Passwords are never included in
 // formatted errors or status reports.
@@ -148,6 +150,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		"CREATE INDEX graph_record_project_card_capture IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.card_capture_id)",
 		"CREATE INDEX graph_record_project_request_signature IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.kind, n.request_signature)",
 		"CREATE INDEX graph_record_project_response_signature IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.kind, n.response_signature)",
+		"CREATE INDEX graph_record_project_field_equality IF NOT EXISTS FOR (n:GraphRecord) ON (n.project_key, n.kind, n.field_equality_signature)",
 	} {
 		result, err := session.Run(ctx, query, nil)
 		if err != nil {
@@ -161,16 +164,17 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 }
 
 type preparedRecord struct {
-	ID                string
-	Type              string
-	Payload           string
-	PayloadHash       string
-	Kind              string
-	RequestSignature  string
-	ResponseSignature string
-	Predicate         string
-	CardEndpointID    string
-	CardCaptureID     string
+	ID                     string
+	Type                   string
+	Payload                string
+	PayloadHash            string
+	Kind                   string
+	RequestSignature       string
+	ResponseSignature      string
+	FieldEqualitySignature string
+	Predicate              string
+	CardEndpointID         string
+	CardCaptureID          string
 }
 
 type preparedRef struct {
@@ -232,6 +236,7 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 				    n.kind = row.kind,
 				    n.request_signature = row.request_signature,
 				    n.response_signature = row.response_signature,
+				    n.field_equality_signature = row.field_equality_signature,
 				    n.predicate = row.predicate,
 				    n.card_endpoint_id = row.card_endpoint_id,
 				    n.card_capture_id = row.card_capture_id`,
@@ -286,6 +291,8 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 			    m.schema_version = 2,
 			    m.signature_index_version = 1,
 			    m.signature_index_generation = next_generation,
+			    m.field_value_index_version = 1,
+			    m.field_value_index_generation = next_generation,
 			    m.projection_state = 'snapshot',
 			    m.record_count = $record_count,
 			    m.reference_count = $reference_count,
@@ -538,6 +545,13 @@ const incrementalProjectionMarkerQuery = `
 	    m.signature_index_generation = CASE
 	        WHEN m.signature_index_version = 1
 	            AND m.signature_index_generation = previous_generation
+	            AND previous_generation >= 1
+	        THEN next_generation
+	        ELSE null
+	    END,
+	    m.field_value_index_generation = CASE
+	        WHEN m.field_value_index_version = 1
+	            AND m.field_value_index_generation = previous_generation
 	            AND previous_generation >= 1
 	        THEN next_generation
 	        ELSE null
@@ -815,6 +829,7 @@ func writePreparedGraph(ctx context.Context, tx neo4j.ManagedTransaction, projec
 			    n.kind = row.kind,
 			    n.request_signature = row.request_signature,
 			    n.response_signature = row.response_signature,
+			    n.field_equality_signature = row.field_equality_signature,
 			    n.predicate = row.predicate,
 			    n.card_endpoint_id = row.card_endpoint_id,
 			    n.card_capture_id = row.card_capture_id`,
@@ -1007,6 +1022,11 @@ func prepareGraphSnapshot(projectKey string, snapshot behaviorgraph.Record, requ
 					item.ResponseSignature = value
 				}
 			}
+			if item.Kind == "value_reference" {
+				if value, ok := variantData["equality_signature"].(string); ok && signatureDigestPattern.MatchString(value) {
+					item.FieldEqualitySignature = value
+				}
+			}
 		}
 		if value, ok := record["predicate"].(string); ok {
 			item.Predicate = value
@@ -1147,9 +1167,10 @@ func recordRows(records []preparedRecord) []map[string]any {
 		rows = append(rows, map[string]any{
 			"record_id": record.ID, "record_type": record.Type, "payload_json": record.Payload,
 			"payload_sha256": record.PayloadHash, "kind": record.Kind, "predicate": record.Predicate,
-			"request_signature":  optionalSignatureProperty(record.RequestSignature),
-			"response_signature": optionalSignatureProperty(record.ResponseSignature),
-			"card_endpoint_id":   record.CardEndpointID, "card_capture_id": record.CardCaptureID,
+			"request_signature":        optionalSignatureProperty(record.RequestSignature),
+			"response_signature":       optionalSignatureProperty(record.ResponseSignature),
+			"field_equality_signature": optionalSignatureProperty(record.FieldEqualitySignature),
+			"card_endpoint_id":         record.CardEndpointID, "card_capture_id": record.CardCaptureID,
 		})
 	}
 	return rows

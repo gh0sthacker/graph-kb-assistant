@@ -223,6 +223,33 @@ func TestGraphCursorIsBoundToProjectAndSortedSeedSet(t *testing.T) {
 	}
 }
 
+func TestFieldValueTraversalCursorRoundTripsExpandedSeedSet(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	original := "observation-" + strings.Repeat("b", 64)
+	expanded := []string{
+		original,
+		"field_occurrence-" + strings.Repeat("c", 64),
+		"value_reference-" + strings.Repeat("d", 64),
+		"field_occurrence-" + strings.Repeat("e", 64),
+		"observation-" + strings.Repeat("f", 64),
+	}
+	cursor := graphCursorData{
+		Version: 1, ProjectKey: projectKey, SeedHash: graphSeedHash(expanded),
+		Generation: 19, Priority: 1, AfterAssertionID: "assertion-" + strings.Repeat("1", 64),
+	}
+	token, err := encodeGraphCursor(cursor)
+	if err != nil {
+		t.Fatalf("encode expanded field-value cursor: %v", err)
+	}
+	decoded, err := decodeGraphCursor(token, projectKey, expanded)
+	if err != nil || decoded.Generation != 19 {
+		t.Fatalf("expanded traversal cursor did not round-trip: %#v %v", decoded, err)
+	}
+	if _, err := decodeGraphCursor(token, projectKey, []string{original}); err == nil {
+		t.Fatal("cursor accepted the original seed after the first page expanded its traversal")
+	}
+}
+
 func TestGraphCursorRejectsMalformedAndAcceptsBoundedFullViewRequests(t *testing.T) {
 	projectKey := strings.Repeat("a", 64)
 	seed := "endpoint-" + strings.Repeat("b", 64)

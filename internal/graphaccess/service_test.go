@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
@@ -19,16 +22,19 @@ import (
 )
 
 type fakeNeo4jGraphStore struct {
-	closeCount          atomic.Int32
-	snapshotReads       atomic.Int32
-	analyticalSliceRead atomic.Int32
-	signatureLookupRead atomic.Int32
-	signatureProjectKey string
-	signatureRequest    string
-	signatureResponse   string
-	signatureIDs        []string
-	signatureTruncated  bool
-	analyticalSlice     neo4jstore.AnalyticalSlice
+	closeCount           atomic.Int32
+	snapshotReads        atomic.Int32
+	analyticalSliceRead  atomic.Int32
+	signatureLookupRead  atomic.Int32
+	signatureProjectKey  string
+	signatureRequest     string
+	signatureResponse    string
+	signatureIDs         []string
+	signatureTruncated   bool
+	analyticalSlice      neo4jstore.AnalyticalSlice
+	fieldValueSnapshot   behaviorgraph.Record
+	fieldValueReceipts   string
+	fieldValueGeneration int64
 }
 
 func (s *fakeNeo4jGraphStore) ReadProjectSnapshot(context.Context, string) (behaviorgraph.Record, error) {
@@ -39,7 +45,13 @@ func (s *fakeNeo4jGraphStore) ReadProjectSnapshot(context.Context, string) (beha
 func (*fakeNeo4jGraphStore) ReadProjectNeighborhood(context.Context, string, []string, int) (neo4jstore.Neighborhood, error) {
 	return neo4jstore.Neighborhood{}, nil
 }
-func (*fakeNeo4jGraphStore) ReadProjectNeighborhoodPage(context.Context, string, []string, int, *neo4jstore.NeighborhoodCursor) (neo4jstore.Neighborhood, error) {
+func (s *fakeNeo4jGraphStore) ReadProjectNeighborhoodPage(_ context.Context, projectKey string, _ []string, _ int, _ *neo4jstore.NeighborhoodCursor) (neo4jstore.Neighborhood, error) {
+	if s.fieldValueSnapshot != nil {
+		if projectKey != s.fieldValueSnapshot["program"] {
+			return neo4jstore.Neighborhood{}, errors.New("synthetic project namespace mismatch")
+		}
+		return neo4jstore.Neighborhood{Snapshot: s.fieldValueSnapshot, Generation: s.fieldValueGeneration}, nil
+	}
 	return neo4jstore.Neighborhood{}, nil
 }
 
@@ -54,6 +66,19 @@ func (s *fakeNeo4jGraphStore) ReadProjectObservationIDsByVariantSignatures(_ con
 	s.signatureRequest = requestSignature
 	s.signatureResponse = responseSignature
 	return s.signatureIDs, s.signatureTruncated, nil
+}
+
+func (s *fakeNeo4jGraphStore) ReadProjectFieldValueTraversalSeeds(ctx context.Context, projectKey, observationID string, maxPaths int) ([]string, bool, int64, error) {
+	if s.fieldValueSnapshot == nil || projectKey != s.fieldValueSnapshot["program"] {
+		return nil, false, 0, errors.New("synthetic project namespace mismatch")
+	}
+	reader, err := behaviorgraph.OpenReaderFromSnapshot(ctx, s.fieldValueSnapshot, projectKey, s.fieldValueReceipts)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	defer reader.Close()
+	ids, truncated, err := reader.FieldValueTraversalSeeds(observationID, maxPaths)
+	return ids, truncated, s.fieldValueGeneration, err
 }
 
 func (s *fakeNeo4jGraphStore) Close(context.Context) error {
@@ -301,6 +326,154 @@ func TestNeighborhoodSliceBudgetFitsEveryHighDegreePageCandidate(t *testing.T) {
 		t.Fatalf("20-seed page edge budget = %d, want 80", got)
 	}
 }
+
+func TestFieldValueTraversalGraphNeighborhoodReachesSecondCapture(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "neo4j")
+	t.Setenv("BB_ASSISTANT_NEO4J_PASSWORD", "synthetic-password")
+	root := t.TempDir()
+	ref := project.CaidoProjectRef{InstanceID: "field-value-instance", ProjectID: "field-value-project"}
+	writable, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("create synthetic project: %v", err)
+	}
+	projectKey, receiptRoot := writable.ProjectKey, writable.BehaviorReceiptPath
+	fieldValueKey := []byte(strings.Repeat("k", 32))
+	defer clear(fieldValueKey)
+	rawA := "GET /items?id=SYNTHETIC_CROSS_CAPTURE_702 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n"
+	rawB := "GET /cart?item=SYNTHETIC_CROSS_CAPTURE_702 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n"
+	bundleA := buildGraphValueCapture(t, ref, projectKey, receiptRoot, fieldValueKey, "capture-a", rawA)
+	bundleB := buildGraphValueCapture(t, ref, projectKey, receiptRoot, fieldValueKey, "capture-b", rawB)
+	snapshot := mergeGraphValueCaptures(projectKey, bundleA, bundleB)
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := store.OpenProjectReadOnly(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("open synthetic project read-only: %v", err)
+	}
+	defer selected.Close()
+
+	backend := &fakeNeo4jGraphStore{fieldValueSnapshot: snapshot, fieldValueReceipts: receiptRoot, fieldValueGeneration: 17}
+	service := newService(func(context.Context, neo4jstore.Config) (neo4jGraphStore, error) { return backend, nil })
+	defer service.Close(context.Background())
+	observationA := graphValueEntityID(bundleA, "observation")
+	observationB := graphValueEntityID(bundleB, "observation")
+	fieldA := graphValueEntityID(bundleA, "field_occurrence")
+	fieldB := graphValueEntityID(bundleB, "field_occurrence")
+	valueReference := graphValueEntityID(bundleA, "value_reference")
+	seeds, truncated, generation, err := service.FieldValueTraversalSeeds(ctx, selected, observationA, behaviorgraph.MaxFieldValueTraversalPaths)
+	if err != nil || truncated || generation != 17 {
+		t.Fatalf("FieldValueTraversalSeeds(): seeds=%v truncated=%t generation=%d err=%v", seeds, truncated, generation, err)
+	}
+	page, err := service.ReadNeighborhoodPage(ctx, selected, seeds, nil)
+	if err != nil {
+		t.Fatalf("ReadNeighborhoodPage(): %v", err)
+	}
+	if page.Generation != generation {
+		t.Fatalf("traversal generation %d differs from graph page %d", generation, page.Generation)
+	}
+	entities := page.Payload["entities"].([]behaviorgraph.Record)
+	assertions := page.Payload["assertions"].([]behaviorgraph.Record)
+	entityIDs, entityKinds, predicates := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, entity := range entities {
+		entityIDs[entity["id"].(string)] = true
+		entityKinds[entity["kind"].(string)] = true
+	}
+	for _, assertion := range assertions {
+		predicates[assertion["predicate"].(string)] = true
+	}
+	for _, id := range []string{observationA, fieldA, valueReference, fieldB, observationB} {
+		if !entityIDs[id] {
+			t.Errorf("Neo4j graph page omitted path node %s", id)
+		}
+	}
+	for _, kind := range []string{"field_occurrence", "value_reference", "observation"} {
+		if !entityKinds[kind] {
+			t.Errorf("Neo4j graph page omitted entity kind %s", kind)
+		}
+	}
+	for _, predicate := range []string{"has_occurrence", "occurrence_of", "value_used_in"} {
+		if !predicates[predicate] {
+			t.Errorf("Neo4j graph page omitted relationship %s", predicate)
+		}
+	}
+	encoded, err := json.Marshal(page.Payload)
+	if err != nil || strings.Contains(string(encoded), "SYNTHETIC_CROSS_CAPTURE_702") {
+		t.Fatalf("Neo4j graph page exposed a raw value or failed to encode: err=%v", err)
+	}
+	if _, _, _, err := backend.ReadProjectFieldValueTraversalSeeds(ctx, strings.Repeat("f", 64), observationA, behaviorgraph.MaxFieldValueTraversalPaths); err == nil {
+		t.Fatal("field-value traversal accepted a different project namespace")
+	}
+}
+
+func buildGraphValueCapture(t *testing.T, ref project.CaidoProjectRef, projectKey, receiptRoot string, fieldValueKey []byte, requestID, raw string) behaviorgraph.Record {
+	t.Helper()
+	projectRef := caido.ProjectRef{InstanceID: ref.InstanceID, ProjectID: ref.ProjectID}
+	receiptPath := filepath.Join(receiptRoot, requestID+".json")
+	receiptBytes := []byte("synthetic receipt " + requestID)
+	if err := os.WriteFile(receiptPath, receiptBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptDigest := sha256.Sum256(receiptBytes)
+	status, notTruncated := 200, false
+	requestLine := strings.SplitN(raw, "\r\n", 2)[0]
+	fields := strings.Fields(requestLine)
+	target := "/"
+	if len(fields) > 1 {
+		target = fields[1]
+	}
+	exchange := caido.HttpExchange{
+		Ref: caido.ExchangeRef{Project: projectRef, RequestID: requestID}, RequestRaw: []byte(raw),
+		ResponseRaw: []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"), HasResponse: true,
+		Method: "GET", Scheme: "https", Host: "fixture.invalid", Port: 443, Target: target,
+		ResponseStatus: &status, RequestTruncated: &notTruncated, ResponseTruncated: &notTruncated,
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
+	}
+	bundle, _, err := behaviorgraph.BuildHistoricalBundleWithSignaturesAndFieldValueKey(exchange, projectKey, behaviorgraph.Record{
+		"path": receiptPath, "sha256": hex.EncodeToString(receiptDigest[:]), "record_locator": "$.records[0]",
+	}, strings.Repeat("b", 64), stringPointer(strings.Repeat("c", 64)), fieldValueKey, strings.Repeat("d", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle
+}
+
+func mergeGraphValueCaptures(projectKey string, bundles ...behaviorgraph.Record) behaviorgraph.Record {
+	sources := []behaviorgraph.Record{}
+	entitiesByID := map[string]behaviorgraph.Record{}
+	assertions := []behaviorgraph.Record{}
+	cards := []behaviorgraph.Record{}
+	for _, bundle := range bundles {
+		sources = append(sources, bundle["sources"].([]behaviorgraph.Record)...)
+		for _, entity := range bundle["entities"].([]behaviorgraph.Record) {
+			if _, exists := entitiesByID[entity["id"].(string)]; !exists {
+				entitiesByID[entity["id"].(string)] = entity
+			}
+		}
+		assertions = append(assertions, bundle["assertions"].([]behaviorgraph.Record)...)
+		cards = append(cards, bundle["cards"].([]behaviorgraph.Record)...)
+	}
+	entities := make([]behaviorgraph.Record, 0, len(entitiesByID))
+	for _, entity := range entitiesByID {
+		entities = append(entities, entity)
+	}
+	return behaviorgraph.Record{
+		"schema_version": json.Number("2"), "program": projectKey,
+		"sources": sources, "entities": entities, "assertions": assertions, "cards": cards,
+	}
+}
+
+func graphValueEntityID(bundle behaviorgraph.Record, kind string) string {
+	for _, entity := range bundle["entities"].([]behaviorgraph.Record) {
+		if entity["kind"] == kind {
+			return entity["id"].(string)
+		}
+	}
+	return ""
+}
+
+func stringPointer(value string) *string { return &value }
 
 func highDegreeNeighborhoodSnapshot(projectKey, seed string, edgeCount int) behaviorgraph.Record {
 	refs := []behaviorgraph.Record{{"path": "/synthetic/high-degree.json", "sha256": strings.Repeat("b", 64), "record_locator": "$.record"}}

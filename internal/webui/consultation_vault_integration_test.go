@@ -86,6 +86,8 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	}
 	requestBytes := []byte("GET /profile HTTP/1.1\r\nHost: app.fixture.invalid\r\nAuthorization: Bearer operator-review-secret\r\n\r\n")
 	responseBytes := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nsynthetic profile")
+	secondRequestBytes := []byte("GET /profile?view=compact HTTP/1.1\r\nHost: app.fixture.invalid\r\n\r\n")
+	secondResponseBytes := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nsynthetic compact profile")
 	status := 200
 	exchange := caido.HttpExchange{
 		Ref:        caido.ExchangeRef{Project: ref, RequestID: "review-capture"},
@@ -94,18 +96,32 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 		Target: "https://app.fixture.invalid/profile", ResponseStatus: &status,
 		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
 	}
-	if _, err := writer.WritePage(ctx, ingest.HistoryPageInput{RunID: run.RunID, Page: caido.HistoryPage{Exchanges: []caido.HttpExchange{exchange}}}); err != nil {
+	secondExchange := caido.HttpExchange{
+		Ref:        caido.ExchangeRef{Project: ref, RequestID: "review-capture-two"},
+		RequestRaw: secondRequestBytes, ResponseRaw: secondResponseBytes, HasResponse: true,
+		Method: "GET", Scheme: "https", Host: "app.fixture.invalid", Port: 443,
+		Target: "https://app.fixture.invalid/profile?view=compact", ResponseStatus: &status,
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
+	}
+	if _, err := writer.WritePage(ctx, ingest.HistoryPageInput{RunID: run.RunID, Page: caido.HistoryPage{Exchanges: []caido.HttpExchange{exchange, secondExchange}}}); err != nil {
 		writer.Close()
 		_ = projectStore.Close()
 		t.Fatalf("WritePage: %v", err)
 	}
-	var revisionID string
+	var revisionID, secondRevisionID string
 	if err := projectStore.Database.DB().QueryRowContext(ctx,
 		"SELECT current_revision_id FROM captures WHERE request_id=?", exchange.Ref.RequestID,
 	).Scan(&revisionID); err != nil {
 		writer.Close()
 		_ = projectStore.Close()
 		t.Fatalf("read exact fixture revision: %v", err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id FROM captures WHERE request_id=?", secondExchange.Ref.RequestID,
+	).Scan(&secondRevisionID); err != nil {
+		writer.Close()
+		_ = projectStore.Close()
+		t.Fatalf("read second exact fixture revision: %v", err)
 	}
 	writer.Close()
 	if err := projectStore.Close(); err != nil {
@@ -135,9 +151,10 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	}
 	createBody, err := json.Marshal(map[string]any{
 		"project_key": projectKey, "question": "Review this selected synthetic exchange.",
-		"selections": []appquery.EvidencePacketSelection{{
-			RequestID: exchange.Ref.RequestID, RevisionID: revisionID, Side: "request", Length: len(requestBytes),
-		}},
+		"selections": []appquery.EvidencePacketSelection{
+			{RequestID: exchange.Ref.RequestID, RevisionID: revisionID, Side: "request", Length: len(requestBytes)},
+			{RequestID: secondExchange.Ref.RequestID, RevisionID: secondRevisionID, Side: "request", Length: len(secondRequestBytes)},
+		},
 		"idempotency_key": "operator_http_create_0001",
 	})
 	if err != nil {
@@ -154,8 +171,8 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if created.Question != "" || created.Evidence.Evidence[0].Excerpt != "" {
 		t.Fatal("creation response exposed unreviewed question or evidence")
 	}
-	if len(created.References) != 1 {
-		t.Fatalf("created evidence references=%d, want one exact selected revision", len(created.References))
+	if len(created.References) != 2 {
+		t.Fatalf("created evidence references=%d, want both exact selected revisions", len(created.References))
 	}
 	annotationBody, err := json.Marshal(map[string]any{
 		"project_key": projectKey, "session_id": created.ID, "expected_version": 1,
@@ -187,7 +204,7 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if err := json.Unmarshal(reviewResponse.Body.Bytes(), &review); err != nil {
 		t.Fatalf("decode review session: %v", err)
 	}
-	if review.Question == "" || review.ReviewAccepted || len(review.Evidence.Evidence) != 1 || len(review.ContextAnnotations) != 1 ||
+	if review.Question == "" || review.ReviewAccepted || len(review.Evidence.Evidence) != 2 || len(review.ContextAnnotations) != 1 ||
 		review.ContextAnnotations[0].Label != "actor-a" || review.ContextAnnotations[0].Origin != "analyst" ||
 		!review.Evidence.Evidence[0].Available || review.Evidence.Evidence[0].RedactedBytes == 0 ||
 		!strings.Contains(review.Evidence.Evidence[0].Excerpt, "[REDACTED]") ||
@@ -213,6 +230,30 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if !accepted.ReviewAccepted || accepted.Version != 3 || len(accepted.ContextAnnotations) != 1 || strings.Contains(acceptedResponse.Body.String(), "operator-review-secret") {
 		t.Fatalf("explicit review transition did not persist or returned raw evidence: %#v", accepted)
 	}
+	compareBody, err := json.Marshal(map[string]any{
+		"project_key": projectKey, "session_id": created.ID, "expected_version": accepted.Version,
+		"idempotency_key": "operator_http_compare_0001",
+		"left_request_id": exchange.Ref.RequestID, "left_revision_id": revisionID,
+		"right_request_id": secondExchange.Ref.RequestID, "right_revision_id": secondRevisionID,
+	})
+	if err != nil {
+		t.Fatalf("encode session comparison: %v", err)
+	}
+	compareResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/compare", compareBody)
+	if compareResponse.Code != http.StatusOK || compareResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("consultation comparison status=%d cache=%q body=%s", compareResponse.Code, compareResponse.Header().Get("Cache-Control"), compareResponse.Body.String())
+	}
+	var comparison consultation.ComparisonRecord
+	if err := json.Unmarshal(compareResponse.Body.Bytes(), &comparison); err != nil {
+		t.Fatalf("decode session comparison: %v", err)
+	}
+	if comparison.ID == "" || comparison.SessionVersion != 4 || comparison.Result.LeftRequestID != exchange.Ref.RequestID ||
+		comparison.Result.LeftRevisionID != revisionID || comparison.Result.RightRequestID != secondExchange.Ref.RequestID ||
+		comparison.Result.RightRevisionID != secondRevisionID || comparison.Result.Request.FirstDifferenceOffset == nil ||
+		comparison.Result.Request.LeftExcerpt != "" || comparison.Result.Request.RightExcerpt != "" ||
+		strings.Contains(compareResponse.Body.String(), "operator-review-secret") {
+		t.Fatalf("persisted comparison lost exact capture identity or exposed excerpts: %#v", comparison)
+	}
 
 	resumeResponse := serveLocalGET(handler, "/api/consultation/session?project_key="+projectKey+"&session_id="+created.ID)
 	if resumeResponse.Code != http.StatusOK || resumeResponse.Header().Get("Cache-Control") != "no-store" {
@@ -222,8 +263,9 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if err := json.Unmarshal(resumeResponse.Body.Bytes(), &resumed); err != nil {
 		t.Fatalf("decode resumed session: %v", err)
 	}
-	if !resumed.ReviewAccepted || resumed.Question == "" || len(resumed.ContextAnnotations) != 1 ||
+	if !resumed.ReviewAccepted || resumed.Question == "" || len(resumed.ContextAnnotations) != 1 || len(resumed.Comparisons) != 1 ||
 		resumed.ContextAnnotations[0].Label != "actor-a" || resumed.Evidence.Evidence[0].RedactedBytes == 0 ||
+		resumed.Comparisons[0].ID != comparison.ID || resumed.Version != comparison.SessionVersion ||
 		strings.Contains(resumeResponse.Body.String(), "operator-review-secret") {
 		t.Fatalf("accepted session did not resume with redacted exact evidence: %#v", resumed)
 	}

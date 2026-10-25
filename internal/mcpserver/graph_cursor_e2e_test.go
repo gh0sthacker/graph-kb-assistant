@@ -84,6 +84,10 @@ func (*cursorFixtureGraphStore) ReadProjectObservationIDsByVariantSignatures(con
 	return nil, false, nil
 }
 
+func (*cursorFixtureGraphStore) ReadProjectFieldValueTraversalSeeds(context.Context, string, string, int) ([]string, bool, int64, error) {
+	return nil, false, 0, fmt.Errorf("unexpected field-value traversal")
+}
+
 func (*cursorFixtureGraphStore) Close(context.Context) error { return nil }
 
 func sha256Digest(record behaviorgraph.Record) []byte {

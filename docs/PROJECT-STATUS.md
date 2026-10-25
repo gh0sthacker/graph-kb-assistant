@@ -14,15 +14,25 @@
   causality, object identity, or ownership. If a source span or revision cannot
   be bound, the occurrence and equality link are omitted and the analysis card
   records the gap.
-- Synthetic Go graph-import tests cover repeated query order, percent-encoded
-  byte spans, same-project correlation across fields and captures, separation
-  by key, sensitive-name omission, plaintext absence, writer validation, and
-  unbound-span coverage. The Python graph validator accepts the same schema
-  and rejects spans outside their occurrence. Targeted graph/ingest Go tests
-  and the Python fixtures passed.
-- This is a query-only slice. Request-body, response-side, actor/object
-  annotations, efficient Neo4j correlation lookup, UI navigation, and complete
-  application-map coverage remain unfinished; Stage 3 stays `PARTIAL`.
+- Synthetic Go graph-import and traversal tests cover repeated query order,
+  percent-encoded byte spans, same-project correlation across fields and
+  captures, separation by project key, sensitive-name omission, plaintext
+  absence, writer validation, and unbound-span coverage. `GraphNeighborhoodPage`
+  now keeps the `has_occurrence`, `occurrence_of`, and `value_used_in` path and
+  can expand a bounded observation → field → project-value match → second
+  capture slice. The Neo4j writer promotes only the keyed signature into an
+  indexed property; its lookup is project-scoped, generation-checked, and
+  returns IDs only. Targeted Go packages and 37 synthetic Web UI tests passed.
+- The UI labels field/value nodes, shows source path, occurrence number and
+  byte spans, and explains that equality is correlation only. It does not
+  render raw query values or equality signatures. These nodes stay hidden in
+  the overview until their filter is enabled; focused observation traversal
+  opens the bounded related path.
+- Stage 3 remains `PARTIAL`: the opt-in ephemeral Neo4j Cypher integration was
+  added but not run, and existing Neo4j snapshots need a full reprojection
+  before the field-value index marker becomes current. Request-body and
+  response-side occurrences, capture-shape coverage, actor/object annotations,
+  and complete application-map coverage remain unfinished.
 
 ## Stage 5 local UI resume after reload — PARTIAL
 
@@ -36,12 +46,35 @@
   changed. Open sessions remain unaccepted and keep the explicit Hermes review
   gate; accepted sessions reopen as accepted. Session contents continue to be
   loaded through the existing local operator-review endpoint.
-- Synthetic verification: `node --check internal/webui/assets/app.js`, all 35
+- Synthetic verification: `node --check internal/webui/assets/app.js`, all 37
   `surface_requests_test.cjs` cases, and `TMPDIR=/var/tmp go test -count=1
   ./internal/webui` passed. The JavaScript transport is mocked; no running
   application, project data, Caido, graph database, KB or model was accessed.
 - Stage 5 remains `PARTIAL`: Hermes/provider selection, actual browser-level
   verification and model/data-boundary review are not part of this slice.
+
+## Stage 5 graph comparison handoff to consultation — PARTIAL (2026-10-25)
+
+- The graph comparison dialog now keeps consultation resume and operator-review
+  controls available. An accepted session can receive a deterministic
+  comparison only when its reviewed evidence references contain both exact,
+  hash-verified capture revisions in the same project. The UI sends the pinned
+  IDs, session version, and idempotency key to the existing consultation
+  compare route; version conflicts require resuming the session again.
+- The saved consultation exposes the comparison record ID and bounded
+  comparison metadata to Hermes. The consultation service removes displayed
+  raw byte excerpts before persistence; it does not infer causality or impact.
+- Synthetic verification passed: the UI test resumed an accepted session and
+  attached an exact graph comparison; a loopback HTTP integration test used
+  two encrypted temporary captures, persisted the comparison, resumed the
+  accepted session, and confirmed excerpts were absent. `node --check`, all
+  38 `surface_requests_test.cjs` cases, and
+  `TMPDIR=/var/tmp go test -count=1 ./internal/webui -run
+  TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence` passed.
+- Stage 5 remains `PARTIAL`: the user must first create and accept a session
+  containing both captures, then resume it in the comparison dialog. Hermes
+  provider selection, an actual model-backed run, and real-browser verification
+  remain unconfirmed.
 
 ## Stage 4 synthetic HTTP evidence acceptance (2026-10-24) — PARTIAL
 
