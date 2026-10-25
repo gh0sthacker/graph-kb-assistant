@@ -2191,7 +2191,10 @@ function renderInspector(node) {
     elements.inspector.append(el("p", "detail-help", "This is a grouped route template. Select a linked historical capture and choose Open stored HTTP to inspect its exact path in the local evidence view. Live-only records remain in Caido."));
   }
   if (node.kind === "operation") renderOperationAliasEditor(node);
-  if (node.kind === "observation") renderProvenance(node);
+  if (node.kind === "observation") {
+    renderProvenance(node);
+    renderAcceptedContextAnnotations(node);
+  }
   renderAnalysisCards(node);
   const center = el("button", "detail-action", "Center and zoom to node");
   center.type = "button";
@@ -2329,6 +2332,29 @@ function renderProvenance(node) {
       }
       section.append(line);
     }
+  }
+  elements.inspector.append(section);
+}
+
+function renderAcceptedContextAnnotations(node) {
+  const session = state.consultation;
+  const annotations = BBGraphFocus.contextAnnotationsForObservation(
+    node, state.graph?.capture_provenance, session, state.projectKey,
+  );
+  if (!annotations.length) return;
+
+  const section = el("section", "detail-section");
+  section.append(el("div", "detail-section-title", `Accepted analyst context · ${annotations.length}`));
+  section.append(el("p", "detail-help", "Operator-provided labels are contextual metadata. They do not establish actor identity, ownership, causality, or effect."));
+  for (const annotation of annotations) {
+    const item = el("div", "provenance-item context-annotation-item");
+    const version = annotation.annotationVersion === null ? "unknown" : String(annotation.annotationVersion);
+    item.append(el("b", "", `${annotation.kind}: ${annotation.label} · analyst-provided`));
+    item.append(el("span", "", `Consultation ${annotation.sessionID} · accepted version ${annotation.sessionVersion} · annotation version ${version}`));
+    for (const reference of annotation.evidenceReferences) {
+      item.append(el("span", "", `Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido request ${reference.requestId} · revision ${reference.revisionId} · reference ${reference.referenceID}`));
+    }
+    section.append(item);
   }
   elements.inspector.append(section);
 }

@@ -1,5 +1,23 @@
 # Project status and known limitations
 
+## Stage 3 accepted analyst context in graph inspector — PARTIAL (2026-10-25)
+
+- The observation inspector can display context labels from the currently
+  selected consultation only after its review is accepted and loaded for the
+  exact selected project. Each displayed label must reference an evidence ID
+  whose Caido request ID and revision ID match that graph observation's capture
+  provenance. The UI shows the consultation and annotation versions, evidence
+  reference ID, side, request ID, and revision ID.
+- The overlay exposes no evidence excerpts or raw HTTP values. It identifies
+  labels as analyst-provided context and states that they do not establish
+  actor identity, ownership, causality, or effect. Unaccepted reviews, other
+  projects, other observations, and mismatched revisions produce no overlay.
+- `node --test internal/webui/graph_focus_test.cjs
+  internal/webui/surface_requests_test.cjs` passed 68/68 synthetic UI tests.
+  `git diff --check` passed. No Go build, Neo4j, containers, runtime database,
+  Caido, or live browser verification was run; no graph data was reprojected.
+  Overall Stage 3 and runtime coverage remain `PARTIAL`.
+
 ## Stage 3 revision-bound query and body occurrences — PARTIAL (2026-10-25)
 
 - The Go historical and live projections now emit capture-specific query

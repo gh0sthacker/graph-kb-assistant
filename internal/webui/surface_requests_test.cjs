@@ -551,6 +551,48 @@ test("local evidence viewer refuses non-local and live-only records without requ
   assert.equal(app.requests.length, 0, "unversioned records cannot fall back to the mutable current revision");
 });
 
+test("graph inspector shows analyst context only for an accepted exact evidence revision", () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const revisionId = "b".repeat(64);
+  const observation = { id: `observation-${"f".repeat(64)}`, kind: "observation", data: { method: "GET", path: "/items" } };
+  app.state.projectKey = projectKey;
+  app.state.graph = {
+    entities: [observation], assertions: [],
+    capture_provenance: [{
+      graph_observation_id: observation.id, request_id: "239", revision_id: revisionId,
+    }],
+  };
+  app.state.consultation = {
+    id: "consultation-1", projectKey, version: 4, accepted: true, reviewLoaded: true,
+    evidenceReferences: [{
+      evidence_reference_id: "evidence-ref-1", evidence_index: 0, side: "request",
+      request_id: "239", revision_id: revisionId,
+    }],
+    contextAnnotations: [{
+      context_annotation_id: "annotation-1", session_version: 2, kind: "actor", label: "actor-a",
+      evidence_reference_ids: ["evidence-ref-1"], origin: "analyst", evidence_state: "analyst_provided",
+      excerpt: "PRIVATE_RAW_TEXT_MUST_NOT_RENDER",
+    }],
+  };
+
+  app.renderInspector(observation);
+  const allChildren = root => [root, ...(root.children || []).flatMap(child => allChildren(child))];
+  const rows = allChildren(app.elements.inspector).filter(item => item.className?.split(/\s+/).includes("context-annotation-item"));
+  assert.equal(rows.length, 1);
+  const rowText = rows.flatMap(row => row.children || []).map(child => child.textContent || "").join(" ");
+  assert.match(rowText, /actor: actor-a · analyst-provided/);
+  assert.match(rowText, /consultation-1/);
+  assert.match(rowText, /evidence-ref-1/);
+  assert.match(rowText, /request · Caido request 239/);
+  assert.match(rowText, new RegExp(revisionId));
+  assert.doesNotMatch(rowText, /PRIVATE_RAW_TEXT_MUST_NOT_RENDER/);
+
+  app.state.consultation.accepted = false;
+  app.renderInspector(observation);
+  assert.equal(allChildren(app.elements.inspector).filter(item => item.className?.split(/\s+/).includes("context-annotation-item")).length, 0);
+});
+
 test("capture comparison pins exact revisions, reports fidelity and truncation, and clears baseline on project switch", async () => {
   const app = createApp();
   const projectKey = "a".repeat(64);

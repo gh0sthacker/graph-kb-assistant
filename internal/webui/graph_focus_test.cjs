@@ -8,6 +8,7 @@ const {
   focusedTransform,
   layeredGridLayout,
   contextAnnotationEvidenceReferences,
+  contextAnnotationsForObservation,
   observationNotes,
   operationAliasFor,
   analysisCardsForNode,
@@ -113,6 +114,64 @@ test("context excerpt display cap is measured in UTF-8 bytes", () => {
 
   assert.equal(new TextEncoder().encode(reference.excerpt).length, 4096);
   assert.equal(reference.excerptTruncated, true);
+});
+
+test("accepted analyst context resolves only exact project and observation revisions", () => {
+  const observation = { id: "observation-a", kind: "observation" };
+  const revision = "a".repeat(64);
+  const session = {
+    id: "consultation-1", projectKey: "project-a", version: 4, accepted: true, reviewLoaded: true,
+    evidenceReferences: [{
+      evidence_reference_id: "ref-a", evidence_index: 0, side: "request",
+      request_id: "239", revision_id: revision,
+    }],
+    contextAnnotations: [{
+      context_annotation_id: "annotation-a", session_version: 2, kind: "actor", label: "actor-a",
+      evidence_reference_ids: ["ref-a"], origin: "analyst", evidence_state: "analyst_provided",
+      excerpt: "must not be returned",
+    }],
+  };
+  const provenance = [{ graph_observation_id: observation.id, request_id: "239", revision_id: revision }];
+
+  assert.deepEqual(contextAnnotationsForObservation(observation, provenance, session, "project-a"), [{
+    annotationID: "annotation-a", annotationVersion: 2, kind: "actor", label: "actor-a",
+    evidenceReferences: [{
+      referenceID: "ref-a", evidenceIndex: 0, side: "request", requestId: "239", revisionId: revision,
+    }],
+    sessionID: "consultation-1", sessionVersion: 4,
+  }]);
+  assert.equal(JSON.stringify(contextAnnotationsForObservation(observation, provenance, session, "project-a"))
+    .includes("must not be returned"), false);
+});
+
+test("accepted analyst context rejects unaccepted, foreign, or mismatched evidence", () => {
+  const observation = { id: "observation-a", kind: "observation" };
+  const revision = "a".repeat(64);
+  const session = {
+    id: "consultation-1", projectKey: "project-a", version: 4, accepted: true, reviewLoaded: true,
+    evidenceReferences: [{
+      evidence_reference_id: "ref-a", evidence_index: 0, side: "response",
+      request_id: "239", revision_id: revision,
+    }],
+    contextAnnotations: [{
+      context_annotation_id: "annotation-a", session_version: 2, kind: "flow", label: "flow-a",
+      evidence_reference_ids: ["ref-a"], origin: "analyst", evidence_state: "analyst_provided",
+    }],
+  };
+  const exactProvenance = [{ graph_observation_id: observation.id, request_id: "239", revision_id: revision }];
+  const empty = [];
+
+  assert.deepEqual(contextAnnotationsForObservation(observation, exactProvenance, { ...session, accepted: false }, "project-a"), empty);
+  assert.deepEqual(contextAnnotationsForObservation(observation, exactProvenance, session, "project-b"), empty);
+  assert.deepEqual(contextAnnotationsForObservation(observation, [
+    { graph_observation_id: observation.id, request_id: "239", revision_id: "b".repeat(64) },
+  ], session, "project-a"), empty);
+  assert.deepEqual(contextAnnotationsForObservation(observation, [
+    { graph_observation_id: "observation-other", request_id: "239", revision_id: revision },
+  ], session, "project-a"), empty);
+  assert.deepEqual(contextAnnotationsForObservation(observation, exactProvenance, {
+    ...session, contextAnnotations: [{ ...session.contextAnnotations[0], evidence_reference_ids: ["ref-other"] }],
+  }, "project-a"), empty);
 });
 
 test("desktop workspace keeps the graph viewport inside the browser window", () => {

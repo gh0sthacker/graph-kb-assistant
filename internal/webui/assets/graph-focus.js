@@ -162,6 +162,72 @@
       });
   }
 
+  function contextAnnotationsForObservation(node, provenance, session, projectKey) {
+    if (!node || node.kind !== "observation" || typeof node.id !== "string" || !node.id ||
+        typeof projectKey !== "string" || !projectKey || !session ||
+        session.projectKey !== projectKey || session.accepted !== true || session.reviewLoaded !== true ||
+        typeof session.id !== "string" || !session.id || !Number.isInteger(session.version) || session.version < 1 ||
+        !Array.isArray(provenance) || !Array.isArray(session.evidenceReferences) ||
+        !Array.isArray(session.contextAnnotations)) return [];
+
+    const captureRevisions = new Set(provenance
+      .filter(item => item?.graph_observation_id === node.id &&
+        item.request_id !== undefined && item.request_id !== null && String(item.request_id).length > 0 &&
+        typeof item.revision_id === "string" && item.revision_id.length > 0)
+      .map(item => `${String(item.request_id)}\u0000${item.revision_id}`));
+    if (!captureRevisions.size) return [];
+
+    const matchedReferences = session.evidenceReferences
+      .filter(reference => typeof reference?.evidence_reference_id === "string" && reference.evidence_reference_id.length > 0 &&
+        Number.isInteger(reference.evidence_index) && reference.evidence_index >= 0 &&
+        (reference.side === "request" || reference.side === "response") &&
+        reference.request_id !== undefined && reference.request_id !== null && String(reference.request_id).length > 0 &&
+        typeof reference.revision_id === "string" && reference.revision_id.length > 0 &&
+        captureRevisions.has(`${String(reference.request_id)}\u0000${reference.revision_id}`))
+      .sort((left, right) => left.evidence_index - right.evidence_index ||
+        left.evidence_reference_id.localeCompare(right.evidence_reference_id));
+    if (!matchedReferences.length) return [];
+
+    const result = [];
+    const seen = new Set();
+    for (const annotation of session.contextAnnotations) {
+      if (typeof annotation?.context_annotation_id !== "string" || !annotation.context_annotation_id ||
+          typeof annotation.kind !== "string" || !annotation.kind.trim() ||
+          typeof annotation.label !== "string" || !annotation.label.trim() ||
+          annotation.origin !== "analyst" || annotation.evidence_state !== "analyst_provided" ||
+          !Array.isArray(annotation.evidence_reference_ids)) continue;
+      const selectedIDs = new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0));
+      const evidenceReferences = matchedReferences
+        .filter(reference => selectedIDs.has(reference.evidence_reference_id))
+        .map(reference => ({
+          referenceID: reference.evidence_reference_id,
+          evidenceIndex: reference.evidence_index,
+          side: reference.side,
+          requestId: String(reference.request_id),
+          revisionId: reference.revision_id,
+        }));
+      if (!evidenceReferences.length) continue;
+      const key = `${annotation.context_annotation_id}\u0000${evidenceReferences.map(reference => reference.referenceID).join("\u0000")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({
+        annotationID: annotation.context_annotation_id,
+        annotationVersion: Number.isInteger(annotation.session_version) && annotation.session_version > 0
+          ? annotation.session_version : null,
+        kind: annotation.kind,
+        label: annotation.label,
+        evidenceReferences,
+        sessionID: session.id,
+        sessionVersion: session.version,
+      });
+    }
+    return result.sort((left, right) => {
+      const leftIndex = left.evidenceReferences[0]?.evidenceIndex ?? Number.MAX_SAFE_INTEGER;
+      const rightIndex = right.evidenceReferences[0]?.evidenceIndex ?? Number.MAX_SAFE_INTEGER;
+      return leftIndex - rightIndex || left.annotationID.localeCompare(right.annotationID);
+    });
+  }
+
   function withObservationParseState(node, provenance) {
     if (!node || node.kind !== "observation") return node;
     const data = node.data && typeof node.data === "object" ? node.data : {};
@@ -193,7 +259,7 @@
       });
   }
 
-  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, analysisCardsForNode, contextAnnotationEvidenceReferences, routeFamilyUncertainty, withObservationParseState };
+  const api = { focusedNeighborhood, focusedTransform, layeredGridLayout, observationNotes, operationAliasFor, analysisCardsForNode, contextAnnotationEvidenceReferences, contextAnnotationsForObservation, routeFamilyUncertainty, withObservationParseState };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.BBGraphFocus = api;
 })(globalThis);
