@@ -17,6 +17,7 @@ import tempfile
 from typing import BinaryIO, Iterable, Iterator, Mapping
 
 from .canonical import CHUNK_SCHEMA, CanonicalChunk, SourceDocument, chunk_document
+from ..project_lock import project_maintenance_lock
 
 
 def _json_line(value: object) -> bytes:
@@ -182,6 +183,225 @@ def export_redamon_snapshot(
         max_chars=max_chars,
         overlap_chars=overlap_chars,
     )
+
+
+def rechunk_index(
+    index: object,
+    *,
+    project_root: Path,
+    max_chars: int = 1920,
+    overlap_chars: int = 0,
+    batch_documents: int = 1000,
+    progress_callback: object | None = None,
+) -> dict[str, object]:
+    """Rebuild chunks from stored sources in durable, restartable batches.
+
+    The maintenance marker remains present until all batches and final pruning
+    commit, so application readers fail closed if this process is interrupted.
+    """
+    if max_chars < 256 or overlap_chars != 0:
+        raise ValueError("RedAmon-compatible chunks require max_chars >= 256 and zero overlap")
+    if not 1 <= batch_documents <= 10_000:
+        raise ValueError("batch_documents must be between 1 and 10000")
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("Install the optional KB dependency with `pip install -e '.[kb]'`.") from exc
+
+    root = project_root.expanduser().resolve()
+    manifest_path = root / "src" / "bb_assistant" / "kb" / "sources.yaml"
+    raw_manifest = manifest_path.read_bytes()
+    manifest = yaml.safe_load(raw_manifest)
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("sources"), list):
+        raise ValueError("KB source manifest is malformed")
+    family_order = {
+        row["id"]: position
+        for position, row in enumerate(manifest["sources"])
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    }
+
+    chunk_columns = (
+        "chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,"
+        "source_revision,license_id,attribution,metadata_json,source_sha256,chunk_sha256,chunk_schema,text"
+    )
+    upsert_chunk_sql = f"""INSERT INTO chunks({chunk_columns}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(chunk_id) DO UPDATE SET
+          source_name=excluded.source_name,source_id=excluded.source_id,title=excluded.title,
+          start_char=excluded.start_char,end_char=excluded.end_char,source_locator=excluded.source_locator,
+          source_url=excluded.source_url,source_revision=excluded.source_revision,
+          license_id=excluded.license_id,attribution=excluded.attribution,metadata_json=excluded.metadata_json,
+          source_sha256=excluded.source_sha256,chunk_sha256=excluded.chunk_sha256,
+          chunk_schema=excluded.chunk_schema,text=excluded.text
+        WHERE chunks.source_name IS NOT excluded.source_name OR chunks.source_id IS NOT excluded.source_id
+          OR chunks.title IS NOT excluded.title OR chunks.start_char IS NOT excluded.start_char
+          OR chunks.end_char IS NOT excluded.end_char OR chunks.source_locator IS NOT excluded.source_locator
+          OR chunks.source_url IS NOT excluded.source_url OR chunks.source_revision IS NOT excluded.source_revision
+          OR chunks.license_id IS NOT excluded.license_id OR chunks.attribution IS NOT excluded.attribution
+          OR chunks.metadata_json IS NOT excluded.metadata_json OR chunks.source_sha256 IS NOT excluded.source_sha256
+          OR chunks.chunk_sha256 IS NOT excluded.chunk_sha256 OR chunks.chunk_schema IS NOT excluded.chunk_schema
+          OR chunks.text IS NOT excluded.text"""
+
+    with project_maintenance_lock(index.path.parent):
+        with index.connect(_maintenance_lock_held=True) as connection:
+            meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+            old_snapshot_id = meta.get("snapshot_id")
+            if not old_snapshot_id:
+                raise ValueError("Cannot re-chunk an index without an installed snapshot")
+            if any(name not in family_order for name in {
+                row[0] for row in connection.execute("SELECT DISTINCT source_name FROM source_documents")
+            }):
+                raise ValueError("Installed KB contains a family absent from the current source manifest")
+
+            coverage_rows = json.loads(meta.get("source_coverage", "[]"))
+            coverage_state = meta.get("coverage_state", "unverified")
+            coverage_report: dict[str, object] | None = None
+            coverage_sha: str | None = None
+            if coverage_state != "unverified":
+                coverage_report = {
+                    "coverage_state": coverage_state,
+                    "source_count": len(coverage_rows),
+                    "blocked_source_count": sum(row.get("state") == "blocked" for row in coverage_rows),
+                    "partial_source_count": sum(row.get("state") == "partial" for row in coverage_rows),
+                    "sources": coverage_rows,
+                }
+                coverage_sha = hashlib.sha256(_json_line(coverage_report)).hexdigest()
+
+            target_snapshot_id = meta.get("rechunk_target_snapshot_id")
+            state_manifest = meta.get("rechunk_manifest_sha256")
+            manifest_sha = hashlib.sha256(raw_manifest).hexdigest()
+            reset_progress = not target_snapshot_id or state_manifest != manifest_sha
+            if reset_progress:
+                target_snapshot_id = hashlib.sha256(json.dumps({
+                    "rechunk_of": old_snapshot_id, "source_manifest_sha256": manifest_sha,
+                    "chunk_schema": CHUNK_SCHEMA, "max_chars": max_chars, "overlap_chars": overlap_chars,
+                }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                connection.execute("DROP TABLE IF EXISTS kb_rechunk_ids")
+                connection.execute("DROP TABLE IF EXISTS kb_rechunk_fts_ids")
+                connection.execute("CREATE TABLE kb_rechunk_ids(chunk_id TEXT PRIMARY KEY)")
+                connection.execute("CREATE TABLE kb_rechunk_fts_ids(chunk_id TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL)")
+                connection.execute("INSERT INTO kb_rechunk_fts_ids(chunk_id,fts_rowid) SELECT chunk_id,rowid FROM chunk_search")
+                for key in ("rechunk_progress_family", "rechunk_progress_source_id"):
+                    connection.execute("DELETE FROM kb_meta WHERE key=?", (key,))
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('rechunk_target_snapshot_id',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (target_snapshot_id,),
+                )
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('rechunk_manifest_sha256',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (manifest_sha,),
+                )
+                connection.commit()
+            elif not connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kb_rechunk_fts_ids'"
+            ).fetchone():
+                connection.execute("CREATE TABLE kb_rechunk_fts_ids(chunk_id TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL)")
+                connection.execute("INSERT INTO kb_rechunk_fts_ids(chunk_id,fts_rowid) SELECT chunk_id,rowid FROM chunk_search")
+                connection.commit()
+
+            family_idx = 0 if reset_progress else int(meta.get("rechunk_progress_family", "0"))
+            last_id = "" if reset_progress else meta.get("rechunk_progress_source_id", "")
+            processed = 0
+            total_chunks = 0
+            total_documents = connection.execute("SELECT count(*) FROM source_documents").fetchone()[0]
+            while family_idx < len(family_order):
+                family = next(name for name, order in family_order.items() if order == family_idx)
+                rows = connection.execute(
+                    "SELECT * FROM source_documents WHERE source_name=? AND source_id>? "
+                    "ORDER BY source_id LIMIT ?", (family, last_id, batch_documents),
+                ).fetchall()
+                if not rows:
+                    family_idx += 1
+                    last_id = ""
+                    connection.execute(
+                        "INSERT INTO kb_meta(key,value) VALUES('rechunk_progress_family',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(family_idx),),
+                    )
+                    connection.execute("DELETE FROM kb_meta WHERE key='rechunk_progress_source_id'")
+                    connection.commit()
+                    continue
+                chunks: list[CanonicalChunk] = []
+                for row in rows:
+                    record = dict(row)
+                    record["metadata"] = json.loads(record.pop("metadata_json"))
+                    document = _source_document_from_record(record)
+                    chunks.extend(chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars))
+                for chunk in chunks:
+                    metadata_json = json.dumps(chunk.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                    old_fts = connection.execute(
+                        "SELECT fts_rowid FROM kb_rechunk_fts_ids WHERE chunk_id=?", (chunk.chunk_id,),
+                    ).fetchone()
+                    if old_fts:
+                        old_text = connection.execute(
+                            "SELECT title,text FROM chunk_search WHERE rowid=?", (old_fts[0],),
+                        ).fetchone()
+                        if old_text and (old_text[0] != chunk.title or old_text[1] != chunk.text):
+                            connection.execute("DELETE FROM chunk_search WHERE rowid=?", (old_fts[0],))
+                            connection.execute("DELETE FROM kb_rechunk_fts_ids WHERE chunk_id=?", (chunk.chunk_id,))
+                            old_fts = None
+                    values = (
+                        chunk.chunk_id, chunk.source_name, chunk.source_id, chunk.title,
+                        chunk.start_char, chunk.end_char, chunk.source_locator, chunk.source_url,
+                        chunk.source_revision, chunk.license_id, chunk.attribution, metadata_json,
+                        chunk.source_sha256, chunk.chunk_sha256, chunk.chunk_schema, chunk.text,
+                    )
+                    connection.execute(upsert_chunk_sql, values)
+                    connection.execute("INSERT OR IGNORE INTO kb_rechunk_ids(chunk_id) VALUES(?)", (chunk.chunk_id,))
+                    if not old_fts:
+                        cursor = connection.execute(
+                            "INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)",
+                            (chunk.chunk_id, chunk.source_name, chunk.title, chunk.text),
+                        )
+                        connection.execute(
+                            "INSERT OR REPLACE INTO kb_rechunk_fts_ids(chunk_id,fts_rowid) VALUES(?,?)",
+                            (chunk.chunk_id, cursor.lastrowid),
+                        )
+                last_id = rows[-1]["source_id"]
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('rechunk_progress_family',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(family_idx),),
+                )
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('rechunk_progress_source_id',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (last_id,),
+                )
+                connection.commit()
+                processed += len(rows)
+                total_chunks += len(chunks)
+                if progress_callback is not None:
+                    progress_callback(processed, total_documents)
+
+            # The staging ID table is the durable source of truth for pruning;
+            # each delete is idempotent and is safe to repeat after interruption.
+            connection.execute("DELETE FROM chunk_search WHERE rowid IN (SELECT f.fts_rowid FROM kb_rechunk_fts_ids f WHERE NOT EXISTS (SELECT 1 FROM kb_rechunk_ids i WHERE i.chunk_id=f.chunk_id))")
+            connection.commit()
+            connection.execute("DELETE FROM chunks WHERE NOT EXISTS (SELECT 1 FROM kb_rechunk_ids i WHERE i.chunk_id=chunks.chunk_id)")
+            connection.commit()
+            chunk_count = connection.execute("SELECT count(*) FROM chunks").fetchone()[0]
+            connection.execute("DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')")
+            for key, value in (
+                ("snapshot_id", target_snapshot_id), ("chunk_count", str(chunk_count)),
+                ("vector_staging_snapshot_id", target_snapshot_id), ("coverage_state", coverage_state),
+                ("coverage_report_sha256", coverage_sha or ""),
+                ("source_coverage", json.dumps(coverage_rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False)),
+            ):
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value),
+                )
+            connection.execute("DROP TABLE kb_rechunk_ids")
+            connection.execute("DROP TABLE kb_rechunk_fts_ids")
+            connection.execute("DELETE FROM kb_meta WHERE key LIKE 'rechunk_%'")
+            connection.commit()
+            if progress_callback is not None:
+                progress_callback(total_documents, total_documents)
+
+    return {
+        "previous_snapshot_id": old_snapshot_id,
+        "snapshot_id": target_snapshot_id,
+        "source_documents": total_documents,
+        "chunks": chunk_count,
+        "coverage_state": coverage_state,
+    }
 
 
 def _is_sha256(value: object) -> bool:

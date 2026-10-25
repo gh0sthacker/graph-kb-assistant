@@ -86,6 +86,7 @@ type SearchResult struct {
 	SnapshotID         string `json:"snapshot_id"`
 	CoverageState      string `json:"coverage_state"`
 	CoverageReportHash string `json:"coverage_report_sha256,omitempty"`
+	MaintenanceState   string `json:"maintenance_state,omitempty"`
 	RetrievalMode      string `json:"retrieval_mode"`
 	Hits               []Hit  `json:"hits"`
 }
@@ -103,6 +104,7 @@ type StatsResult struct {
 	CoverageState                string           `json:"coverage_state"`
 	CoverageReportHash           *string          `json:"coverage_report_sha256"`
 	SourceCoverage               []map[string]any `json:"source_coverage"`
+	MaintenanceState             *string          `json:"maintenance_state,omitempty"`
 	ReferenceMaterialIsUntrusted bool             `json:"reference_material_is_untrusted"`
 }
 
@@ -235,6 +237,9 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 		SourceCoverage:               []map[string]any{},
 		ReferenceMaterialIsUntrusted: true,
 	}
+	if info.MaintenanceState != "" {
+		result.MaintenanceState = optionalString(info.MaintenanceState)
+	}
 	if err := tx.QueryRowContext(ctx, "SELECT count(DISTINCT source_name), count(*) FROM source_documents").Scan(&result.SourceFamilies, &result.SourceDocuments); err != nil {
 		return StatsResult{}, errors.New("KB source counts could not be read")
 	}
@@ -336,6 +341,9 @@ func (i *Index) GetSource(ctx context.Context, sourceName, sourceID string, maxC
 	if err != nil {
 		return SourceResult{}, err
 	}
+	if info.MaintenanceState != "" {
+		return SourceResult{}, errors.New("KB index maintenance is in progress")
+	}
 	result := SourceResult{
 		SnapshotID: info.SnapshotID, CoverageState: info.CoverageState,
 		CoverageReportHash:           optionalString(info.CoverageReportHash),
@@ -428,7 +436,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if utf8.RuneCountInString(query) > 4096 {
 		return SearchResult{}, errors.New("KB query exceeds the 4096-character limit")
 	}
-	terms := queryTerms(query)
+	matchExpression := redAmonFullTextExpression(query)
 	if len(options.SourceNames) > maximumSourceFilters {
 		return SearchResult{}, errors.New("select no more than 32 KB source families")
 	}
@@ -455,17 +463,16 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if err != nil {
 		return SearchResult{}, err
 	}
+	if result.MaintenanceState != "" {
+		return SearchResult{}, errors.New("KB index maintenance is in progress")
+	}
 	result.Hits = []Hit{}
 	result.RetrievalMode = "fulltext"
-	if len(terms) == 0 {
+	if matchExpression == "" {
 		if err := tx.Commit(); err != nil {
 			return SearchResult{}, errors.New("KB read transaction could not finish")
 		}
 		return result, nil
-	}
-	match := make([]string, 0, len(terms))
-	for _, term := range terms {
-		match = append(match, `"`+strings.ReplaceAll(term, `"`, `""`)+`"*`)
 	}
 	statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
 		substr(c.source_id,1,1025),substr(c.title,1,2049),substr(c.text,1,?),
@@ -477,15 +484,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
 		WHERE chunk_search MATCH ?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
-	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, strings.Join(match, " OR ")}
-	if len(sources) != 0 {
-		placeholders := make([]string, len(sources))
-		for n, source := range sources {
-			placeholders[n] = "?"
-			args = append(args, source)
-		}
-		statement += " AND c.source_name IN (" + strings.Join(placeholders, ",") + ")"
-	}
+	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, matchExpression}
 	candidateLimit := max(options.TopK*6, 30)
 	statement += " ORDER BY 16 LIMIT ?"
 	args = append(args, candidateLimit)
@@ -503,6 +502,10 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if err := rows.Close(); err != nil {
 		return SearchResult{}, errors.New("KB full-text search could not finish")
 	}
+	// RedAmon applies include_sources after Neo4j's global Lucene top-k query.
+	// Applying this predicate inside SQL before LIMIT would fill the pool with
+	// lower-ranked source-specific hits that RedAmon excludes.
+	fulltextHits = filterHitsBySources(fulltextHits, sources)
 	fulltextIDs := hitIDs(fulltextHits)
 	result.Hits = fulltextHits
 	vectorIDs, vectorScores, vectorMode := i.vectorCandidates(ctx, tx, query, sources, candidateLimit)
@@ -708,47 +711,43 @@ func (i *Index) vectorCandidates(
 	if queryNorm == 0 {
 		return nil, nil, "lexical_fallback"
 	}
-	statement := `SELECT e.chunk_id,e.vector FROM chunk_embeddings e
+	statement := `SELECT e.chunk_id,e.vector,c.source_name FROM chunk_embeddings e
 		JOIN chunks c ON c.chunk_id=e.chunk_id
 		WHERE e.model_name=? AND e.dimensions=?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
 	args := []any{modelName, dimensions}
-	if len(sources) > 0 {
-		placeholders := make([]string, len(sources))
-		for n, source := range sources {
-			placeholders[n] = "?"
-			args = append(args, source)
-		}
-		statement += " AND c.source_name IN (" + strings.Join(placeholders, ",") + ")"
-	}
 	rows, err := tx.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, nil, "lexical_fallback"
 	}
 	type scored struct {
-		id    string
-		score float64
+		id     string
+		source string
+		score  float64
 	}
 	all := make([]scored, 0)
 	for rows.Next() {
-		var id string
+		var id, source string
 		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil || len(blob) != dimensions*4 {
+		if err := rows.Scan(&id, &blob, &source); err != nil || len(blob) != dimensions*4 {
 			_ = rows.Close()
 			return nil, nil, "lexical_fallback"
 		}
-		dot, norm := 0.0, 0.0
+		// RedAmon stores normalized E5 vectors and searches them with FAISS
+		// IndexFlatIP. Match that inner-product ordering rather than recomputing
+		// cosine normalization, which can reorder non-unit or rounding-edge rows.
+		dot, norm := float32(0), 0.0
 		for n, queryValue := range queryVector {
 			value := math.Float32frombits(binary.LittleEndian.Uint32(blob[n*4 : n*4+4]))
 			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 				_ = rows.Close()
 				return nil, nil, "lexical_fallback"
 			}
-			dot += float64(queryValue) * float64(value)
+			dot += queryValue * value
 			norm += float64(value) * float64(value)
 		}
 		if norm > 0 {
-			all = append(all, scored{id, dot / (queryNorm * math.Sqrt(norm))})
+			all = append(all, scored{id: id, source: source, score: float64(dot)})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -761,6 +760,23 @@ func (i *Index) vectorCandidates(
 	sort.SliceStable(all, func(a, b int) bool { return all[a].score > all[b].score })
 	if len(all) > limit {
 		all = all[:limit]
+	}
+	// RedAmon asks FAISS for one global candidate pool, then applies the
+	// include_sources filter while fetching the fused candidates from Neo4j.
+	// Filtering before top-k changes which vectors can enter RRF and can fill
+	// the pool with lower-ranked source-specific rows that RedAmon would omit.
+	if len(sources) > 0 {
+		allowed := make(map[string]struct{}, len(sources))
+		for _, source := range sources {
+			allowed[source] = struct{}{}
+		}
+		filtered := all[:0]
+		for _, item := range all {
+			if _, ok := allowed[item.source]; ok {
+				filtered = append(filtered, item)
+			}
+		}
+		all = filtered
 	}
 	ids, scores := make([]string, 0, len(all)), make(map[string]float64, len(all))
 	for _, item := range all {
@@ -776,6 +792,23 @@ func hitIDs(hits []Hit) []string {
 		ids[n] = hit.ChunkID
 	}
 	return ids
+}
+
+func filterHitsBySources(hits []Hit, sources []string) []Hit {
+	if len(sources) == 0 {
+		return hits
+	}
+	allowed := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		allowed[source] = struct{}{}
+	}
+	filtered := make([]Hit, 0, len(hits))
+	for _, hit := range hits {
+		if _, ok := allowed[hit.SourceName]; ok {
+			filtered = append(filtered, hit)
+		}
+	}
+	return filtered
 }
 
 func rankHybridHits(hits []Hit, vectorIDs []string, vectorScores map[string]float64, fulltextIDs []string, rerankScores map[string]float64, limit int) []Hit {
@@ -967,8 +1000,8 @@ type rowQueryer interface {
 func readSnapshotInfo(ctx context.Context, queryer rowQueryer) (SearchResult, error) {
 	result := SearchResult{}
 	err := queryer.QueryRowContext(ctx,
-		"SELECT max(CASE WHEN key='snapshot_id' THEN substr(value,1,65) END), max(CASE WHEN key='coverage_state' THEN substr(value,1,257) END), max(CASE WHEN key='coverage_report_sha256' THEN substr(value,1,65) END) FROM kb_meta",
-	).Scan(&result.SnapshotID, &result.CoverageState, &result.CoverageReportHash)
+		"SELECT max(CASE WHEN key='snapshot_id' THEN substr(value,1,65) END), max(CASE WHEN key='coverage_state' THEN substr(value,1,257) END), max(CASE WHEN key='coverage_report_sha256' THEN substr(value,1,65) END), coalesce(max(CASE WHEN key='rechunk_target_snapshot_id' THEN substr(value,1,65) END),'') FROM kb_meta",
+	).Scan(&result.SnapshotID, &result.CoverageState, &result.CoverageReportHash, &result.MaintenanceState)
 	if err != nil || !snapshotDigestPattern.MatchString(result.SnapshotID) || len(result.CoverageState) > maximumCoverageStateBytes ||
 		(result.CoverageState != "DONE" && result.CoverageState != "PARTIAL" && result.CoverageState != "BLOCKED" && result.CoverageState != "unverified") {
 		return SearchResult{}, errors.New("KB snapshot metadata could not be read")
@@ -983,7 +1016,7 @@ func queryTerms(input string) []string {
 	terms := make([]string, 0, maximumSearchTerms)
 	current := make([]rune, 0, 64)
 	flush := func() {
-		if len(current) >= 2 && len(terms) < maximumSearchTerms {
+		if len(current) > 0 && len(terms) < maximumSearchTerms {
 			terms = append(terms, string(current))
 		}
 		current = current[:0]
@@ -1005,6 +1038,68 @@ func queryTerms(input string) []string {
 		flush()
 	}
 	return terms
+}
+
+// redAmonFullTextExpression mirrors RedAmon's Lucene special-character cleanup,
+// default OR behavior, and explicit boolean operators. Terms are quoted for
+// FTS5 after the same punctuation has been removed from the input.
+func redAmonFullTextExpression(input string) string {
+	var sanitized strings.Builder
+	for _, character := range input {
+		switch character {
+		case '+', '-', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\', '/':
+			sanitized.WriteByte(' ')
+		default:
+			sanitized.WriteRune(character)
+		}
+	}
+	query := strings.ReplaceAll(sanitized.String(), "&&", " ")
+	query = strings.ReplaceAll(query, "||", " ")
+	items := make([]string, 0, maximumSearchTerms+4)
+	termCount := 0
+	for _, word := range strings.Fields(query) {
+		if word == "AND" || word == "OR" || word == "NOT" {
+			items = append(items, word)
+			continue
+		}
+		for _, term := range queryTerms(word) {
+			if termCount == maximumSearchTerms {
+				break
+			}
+			items = append(items, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+			termCount++
+		}
+		if termCount == maximumSearchTerms {
+			break
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	var expression strings.Builder
+	previousWasTerm := false
+	for index, item := range items {
+		switch item {
+		case "AND", "OR", "NOT":
+			if !previousWasTerm || index+1 == len(items) || items[index+1] == "AND" || items[index+1] == "OR" || items[index+1] == "NOT" {
+				return ""
+			}
+			expression.WriteByte(' ')
+			expression.WriteString(item)
+			expression.WriteByte(' ')
+			previousWasTerm = false
+		default:
+			if previousWasTerm {
+				expression.WriteString(" OR ")
+			}
+			expression.WriteString(item)
+			previousWasTerm = true
+		}
+	}
+	if !previousWasTerm {
+		return ""
+	}
+	return expression.String()
 }
 
 func pointerTooLong(value *string, maximum int) bool {

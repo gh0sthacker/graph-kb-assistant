@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import sqlite3
 import tempfile
+from unittest.mock import patch
 
 from bb_assistant.kb.ranking import RankedCandidate, rank_candidates, reciprocal_rank_fusion
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
-from bb_assistant.kb.index import KBIndex
+from bb_assistant.kb.index import KBIndex, _commit_with_busy_retry
+from bb_assistant.project_lock import project_maintenance_read_lock
 
 
 class _FixtureEmbedder:
@@ -24,6 +27,15 @@ class _FixtureReranker:
         return [1.0 if "alpha" in text else 0.0 for text in texts]
 
 
+class _RecordingEmbedder(_FixtureEmbedder):
+    def __init__(self):
+        self.batches = []
+
+    def embed_documents_batch(self, texts, *, batch_size=64):
+        self.batches.append(tuple(texts))
+        return super().embed_documents_batch(texts, batch_size=batch_size)
+
+
 class _FailOnSecondBatchEmbedder(_FixtureEmbedder):
     def __init__(self):
         self.calls = 0
@@ -38,10 +50,23 @@ class _FailOnSecondBatchEmbedder(_FixtureEmbedder):
 class _RecordingEmbedder(_FixtureEmbedder):
     def __init__(self):
         self.texts = []
+        self.batches = []
 
     def embed_documents_batch(self, texts, *, batch_size=64):
         self.texts.extend(texts)
+        self.batches.append(tuple(texts))
         return super().embed_documents_batch(texts, batch_size=batch_size)
+
+
+class _TransientLockConnection:
+    def __init__(self, failures):
+        self.failures = failures
+        self.attempts = 0
+
+    def commit(self):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise sqlite3.OperationalError("database is locked")
 
 
 class RetrievalRankingTests(unittest.TestCase):
@@ -59,7 +84,60 @@ class RetrievalRankingTests(unittest.TestCase):
             index.replace_snapshot(chunks, "c" * 64, sources=documents)
             embedder = _RecordingEmbedder()
             self.assertEqual(index.rebuild_embeddings(embedder, batch_size=3), 3)
-            self.assertEqual(embedder.texts, sorted((chunk.text for chunk in chunks), key=len))
+        self.assertEqual(embedder.texts, sorted((chunk.text for chunk in chunks), key=len))
+
+    def test_embedding_inference_releases_project_maintenance_lock(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="alpha.md", title="Alpha",
+                text="alpha authentication flow", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-vector-lock-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "d" * 64, sources=documents)
+
+            class LockCheckingEmbedder(_FixtureEmbedder):
+                def embed_documents_batch(self, texts, *, batch_size=64):
+                    with project_maintenance_read_lock(index.path.parent, timeout=0.1):
+                        return super().embed_documents_batch(texts, batch_size=batch_size)
+
+            self.assertEqual(index.rebuild_embeddings(LockCheckingEmbedder(), batch_size=1), 1)
+            self.assertTrue(index.stats()["vector_ready"])
+
+    def test_embedding_batch_commit_retries_transient_sqlite_lock(self) -> None:
+        connection = _TransientLockConnection(failures=2)
+        with patch("bb_assistant.kb.index.time.sleep"):
+            _commit_with_busy_retry(connection)
+        self.assertEqual(connection.attempts, 3)
+
+    def test_embedding_batch_commit_does_not_retry_non_lock_errors(self) -> None:
+        class BrokenConnection:
+            def commit(self):
+                raise sqlite3.OperationalError("disk I/O error")
+
+        with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+            _commit_with_busy_retry(BrokenConnection())
+
+    def test_embedding_queue_batches_shorter_chunks_first(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="long.md", title="Long",
+                text="long " * 300, metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="gtfobins", source_id="short.md", title="Short",
+                text="short", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-embed-order-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "c" * 64, sources=documents)
+            embedder = _RecordingEmbedder()
+            index.rebuild_embeddings(embedder, batch_size=1)
+        self.assertEqual(len(embedder.batches[0][0]), min(len(chunk.text) for chunk in chunks))
 
     def test_persisted_vectors_retrieve_semantic_candidate_without_lexical_match(self) -> None:
         documents = (

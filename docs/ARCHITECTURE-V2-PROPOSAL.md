@@ -293,8 +293,9 @@ capabilities.
 
 The operator approved the architecture and this sequence on 2026-10-23.
 Routine implementation, local verification and Git commits follow this plan.
-ChatGPT/Codex Subscription with `gpt-6-luna` was selected on 2026-10-25; KB
-remains deferred.
+ChatGPT/Codex Subscription with `gpt-6-luna` was selected on 2026-10-25.
+The original approval deferred KB expansion; the user's later exact RedAmon KB
+parity request adds that requirement to overall delivery (see Section 11).
 
 | Stage | Deliverable | Acceptance criteria |
 | --- | --- | --- |
@@ -322,6 +323,55 @@ Keep existing evidence recoverable throughout migration. Schema upgrades and
 new grouping projections must have explicit versions, replay rules and a
 rollback path. The approved architecture is being implemented incrementally;
 this document is not a claim that the above services already exist.
+
+## 11. Post-approval scope extension — RedAmon KB parity (2026-10-25)
+
+The user explicitly added exact RedAmon KB parity to this delivery. This
+supersedes the original Section 1/9 statement that KB expansion is deferred for
+the current delivery; it does not change the six core application stages.
+
+The current Graph Assistant manifest targets RedAmon's `full` profile. The
+checked-out RedAmon configuration defaults to `lite`; its active deployed
+profile and exact snapshot are not available in this workspace. Treat `full`
+as the working target, and do not claim parity against the deployed RedAmon
+instance until its active profile and snapshot are identified.
+
+KB parity acceptance requires all of the following:
+
+- The same selected profile, source families, pinned revisions, filters,
+  source document counts, and normalized/chunked content. Record per-source
+  counts and content digests; keep generated corpus/index files outside Git.
+- The same pinned E5 and BGE model revisions and complete vector coverage for
+  the selected corpus. Compare representative retrieval outputs against the
+  same RedAmon snapshot; matching configuration constants alone is insufficient.
+- Every source has recorded license/terms evidence and required attribution.
+  ExploitDB remains excluded from the parity claim until its dataset-terms
+  status is resolved; do not bypass the provider's rights gate.
+- A live retrieval check confirms the running application uses that completed
+  snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
+  query-parity item remains incomplete or unverified.
+
+Current verification (2026-10-25): the corrected chunker was compared
+offline with RedAmon's `ChunkStrategy` across the 161,240 documents in the
+current local snapshot and matched all 162,398 generated chunk texts and
+titles. The installed index is still stale: 5,801 chunk texts, 161,084 titles,
+1,507 spans, and six per-document chunk counts differ from the corrected
+output. E5 generation was stopped at 6,560/162,413 vectors pending index
+refresh; no vector snapshot is ready. ExploitDB terms remain unresolved, and
+the active deployed RedAmon profile/snapshot is unknown. These results verify
+the algorithm against the current documents, not KB parity; delivery remains
+`PARTIAL` until the installed corpus, complete vector generation, and
+representative query results pass the acceptance criteria above.
+
+The `bb-assistant-kb rechunk` command is implemented to refresh the installed
+index from already stored source documents, with no source fetch. It uses
+bounded, resumable transactions and a durable maintenance marker; Python and
+Go readers refuse to serve a partially refreshed index. Unchanged
+content-bound chunk identities keep their vectors, obsolete vectors are
+removed, and changed chunks remain pending in the resumable embedding process.
+Synthetic tests cover interruption-state reporting, reader fail-closed behavior,
+source-span validation, FTS title replacement, vector reuse, and readiness. It
+has not yet been applied to the installed 2.1 GB index.
 
 ## Review scope and limits
 

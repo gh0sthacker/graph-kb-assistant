@@ -154,6 +154,288 @@ func TestSearchDoesNotReturnLicenseNoticeOnlyMatches(t *testing.T) {
 	}
 }
 
+func TestKBReadsFailClosedWhileRechunkMarkerIsPresent(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic source content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO kb_meta(key,value) VALUES('rechunk_target_snapshot_id',?)`, strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	ctx := context.Background()
+	stats, err := index.Stats(ctx)
+	if err != nil || stats.MaintenanceState == nil || *stats.MaintenanceState != strings.Repeat("b", 64) {
+		t.Fatalf("Stats maintenance state = %+v, %v", stats.MaintenanceState, err)
+	}
+	if _, err := index.Search(ctx, "synthetic", SearchOptions{TopK: 5}); err == nil {
+		t.Fatal("Search succeeded while the KB snapshot was only partially refreshed")
+	}
+	if _, err := index.GetSource(ctx, "synthetic", "document-1", 512); err == nil {
+		t.Fatal("GetSource succeeded while the KB snapshot was only partially refreshed")
+	}
+}
+
+func TestSearchUsesCompleteTermsLikeRedAmonFullText(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "authentication guidance for the synthetic application"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{query: "auth", want: 0},
+		{query: "authentication", want: 1},
+	} {
+		result, err := index.Search(context.Background(), test.query, SearchOptions{TopK: 5})
+		if err != nil || len(result.Hits) != test.want {
+			t.Fatalf("Search(%q) = %d hits, %v; want %d", test.query, len(result.Hits), err, test.want)
+		}
+	}
+}
+
+func TestSearchSanitizesLucenePunctuationLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "CVE 2024 descriptive record for reference 12345"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "CVE-2024-12345", SearchOptions{TopK: 5})
+	if err != nil || len(result.Hits) != 1 {
+		t.Fatalf("Search(CVE-2024-12345) = %d hits, %v; want one Lucene-sanitized match", len(result.Hits), err)
+	}
+}
+
+func TestSearchHonorsLuceneBooleanOperatorsAndSingleCharacterTerms(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "C is a programming language with alpha beta examples"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("d", 64)
+	secondText := "alpha appears without the other term"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "synthetic", "document-2", "Alpha only", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, secondID, "synthetic", "Alpha only", secondText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("add synthetic boolean-operator document: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{query: "alpha AND beta", want: 1},
+		{query: "C++", want: 1},
+	} {
+		result, err := index.Search(context.Background(), test.query, SearchOptions{TopK: 5})
+		if err != nil || len(result.Hits) != test.want {
+			t.Fatalf("Search(%q) = %d hits, %v; want %d", test.query, len(result.Hits), err, test.want)
+		}
+	}
+}
+
+func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "first vector candidate content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("c", 64)
+	secondText := "source-filtered vector candidate"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "other", "document-2", "Other source", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+		('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(first, second float32) []byte {
+		vector := make([]byte, 1024*4)
+		binary.LittleEndian.PutUint32(vector[0:], math.Float32bits(first))
+		binary.LittleEndian.PutUint32(vector[4:], math.Float32bits(second))
+		return vector
+	}
+	_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+		(?,?,1024,?),(?,?,1024,?)`, strings.Repeat("a", 64), "intfloat/e5-large-v2", encode(1, 0),
+		secondID, "intfloat/e5-large-v2", encode(0.8, 0.6))
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare vector source-filter fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	index.SetRetrievalModels(&syntheticRetrievalModels{queryVector: queryVector})
+	tx, err := index.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ids, _, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", []string{"other"}, 1)
+	if mode != "hybrid" || len(ids) != 0 {
+		t.Fatalf("filtered global top-1 candidates = %#v (%s); want empty after the higher-ranked source is excluded", ids, mode)
+	}
+}
+
+func TestVectorCandidatesUseFaissInnerProductOrdering(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "first normalized vector candidate"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("c", 64)
+	secondText := "second vector candidate"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "other", "document-2", "Other source", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+		('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(first, second float32) []byte {
+		vector := make([]byte, 1024*4)
+		binary.LittleEndian.PutUint32(vector[0:], math.Float32bits(first))
+		binary.LittleEndian.PutUint32(vector[4:], math.Float32bits(second))
+		return vector
+	}
+	_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+		(?,?,1024,?),(?,?,1024,?)`, strings.Repeat("a", 64), "intfloat/e5-large-v2", encode(0.8, 0.6),
+		secondID, "intfloat/e5-large-v2", encode(0.9, 0.9))
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare FAISS inner-product fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	index.SetRetrievalModels(&syntheticRetrievalModels{queryVector: queryVector})
+	tx, err := index.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ids, scores, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", nil, 1)
+	if mode != "hybrid" || len(ids) != 1 || ids[0] != secondID || math.Abs(scores[secondID]-0.9) > 1e-6 {
+		t.Fatalf("FAISS-style inner-product top-1 = %#v (%s, %v); want second candidate at 0.9", ids, mode, scores)
+	}
+}
+
+func TestFullTextCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "baseline fixture without the search term"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < 31 && err == nil; n++ {
+		id := digestHex("other-" + string(rune('a'+n)))
+		text := strings.Repeat("needle ", 12)
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "other", "other-"+string(rune('a'+n)), "Other source", 0,
+			len(text), `{}`, digestHex(text), digestHex(text), "bb-kb-chunk-v2", text)
+		if err == nil {
+			_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "other", "Other source", text)
+		}
+	}
+	wantedID := digestHex("wanted")
+	wantedText := "needle"
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, wantedID, "wanted", "wanted-document", "Wanted source", 0,
+			len(wantedText), `{}`, digestHex(wantedText), digestHex(wantedText), "bb-kb-chunk-v2", wantedText)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, wantedID, "wanted", "Wanted source", wantedText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare source-filter FTS fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "needle", SearchOptions{TopK: 1, SourceNames: []string{"wanted"}})
+	if err != nil || len(result.Hits) != 0 {
+		t.Fatalf("source-filtered global fulltext top-30 = %d hits, %v; want empty after higher-ranked sources are excluded", len(result.Hits), err)
+	}
+}
+
 type syntheticRetrievalModels struct {
 	queryVector []float32
 	rerankCalls int

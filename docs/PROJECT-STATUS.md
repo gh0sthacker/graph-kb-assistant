@@ -2,26 +2,49 @@
 
 ## KB parity checkpoint (2026-10-25)
 
-- The retrieval runtime now follows the pinned RedAmon stages in the Go
-  application: lexical/vector reciprocal-rank fusion (`k=60`), source boosts,
-  BGE cross-encoder reranking of the top 30, sigmoid score mapping, and MMR
-  selection (`lambda=0.65`). The E5/BGE revisions are pinned and have been
-  exercised through the Go-to-local-model-worker path.
-- NVD search content now follows RedAmon's exact normalization order: English
-  description, optional CVSS 3.1/3.0 score and lower-case severity, and the
-  first ten CPE criteria, including RedAmon's 480-token atomic-record clipping
-  and ellipsis. Full upstream JSON remains locally preserved with a separate
-  digest; model-facing KB source reads expose only normalized text.
-  Offline provider and SQLite snapshot checks cover this split. E5 ingestion
-  batches shorter chunks first to avoid padding every batch to its longest CVE
-  record.
-- These code-level matches do **not** make the corpus identical. The approved
-  seven-family source manifest still has unresolved source coverage, including
-  ExploitDB dataset rights. A full NVD snapshot is being fetched; import and
-  vector indexing are pending, so deployed corpus completeness and retrieval
-  quality remain unverified. Keep the overall KB state `PARTIAL` until a
-  completed snapshot, matching source counts, vectors, and retrieval checks are
-  recorded.
+- The configured target is RedAmon's declared `full` profile: ToolDocs, GTFOBins,
+  LOLBAS, OWASP, ExploitDB, NVD, and Nuclei. The local RedAmon checkout's
+  default is `lite`; its deployed profile/snapshot is unknown, so equality to a
+  live RedAmon database has not been demonstrated.
+- Retrieval constants and model revisions are aligned with RedAmon: E5
+  embeddings, BGE cross-encoder over 30 candidates, RRF `k=60`, matching source
+  boosts, sigmoid rerank mapping, and MMR `lambda=0.65`. The local full-text
+  analyzer still differs (SQLite FTS5 vs Neo4j/Lucene), and end-to-end result
+  parity has not been measured.
+- The current local snapshot is `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`:
+  161,240 documents and 162,398 chunks across six families; ExploitDB has no
+  rows. It has 6,688 of 162,398 E5 vectors, is marked `PARTIAL`, and has no
+  published vector-ready snapshot. `quick_check` passed.
+- ExploitDB import is still unresolved: the pinned repository license is
+  GPL-2.0-or-later, while the official website Terms restrict reproduction of
+  Service content without express written permission. The dataset-specific
+  rights question is not settled by the repository license alone ([pinned
+  repository license](https://gitlab.com/exploit-database/exploitdb/-/blob/6a57361db10b709c4b4f339c09ee250acc2d8aac/LICENSE.md),
+  [official Terms](https://www.exploit-db.com/terms)).
+- Therefore the KB is not yet identical to the declared RedAmon full profile.
+  Keep parity `PARTIAL` until source coverage, vectors, and retrieval behavior
+  are matched and the RedAmon comparison snapshot is identified.
+
+## Current KB/runtime state (2026-10-25 22:36 UTC)
+
+- Read-only inspection of the active index reports snapshot
+  `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`,
+  161,240 source documents, 162,398 chunks, and 6,688 vectors. All vectors are
+  staged for `intfloat/e5-large-v2`; no ready snapshot marker is published.
+  Source families are GTFOBins (479), LOLBAS (244), Nuclei (13,403), NVD
+  (146,940), OWASP (130), and ToolDocs (44). ExploitDB has no imported rows.
+  SQLite `quick_check` passed and coverage is `PARTIAL`.
+- The local HTTP UI returned HTTP 200 on loopback. The running Go server and
+  Hermes MCP process have the active checkout as their working directory, but
+  their binaries predate the just-merged RedAmon parity changes and have not
+  yet been rebuilt/restarted.
+- The embedding process is not currently running. Full E5 generation and an
+  end-to-end retrieval comparison remain outstanding. The exact deployed
+  RedAmon corpus snapshot is also unknown, so corpus and result identity cannot
+  yet be established.
+- On this checkout, the focused KB tests passed (25 tests, 3 subtests), the
+  complete Python suite passed (159 tests, 8 subtests), and Go
+  `internal/kb`, `internal/mcpserver`, and `cmd/bb-assistant` tests passed.
 
 ## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 
@@ -2416,7 +2439,85 @@ This repository is an early public alpha. The following boundaries are deliberat
   MMR, top-k, and citation provenance. FTS-only or synthetic-test success is
   not KB parity.
 
+## Earlier local delivery checkpoint (2026-10-25, verified runtime state)
+
+- The installed local UI's read-only `/api/runtime-capabilities` endpoint
+  returned HTTP 200. Before the later service restart, it reported
+  `evidence_vault_key_state=verified`; the current process after restart
+  reports `configured_not_verified`. The vault key is configured, but its
+  ability to decrypt the existing vault has not been confirmed in this process.
+  No existing capture body or project database was opened to check it.
+- The current imported KB snapshot is
+  `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`, with
+  161,240 documents and 162,413 chunks. Six source families are `done`; the
+  only source-coverage blocker is ExploitDB reuse terms. Therefore this is not
+  exact full-corpus parity with RedAmon.
+- E5 vectorization is actively running and restartable. The latest read-only
+  SQLite count is 1,856/162,413 stored vectors; `vector_snapshot_id` is not
+  published for this partial generation, so vector search is not ready yet.
+- Verification after the latest embedding-order optimization: all 19 Python
+  KB CLI/ranking/provider tests passed, as did `go test -count=1
+  ./internal/kb ./internal/mcpserver`. These tests use fixtures; they do not
+  establish complete vector search or access to real target traffic.
+- KB code commit `3e7ec26` and this status update commit are pushed to
+  `codex/consultation-empty-comparisons`. The app's broader delivery remains
+  `PARTIAL`: the plan's synthetic graph/evidence/consultation paths are
+  implemented, but project-data completeness, external client reachability,
+  and real-target readiness have not been established here.
+
+### Runtime KB wiring correction — 2026-10-25
+
+- Inspection of the active web and Hermes MCP processes found they were
+  defaulting to the older nested 222 MB index and had no local model-worker
+  executable configured. The 161,240-document RedAmon-compatible snapshot was
+  in a separate 2.1 GB index. The web service and Hermes profile now both point
+  to that snapshot and the already-installed pinned-model Python runtime; both
+  processes were restarted and their non-secret environment settings verified.
+- The local UI root and LAN proxy returned HTTP 200 after the web restart.
+  Hermes reconnected to `bb_assistant` and discovered all 15 allowed tools.
+  A temporary-project MCP search over the imported NVD snapshot returned
+  relevant CVEs and non-null BGE rerank scores. E5 vector scores were absent,
+  as expected while the vector snapshot is incomplete.
+- That verification read only KB source material; no existing project
+  exchange, Caido record, or external target was opened. The 730-day NVD
+  content and source manifest remain `PARTIAL` because ExploitDB terms are
+  unresolved.
+- After a temporary database-lock error at a batch commit, the resumable
+  builder retained all durable rows and resumed from 2,624 with batches of
+  32. At this checkpoint it had stored 2,720/162,413 vectors; the build is
+  still incomplete and the published vector snapshot marker remains absent.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
+
+### Earlier RedAmon KB parity checkpoint — 2026-10-25 (PARTIAL)
+
+- The approved architecture v2 treats KB expansion as deferred for the core
+  HTTP-evidence → graph → navigation/comparison → Hermes workflow. The user
+  separately requested that this application's KB match the pinned RedAmon
+  full-profile KB; this parity work is therefore tracked as an explicit
+  additional requirement and is not represented as complete.
+- The imported local snapshot is
+  `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`:
+  161,240 documents and 162,413 chunks. NVD completed its 730-day profile
+  (146,938 CVEs plus two source notices); ToolDocs, GTFOBins, LOLBAS, OWASP,
+  and Nuclei report `done`. The source coverage manifest reports `PARTIAL`
+  solely because ExploitDB is blocked pending express dataset-reuse rights.
+- RedAmon-normalized NVD text, the 480-token clipping rule, 2,000-record
+  provider pages, and live Go retrieval fusion/reranking are implemented in
+  the commits above. ExploitDB has not been copied into the KB because its
+  dataset terms remain unresolved; a repository's code license does not grant
+  rights to copy the dataset. No exact-corpus-parity claim should be made
+  unless those rights are obtained.
+- The local E5 vector build is currently resumable and running against the
+  imported snapshot. At the latest read-only progress check it had stored
+  1,088 of 162,413 content vectors. The generation is not ready for vector
+  search until every vector has been stored and the snapshot marker is
+  published. This in-progress count is a checkpoint, not a completion claim.
+- A full 730-day NVD refresh was fetched and reconciled (146,938 expected,
+  fetched, and parsed records; 77 pages at 2,000 per page); raw CVE JSON is
+  preserved in the local snapshot while model-facing chunks use RedAmon's
+  normalized text. Completion of vector generation and a local Go search
+  smoke check remain outstanding.
 
 ### KB parity follow-up — 2026-10-25
 
@@ -2447,3 +2548,44 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   dataset-specific reuse terms; the KB is therefore not identical to RedAmon
   yet. The pinned source corpus and retrieval settings are the parity target,
   while snapshot schema and index storage remain application-owned.
+
+### Chunking parity correction — 2026-10-25 (PARTIAL)
+
+- A full offline comparison against RedAmon's checked-out `ChunkStrategy`
+  covered all 161,240 documents currently stored in the local snapshot. The
+  corrected Graph Assistant chunker produced 162,398 chunks with zero
+  text/title mismatches against that algorithm. This verifies chunk algorithm
+  parity for the current document set only; it does not establish source-set,
+  active-profile, vector, or query-result parity.
+- The installed SQLite index has now been rebuilt from the corrected chunker:
+  161,240 source documents and 162,398 chunks. SQLite `quick_check` is `ok`,
+  there are no foreign-key violations, and the FTS row count matches the chunk
+  count. The rebuild now batches and checkpoints by source ID, persists its
+  cursor and fails closed in Python and Go while incomplete, so it can resume
+  after the command's runtime limit without exposing a partial index.
+- The embedding process was stopped cleanly at 6,560/162,413 vectors because
+  it was embedding the stale chunk snapshot. Its staging marker is not a ready
+  vector snapshot; vector retrieval is unavailable until the corrected index
+  is installed and embedding completes.
+- The first full-index refresh attempt was interrupted before changing the
+  snapshot marker: its single SQLite rollback journal reached 878 MB while the
+  transaction was still preparing writes. SQLite recovered the original index
+  on reopen (162,413 chunks and 6,560 vectors remain). The maintenance command
+  has since been changed to bounded resumable transactions, sets a durable
+  marker, and makes Python/Go readers fail closed during an incomplete refresh.
+- Source-set parity remains `PARTIAL`: the index contains six populated
+  families, while ExploitDB remains blocked by unresolved dataset reuse terms.
+  The checked-out RedAmon profile defaults to `lite`; the parity target in the
+  project plan is `full`, and the active deployed RedAmon snapshot has not been
+  identified. No exact KB parity claim is justified yet.
+- Code changes now use RedAmon's actual section trimming/merging, paragraph
+  splitting, structured truncation/title behavior, and explicit exact-vs-
+  covering source-span metadata. Full Python test suite passes (157 tests plus
+  8 subtests); focused Go KB, MCP and app tests pass. The `bb-assistant-kb
+  rechunk` maintenance command rebuilds chunks directly from stored source
+  documents without network fetches. The app has been restarted against the
+  repaired index. Vector search remains unavailable: only 6,496 of 162,398
+  chunks have vectors and the vector snapshot is not ready. Next:
+  finish embedding, resolve the ExploitDB dataset-rights blocker, identify the
+  exact deployed RedAmon profile/snapshot, and complete retrieval-parity
+  checks before claiming that the KB is identical.
