@@ -2298,4 +2298,30 @@ This repository is an early public alpha. The following boundaries are deliberat
   the Proxmox hairpin path from the app host. A separate client-device check
   remains outstanding; the LAN URL is `http://192.168.1.148:8765/`.
 
+## Browser workflow smoke (2026-10-25) — PARTIAL
+
+- After `ee727ef`, the managed UI service was restarted and returned HTTP 200
+  on its loopback endpoint and the configured LAN/NAT route from the application
+  host. A separate client-device connection is still unverified.
+- In the browser UI, opening a locally stored encrypted HTTP exchange completed
+  authenticated decryption and integrity verification; the key badge changed
+  to verified only after that check. A deterministic comparison of two stored
+  exchanges showed identical request sides and a response difference. No raw
+  request/response values or capture identifiers are recorded here.
+- Graph navigation continued from 100 to 199 to 298 nodes through bounded
+  neighbor pages; Back restored the prior 199-node page. This verifies the
+  observed path only, not complete graph coverage.
+- The read-only operation catalog reports 131 operations across 1,400 local
+  observations and remains `PARTIAL`: local indexes are not Caido totals,
+  unreconciled source history and incomplete parses remain, browser/JavaScript
+  coverage is absent, and further operation pages are available.
+- The provider is configured as `openai-codex` / `gpt-6-luna`; the previously
+  recorded synthetic consultation/resume smoke remains the only model-backed
+  workflow. No captured exchange was sent to Hermes. The local review gate
+  remains required before a saved evidence packet can be resumed by Hermes.
+- This was a bounded browser smoke, not full application acceptance. Source
+  history reconciliation, browser/JavaScript mapping, the dead-letter review
+  path, separate-client access, and a complete operator-reviewed consultation
+  remain open.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
