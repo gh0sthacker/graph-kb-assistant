@@ -23,7 +23,7 @@ func TestHistoricalJSONBodyOccurrencesCoverRequestAndResponseWithoutValues(t *te
 		`{"result":{"id":"` + shared + `"},"password":"` + secret + `"}`
 	fieldKey := fieldValueKeyForProject(t, "fixture-project")
 	defer clear(fieldKey)
-	bundle := buildJSONBodyFieldBundle(t, "body-fields", requestRaw, responseRaw, fieldKey, false)
+	bundle := buildBodyFieldBundle(t, "body-fields", requestRaw, responseRaw, fieldKey, false)
 	validateJSONEntities(t, bundle)
 
 	occurrences := entitiesByKind(bundle, "field_occurrence")
@@ -134,7 +134,7 @@ func TestHistoricalJSONBodyOccurrencesRequireCompleteBoundedMessages(t *testing.
 	defer clear(fieldKey)
 	request := "POST /api/items HTTP/1.1\r\nHost: fixture.invalid\r\nContent-Type: application/json\r\n\r\n{\"id\":\"TRUNCATED_BODY_VALUE_216\"}"
 	response := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"RESPONSE_BODY_VALUE_315\"}"
-	bundle := buildJSONBodyFieldBundle(t, "body-truncated", request, response, fieldKey, true)
+	bundle := buildBodyFieldBundle(t, "body-truncated", request, response, fieldKey, true)
 	for _, entity := range entitiesByKind(bundle, "field_occurrence") {
 		if entity["data"].(Record)["side"] != "response" {
 			t.Fatal("truncated request body produced a source-bound occurrence")
@@ -142,7 +142,7 @@ func TestHistoricalJSONBodyOccurrencesRequireCompleteBoundedMessages(t *testing.
 	}
 
 	malformed := "POST /api/items HTTP/1.1\r\nHost: fixture.invalid\r\nContent-Type: application/json\r\n\r\n{\"id\":\"MALFORMED_BODY_VALUE_827\""
-	malformedBundle := buildJSONBodyFieldBundle(t, "body-malformed", malformed, response, fieldKey, false)
+	malformedBundle := buildBodyFieldBundle(t, "body-malformed", malformed, response, fieldKey, false)
 	for _, entity := range entitiesByKind(malformedBundle, "field_occurrence") {
 		if entity["data"].(Record)["side"] == "request" {
 			t.Fatal("malformed request JSON produced a source-bound occurrence")
@@ -150,10 +150,158 @@ func TestHistoricalJSONBodyOccurrencesRequireCompleteBoundedMessages(t *testing.
 	}
 
 	lengthMismatch := strings.Replace(request, "\r\n\r\n", "\r\nContent-Length: 999\r\n\r\n", 1)
-	lengthMismatchBundle := buildJSONBodyFieldBundle(t, "body-length-mismatch", lengthMismatch, response, fieldKey, false)
+	lengthMismatchBundle := buildBodyFieldBundle(t, "body-length-mismatch", lengthMismatch, response, fieldKey, false)
 	for _, entity := range entitiesByKind(lengthMismatchBundle, "field_occurrence") {
 		if entity["data"].(Record)["side"] == "request" {
 			t.Fatal("JSON body with a mismatched Content-Length produced source-bound occurrences")
+		}
+	}
+}
+
+func TestHistoricalFormBodyOccurrencesPreserveEncodingAndCorrelateLocations(t *testing.T) {
+	fieldKey := fieldValueKeyForProject(t, "fixture-project")
+	defer clear(fieldKey)
+	const secret = "FORM_SECRET_VALUE_628"
+	requestBody := "id=FORM+SHARED&tag=FORM_TAG_A_312&tag=FORM_TAG_B_847&password=" + secret
+	responseBody := "id=FORM%20SHARED&password=" + secret
+	request := "POST /api/items?seen=FORM%20SHARED HTTP/1.1\r\nHost: fixture.invalid\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n" + requestBody
+	response := "HTTP/1.1 200 OK\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n" + responseBody
+	bundle := buildBodyFieldBundle(t, "form-body-fields", request, response, fieldKey, false)
+	validateJSONEntities(t, bundle)
+
+	occurrences := entitiesByKind(bundle, "field_occurrence")
+	if len(occurrences) != 7 {
+		t.Fatalf("form/query field occurrences = %d, want 7", len(occurrences))
+	}
+	seenPaths := map[string]bool{}
+	tagIndexes := map[int]bool{}
+	wantValues := map[string]string{
+		`request:query["seen"][]`:              "FORM%20SHARED",
+		`request:request.body["id"][]`:         "FORM+SHARED",
+		`request:request.body["tag"][0]`:       "FORM_TAG_A_312",
+		`request:request.body["tag"][1]`:       "FORM_TAG_B_847",
+		`request:request.body["password"][]`:   secret,
+		`response:response.body["id"][]`:       "FORM%20SHARED",
+		`response:response.body["password"][]`: secret,
+	}
+	wantSourcePairs := map[string]string{
+		`request:query["seen"][]`:              "seen=FORM%20SHARED",
+		`request:request.body["id"][]`:         "id=FORM+SHARED",
+		`request:request.body["tag"][0]`:       "tag=FORM_TAG_A_312",
+		`request:request.body["tag"][1]`:       "tag=FORM_TAG_B_847",
+		`request:request.body["password"][]`:   "password=" + secret,
+		`response:response.body["id"][]`:       "id=FORM%20SHARED",
+		`response:response.body["password"][]`: "password=" + secret,
+	}
+	for _, entity := range occurrences {
+		data := entity["data"].(Record)
+		span := data["value_span"].(Record)
+		message := request
+		if data["side"] == "response" {
+			message = response
+		}
+		start, end := span["start"].(int), span["end"].(int)
+		if start < 0 || end < start || end > len(message) {
+			t.Fatalf("invalid form source span: %#v", span)
+		}
+		value := string(message[start:end])
+		path := data["side"].(string) + ":" + data["path"].(string)
+		seenPaths[path] = true
+		if want := wantValues[path]; value != want {
+			t.Errorf("%s value span = %q, want exact encoded bytes %q", path, value, want)
+		}
+		sourceSpan := data["source_span"].(Record)
+		sourceStart, sourceEnd := sourceSpan["start"].(int), sourceSpan["end"].(int)
+		if sourceStart < 0 || sourceEnd < sourceStart || sourceEnd > len(message) {
+			t.Fatalf("invalid form pair span: %#v", sourceSpan)
+		}
+		if source := string(message[sourceStart:sourceEnd]); source != wantSourcePairs[path] {
+			t.Errorf("%s source span = %q, want exact pair %q", path, source, wantSourcePairs[path])
+		}
+		if strings.HasPrefix(data["path"].(string), `request.body["tag"][`) {
+			tagIndexes[data["occurrence_index"].(int)] = true
+			if !strings.HasPrefix(value, "FORM_TAG_") {
+				t.Fatalf("repeated form value span = %q", value)
+			}
+		}
+	}
+	sharedReference := ""
+	for _, assertion := range bundle["assertions"].([]Record) {
+		if assertion["predicate"] != "value_used_in" {
+			continue
+		}
+		occurrence := fieldOccurrenceEntity(t, bundle, assertion["object"].(string))
+		data := occurrence["data"].(Record)
+		span := data["value_span"].(Record)
+		message := request
+		if data["side"] == "response" {
+			message = response
+		}
+		start, end := span["start"].(int), span["end"].(int)
+		if start < 0 || end < start || end > len(message) {
+			t.Fatalf("invalid form source span: %#v", span)
+		}
+		value := string(message[start:end])
+		if value == "FORM+SHARED" || value == "FORM%20SHARED" {
+			if sharedReference != "" && sharedReference != assertion["subject"] {
+				t.Fatal("equivalent query/form encodings did not share a keyed value reference")
+			}
+			sharedReference = assertion["subject"].(string)
+		}
+	}
+	for _, path := range []string{
+		`request:query["seen"][]`, `request:request.body["id"][]`,
+		`request:request.body["tag"][0]`, `request:request.body["tag"][1]`, `request:request.body["password"][]`,
+		`response:response.body["id"][]`, `response:response.body["password"][]`,
+	} {
+		if !seenPaths[path] {
+			t.Errorf("missing form occurrence %q; seen=%v", path, seenPaths)
+		}
+	}
+	if sharedReference == "" || !tagIndexes[0] || !tagIndexes[1] {
+		t.Fatalf("shared reference or repeated order missing: reference=%q indices=%v", sharedReference, tagIndexes)
+	}
+	refs := entitiesByKind(bundle, "value_reference")
+	if len(refs) != 3 {
+		t.Fatalf("form value references = %d, want 3 non-sensitive unique strings", len(refs))
+	}
+	encoded, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{secret, "FORM+SHARED", "FORM%20SHARED", "FORM_TAG_A_312", "FORM_TAG_B_847"} {
+		if bytes.Contains(encoded, []byte(raw)) {
+			t.Fatalf("graph bundle contains raw form value %q", raw)
+		}
+	}
+}
+
+func TestHistoricalFormBodyOccurrencesOmitTruncatedAndMalformedInputs(t *testing.T) {
+	fieldKey := fieldValueKeyForProject(t, "fixture-project")
+	defer clear(fieldKey)
+	request := "POST /api/items HTTP/1.1\r\nHost: fixture.invalid\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nid=FORM_TRUNCATED_473"
+	response := "HTTP/1.1 200 OK\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nid=FORM_RESPONSE_218"
+	truncated := buildBodyFieldBundle(t, "form-body-truncated", request, response, fieldKey, true)
+	for _, entity := range entitiesByKind(truncated, "field_occurrence") {
+		data := entity["data"].(Record)
+		if data["location"] == "request.body" {
+			t.Fatal("truncated form body produced a source-bound occurrence")
+		}
+	}
+
+	malformed := strings.Replace(request, "id=FORM_TRUNCATED_473", "id=BAD%FFVALUE", 1)
+	malformedBundle := buildBodyFieldBundle(t, "form-body-malformed", malformed, response, fieldKey, false)
+	for _, entity := range entitiesByKind(malformedBundle, "field_occurrence") {
+		if entity["data"].(Record)["location"] == "request.body" {
+			t.Fatal("invalid UTF-8 form value produced a source-bound occurrence")
+		}
+	}
+
+	badEscape := strings.Replace(request, "id=FORM_TRUNCATED_473", "id=BAD%ZZVALUE", 1)
+	badEscapeBundle := buildBodyFieldBundle(t, "form-body-bad-escape", badEscape, response, fieldKey, false)
+	for _, entity := range entitiesByKind(badEscapeBundle, "field_occurrence") {
+		if entity["data"].(Record)["location"] == "request.body" {
+			t.Fatal("malformed percent escape produced a source-bound occurrence")
 		}
 	}
 }
@@ -163,7 +311,7 @@ func TestLiveJSONBodyOccurrencesUseTheSharedHistoricalProjection(t *testing.T) {
 	defer clear(fieldKey)
 	request := "POST /api/items HTTP/1.1\r\nHost: fixture.invalid\r\nContent-Type: application/json\r\n\r\n{\"id\":\"LIVE_REQUEST_BODY_VALUE_315\"}"
 	response := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"id\":\"LIVE_RESPONSE_BODY_VALUE_729\"}"
-	exchange, projectKey, source, receiptRoot := syntheticJSONBodyFixture(t, "body-live", request, response, false)
+	exchange, projectKey, source, receiptRoot := syntheticBodyFixture(t, "body-live", request, response, false)
 	responseSignature := strings.Repeat("f", 64)
 	bundle, _, err := BuildLiveBundleWithSignaturesAndFieldValueKey(
 		exchange, projectKey, source, strings.Repeat("a", 64), &responseSignature, fieldKey, strings.Repeat("c", 64),
@@ -189,9 +337,9 @@ func TestLiveJSONBodyOccurrencesUseTheSharedHistoricalProjection(t *testing.T) {
 	}
 }
 
-func buildJSONBodyFieldBundle(t *testing.T, requestID, requestRaw, responseRaw string, fieldKey []byte, requestTruncated bool) Record {
+func buildBodyFieldBundle(t *testing.T, requestID, requestRaw, responseRaw string, fieldKey []byte, requestTruncated bool) Record {
 	t.Helper()
-	exchange, projectKey, source, receiptRoot := syntheticJSONBodyFixture(t, requestID, requestRaw, responseRaw, requestTruncated)
+	exchange, projectKey, source, receiptRoot := syntheticBodyFixture(t, requestID, requestRaw, responseRaw, requestTruncated)
 	responseSignature := strings.Repeat("e", 64)
 	bundle, _, err := BuildHistoricalBundleWithSignaturesAndFieldValueKey(exchange, projectKey, source,
 		strings.Repeat("b", 64), &responseSignature, fieldKey, strings.Repeat("d", 64))
@@ -205,7 +353,7 @@ func buildJSONBodyFieldBundle(t *testing.T, requestID, requestRaw, responseRaw s
 	return bundle
 }
 
-func syntheticJSONBodyFixture(t *testing.T, requestID, requestRaw, responseRaw string, requestTruncated bool) (caido.HttpExchange, string, Record, string) {
+func syntheticBodyFixture(t *testing.T, requestID, requestRaw, responseRaw string, requestTruncated bool) (caido.HttpExchange, string, Record, string) {
 	t.Helper()
 	project := caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
 	projectKey, err := project.StorageKey()

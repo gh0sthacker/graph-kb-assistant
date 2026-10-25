@@ -1,28 +1,29 @@
 # Project status and known limitations
 
-## Stage 3 revision-bound query and JSON body occurrences — PARTIAL (2026-10-25)
+## Stage 3 revision-bound query and body occurrences — PARTIAL (2026-10-25)
 
 - The Go historical and live projections now emit capture-specific query
-  `field_occurrence` records and request/response JSON scalar occurrences with
-  occurrence order, message-relative byte spans, wire fidelity, source receipt,
-  and capture revision identity. Body spans are emitted only for complete,
-  byte-preserving JSON messages with explicit non-truncated metadata and a
-  consistent message extent. They
-  create project-keyed `value_reference` links only for non-sensitive strings;
-  query and JSON strings use the same `field-equality-v2` decoded UTF-8
-  normalization so equal strings can link across those locations. Neither the
-  key nor plaintext values enter graph records. Legacy v1 references remain
-  readable; new projections use v2.
+  `field_occurrence` records plus request/response JSON scalar and
+  `application/x-www-form-urlencoded` body occurrences with occurrence order,
+  message-relative byte spans, wire fidelity, source receipt, and capture
+  revision identity. Body spans are emitted only for complete, byte-preserving
+  messages with explicit non-truncated metadata and a consistent message
+  extent. Project-keyed `value_reference` links are created only for
+  non-sensitive strings; query, form, and JSON strings share the
+  `field-equality-v2` decoded UTF-8 normalization. Neither the key nor plaintext
+  values enter graph records. Legacy v1 references remain readable; new
+  projections use v2.
 - Equality relations are labeled `keyed_value_equality` / `correlation_only`.
   They establish a same-project keyed value match and do not establish
   causality, object identity, or ownership. If a source span or revision cannot
   be bound, the occurrence and equality link are omitted and the analysis card
   records the gap.
-- Synthetic Go graph-import tests cover repeated query order, request/response
-  JSON scalar spans (including escaped values), same-project correlation across
-  query/body locations, separation by project key, sensitive-name omission,
-  plaintext absence, writer validation, and omission for truncated or malformed
-  bodies. Historical and live builders use the same projection path.
+- Synthetic Go graph-import tests cover repeated query/form order, URL-encoded
+  source spans, request/response JSON scalar spans (including escaped values),
+  same-project correlation across query/form/JSON locations, separation by
+  project key, sensitive-name omission, plaintext absence, writer validation,
+  and omission of spans for truncated, malformed, or extent-mismatched bodies.
+  Historical and live builders use the same projection path.
   Synthetic traversal tests cover same-project correlation across captures.
   `GraphNeighborhoodPage`
   now keeps the `has_occurrence`, `occurrence_of`, and `value_used_in` path and
@@ -32,16 +33,16 @@
   returns IDs only. Targeted Go packages and 37 synthetic Web UI tests passed.
 - The UI labels field/value nodes, shows source path, occurrence number and
   byte spans, and explains that equality is correlation only. It does not
-  render raw query values or equality signatures. These nodes stay hidden in
+  render raw parameter values or equality signatures. These nodes stay hidden in
   the overview until their filter is enabled; focused observation traversal
   opens the bounded related path.
 - Stage 3 remains `PARTIAL`: the opt-in ephemeral Neo4j Cypher integration was
   added but not run, and existing graph snapshots need a full reprojection
   before v2 field-value references and the field-value index marker become
-  current. Form and multipart body occurrences, complete capture-shape
-  coverage, actor/object annotations, and complete application-map coverage
-  remain unfinished. Caido and active working databases were not checked for
-  this code slice.
+  current. Multipart body occurrences, complete capture-shape coverage,
+  actor/object annotations, and complete application-map coverage remain
+  unfinished. Caido and active working databases were not checked for this code
+  slice.
 
 ## Stage 5 local UI resume after reload — PARTIAL
 

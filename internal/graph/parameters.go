@@ -9,6 +9,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -93,6 +94,17 @@ func historicalMessageBodyOffset(raw []byte) (int, bool) {
 		return index + 2, true
 	}
 	return 0, false
+}
+
+func historicalMessageOffsetBasis(location string) string {
+	switch location {
+	case "request.body":
+		return "request_message"
+	case "response.body":
+		return "response_message"
+	default:
+		return ""
+	}
 }
 
 func historicalBodyExtentComplete(headers []headerField, body []byte) bool {
@@ -205,7 +217,8 @@ func historicalBodyParameterFields(body []byte, contentType, location string, so
 	mediaType = strings.ToLower(mediaType)
 	switch {
 	case mediaType == "application/x-www-form-urlencoded":
-		fields, complete := historicalFormParameterFields(body, location, source, remaining)
+		fields, complete := historicalFormParameterFields(body, location, source, remaining,
+			bodyOffset, sourceSpanAvailable, fieldValueKey, wireFidelity)
 		return historicalBodyAnalysis{fields: fields, complete: complete}
 	case mediaType == "application/json", strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json"):
 		fields, complete := historicalJSONParameterFields(body, location, source, remaining,
@@ -423,7 +436,7 @@ func historicalMultipartPayloadSize(part io.Reader, transferEncoding string, rem
 	return &count, true
 }
 
-func historicalFormParameterFields(body []byte, location string, source Record, remaining int) ([]historicalParameterField, bool) {
+func historicalFormParameterFields(body []byte, location string, source Record, remaining, bodyOffset int, sourceSpanAvailable bool, fieldValueKey []byte, wireFidelity string) ([]historicalParameterField, bool) {
 	if !utf8.Valid(body) {
 		return nil, false
 	}
@@ -434,13 +447,18 @@ func historicalFormParameterFields(body []byte, location string, source Record, 
 	fields := make([]historicalParameterField, 0, minInt(remaining, len(pairs)))
 	occurrences := make(map[string][]int)
 	fieldIndex := 0
+	pairOffset := 0
 	for _, pair := range pairs {
 		if pair == "" {
+			pairOffset++
 			continue
 		}
 		index := fieldIndex
 		fieldIndex++
 		key, value, hasValue := strings.Cut(pair, "=")
+		if !historicalValidFormEscapes(key) || hasValue && !historicalValidFormEscapes(value) {
+			return nil, false
+		}
 		name, valid := historicalURLUnquote(key, true, true)
 		if !valid {
 			return nil, false
@@ -460,11 +478,47 @@ func historicalFormParameterFields(body []byte, location string, source Record, 
 		occurrence := len(occurrences[safeName])
 		occurrences[safeName] = append(occurrences[safeName], len(fields))
 		path := location + "[\"" + safeName + "\"][" + strconv.Itoa(occurrence) + "]"
+		fieldOccurrence := &historicalFieldOccurrence{index: occurrence}
+		if sourceSpanAvailable {
+			fieldOccurrence.sourceSpan = Record{
+				"start": bodyOffset + pairOffset, "end": bodyOffset + pairOffset + len(pair),
+				"unit": "byte", "offset_basis": historicalMessageOffsetBasis(location), "wire_fidelity": wireFidelity,
+			}
+			if hasValue {
+				valueStart := bodyOffset + pairOffset + len(key) + 1
+				fieldOccurrence.valueSpan = Record{
+					"start": valueStart, "end": bodyOffset + pairOffset + len(pair),
+					"unit": "byte", "offset_basis": historicalMessageOffsetBasis(location), "wire_fidelity": wireFidelity,
+				}
+				if len(fieldValueKey) == 32 && safeName == name && !secretNamePattern.MatchString(name) && len(value) <= 4_096 {
+					decoded, decodeErr := url.QueryUnescape(value)
+					if decodeErr == nil && len(decoded) > 0 && len(decoded) <= 4_096 && safeEqualityString(decoded) {
+						fieldOccurrence.valueToken = fieldValueTokenForNormalization(fieldValueKey, decoded, "decoded_utf8_scalar_v2")
+						fieldOccurrence.valueTokenVersion = "field-equality-v2"
+						fieldOccurrence.valueNormalization = "decoded_utf8_scalar_v2"
+					}
+				}
+			}
+		}
 		fields = append(fields, historicalParameterField{
-			path: path, typeName: "string", location: location,
+			path: path, typeName: "string", location: location, occurrence: fieldOccurrence,
 		})
+		pairOffset += len(pair) + 1
 	}
 	return finalizeHistoricalFormOccurrences(fields, occurrences), true
+}
+
+func historicalValidFormEscapes(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] != '%' {
+			continue
+		}
+		if index+2 >= len(value) || !isHexadecimalDigit(value[index+1]) || !isHexadecimalDigit(value[index+2]) {
+			return false
+		}
+		index += 2
+	}
+	return true
 }
 
 // finalizeHistoricalFormOccurrences retains source-order indices for duplicate
@@ -472,10 +526,18 @@ func historicalFormParameterFields(body []byte, location string, source Record, 
 func finalizeHistoricalFormOccurrences(fields []historicalParameterField, occurrences map[string][]int) []historicalParameterField {
 	for _, indices := range occurrences {
 		if len(indices) != 1 {
+			for occurrenceIndex, fieldIndex := range indices {
+				if fields[fieldIndex].occurrence != nil {
+					fields[fieldIndex].occurrence.index = occurrenceIndex
+				}
+			}
 			continue
 		}
 		index := indices[0]
 		fields[index].path = historicalTemplateParameterPath(fields[index].path)
+		if fields[index].occurrence != nil {
+			fields[index].occurrence.index = 0
+		}
 	}
 	return fields
 }
@@ -579,10 +641,8 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 			if !startOK || end <= start || end > len(body) {
 				return errors.New("historical JSON scalar span could not be bound")
 			}
-			basis := "request_message"
-			if location == "response.body" {
-				basis = "response_message"
-			} else if location != "request.body" {
+			basis := historicalMessageOffsetBasis(location)
+			if basis == "" {
 				return errors.New("historical JSON body location is invalid")
 			}
 			span := Record{
