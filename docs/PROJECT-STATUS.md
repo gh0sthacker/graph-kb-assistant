@@ -1,5 +1,43 @@
 # Project status and known limitations
 
+## RedAmon KB parity re-check (2026-10-25 23:00 UTC) — PARTIAL
+
+- Compared this checkout with RedAmon upstream master at
+  `4585b3442cf3c6e075fca5d3b512a8f47be501b6`. Its pinned source revisions
+  (GTFOBins, LOLBAS, OWASP, ExploitDB, Nuclei) and E5/BGE model revisions match
+  this project's manifest and adapters. The upstream `full` profile lists all
+  seven families; its checked-in Makefile sets NVD to 730 days, and its
+  `kb_config.yaml` says full ignores the standard CVSS floor. This project's
+  730-day, zero-floor NVD settings therefore match that source configuration.
+  The upstream Wiki page instead says 90 days/CVSS 7, contradicting the source
+  config and Makefile; do not treat that Wiki table as the profile authority.
+  RedAmon's default installed profile is `lite`, so the deployment's selected
+  profile still must be identified before claiming equality with a live
+  RedAmon installation.
+- The current private index remains partial: snapshot
+  `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`,
+  162,398 chunks across six source families, no ExploitDB rows, and 6,944 of
+  162,390 eligible E5 vectors. Coverage is `PARTIAL`; the vector snapshot is
+  unpublished, so semantic retrieval is not ready. The ExploitDB provider is
+  implemented but the source is still excluded while its dataset reuse terms
+  are unresolved.
+- The existing resumable vector process is alive but currently in Linux's
+  stopped state (`T`) even though systemd reports its transient unit active.
+  Resuming that same process increased the stored count from 6,752 to
+  6,944; it stopped again afterward. Do not treat this as active progress or
+  start a duplicate worker. The index remains readable through its available
+  lexical path while vector publication is incomplete.
+- No deployed RedAmon instance was found on Proxmox2: its read-only inventory
+  showed one Kali VM and no LXC guests; the current VM's Docker inventory
+  contains only the Neo4j container. Therefore a byte/content comparison with
+  RedAmon's actual live database is still unavailable. Search behavior also
+  remains unproven as identical: this app uses SQLite FTS5 while RedAmon uses
+  Neo4j/Lucene, despite matching model revisions and ranking constants.
+- KB parity remains `PARTIAL`. Required next evidence: identify the RedAmon
+  deployment/profile or obtain its comparable manifest; resolve ExploitDB
+  reuse rights; finish and publish all E5 vectors; then compare source/chunk
+  digests and retrieval results against that exact reference.
+
 ## KB parity checkpoint (2026-10-25)
 
 - The configured target is RedAmon's declared `full` profile: ToolDocs, GTFOBins,
