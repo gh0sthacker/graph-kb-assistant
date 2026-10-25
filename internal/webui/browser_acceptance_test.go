@@ -31,16 +31,20 @@ type browserAcceptanceCapture struct {
 }
 
 type browserAcceptanceInfo struct {
-	URL        string                     `json:"url"`
-	ProjectKey string                     `json:"project_key"`
-	Captures   []browserAcceptanceCapture `json:"captures"`
-	ExpiresAt  time.Time                  `json:"expires_at"`
+	URL          string                     `json:"url"`
+	DataHome     string                     `json:"data_home"`
+	VaultKey     string                     `json:"vault_key"`
+	GraphBackend string                     `json:"graph_backend"`
+	ProjectKey   string                     `json:"project_key"`
+	Captures     []browserAcceptanceCapture `json:"captures"`
+	ExpiresAt    time.Time                  `json:"expires_at"`
 }
 
 // TestBrowserAcceptanceFixture is an explicitly opted-in, temporary local
 // application for browser acceptance. It serves the real embedded assets and
-// HTTP/application services. Only its synthetic encrypted vault and SQLite
-// graph are used; no Caido client, Neo4j service, KB, or model is configured.
+// HTTP/application services. Only synthetic encrypted captures are used; the
+// graph backend can be SQLite or an explicitly selected disposable Neo4j.
+// No Caido client, KB index, or model is configured.
 func TestBrowserAcceptanceFixture(t *testing.T) {
 	infoPath := os.Getenv("BB_BROWSER_ACCEPTANCE_INFO")
 	if infoPath == "" {
@@ -50,14 +54,22 @@ func TestBrowserAcceptanceFixture(t *testing.T) {
 
 	ctx := t.Context()
 	root := filepath.Join(t.TempDir(), "synthetic-runtime")
+	graphBackend := strings.ToLower(strings.TrimSpace(os.Getenv("BB_BROWSER_ACCEPTANCE_GRAPH_BACKEND")))
+	if graphBackend == "" {
+		graphBackend = "sqlite"
+	}
+	if graphBackend != "sqlite" && graphBackend != "neo4j" {
+		t.Fatalf("unsupported browser acceptance graph backend %q", graphBackend)
+	}
 	vaultKey := make([]byte, 32)
 	if _, err := rand.Read(vaultKey); err != nil {
 		t.Fatal(err)
 	}
 	defer clear(vaultKey)
+	vaultKeyEncoded := base64.RawURLEncoding.EncodeToString(vaultKey)
 	t.Setenv("BB_ASSISTANT_DATA_HOME", root)
-	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
-	t.Setenv("BB_ASSISTANT_VAULT_KEY", base64.RawURLEncoding.EncodeToString(vaultKey))
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", graphBackend)
+	t.Setenv("BB_ASSISTANT_VAULT_KEY", vaultKeyEncoded)
 	t.Setenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL", "0")
 	// An explicit absent path prevents NewTools from resolving a real KB index.
 	kbPath := filepath.Join(root, "absent-synthetic-kb.sqlite3")
@@ -95,9 +107,12 @@ func TestBrowserAcceptanceFixture(t *testing.T) {
 	if err != nil || accepted.Stored != 2 {
 		t.Fatalf("write synthetic encrypted captures: stored=%d err=%v", accepted.Stored, err)
 	}
-	graphWriter, err := behaviorgraph.OpenWriter(ctx, selected)
-	if err != nil {
-		t.Fatalf("open synthetic graph writer: %v", err)
+	var graphWriter *behaviorgraph.Writer
+	if graphBackend == "sqlite" {
+		graphWriter, err = behaviorgraph.OpenWriter(ctx, selected)
+		if err != nil {
+			t.Fatalf("open synthetic graph writer: %v", err)
+		}
 	}
 	captures := make([]browserAcceptanceCapture, 0, len(exchanges))
 	for _, exchange := range exchanges {
@@ -111,38 +126,52 @@ func TestBrowserAcceptanceFixture(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read canonical synthetic projection: %v", err)
 		}
-		if _, err := graphWriter.ImportBundle(ctx, job.PayloadBundle); err != nil {
-			t.Fatalf("import canonical synthetic graph: %v", err)
-		}
-		// The fixture materializes the actual local graph and exact historical
-		// mappings. Jobs remain pending: no remote delivery is simulated or
-		// acknowledged, and this fixture does not exercise the Neo4j worker.
-		timestamp := time.Now().UTC().Format(time.RFC3339Nano)
-		tx, err := selected.Database.DB().BeginTx(ctx, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO graph_capture_revisions(revision_id,graph_observation_id,updated_at) VALUES(?,?,?)",
-			revision, job.GraphObservationID, timestamp,
-		); err != nil {
-			_ = tx.Rollback()
-			t.Fatalf("store synthetic revision mapping: %v", err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO graph_capture_map(observation_id,revision_id,graph_observation_id,updated_at) VALUES(?,?,?,?)",
-			job.ObservationID, revision, job.GraphObservationID, timestamp,
-		); err != nil {
-			_ = tx.Rollback()
-			t.Fatalf("store synthetic current mapping: %v", err)
-		}
-		if err := tx.Commit(); err != nil {
-			t.Fatal(err)
+		if graphBackend == "sqlite" {
+			if _, err := graphWriter.ImportBundle(ctx, job.PayloadBundle); err != nil {
+				t.Fatalf("import canonical synthetic graph: %v", err)
+			}
+			// SQLite compatibility mode materializes the local graph directly;
+			// Neo4j mode uses the durable projection worker below.
+			timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+			tx, err := selected.Database.DB().BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				"INSERT INTO graph_capture_revisions(revision_id,graph_observation_id,updated_at) VALUES(?,?,?)",
+				revision, job.GraphObservationID, timestamp,
+			); err != nil {
+				_ = tx.Rollback()
+				t.Fatalf("store synthetic revision mapping: %v", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				"INSERT INTO graph_capture_map(observation_id,revision_id,graph_observation_id,updated_at) VALUES(?,?,?,?)",
+				job.ObservationID, revision, job.GraphObservationID, timestamp,
+			); err != nil {
+				_ = tx.Rollback()
+				t.Fatalf("store synthetic current mapping: %v", err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
 		}
 		captures = append(captures, browserAcceptanceCapture{
 			RequestID: exchange.Ref.RequestID, RevisionID: revision, GraphObservationID: job.GraphObservationID,
 			RequestBytes: len(exchange.RequestRaw), ResponseBytes: len(exchange.ResponseRaw),
 		})
+	}
+	if graphBackend == "neo4j" {
+		results, err := ingest.RunProjectionWorkerBatch(ctx, selected, maintenance, ingest.ProjectionWorkerOptions{
+			LeaseDuration: time.Minute, MaxAttempts: 1,
+		}, len(exchanges))
+		if err != nil || len(results) != len(exchanges) {
+			t.Fatalf("project synthetic captures to Neo4j: applied=%d expected=%d err=%v", len(results), len(exchanges), err)
+		}
+		for _, result := range results {
+			if result.State != "applied" {
+				t.Fatalf("synthetic Neo4j projection did not apply: state=%s code=%s", result.State, result.ErrorCode)
+			}
+		}
 	}
 	projectKey := selected.ProjectKey
 	if err := selected.Close(); err != nil {
@@ -172,6 +201,9 @@ func TestBrowserAcceptanceFixture(t *testing.T) {
 		SeedIDs: []string{captures[0].GraphObservationID, captures[1].GraphObservationID},
 		Budget:  appquery.GraphBudget{MaxNodes: 100, MaxEdges: 300, MaxDepth: 2},
 	}); err != nil {
+		if queryErr, ok := err.(*appquery.QueryError); ok {
+			t.Fatalf("query actual synthetic graph: %v (cause: %v)", err, queryErr.Unwrap())
+		}
 		t.Fatalf("query actual synthetic graph: %v", err)
 	}
 	comparison, err := tools.CompareCaptureMessages(ctx, appquery.CaptureComparisonRequest{
@@ -187,8 +219,11 @@ func TestBrowserAcceptanceFixture(t *testing.T) {
 	}
 	server := httptest.NewServer(handler)
 	defer server.Close()
-	expiresAt := time.Now().UTC().Add(10 * time.Minute)
-	info := browserAcceptanceInfo{URL: server.URL, ProjectKey: projectKey, Captures: captures, ExpiresAt: expiresAt}
+	expiresAt := time.Now().UTC().Add(30 * time.Minute)
+	info := browserAcceptanceInfo{
+		URL: server.URL, DataHome: root, VaultKey: vaultKeyEncoded, GraphBackend: graphBackend,
+		ProjectKey: projectKey, Captures: captures, ExpiresAt: expiresAt,
+	}
 	encoded, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +240,7 @@ func TestBrowserAcceptanceFixture(t *testing.T) {
 		case <-ctx.Done():
 			return
 		case <-deadline.C:
-			t.Log("synthetic browser fixture reached its ten-minute lifetime")
+			t.Log("synthetic browser fixture reached its thirty-minute lifetime")
 			return
 		case <-poll.C:
 			if _, err := os.Lstat(infoPath + ".stop"); err == nil {

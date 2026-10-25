@@ -35,6 +35,22 @@ contacting Caido, Neo4j, or a model provider. Its overall state remains
 See [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) for what the report
 measures and how to read its limits.
 
+For a persistent per-user service on systemd, install the unit from the
+checkout. The user's systemd manager must be enabled at login (lingering is
+needed to keep it running after logout):
+
+```sh
+mkdir -p ~/.config/systemd/user
+install -m 0644 deploy/graph-kb-assistant.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now graph-kb-assistant.service
+systemctl --user status graph-kb-assistant.service
+```
+
+The service remains bound to loopback on port 8765. Use a reverse proxy with
+the intended network access policy for remote browser access; do not change the
+application bind address to a LAN or public interface.
+
 ## Connect an assistant over MCP
 
 The project exposes a stdio MCP server. The included launcher is:
@@ -69,7 +85,13 @@ Hermes is the supported runtime harness for the local assistant. Install it and 
 
 The generated profile is stored outside the checkout with private file permissions. It enables only the local MCP server, skills, and clarification tools, and allowlists 15 named `bb_*` tools for local graph/KB inspection and the reviewed consultation workflow. Running `setup-hermes` or `run-hermes` reconciles the managed tool list to those 15 names: missing approved tools are added and stale names are removed, while the rest of the Hermes profile is preserved. Unmanaged profiles are left untouched. MCP resources and prompts are disabled; terminal, file, browser, web, computer-use, and code-execution toolsets are not enabled for this profile. `mcp test` should discover exactly the 15 allowlisted tools, including no raw-capture body tool. This checks tool discovery only; model-backed analysis still requires a separately selected and reviewed provider.
 
-The harness and model provider are separate choices. Hermes can verify MCP connectivity before a provider is selected; configure one with `./scripts/run-hermes model` when ready. Review that provider's data handling before sending real capture content. The current workflow has not verified model-backed hypothesis generation or validation.
+The harness and model provider are separate choices. Hermes can verify MCP
+connectivity before a provider is selected; configure one with
+`./scripts/run-hermes model` when ready. The current managed profile uses
+ChatGPT/Codex Subscription with `gpt-6-luna`, and a model-backed synthetic
+consultation/resume has passed. Review the provider's data handling before
+sending real capture content; the synthetic check does not verify model-backed
+hypothesis impact validation.
 
 ## Connect Caido
 

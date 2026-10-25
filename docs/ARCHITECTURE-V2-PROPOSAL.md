@@ -22,18 +22,19 @@ an incremental migration inside the existing application.
 
 ## 2. What the review found
 
-The current foundation is suitable for an evidence navigator. It is not yet an
-end-to-end consultation product. The following findings drive this proposal.
-They are source-review findings; conditional failure scenarios were not
-reproduced during this review.
+The initial review findings below describe the proposal's 2026-10-23 source
+baseline. They are retained as an audit trail; implementation status is updated
+here as the six-stage plan progresses. A resolved source-review item means the
+code path was inspected and its focused regression/acceptance coverage passed;
+it does not imply validation against an existing production dataset.
 
 | Priority | Finding and consequence | Evidence |
 | --- | --- | --- |
-| P1 | Snapshot replacement can remove an event applied after the local snapshot was read; retained import markers can suppress its replay. Parity against the older snapshot can still pass. | `cmd/bb-assistant/main.go:203`, `:230`; `internal/neo4jstore/store.go:199`, `:345` |
-| P1 | Live deduplication skips all known IDs, including exchanges with missing or incomplete responses. A later response is not refreshed by the current live path. | `internal/ingest/live_tail.go:224`, `:452`, `:597`, `:629` |
-| P1 | Neo4j draining is synchronous inside ingestion. A graph outage can block capture/checkpoint progress after a separate graph transaction has committed. | `internal/ingest/page_writer.go:382`, `:428`, `:579`; `internal/ingest/live_tail.go:298`, `:303` |
-| P1 | Actor, session, tenant, object and policy context are unknown; live semantic/business analysis is explicitly unimplemented. Schema vocabulary alone does not supply those relationships. | `internal/graph/historical.go:441`; `internal/graph/live.go:56` |
-| P1 | Hermes receives structural summaries, but has no integrated semantic evidence broker or application-owned save/resume consultation cycle. | `internal/search/capture_detail.go:12`; `scripts/setup-hermes:52`; `internal/mcpserver/server.go:290` |
+| Resolved | Snapshot replacement and intake/outbox draining share the project's cross-process maintenance lock, preventing an older snapshot from replacing newer applied events. | `cmd/bb-assistant/main.go:299`; `cmd/bb-assistant/navigation_backfill_test.go`; `cmd/bb-assistant/maintenance_test.go` |
+| Resolved | Live intake refreshes previously accepted captures when their response was absent, and applies only the monotonic absent-to-present response transition. | `internal/ingest/live_tail.go:300`, `:459`; `internal/ingest/live_tail_test.go` |
+| Resolved | Historical and live intake commit captures, checkpoints and durable projection jobs locally; the projection worker applies Neo4j work asynchronously and retries failures. | `internal/ingest/page_writer.go:330`; `internal/ingest/live_tail_test.go:145`; `internal/ingest/projection_worker_test.go` |
+| Open | HTTP exchanges do not establish actor, session, tenant, object ownership or policy context, and live semantic/business analysis remains unimplemented. The consultation workspace supports explicit analyst annotations pinned to selected evidence and accepted before Hermes; those annotations do not prove ownership or enrich the imported graph automatically. | `internal/graph/historical.go`; `internal/graph/live.go`; `internal/consultation/service.go`; `internal/consultation/service_test.go` |
+| Resolved | Hermes has an application-owned evidence broker and save/resume consultation flow. A model-backed synthetic consultation completed with persisted candidate state; existing project data remains unverified. | `internal/mcpserver/server.go`; `internal/consultation`; `docs/PROJECT-STATUS.md` |
 | P1 | Signature-filtered historical capture search now uses an app-owned, indexed Neo4j lookup and no longer downloads the full project. Existing Neo4j snapshots need a controlled reproject before this lookup is available; a generation-bound marker fails closed after older-writer updates. Live compatibility and query-plan cost remain unverified. The direct view now loads a bounded set of analysis cards and exposes summaries in the inspector; its opt-in Neo4j check passed against an ephemeral synthetic `neo4j:2026.10.0` container, while existing project data remains unverified. Recorded 50–102 second cold reads belong to the former full-snapshot path; newer bounded-view measurements cover only two query shapes. | `internal/search/captures.go`; `internal/graphaccess/signatures.go`; `internal/neo4jstore/store.go`; `internal/neo4jstore/analytical_slice_integration_test.go`; `docs/PROJECT-STATUS.md` |
 | P1 | Resolved in the Stage 2 implementation: stale surface responses are rejected across project and filter changes. | `internal/webui/assets/app.js` |
 | P2 | Display route masking can merge distinct operations, while source-bound graph aliases can fragment equivalent routes. There is no separate reviewed operation grouping layer. | `internal/graph/projection.go:163`; `internal/graph/historical.go:127`, `:518`, `:634` |
@@ -205,9 +206,11 @@ Offer two deliberate outputs:
   redactions, source spans, hashes/revisions, omitted data and policy version.
 
 The packet is assembled around the analyst's question and chosen comparisons.
-A transport-size ceiling alone is not a model-context budget. The model
-provider remains unset until the operator selects it; the chosen route and
-permitted evidence classes become application configuration/session metadata.
+A transport-size ceiling alone is not a model-context budget. The user selected
+ChatGPT/Codex Subscription with `gpt-6-luna`; keep the route in managed Hermes
+configuration and make permitted evidence classes explicit in application
+configuration/session metadata. Real capture data remains outside model context
+until its retention and data boundary are verified.
 
 ### Consultation state and workflow
 
@@ -228,9 +231,11 @@ edit. Preserve candidate/reproducing/reproduced/verified distinctions. Citation
 validation alone cannot establish impact or grant verified status.
 
 The first complete cycle uses synthetic evidence and an injectable fake model
-adapter. A real Hermes/provider evaluation follows provider selection and an
-approved data boundary. KB absence must be visible without preventing
-structural evidence comparison or candidate saving.
+adapter. A model-backed Hermes turn has also resumed an operator-accepted
+synthetic session through MCP and summarized its two responses. This verifies
+the harness handoff for synthetic data only; the real-capture data boundary is
+still unverified. KB absence must be visible without preventing structural
+evidence comparison or candidate saving.
 
 ## 7. Web investigation workspace
 
@@ -288,7 +293,8 @@ capabilities.
 
 The operator approved the architecture and this sequence on 2026-10-23.
 Routine implementation, local verification and Git commits follow this plan.
-Provider choice remains an operator decision. KB remains deferred.
+ChatGPT/Codex Subscription with `gpt-6-luna` was selected on 2026-10-25; KB
+remains deferred.
 
 | Stage | Deliverable | Acceptance criteria |
 | --- | --- | --- |
@@ -296,7 +302,7 @@ Provider choice remains an operator decision. KB remains deferred.
 | 2. Shared graph query service | Shared typed HTTP/MCP use cases; process-owned driver; native bounded Neo4j queries; generation/cursors; indexed operation catalog | Selecting one request avoids a full snapshot load; omitted neighbors are reachable through continuation; analytical closure remains explicit; proposed local p95 target is under 2 seconds for a focused view on a declared reference dataset |
 | 3. Canonical operations and context | Versioned grouping, field occurrences, analyst actor/session/object/flow annotations and selected equality links | Distinct static operations stay distinct; repeated equivalent operations can group without changing old evidence IDs; unknown ownership/causality stays unknown; every derived link states its basis |
 | 4. Evidence workspace | Exact evidence resolver, local request/response view, deterministic comparisons, bounded model packets | The analyst can inspect and compare two captures; spans/revisions resolve; truncation/redactions/missing source are visible; ordinary navigation never emits raw values to a model |
-| 5. Complete consultation cycle | Session store, candidate versions, citation checks, save/resume, Hermes adapter | Synthetic scenario runs question → evidence → comparison → proposal → validated references → saved candidate → resume; real model check waits for provider selection |
+| 5. Complete consultation cycle | Session store, candidate versions, citation checks, save/resume, Hermes adapter | Synthetic scenario runs question → evidence → comparison → proposal → validated references → saved candidate → resume; a live Hermes `gpt-6-luna` turn has resumed and summarized a redacted synthetic session; real capture data remains excluded pending a verified retention boundary |
 | 6. Managed local operation | Go service/runbook cutover, lag/failure diagnostics, backup/restore contract | One documented startup path; new live intake and restart/replay demonstrated; restoration retains evidence/receipt references and a current capability summary |
 
 The latency target is proposed acceptance work, not a measured result. Declare

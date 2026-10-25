@@ -219,7 +219,12 @@ func navigationSourceRefs(refs []Record) []Record {
 		}
 		leftLocator, _ := unique[i]["record_locator"].(string)
 		rightLocator, _ := unique[j]["record_locator"].(string)
-		return leftLocator < rightLocator
+		if leftLocator != rightLocator {
+			return leftLocator < rightLocator
+		}
+		leftPath, _ := unique[i]["path"].(string)
+		rightPath, _ := unique[j]["path"].(string)
+		return leftPath < rightPath
 	})
 	return unique
 }

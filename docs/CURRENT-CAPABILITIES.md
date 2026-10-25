@@ -30,7 +30,8 @@ snapshot; it does not migrate stores or drain projection jobs.
   explicit worker operation.
 - A reviewed consultation workflow with session persistence, evidence
   comparison, citation checks, candidate versioning, and resume. Its synthetic
-  workflow is verified; model-backed use is not.
+  workflow and a model-backed Hermes consultation/resume using only synthetic
+  evidence are verified. No real capture content was sent to Hermes.
 - Consultation state changes acquire a shared project lease on Linux. This
   makes project-wide maintenance wait for in-flight session writes and block
   new ones; maintenance actions must fail closed on platforms without project
@@ -48,7 +49,8 @@ snapshot; it does not migrate stores or drain projection jobs.
 - Backup/restore preserving capture revisions, encrypted vault objects,
   BehaviorGraph receipts, consultation state, and required key references.
 - KB source/vector content validation, authenticated actor/object analysis,
-  model-backed evaluation, and browser/JavaScript application-map coverage.
+  broader model-backed evaluation, provider retention behavior for real capture
+  content, and browser/JavaScript application-map coverage.
 
 Use [PROJECT-STATUS.md](PROJECT-STATUS.md) for dated implementation evidence
 and known gaps. Older checkpoints in that file describe their own state and

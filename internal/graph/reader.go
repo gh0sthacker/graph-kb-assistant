@@ -513,7 +513,7 @@ func (r *Reader) load(ctx context.Context) error {
 	}
 	for _, record := range assertions {
 		if err := validateAssertion(record, r.sourceByPair, r.program); err != nil {
-			return errors.New("BehaviorGraph contains a malformed assertion")
+			return fmt.Errorf("BehaviorGraph contains a malformed assertion: %w", err)
 		}
 		id := record["id"].(string)
 		if _, exists := r.assertions[id]; exists {
@@ -1073,12 +1073,27 @@ func validateAssertion(record Record, sources map[string]Record, program string)
 	if err := validateContext(context, program); err != nil {
 		return err
 	}
+	refs, okRefs := record["source_refs"].([]Record)
+	if !okRefs {
+		if raw, ok := record["source_refs"].([]any); ok {
+			refs = recordsFromAny(raw)
+			okRefs = true
+		}
+	}
+	if !okRefs {
+		return errors.New("invalid assertion provenance")
+	}
+	canonicalRefs := navigationSourceRefs(refs)
+	if len(canonicalRefs) != len(refs) {
+		return errors.New("duplicate assertion provenance")
+	}
 	identity := make(Record, len(record)-1)
 	for key, value := range record {
 		if key != "id" {
 			identity[key] = value
 		}
 	}
+	identity["source_refs"] = canonicalRefs
 	encoded, err := canonicalJSON(Record{"kind": "assertion", "identity": identity})
 	if err != nil {
 		return errors.New("invalid assertion identity")

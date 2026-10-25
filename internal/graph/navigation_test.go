@@ -257,6 +257,73 @@ func TestNavigationAssertionsKeepExactSourcesAndStableIdentityAcrossReplayOrder(
 	}
 }
 
+func TestValidateAssertionAcceptsReorderedProvenance(t *testing.T) {
+	project := caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "provenance-order"}
+	projectKey, err := project.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := navigationExchange(project, "request-start", "https://app.invalid/start", "", "302 Found", "/next")
+	next := navigationExchange(project, "request-next", "https://app.invalid/next", "https://app.invalid/start", "200 OK", "")
+	bundles := make([]Record, 0, 2)
+	for index, exchange := range []caido.HttpExchange{start, next} {
+		bundle, _, err := BuildHistoricalBundle(exchange, projectKey, Record{
+			"path": fmt.Sprintf("/synthetic/%d.json", index), "sha256": strings.Repeat(string(rune('a'+index)), 64),
+			"record_locator": fmt.Sprintf("$.records[%d]", index),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bundles = append(bundles, bundle)
+	}
+	if err := AddPageNavigationAssertions(bundles, []caido.HttpExchange{start, next}); err != nil {
+		t.Fatal(err)
+	}
+
+	sources := make(map[string]Record)
+	for _, bundle := range bundles {
+		for _, source := range bundle["sources"].([]Record) {
+			sources[sourcePair(source)] = source
+		}
+	}
+	var assertion Record
+	for _, candidate := range bundles[1]["assertions"].([]Record) {
+		if candidate["predicate"] == "referrer_context_for" {
+			assertion = candidate
+			break
+		}
+	}
+	if assertion == nil {
+		t.Fatal("expected a navigation assertion with provenance from both captures")
+	}
+	context := make(map[string]any, len(assertion["context"].(Record)))
+	for key, value := range assertion["context"].(Record) {
+		context[key] = value
+	}
+	assertion["context"] = context
+	refs := assertion["source_refs"].([]Record)
+	if len(refs) != 2 {
+		t.Fatalf("assertion provenance has %d refs, want 2", len(refs))
+	}
+	if err := validateAssertion(assertion, sources, projectKey); err != nil {
+		t.Fatalf("validate canonical assertion: %v", err)
+	}
+
+	reordered := cloneRecord(assertion)
+	reorderedRefs := append([]Record(nil), refs...)
+	reorderedRefs[0], reorderedRefs[1] = reorderedRefs[1], reorderedRefs[0]
+	reordered["source_refs"] = reorderedRefs
+	if err := validateAssertion(reordered, sources, projectKey); err != nil {
+		t.Fatalf("validate assertion after storage reordered its provenance refs: %v", err)
+	}
+
+	duplicated := cloneRecord(assertion)
+	duplicated["source_refs"] = append(append([]Record(nil), refs...), refs[0])
+	if err := validateAssertion(duplicated, sources, projectKey); err == nil {
+		t.Fatal("validation accepted duplicate provenance")
+	}
+}
+
 func TestResolveNavigationURLRejectsMalformedURLsAndNormalizesSafeOriginParts(t *testing.T) {
 	exchange := navigationExchange(
 		caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"},

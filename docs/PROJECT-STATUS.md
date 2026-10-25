@@ -1,14 +1,47 @@
 # Project status and known limitations
 
-## Current delivery checkpoint (2026-10-25)
+## Current delivery checkpoint (2026-10-25, after synthetic Hermes consultation)
+
+- The managed Graph Assistant Hermes profile now uses the OpenAI Codex
+  subscription provider with `gpt-6-luna` as its default model. A fresh,
+  budgeted one-shot request returned the exact `HERMES_PROVIDER_OK` response.
+  The prompt contained no HTTP evidence and invoked no application tools. This
+  confirms provider connectivity only.
+- A model-backed Hermes turn then resumed an accepted consultation through
+  `bb_consult_resume` over MCP using only the isolated synthetic SQLite fixture.
+  It reported both responses as HTTP 200 with the same item, quantity changing
+  from 1 to 2, and state changing from `draft` to `confirmed`. The temporary
+  test profile was removed and the original Hermes profile and gateway were
+  restored afterward. This verifies the consultation handoff for synthetic
+  evidence, not readiness or coverage of the user's retained project data.
+- Reloading the synthetic browser fixture preserved its accepted consultation,
+  exact request/response comparison, and saved `candidate` with its evidence
+  and comparison references. This is local synthetic persistence, not a
+  finding or a check against the user's retained project data.
+- A Neo4j-backed browser acceptance run exposed an assertion identity bug:
+  Neo4j returned evidence provenance in a different order than the order used
+  to hash it. Assertion IDs now canonicalize source references before hashing,
+  and a regression test covers reordered and duplicate provenance. Focused
+  graph, Neo4j store, and web UI package tests pass. The browser run used a
+  disposable local Neo4j container and synthetic captures only.
+- The managed web process is enabled as a persistent systemd user service on
+  `127.0.0.1:8765`; the configured Nginx listener returned HTTP 200 on the
+  host after service startup/restart. This confirms local process and proxy
+  startup only: graph connectivity is reported as `not_checked`, remote
+  client reachability through Proxmox NAT is still unverified, and no project
+  graph/evidence API was queried during this check. Caido intake remained off
+  and no real capture content was sent to Hermes.
+
+## Earlier delivery checkpoint, before the model-backed follow-up (2026-10-25)
 
 - The chat named «Разработка» is idle. Current product work is coordinated in
   the supervising chat; its last stale report was corrected against Git HEAD.
   An earlier unrelated disk scan occupied about 20 minutes. Repeated conflicting
   stop/continue instructions also disrupted ownership; use one explicit owner
   and completion criterion per assignment.
-- The user-facing product is not declared complete. Local code and synthetic
-  acceptance do not establish working-data readiness or model-backed analysis.
+- At this checkpoint, the user-facing product was not declared complete. Local
+  code and synthetic acceptance did not establish working-data readiness or
+  model-backed analysis; the later follow-up is recorded above.
 - Added `bb-assistant serve` as the common managed Go entry point for the web UI
   and explicitly selected Neo4j projection workers. It validates project keys,
   acquires the existing per-project lease, drains workers on shutdown, and
@@ -24,10 +57,10 @@
 - The accepted synthetic session was then resumed, a byte comparison was
   attached, and an evidence-linked candidate was saved and recovered. The
   candidate remains `candidate`, with four verified evidence references and
-  one comparison; this is not a finding or impact confirmation. No Hermes model
-  invocation was made. Current runtime Neo4j delivery and existing-vault use
-  remain unverified; KB expansion and target recon coverage are outside this
-  delivery criterion.
+  one comparison; this is not a finding or impact confirmation. At this
+  checkpoint, no Hermes model invocation had been made. Current runtime Neo4j
+  delivery and existing-vault use remain unverified; KB expansion and target
+  recon coverage are outside this delivery criterion.
 
 ## Synthetic Hermes candidate save/resume — VERIFIED IN LOCAL FIXTURE (2026-10-25)
 
@@ -63,12 +96,13 @@
   profile over stdio and discovered exactly the 15 tools in the app's
   allowlist, including graph, redacted capture summary, and consultation
   candidate lifecycle handlers.
-- This is a real Hermes runtime/MCP handshake, not a model-backed consultation.
-  The OpenAI Codex/ChatGPT provider login is still waiting for account
-  confirmation. One synthetic provider smoke prompt ended with Hermes reporting
-  an unknown execution outcome; the lost turn was explicitly discarded and not
-  replayed. Whether the provider processed that prompt is unknown. The prompt
-  contained no HTTP evidence or real capture content.
+- This is a real Hermes runtime/MCP handshake, not a model-backed consultation
+  at that checkpoint. Provider login was then waiting for account confirmation;
+  it was completed later, as recorded in the current checkpoint above. One
+  earlier synthetic provider smoke prompt ended with Hermes reporting an
+  unknown execution outcome; that lost turn was discarded and not replayed.
+  Whether the provider processed that prompt is unknown. A separate fresh
+  provider smoke and accepted synthetic MCP consultation later succeeded.
 
 ## Shared launcher runtime configuration — FIXED IN SOURCE (2026-10-25)
 
@@ -567,8 +601,9 @@
   the fix. Six Hermes profile tests pass, including a synthetic check that all
   15 managed names exist in the Go MCP tool catalog and the raw-capture tool is
   excluded. The installed Hermes MCP discovery check and model-backed workflow
-  were not run; Stage 5 remains `PARTIAL` and the model provider remains an
-  operator decision.
+  had not yet run at this 2026-10-24 checkpoint; later runtime and synthetic
+  model-backed checks are recorded above. Stage 5 remains `PARTIAL` until the
+  working-project data boundary and deployment are verified.
 
 ## Evidence vault readiness indicator (2026-10-24) — PARTIAL
 
@@ -1641,10 +1676,12 @@ loop remain `PARTIAL`.
   in full. A final public-data validation gate rejects unsafe questions and
   omits excerpts that still fail validation. Redaction remains heuristic and
   each preview is marked for operator review.
+- At this checkpoint the provider was unset; the user selected
+  ChatGPT/Codex Subscription with `gpt-6-luna` on 2026-10-25, as recorded above.
 - The loopback API accepts only bounded JSON from a same-origin POST, disables
   caching, and renders the result as text in the local UI. This operation does
-  not call a model and is not registered in MCP/Hermes. The provider remains
-  unset. The UI can accumulate up to four exact spans across historical
+  not call a model and is not registered in MCP/Hermes. The UI can accumulate
+  up to four exact spans across historical
   captures in the selected project, remove individual spans, and preview the
   redacted packet. It clears the draft on project switch and blocks additions
   beyond 8 KiB total before posting.

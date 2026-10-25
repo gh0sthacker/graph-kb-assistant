@@ -529,6 +529,7 @@ func historicalEntityID(kind string, identity Record) (string, error) {
 func historicalAssertion(program, subject, predicate, object string, context Record, refs []Record) (Record, error) {
 	assertionContext := cloneRecord(context)
 	assertionContext["program"] = program
+	refs = navigationSourceRefs(refs)
 	assertion := Record{
 		"subject": subject, "predicate": predicate, "object": object,
 		"context": assertionContext, "origin_kind": "parsed",
