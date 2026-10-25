@@ -2,10 +2,13 @@
 
 ## KB parity checkpoint (2026-10-25)
 
-- The local RedAmon checkout is pinned at `cf1b9e92`. Its `full` profile
-  declares seven families: ToolDocs, GTFOBins, LOLBAS, OWASP, ExploitDB, NVD,
-  and Nuclei. The Graph Assistant manifest names the same seven families and
-  uses RedAmon's retrieval constants: hybrid RRF (`k=60`), the same per-source
+- The local RedAmon checkout is pinned at `cf1b9e92`; its configured default
+  profile is `lite`, while its `full` profile declares seven families:
+  ToolDocs, GTFOBins, LOLBAS, OWASP, ExploitDB, NVD, and Nuclei. Graph
+  Assistant is configured for `full`. No RedAmon service or Neo4j process was
+  running in this workspace, so the deployed RedAmon profile/snapshot was not
+  verified; the comparison below is against the declared `full` profile. Its
+  manifest uses RedAmon's retrieval constants: hybrid RRF (`k=60`), the same per-source
   boosts, BGE cross-encoder reranking over 30 candidates, sigmoid score mapping,
   and MMR (`lambda=0.65`). The E5/BGE model revisions are pinned. This is
   pipeline/configuration parity, not corpus parity.
