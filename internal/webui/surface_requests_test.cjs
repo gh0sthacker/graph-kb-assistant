@@ -56,7 +56,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, acceptConsultationReview, saveConsultationCandidate, continueConsultationCandidateProposal, updateCandidateControl, renderConsultationCandidate, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -597,6 +597,198 @@ test("a graph comparison can be attached to a resumed accepted consultation only
   assert.match(app.elements.comparisonAttachStatus.textContent, /comparison-saved/);
   assert.equal(app.elements.comparisonAttachStatus.textContent.includes("GET /item?id=1"), false);
   assert.equal(app.elements.consultationReview.hidden, false);
+});
+
+test("candidate workflow validates selected session citations before saving an explicitly unconfirmed candidate", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const verifiedRef = "b".repeat(43);
+  const unverifiedRef = "c".repeat(43);
+  const comparisonID = "d".repeat(43);
+  app.state.projectKey = projectKey;
+  app.elements.consultationResumeID.value = "candidate-session";
+
+  const resume = app.resumeConsultationByID();
+  app.requests[0].resolve({
+    consultation_id: "candidate-session", version: 2, review_accepted: false,
+    question: "Compare synthetic behavior.", evidence: [], context_annotations: [], proposals: [], validation_receipts: [], candidates: [],
+    evidence_references: [
+      { evidence_reference_id: verifiedRef, evidence_index: 0, request_id: "239", revision_id: "e".repeat(64), side: "request", source_integrity_status: "verified", sha256: "f".repeat(64) },
+      { evidence_reference_id: unverifiedRef, evidence_index: 1, request_id: "240", revision_id: "1".repeat(64), side: "request", source_integrity_status: "unavailable", sha256: "" },
+    ],
+    comparisons: [{ comparison_id: comparisonID, result: { left_request_id: "239", right_request_id: "240" } }],
+  });
+  await resume;
+  assert.equal(app.elements.candidateEvidence.children.length, 1, "unverified references are not offered as citations");
+  assert.equal(app.elements.candidateSave.disabled, true, "unaccepted sessions cannot create candidates");
+  await app.saveConsultationCandidate();
+  assert.equal(app.requests.length, 1, "the UI does not send a proposal before acceptance");
+
+  const accept = app.acceptConsultationReview();
+  assert.equal(app.requests[1].url.pathname, "/api/consultation/accept-review");
+  app.requests[1].resolve({ version: 3, review_accepted: true });
+  await accept;
+  app.elements.candidateTitle.value = "Possible account response difference";
+  app.elements.candidateSummary.value = "The two accepted captures show different response behavior.";
+  app.elements.candidateRationale.value = "The comparison is repeatable in this synthetic fixture.";
+  app.elements.candidateImpact.value = "Potentially exposes account-specific information.";
+  app.elements.candidateEvidence.children[0].children[0].checked = true;
+  app.elements.candidateComparisons.children[0].children[0].checked = true;
+  app.updateCandidateControl();
+  assert.equal(app.elements.candidateSave.disabled, false);
+
+  const save = app.saveConsultationCandidate();
+  assert.equal(app.requests[2].method, "POST");
+  assert.equal(app.requests[2].url.pathname, "/api/consultation/proposal");
+  const proposalRequest = JSON.parse(app.requests[2].body);
+  assert.equal(proposalRequest.expected_version, 3);
+  assert.deepEqual(proposalRequest.evidence_reference_ids, [verifiedRef]);
+  assert.deepEqual(proposalRequest.comparison_ids, [comparisonID]);
+  assert.equal(proposalRequest.proposal.title, "Possible account response difference");
+  assert.ok(proposalRequest.idempotency_key);
+  assert.equal(app.requests[2].body.includes("HTTP/1.1"), false, "raw HTTP excerpts are not copied into the proposal");
+
+  app.requests[2].resolve({ proposal_id: "proposal-1", session_version: 4 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.requests[3].url.pathname, "/api/consultation/validate");
+  const validateRequest = JSON.parse(app.requests[3].body);
+  assert.equal(validateRequest.expected_version, 4);
+  assert.equal(validateRequest.proposal_id, "proposal-1");
+  app.requests[3].resolve({ receipt_id: "receipt-1", session_version: 5, status: "references_valid" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.requests[4].url.pathname, "/api/consultation/candidate");
+  const candidateRequest = JSON.parse(app.requests[4].body);
+  assert.equal(candidateRequest.expected_version, 5);
+  assert.equal(candidateRequest.proposal_id, "proposal-1");
+  assert.equal(candidateRequest.receipt_id, "receipt-1");
+  assert.ok(candidateRequest.idempotency_key);
+  app.requests[4].resolve({
+    candidate_id: "candidate-1", version: 1, session_version: 6, state: "candidate",
+    proposal_id: "proposal-1", receipt_id: "receipt-1",
+    citations: [{ evidence_reference_id: verifiedRef }], comparison_ids: [comparisonID],
+  });
+  await save;
+  assert.equal(app.state.consultation.version, 6);
+  assert.match(app.elements.candidateStatus.textContent, /state candidate/);
+  const listedCandidate = app.elements.candidateList.children[0].children.map(item => item.textContent).join(" ");
+  assert.match(listedCandidate, /State: candidate/);
+  assert.match(listedCandidate, new RegExp(verifiedRef));
+  assert.match(listedCandidate, new RegExp(comparisonID));
+  assert.doesNotMatch(listedCandidate, /verified|finding/i);
+});
+
+test("a candidate workflow conflict disables stale state and requires a fresh consultation resume", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const referenceID = "b".repeat(43);
+  app.state.projectKey = projectKey;
+  app.elements.consultationResumeID.value = "conflict-session";
+
+  const resume = app.resumeConsultationByID();
+  app.requests[0].resolve({
+    consultation_id: "conflict-session", version: 7, review_accepted: true,
+    question: "Check version fencing.", evidence: [], context_annotations: [], comparisons: [],
+    evidence_references: [{ evidence_reference_id: referenceID, evidence_index: 0, side: "request", source_integrity_status: "verified", sha256: "c".repeat(64) }],
+  });
+  await resume;
+  app.elements.candidateTitle.value = "Version conflict candidate";
+  app.elements.candidateSummary.value = "Synthetic stale state.";
+  app.elements.candidateRationale.value = "The server has a newer session version.";
+  app.elements.candidateEvidence.children[0].children[0].checked = true;
+  app.updateCandidateControl();
+
+  const save = app.saveConsultationCandidate();
+  assert.equal(app.requests[1].url.pathname, "/api/consultation/proposal");
+  app.requests[1].fail(409, "consultation state changed");
+  await save;
+  assert.equal(app.state.consultation.reviewLoaded, false);
+  assert.equal(app.elements.candidateSave.disabled, true);
+  assert.match(app.elements.candidateStatus.textContent, /Resume this consultation/);
+  await app.saveConsultationCandidate();
+  assert.equal(app.requests.length, 2, "stale session state cannot be submitted again");
+
+  const refresh = app.resumeConsultationByID();
+  assert.equal(app.requests[2].url.pathname, "/api/consultation/review");
+  app.requests[2].resolve({
+    consultation_id: "conflict-session", version: 8, review_accepted: true,
+    question: "Check version fencing.", evidence: [], context_annotations: [], comparisons: [],
+    evidence_references: [{ evidence_reference_id: referenceID, evidence_index: 0, side: "request", source_integrity_status: "verified", sha256: "c".repeat(64) }],
+  });
+  await refresh;
+  assert.equal(app.state.consultation.version, 8);
+  assert.equal(app.state.consultation.reviewLoaded, true);
+});
+
+test("resuming after an interrupted proposal validates the saved proposal instead of creating a duplicate", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const referenceID = "b".repeat(43);
+  const comparisonID = "c".repeat(43);
+  const proposalID = "d".repeat(43);
+  app.state.projectKey = projectKey;
+  app.elements.consultationResumeID.value = "interrupted-proposal-session";
+  const resume = app.resumeConsultationByID();
+  app.requests[0].resolve({
+    consultation_id: "interrupted-proposal-session", version: 5, review_accepted: true,
+    question: "Resume the proposal stage.", evidence: [], context_annotations: [], validation_receipts: [], candidates: [],
+    evidence_references: [{ evidence_reference_id: referenceID, evidence_index: 0, side: "request", source_integrity_status: "verified", sha256: "e".repeat(64) }],
+    comparisons: [{ comparison_id: comparisonID }],
+    proposals: [{ proposal_id: proposalID, proposal_digest: "f".repeat(64), evidence_reference_ids: [referenceID], comparison_ids: [comparisonID] }],
+  });
+  await resume;
+  assert.match(app.elements.candidateRecoveryList.children[0].children[1].textContent, /Validate proposal and save candidate/);
+
+  const continuation = app.continueConsultationCandidateProposal(proposalID);
+  assert.equal(app.requests[1].url.pathname, "/api/consultation/validate");
+  const validateRequest = JSON.parse(app.requests[1].body);
+  assert.equal(validateRequest.expected_version, 5);
+  assert.equal(validateRequest.proposal_id, proposalID);
+  app.requests[1].resolve({ receipt_id: "g".repeat(43), proposal_id: proposalID, proposal_digest: "f".repeat(64),
+    evidence_reference_ids: [referenceID], comparison_ids: [comparisonID], status: "references_valid", session_version: 6 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.requests[2].url.pathname, "/api/consultation/candidate");
+  assert.equal(JSON.parse(app.requests[2].body).expected_version, 6);
+  app.requests[2].resolve({ candidate_id: "h".repeat(43), version: 1, session_version: 7, state: "candidate",
+    proposal_id: proposalID, receipt_id: "g".repeat(43), citations: [{ evidence_reference_id: referenceID }], comparison_ids: [comparisonID] });
+  await continuation;
+  assert.equal(app.requests.filter(request => request.url.pathname === "/api/consultation/proposal").length, 0);
+  assert.equal(app.state.consultation.version, 7);
+  assert.equal(app.state.consultation.candidates.length, 1);
+});
+
+test("resuming with a matching valid receipt saves its candidate without validating again", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const referenceID = "b".repeat(43);
+  const proposalID = "c".repeat(43);
+  const receiptID = "d".repeat(43);
+  const digest = "e".repeat(64);
+  app.state.projectKey = projectKey;
+  app.elements.consultationResumeID.value = "interrupted-receipt-session";
+  const resume = app.resumeConsultationByID();
+  app.requests[0].resolve({
+    consultation_id: "interrupted-receipt-session", version: 6, review_accepted: true,
+    question: "Resume the candidate stage.", evidence: [], context_annotations: [], comparisons: [], candidates: [],
+    evidence_references: [{ evidence_reference_id: referenceID, evidence_index: 0, side: "request", source_integrity_status: "verified", sha256: "f".repeat(64) }],
+    proposals: [{ proposal_id: proposalID, proposal_digest: digest, evidence_reference_ids: [referenceID], comparison_ids: [] }],
+    validation_receipts: [{ receipt_id: receiptID, proposal_id: proposalID, proposal_digest: digest,
+      evidence_reference_ids: [referenceID], comparison_ids: [], status: "references_valid" }],
+  });
+  await resume;
+  assert.match(app.elements.candidateRecoveryList.children[0].children[1].textContent, /Matching valid receipt/);
+
+  const continuation = app.continueConsultationCandidateProposal(proposalID);
+  assert.equal(app.requests[1].url.pathname, "/api/consultation/candidate");
+  const candidateRequest = JSON.parse(app.requests[1].body);
+  assert.equal(candidateRequest.expected_version, 6);
+  assert.equal(candidateRequest.proposal_id, proposalID);
+  assert.equal(candidateRequest.receipt_id, receiptID);
+  app.requests[1].resolve({ candidate_id: "g".repeat(43), version: 1, session_version: 7, state: "candidate",
+    proposal_id: proposalID, receipt_id: receiptID, citations: [{ evidence_reference_id: referenceID }], comparison_ids: [] });
+  await continuation;
+  assert.equal(app.requests.some(request => request.url.pathname === "/api/consultation/validate"), false);
+  assert.equal(app.requests.some(request => request.url.pathname === "/api/consultation/proposal"), false);
+  assert.equal(app.state.consultation.version, 7);
 });
 
 test("evidence packet preview accumulates exact spans across captures and resets on project switch", async () => {

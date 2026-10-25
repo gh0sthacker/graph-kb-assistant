@@ -76,6 +76,34 @@
   provider selection, an actual model-backed run, and real-browser verification
   remain unconfirmed.
 
+## Stage 5 consultation candidate workflow and recovery — PARTIAL (2026-10-25)
+
+- The accepted consultation review now supports a manually written candidate
+  proposal with bounded fields. The UI offers only hash-verified evidence
+  references and comparisons already stored in that same session. It calls
+  proposal, citation validation, and candidate-save routes in sequence with
+  the latest session version and separate idempotency keys. The resulting
+  record is labeled `candidate`; the UI does not present it as a finding or
+  verified impact.
+- On version conflict the UI disables the stale workflow and requires a fresh
+  session resume. A resumed session lists saved proposals, matching valid
+  receipts, and candidates. It can continue by validating a saved proposal or
+  by saving against its matching valid receipt, so an interrupted HTTP step
+  does not require creating a duplicate proposal. Proposal fields contain only
+  operator-entered text and reference IDs; displayed HTTP excerpts are not
+  copied into the proposal.
+- Synthetic verification passed: `node --check`, all 42
+  `surface_requests_test.cjs` cases, and the loopback
+  `TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence` test using
+  temporary encrypted captures and a temporary consultation store. The test
+  covers proposal/receipt/candidate/resume, recovery after proposal and receipt
+  persistence, rejection of an out-of-session citation at validation, and
+  stale-version conflicts. No running application, Caido, Neo4j, KB, Hermes
+  process, or model provider was used.
+- Stage 5 remains `PARTIAL`: this is an operator-authored local candidate
+  workflow. Hermes/provider selection, model-backed analysis, and actual
+  browser verification remain unconfirmed.
+
 ## Stage 4 synthetic HTTP evidence acceptance (2026-10-24) — PARTIAL
 
 - A new end-to-end synthetic fixture writes two encrypted HTTP exchanges into

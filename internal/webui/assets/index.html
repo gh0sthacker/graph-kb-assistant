@@ -161,6 +161,27 @@
             <div id="consultation-context-list" class="context-label-list" aria-live="polite"></div>
           </section>
           <button class="tool-button" id="consultation-accept" type="button" disabled>I reviewed this packet — allow Hermes access</button>
+          <section class="consultation-context candidate-workflow" id="consultation-candidate" aria-label="Save an evidence-linked candidate" hidden>
+            <strong>Save an analysis candidate</strong>
+            <p>This is an unconfirmed candidate, not a finding or verification. Choose only verified evidence from this accepted session. The application validates the references before saving.</p>
+            <div id="candidate-recovery-list" class="context-label-list" aria-live="polite"></div>
+            <div class="candidate-fields">
+              <label for="candidate-title">Title<input id="candidate-title" maxlength="160" autocomplete="off"></label>
+              <label for="candidate-impact">Potential impact<input id="candidate-impact" maxlength="1024" autocomplete="off"></label>
+              <label for="candidate-summary">Summary<textarea id="candidate-summary" maxlength="2048" rows="2"></textarea></label>
+              <label for="candidate-rationale">Rationale<textarea id="candidate-rationale" maxlength="4096" rows="3"></textarea></label>
+              <label for="candidate-alternatives">Alternative explanations, one per line<textarea id="candidate-alternatives" maxlength="5120" rows="2"></textarea></label>
+              <label for="candidate-next-checks">Next checks, one per line<textarea id="candidate-next-checks" maxlength="4096" rows="2"></textarea></label>
+              <label for="candidate-limitations">Limitations, one per line<textarea id="candidate-limitations" maxlength="4096" rows="2"></textarea></label>
+            </div>
+            <div class="candidate-selections">
+              <fieldset><legend>Verified evidence references</legend><div id="candidate-evidence" class="candidate-options"></div></fieldset>
+              <fieldset><legend>Comparisons in this consultation</legend><div id="candidate-comparisons" class="candidate-options"></div></fieldset>
+            </div>
+            <button class="tool-button" id="candidate-save" type="button" disabled>Validate and save candidate</button>
+            <p id="candidate-status" role="status" aria-live="polite">Accept the operator review before creating a candidate.</p>
+            <div id="candidate-list" class="context-label-list" aria-live="polite"></div>
+          </section>
         </section>
         <section class="consultation-actions comparison-consultation" id="consultation-comparison-link" aria-label="Add capture comparison to consultation" hidden>
           <button class="tool-button" id="consultation-comparison-attach" type="button" disabled>Attach comparison to Hermes session</button>

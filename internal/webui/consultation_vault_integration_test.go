@@ -255,6 +255,136 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 		t.Fatalf("persisted comparison lost exact capture identity or exposed excerpts: %#v", comparison)
 	}
 
+	proposal := consultation.CandidateProposal{
+		Title: "Possible account response difference", Summary: "The two synthetic captures show different response behavior.",
+		Rationale: "The exact comparison is tied to both selected revisions.", Impact: "Potentially exposes account-specific information.",
+		Alternatives: []string{"The difference may be an expected presentation preference."},
+		NextChecks:   []string{"Repeat the comparison with a second authorized actor."},
+		Limitations:  []string{"Only two synthetic captures are represented."},
+	}
+	currentSessionVersion := comparison.SessionVersion
+	proposalBody := func(expectedVersion int, idempotencyKey string, evidenceIDs []string) []byte {
+		body, marshalErr := json.Marshal(consultation.RecordProposalRequest{
+			ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: expectedVersion,
+			IdempotencyKey: idempotencyKey, Proposal: proposal,
+			EvidenceReferenceIDs: evidenceIDs, ComparisonIDs: []string{comparison.ID},
+		})
+		if marshalErr != nil {
+			t.Fatalf("encode candidate proposal: %v", marshalErr)
+		}
+		return body
+	}
+	staleProposalResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/proposal",
+		proposalBody(currentSessionVersion-1, "operator_http_proposal_stale_0001", []string{created.References[0].ID}))
+	if staleProposalResponse.Code != http.StatusConflict {
+		t.Fatalf("stale proposal version status=%d body=%s, want conflict", staleProposalResponse.Code, staleProposalResponse.Body.String())
+	}
+
+	outsideReferenceID := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xee}, 32))
+	outsideProposalResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/proposal",
+		proposalBody(currentSessionVersion, "operator_http_proposal_outside_0001", []string{outsideReferenceID}))
+	if outsideProposalResponse.Code != http.StatusOK || strings.Contains(outsideProposalResponse.Body.String(), "operator-review-secret") {
+		t.Fatalf("untrusted proposal was not safely recorded for validation: status=%d body=%s", outsideProposalResponse.Code, outsideProposalResponse.Body.String())
+	}
+	var outsideProposal consultation.ProposalRecord
+	if err := json.Unmarshal(outsideProposalResponse.Body.Bytes(), &outsideProposal); err != nil {
+		t.Fatalf("decode untrusted proposal: %v", err)
+	}
+	outsideValidationBody, err := json.Marshal(consultation.ValidateProposalRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: outsideProposal.SessionVersion,
+		IdempotencyKey: "operator_http_validate_outside_0001", ProposalID: outsideProposal.ID,
+	})
+	if err != nil {
+		t.Fatalf("encode outside-reference validation: %v", err)
+	}
+	outsideValidationResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/validate", outsideValidationBody)
+	if outsideValidationResponse.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("outside-session citation validation status=%d body=%s, want rejection", outsideValidationResponse.Code, outsideValidationResponse.Body.String())
+	}
+
+	validProposalResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/proposal",
+		proposalBody(outsideProposal.SessionVersion, "operator_http_proposal_valid_0001", []string{created.References[0].ID, created.References[1].ID}))
+	if validProposalResponse.Code != http.StatusOK || strings.Contains(validProposalResponse.Body.String(), "operator-review-secret") {
+		t.Fatalf("valid proposal status=%d body=%s", validProposalResponse.Code, validProposalResponse.Body.String())
+	}
+	var savedProposal consultation.ProposalRecord
+	if err := json.Unmarshal(validProposalResponse.Body.Bytes(), &savedProposal); err != nil {
+		t.Fatalf("decode valid proposal: %v", err)
+	}
+	interruptedResponse := serveLocalGET(handler, "/api/consultation/review?project_key="+projectKey+"&session_id="+created.ID)
+	if interruptedResponse.Code != http.StatusOK {
+		t.Fatalf("resume after proposal status=%d body=%s", interruptedResponse.Code, interruptedResponse.Body.String())
+	}
+	var interrupted consultation.Session
+	if err := json.Unmarshal(interruptedResponse.Body.Bytes(), &interrupted); err != nil {
+		t.Fatalf("decode resumed proposal session: %v", err)
+	}
+	if interrupted.Version != savedProposal.SessionVersion || len(interrupted.Proposals) != 2 || len(interrupted.Receipts) != 0 ||
+		interrupted.Proposals[1].ID != savedProposal.ID || len(interrupted.Proposals[1].EvidenceReferenceIDs) != 2 {
+		t.Fatalf("proposal was not recoverable after an interrupted workflow: %#v", interrupted)
+	}
+	validationBody, err := json.Marshal(consultation.ValidateProposalRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: interrupted.Version,
+		IdempotencyKey: "operator_http_validate_valid_0001", ProposalID: savedProposal.ID,
+	})
+	if err != nil {
+		t.Fatalf("encode proposal validation: %v", err)
+	}
+	validationResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/validate", validationBody)
+	if validationResponse.Code != http.StatusOK || strings.Contains(validationResponse.Body.String(), "operator-review-secret") {
+		t.Fatalf("proposal validation status=%d body=%s", validationResponse.Code, validationResponse.Body.String())
+	}
+	var receipt consultation.ValidationReceipt
+	if err := json.Unmarshal(validationResponse.Body.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode validation receipt: %v", err)
+	}
+	if receipt.Status != consultation.ValidationReferencesValid || receipt.ProposalID != savedProposal.ID ||
+		len(receipt.EvidenceReferenceIDs) != 2 || len(receipt.ComparisonIDs) != 1 || receipt.ComparisonIDs[0] != comparison.ID {
+		t.Fatalf("validation receipt lost its exact references: %#v", receipt)
+	}
+	validatedResumeResponse := serveLocalGET(handler, "/api/consultation/session?project_key="+projectKey+"&session_id="+created.ID)
+	if validatedResumeResponse.Code != http.StatusOK {
+		t.Fatalf("resume after validation status=%d body=%s", validatedResumeResponse.Code, validatedResumeResponse.Body.String())
+	}
+	var validatedResume consultation.Session
+	if err := json.Unmarshal(validatedResumeResponse.Body.Bytes(), &validatedResume); err != nil {
+		t.Fatalf("decode resumed validation receipt: %v", err)
+	}
+	if validatedResume.Version != receipt.SessionVersion || len(validatedResume.Receipts) != 1 ||
+		validatedResume.Receipts[0].ID != receipt.ID || validatedResume.Receipts[0].Status != consultation.ValidationReferencesValid {
+		t.Fatalf("valid receipt was not recoverable after an interrupted workflow: %#v", validatedResume)
+	}
+
+	candidateBody := func(expectedVersion int, idempotencyKey string) []byte {
+		body, marshalErr := json.Marshal(consultation.SaveCandidateRequest{
+			ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: expectedVersion,
+			IdempotencyKey: idempotencyKey, ProposalID: savedProposal.ID, ReceiptID: receipt.ID,
+		})
+		if marshalErr != nil {
+			t.Fatalf("encode candidate save: %v", marshalErr)
+		}
+		return body
+	}
+	staleCandidateResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/candidate",
+		candidateBody(validatedResume.Version-1, "operator_http_candidate_stale_0001"))
+	if staleCandidateResponse.Code != http.StatusConflict {
+		t.Fatalf("stale candidate version status=%d body=%s, want conflict", staleCandidateResponse.Code, staleCandidateResponse.Body.String())
+	}
+	candidateResponse := serveLocalJSON(handler, http.MethodPost, "/api/consultation/candidate",
+		candidateBody(validatedResume.Version, "operator_http_candidate_save_0001"))
+	if candidateResponse.Code != http.StatusOK || strings.Contains(candidateResponse.Body.String(), "operator-review-secret") {
+		t.Fatalf("candidate save status=%d body=%s", candidateResponse.Code, candidateResponse.Body.String())
+	}
+	var candidate consultation.CandidateVersion
+	if err := json.Unmarshal(candidateResponse.Body.Bytes(), &candidate); err != nil {
+		t.Fatalf("decode candidate: %v", err)
+	}
+	if candidate.State != "candidate" || candidate.ProposalID != savedProposal.ID || candidate.ReceiptID != receipt.ID ||
+		len(candidate.Citations) != 2 || len(candidate.ComparisonIDs) != 1 || candidate.ComparisonIDs[0] != comparison.ID ||
+		candidate.Citations[0].EvidenceReferenceID != created.References[0].ID || candidate.Citations[1].EvidenceReferenceID != created.References[1].ID {
+		t.Fatalf("candidate lost its validated citations or candidate state: %#v", candidate)
+	}
+
 	resumeResponse := serveLocalGET(handler, "/api/consultation/session?project_key="+projectKey+"&session_id="+created.ID)
 	if resumeResponse.Code != http.StatusOK || resumeResponse.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("resume status=%d cache=%q body=%s", resumeResponse.Code, resumeResponse.Header().Get("Cache-Control"), resumeResponse.Body.String())
@@ -265,7 +395,9 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	}
 	if !resumed.ReviewAccepted || resumed.Question == "" || len(resumed.ContextAnnotations) != 1 || len(resumed.Comparisons) != 1 ||
 		resumed.ContextAnnotations[0].Label != "actor-a" || resumed.Evidence.Evidence[0].RedactedBytes == 0 ||
-		resumed.Comparisons[0].ID != comparison.ID || resumed.Version != comparison.SessionVersion ||
+		resumed.Comparisons[0].ID != comparison.ID || resumed.Version != candidate.SessionVersion ||
+		len(resumed.Proposals) != 2 || len(resumed.Receipts) != 1 || len(resumed.Candidates) != 1 ||
+		resumed.Candidates[0].State != "candidate" || resumed.Candidates[0].CandidateID != candidate.CandidateID ||
 		strings.Contains(resumeResponse.Body.String(), "operator-review-secret") {
 		t.Fatalf("accepted session did not resume with redacted exact evidence: %#v", resumed)
 	}

@@ -52,6 +52,13 @@ const elements = {
   consultationContextLabel: $("#consultation-context-label"), consultationContextEvidence: $("#consultation-context-evidence"),
   consultationContextSave: $("#consultation-context-save"), consultationContextList: $("#consultation-context-list"),
   consultationAccept: $("#consultation-accept"),
+  consultationCandidate: $("#consultation-candidate"), candidateTitle: $("#candidate-title"),
+  candidateImpact: $("#candidate-impact"), candidateSummary: $("#candidate-summary"),
+  candidateRationale: $("#candidate-rationale"), candidateAlternatives: $("#candidate-alternatives"),
+  candidateNextChecks: $("#candidate-next-checks"), candidateLimitations: $("#candidate-limitations"),
+  candidateEvidence: $("#candidate-evidence"), candidateComparisons: $("#candidate-comparisons"),
+  candidateRecoveryList: $("#candidate-recovery-list"), candidateSave: $("#candidate-save"),
+  candidateStatus: $("#candidate-status"), candidateList: $("#candidate-list"),
   evidenceRequest: $("#evidence-request"), evidenceResponse: $("#evidence-response"),
 };
 
@@ -442,6 +449,14 @@ function resetConsultationUI(message) {
   elements.consultationAccept.disabled = true;
   elements.consultationAccept.hidden = false;
   elements.consultationCopyID.hidden = true;
+  elements.consultationCandidate.hidden = true;
+  for (const field of candidateProposalFields()) field.value = "";
+  elements.candidateEvidence.replaceChildren();
+  elements.candidateComparisons.replaceChildren();
+  elements.candidateRecoveryList.replaceChildren();
+  elements.candidateList.replaceChildren();
+  elements.candidateSave.disabled = true;
+  elements.candidateStatus.textContent = message;
   elements.consultationCreate.disabled = true;
   elements.consultationCreate.textContent = "Save session for review";
   updateConsultationResumeControl();
@@ -566,6 +581,9 @@ function displayConsultationReview(review, session) {
   session.contextAnnotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
   session.evidenceReferences = Array.isArray(review.evidence_references) ? review.evidence_references : [];
   session.comparisons = Array.isArray(review.comparisons) ? review.comparisons : [];
+  session.proposals = Array.isArray(review.proposals) ? review.proposals : [];
+  session.validationReceipts = Array.isArray(review.validation_receipts) ? review.validation_receipts : [];
+  session.candidates = Array.isArray(review.candidates) ? review.candidates : [];
   if (state.comparison) delete state.comparison.attachError;
   elements.consultationContextLabel.value = "";
   elements.consultationReviewContent.textContent = JSON.stringify({
@@ -574,6 +592,7 @@ function displayConsultationReview(review, session) {
     comparisons: review.comparisons || [],
   }, null, 2);
   renderConsultationContext(review, session.accepted);
+  renderConsultationCandidate(session);
   elements.consultationReview.hidden = false;
   elements.consultationAccept.hidden = session.accepted;
   elements.consultationAccept.disabled = session.accepted;
@@ -790,12 +809,291 @@ async function acceptConsultationReview() {
     for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = true;
     elements.consultationContextSave.hidden = true;
     elements.consultationStatus.textContent = `Accepted · consultation ${session.id} · Hermes can now resume this session.`;
+    renderConsultationCandidate(session);
     updateComparisonAttachmentControl();
   } catch (error) {
     elements.consultationStatus.textContent = `Approval was not recorded: ${error.message}`;
     elements.consultationAccept.disabled = false;
     updateEvidencePacketControl();
   }
+}
+
+function candidateProposalFields() {
+  return [elements.candidateTitle, elements.candidateImpact, elements.candidateSummary,
+    elements.candidateRationale, elements.candidateAlternatives, elements.candidateNextChecks,
+    elements.candidateLimitations];
+}
+
+function validCandidateReferenceID(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+function verifiedCandidateReferences(session) {
+  const seen = new Set();
+  return (Array.isArray(session?.evidenceReferences) ? session.evidenceReferences : []).filter(reference => {
+    const id = reference?.evidence_reference_id;
+    if (!validCandidateReferenceID(id) || seen.has(id) || reference.source_integrity_status !== "verified" ||
+        !/^[a-f0-9]{64}$/.test(String(reference.sha256 || ""))) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function consultationCandidateComparisons(session) {
+  const seen = new Set();
+  return (Array.isArray(session?.comparisons) ? session.comparisons : []).filter(record => {
+    const id = record?.comparison_id;
+    if (!validCandidateReferenceID(id) || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function renderCandidateChoices(container, entries, getID, getLabel) {
+  container.replaceChildren();
+  for (const entry of entries) {
+    const label = el("label");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.value = getID(entry);
+    checkbox.addEventListener("change", updateCandidateControl);
+    label.append(checkbox, document.createTextNode(getLabel(entry)));
+    container.append(label);
+  }
+  if (!entries.length) container.append(el("span", "", "No eligible items in this consultation."));
+}
+
+function checkedCandidateIDs(container) {
+  return [...(container.children || [])].map(row => row.children?.[0])
+    .filter(input => input?.type === "checkbox" && input.checked).map(input => input.value);
+}
+
+function candidateLines(field, maximumCount, maximumLength) {
+  const values = field.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+  if (values.length > maximumCount || values.some(value => value.length > maximumLength)) return null;
+  return values;
+}
+
+function candidateProposalFromInputs() {
+  const alternatives = candidateLines(elements.candidateAlternatives, 5, 1024);
+  const nextChecks = candidateLines(elements.candidateNextChecks, 8, 512);
+  const limitations = candidateLines(elements.candidateLimitations, 8, 512);
+  if (alternatives === null || nextChecks === null || limitations === null) return null;
+  const proposal = {
+    title: elements.candidateTitle.value.trim(), summary: elements.candidateSummary.value.trim(),
+    rationale: elements.candidateRationale.value.trim(), impact: elements.candidateImpact.value.trim(),
+    alternatives, next_checks: nextChecks, limitations,
+  };
+  if (!proposal.title || proposal.title.length > 160 || !proposal.summary || proposal.summary.length > 2048 ||
+      !proposal.rationale || proposal.rationale.length > 4096 || proposal.impact.length > 1024) return null;
+  return proposal;
+}
+
+function sameCandidateIDs(left, right) {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+    left.every((id, index) => id === right[index]);
+}
+
+function matchingCandidateReceipt(session, proposal) {
+  return (session?.validationReceipts || []).find(receipt => receipt?.status === "references_valid" &&
+    receipt.proposal_id === proposal?.proposal_id && receipt.proposal_digest === proposal?.proposal_digest &&
+    sameCandidateIDs(receipt.evidence_reference_ids, proposal.evidence_reference_ids) &&
+    sameCandidateIDs(receipt.comparison_ids, proposal.comparison_ids));
+}
+
+function candidateProposalIsBoundToSession(session, proposal) {
+  const referenceIDs = Array.isArray(proposal?.evidence_reference_ids) ? proposal.evidence_reference_ids : [];
+  const comparisonIDs = Array.isArray(proposal?.comparison_ids) ? proposal.comparison_ids : [];
+  const references = new Set(verifiedCandidateReferences(session).map(reference => reference.evidence_reference_id));
+  const comparisons = new Set(consultationCandidateComparisons(session).map(record => record.comparison_id));
+  return referenceIDs.length > 0 && referenceIDs.every(id => references.has(id)) && comparisonIDs.every(id => comparisons.has(id));
+}
+
+function appendCandidateRecord(records, record, idField) {
+  const existing = Array.isArray(records) ? records : [];
+  return [...existing.filter(item => item?.[idField] !== record?.[idField]), record];
+}
+
+function renderConsultationCandidate(session) {
+  elements.consultationCandidate.hidden = !session?.reviewLoaded;
+  const references = verifiedCandidateReferences(session);
+  const comparisons = consultationCandidateComparisons(session);
+  renderCandidateChoices(elements.candidateEvidence, references, reference => reference.evidence_reference_id, reference =>
+    `Evidence ${Number(reference.evidence_index) + 1} · ${reference.side} · ${reference.evidence_reference_id}`);
+  renderCandidateChoices(elements.candidateComparisons, comparisons, record => record.comparison_id, record =>
+    `Comparison · ${record.comparison_id}`);
+
+  elements.candidateRecoveryList.replaceChildren();
+  const proposals = Array.isArray(session?.proposals) ? session.proposals : [];
+  const candidates = Array.isArray(session?.candidates) ? session.candidates : [];
+  if (!proposals.length) {
+    elements.candidateRecoveryList.append(el("div", "context-label-item", "No saved proposals or validation receipts in this consultation."));
+  }
+  for (const proposal of proposals) {
+    const item = el("div", "context-label-item candidate-record");
+    item.append(el("strong", "", `Saved proposal ${proposal.proposal_id} · ${proposal.evidence_reference_ids?.length || 0} evidence references · ${proposal.comparison_ids?.length || 0} comparisons`));
+    const receipt = matchingCandidateReceipt(session, proposal);
+    if (receipt) item.append(el("div", "", `Matching valid receipt: ${receipt.receipt_id}`));
+    const savedCandidate = candidates.find(candidate => candidate.proposal_id === proposal.proposal_id && candidate.state === "candidate");
+    if (savedCandidate) {
+      item.append(el("div", "", `Already saved as candidate ${savedCandidate.candidate_id}.`));
+    } else {
+      const continueButton = el("button", "tool-button recovery-continue", receipt
+        ? "Save candidate from validated proposal" : "Validate proposal and save candidate");
+      continueButton.type = "button";
+      continueButton.candidateEligible = candidateProposalIsBoundToSession(session, proposal);
+      continueButton.disabled = !continueButton.candidateEligible;
+      continueButton.addEventListener("click", () => { void continueConsultationCandidateProposal(proposal.proposal_id); });
+      item.append(continueButton);
+      if (!continueButton.candidateEligible) item.append(el("div", "", "This proposal includes references outside the currently verified session evidence."));
+    }
+    elements.candidateRecoveryList.append(item);
+  }
+
+  elements.candidateList.replaceChildren();
+  if (!candidates.length) {
+    elements.candidateList.append(el("div", "context-label-item", "No saved candidates in this consultation."));
+  }
+  for (const candidate of candidates) {
+    const item = el("div", "context-label-item candidate-record");
+    item.append(el("strong", "", `State: ${candidate.state} · ${candidate.candidate_id} · version ${candidate.version}`));
+    item.append(el("div", "", `Evidence reference IDs: ${(candidate.citations || []).map(citation => citation.evidence_reference_id).join(", ") || "none"}`));
+    item.append(el("div", "", `Comparison IDs: ${(candidate.comparison_ids || []).join(", ") || "none"}`));
+    elements.candidateList.append(item);
+  }
+  updateCandidateControl();
+}
+
+function updateCandidateControl() {
+  const session = state.consultation;
+  const current = Boolean(session && session.projectKey === state.projectKey &&
+    state.evidencePacketPreview?.projectKey === state.projectKey && session.reviewLoaded);
+  const canEdit = current && session.accepted && !session.candidateWorkflowBusy;
+  for (const field of candidateProposalFields()) field.disabled = !canEdit;
+  for (const container of [elements.candidateEvidence, elements.candidateComparisons]) {
+    for (const row of container.children || []) {
+      const checkbox = row.children?.[0];
+      if (checkbox?.type === "checkbox") checkbox.disabled = !canEdit;
+    }
+  }
+  for (const item of elements.candidateRecoveryList.children || []) {
+    for (const child of item.children || []) {
+      if (child.className === "tool-button recovery-continue") child.disabled = !canEdit || !child.candidateEligible;
+    }
+  }
+  const validReferences = new Set(verifiedCandidateReferences(session).map(reference => reference.evidence_reference_id));
+  const validComparisons = new Set(consultationCandidateComparisons(session).map(record => record.comparison_id));
+  const selectedReferences = checkedCandidateIDs(elements.candidateEvidence);
+  const selectedComparisons = checkedCandidateIDs(elements.candidateComparisons);
+  const validSelection = selectedReferences.length > 0 && new Set(selectedReferences).size === selectedReferences.length &&
+    selectedReferences.every(id => validReferences.has(id)) && new Set(selectedComparisons).size === selectedComparisons.length &&
+    selectedComparisons.every(id => validComparisons.has(id));
+  const proposal = candidateProposalFromInputs();
+  elements.candidateSave.disabled = !canEdit || !validSelection || !proposal;
+
+  if (!session || session.projectKey !== state.projectKey) {
+    elements.candidateStatus.textContent = "Resume a consultation in the selected project before creating a candidate.";
+  } else if (!session.reviewLoaded) {
+    elements.candidateStatus.textContent = session.candidateStatus || "Session state is stale. Resume this consultation before continuing.";
+  } else if (!session.accepted) {
+    elements.candidateStatus.textContent = "Accept the operator review before creating a candidate.";
+  } else if (session.candidateWorkflowBusy) {
+    elements.candidateStatus.textContent = "Validating citations and saving the candidate locally…";
+  } else if (!validReferences.size) {
+    elements.candidateStatus.textContent = "This consultation has no verified evidence references available for a candidate.";
+  } else {
+    elements.candidateStatus.textContent = session.candidateStatus ||
+      "Select at least one verified evidence reference and complete the required fields. A candidate is not a confirmed finding.";
+  }
+}
+
+async function runCandidateWorkflow(session, projectKey, { proposal: proposalDraft, evidenceReferenceIDs, comparisonIDs, existingProposal, existingReceipt }) {
+  if (!session || session.projectKey !== projectKey || !session.reviewLoaded || !session.accepted || session.candidateWorkflowBusy) return;
+  session.candidateWorkflowBusy = true;
+  session.candidateStatus = "";
+  updateCandidateControl();
+  try {
+    let proposal = existingProposal;
+    if (!proposal) {
+      proposal = await postJSON("/api/consultation/proposal", {
+        project_key: projectKey, session_id: session.id, expected_version: session.version,
+        idempotency_key: session.proposalKey || (session.proposalKey = newIdempotencyKey()),
+        proposal: proposalDraft, evidence_reference_ids: evidenceReferenceIDs, comparison_ids: comparisonIDs,
+      });
+      if (state.consultation !== session || state.projectKey !== projectKey) return;
+      session.version = proposal.session_version;
+      session.proposals = appendCandidateRecord(session.proposals, proposal, "proposal_id");
+    }
+
+    let receipt = existingReceipt;
+    if (!receipt) {
+      receipt = await postJSON("/api/consultation/validate", {
+        project_key: projectKey, session_id: session.id, expected_version: session.version,
+        idempotency_key: session.validationKey || (session.validationKey = newIdempotencyKey()),
+        proposal_id: proposal.proposal_id,
+      });
+      if (state.consultation !== session || state.projectKey !== projectKey) return;
+      if (receipt.status !== "references_valid") throw new Error("The server did not validate the candidate references.");
+      session.version = receipt.session_version;
+      session.validationReceipts = appendCandidateRecord(session.validationReceipts, receipt, "receipt_id");
+    }
+
+    const candidate = await postJSON("/api/consultation/candidate", {
+      project_key: projectKey, session_id: session.id, expected_version: session.version,
+      idempotency_key: session.candidateKey || (session.candidateKey = newIdempotencyKey()),
+      proposal_id: proposal.proposal_id, receipt_id: receipt.receipt_id,
+    });
+    if (state.consultation !== session || state.projectKey !== projectKey) return;
+    if (candidate.state !== "candidate") throw new Error("The saved record did not return the candidate state.");
+    session.version = candidate.session_version;
+    session.candidates = appendCandidateRecord(session.candidates, candidate, "candidate_id");
+    session.proposalKey = "";
+    session.validationKey = "";
+    session.candidateKey = "";
+    for (const field of candidateProposalFields()) field.value = "";
+    session.candidateStatus = `Saved candidate ${candidate.candidate_id} · state candidate. This does not confirm impact or a vulnerability.`;
+    renderConsultationCandidate(session);
+  } catch (error) {
+    if (state.consultation !== session || state.projectKey !== projectKey) return;
+    session.reviewLoaded = false;
+    session.proposalKey = "";
+    session.validationKey = "";
+    session.candidateKey = "";
+    session.candidateStatus = error.status === 409
+      ? "The session version changed. Resume this consultation to refresh it before continuing."
+      : `Candidate workflow stopped: ${error.message}. Resume the consultation before retrying.`;
+  } finally {
+    if (state.consultation === session && state.projectKey === projectKey) {
+      session.candidateWorkflowBusy = false;
+      updateCandidateControl();
+    }
+  }
+}
+
+async function saveConsultationCandidate() {
+  const session = state.consultation;
+  const projectKey = state.projectKey;
+  if (!session || session.projectKey !== projectKey || !session.reviewLoaded || !session.accepted ||
+      elements.candidateSave.disabled) return;
+  const proposal = candidateProposalFromInputs();
+  const evidenceReferenceIDs = checkedCandidateIDs(elements.candidateEvidence);
+  const comparisonIDs = checkedCandidateIDs(elements.candidateComparisons);
+  const availableReferences = new Set(verifiedCandidateReferences(session).map(reference => reference.evidence_reference_id));
+  const availableComparisons = new Set(consultationCandidateComparisons(session).map(record => record.comparison_id));
+  if (!proposal || evidenceReferenceIDs.length === 0 || evidenceReferenceIDs.some(id => !availableReferences.has(id)) ||
+      comparisonIDs.some(id => !availableComparisons.has(id))) return;
+  return runCandidateWorkflow(session, projectKey, { proposal, evidenceReferenceIDs, comparisonIDs });
+}
+
+async function continueConsultationCandidateProposal(proposalID) {
+  const session = state.consultation;
+  const projectKey = state.projectKey;
+  if (!session || session.projectKey !== projectKey || !session.reviewLoaded || !session.accepted || session.candidateWorkflowBusy) return;
+  const proposal = (session.proposals || []).find(item => item?.proposal_id === proposalID);
+  if (!proposal || !candidateProposalIsBoundToSession(session, proposal) ||
+      (session.candidates || []).some(candidate => candidate.proposal_id === proposalID && candidate.state === "candidate")) return;
+  const receipt = matchingCandidateReceipt(session, proposal);
+  return runCandidateWorkflow(session, projectKey, { existingProposal: proposal, existingReceipt: receipt });
 }
 
 function comparisonIsReferencedBySession(session, comparison) {
@@ -2150,6 +2448,8 @@ elements.consultationResumeID.addEventListener("input", () => {
 elements.consultationResume.addEventListener("click", () => { void resumeConsultationByID(); });
 elements.consultationOpen.addEventListener("click", openConsultationResume);
 elements.consultationAccept.addEventListener("click", () => { void acceptConsultationReview(); });
+elements.candidateSave.addEventListener("click", () => { void saveConsultationCandidate(); });
+for (const field of candidateProposalFields()) field.addEventListener("input", updateCandidateControl);
 elements.consultationContextKind.addEventListener("change", () => {
   elements.consultationContextLabel.placeholder = `${elements.consultationContextKind.value.replaceAll("_", "-")}-a`;
   state.contextAnnotationKey = "";
