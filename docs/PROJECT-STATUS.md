@@ -2372,23 +2372,29 @@ This repository is an early public alpha. The following boundaries are deliberat
   verified snapshot is partial: 14,300 documents / 16,961 chunks across the
   declared families; ToolDocs, GTFOBins, LOLBAS, WSTG and Nuclei are done,
   NVD is partial, and ExploitDB is blocked by unresolved dataset terms.
-- The chunker differs materially: the app currently applies generic
-  6,000-character windows with 400-character overlap, while RedAmon uses
-  atomic structured records and heading/paragraph-aware Markdown chunks with
-  its 256-token preference and 480-token cap.
+- Source-aware chunking is now implemented locally: structured records remain
+  atomic and are clipped at RedAmon's 480-token character estimate;
+  ToolDocs/WSTG Markdown is grouped by H2 headings, small sections can merge,
+  and oversized sections split on paragraphs. Chunks retain exact source
+  spans, use no overlap, and mark clipped records. The schema is v2, so v1
+  snapshots must be exported again before import. Focused provider and CLI
+  tests pass. This matches the upstream strategy while keeping stored text an
+  exact source substring for citation integrity.
 - Search is SQLite FTS5 only. RedAmon uses E5-large-v2 vectors and Neo4j
   full-text candidates, RRF (`k=60`), source boosts, BGE reranking, MMR
   (`lambda=0.65`), and a default top 5. Local search does not yet provide those
   stages and defaults to ten results.
 - A new full-profile build is running in a disposable directory, not against
   the application's private index. It uses the 730-day NVD window without a
-  CVSS floor. At this checkpoint it has not produced a final snapshot; the
+  CVSS floor. It began before the chunk-schema update, so it can establish
+  source-coverage evidence but its v1 snapshot must be re-exported to use the
+  new chunker. At this checkpoint it has not produced a final snapshot; the
   unauthenticated NVD provider applies a 6.5-second minimum between requests.
   No coverage is inferred from an in-progress build.
 - The source comparison used the pinned RedAmon checkout
   `cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`. Next acceptance requires a
   completed eligible full-profile snapshot with reconciled per-family
-  coverage, RedAmon-compatible source-aware chunking, and deterministic
+  coverage and deterministic
   retrieval fixtures covering vector/full-text fusion, boosts, reranking,
   MMR, top-k, and citation provenance. FTS-only or synthetic-test success is
   not KB parity.

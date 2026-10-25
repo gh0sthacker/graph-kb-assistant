@@ -13,7 +13,7 @@ from typing import Iterable, Iterator, Mapping
 
 from ..paths import data_root, ensure_private_directory
 from ..project_lock import project_maintenance_lock, project_maintenance_read_lock
-from .canonical import CanonicalChunk, SourceDocument
+from .canonical import CHUNK_SCHEMA, CanonicalChunk, SourceDocument
 
 
 _SCHEMA = """
@@ -405,5 +405,5 @@ class KBIndex:
         expected_chunk_id = hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         ).hexdigest()
-        if chunk.chunk_schema != "bb-kb-chunk-v1" or chunk.chunk_id != expected_chunk_id:
+        if chunk.chunk_schema != CHUNK_SCHEMA or chunk.chunk_id != expected_chunk_id:
             raise ValueError("KB chunk identity does not match its provenance")

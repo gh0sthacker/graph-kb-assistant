@@ -46,8 +46,8 @@ def export_snapshot(
     *,
     source_manifest_sha256: str,
     source_coverage_report: Mapping[str, object] | None = None,
-    max_chars: int = 6000,
-    overlap_chars: int = 400,
+    max_chars: int = 1920,
+    overlap_chars: int = 0,
 ) -> dict[str, object]:
     """Write original UTF-8 text, canonical chunks and a manifest atomically.
 
@@ -117,7 +117,7 @@ def export_snapshot(
             "source_documents_sha256": source_digest_hex,
             "chunks_sha256": chunks_digest_hex,
             "source_coverage_report_sha256": coverage_report_sha256,
-            "chunk_schema": "bb-kb-chunk-v1",
+            "chunk_schema": CHUNK_SCHEMA,
             "max_chars": max_chars,
             "overlap_chars": overlap_chars,
         }
@@ -166,8 +166,8 @@ def export_redamon_snapshot(
     snapshot: object,
     output_dir: Path,
     *,
-    max_chars: int = 6000,
-    overlap_chars: int = 400,
+    max_chars: int = 1920,
+    overlap_chars: int = 0,
 ) -> dict[str, object]:
     """Export a canonical RedAmon snapshot with its measured source coverage."""
     from .redamon_sources import RedAmonSnapshot
@@ -337,8 +337,8 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
         raise ValueError("snapshot chunk schema is unsupported")
     max_chars = _manifest_integer(manifest, "max_chars", minimum=256)
     overlap_chars = _manifest_integer(manifest, "overlap_chars")
-    if overlap_chars >= max_chars:
-        raise ValueError("snapshot manifest has invalid chunk overlap")
+    if overlap_chars != 0:
+        raise ValueError("snapshot manifest chunk overlap must be zero for RedAmon-compatible chunks")
     document_count = _manifest_integer(manifest, "document_count")
     chunk_count = _manifest_integer(manifest, "chunk_count")
     source_count = _manifest_integer(manifest, "source_count", minimum=1)

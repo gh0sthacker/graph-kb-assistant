@@ -281,6 +281,36 @@ class SourceRightsAndCoverageGateTests(unittest.TestCase):
 
 
 class VendoredToolDocsSnapshotTests(unittest.TestCase):
+    def test_redamon_chunking_keeps_atomic_records_and_heading_based_markdown(self) -> None:
+        structured = SourceDocument.create(
+            source_name="nuclei", source_id="template.yaml", title="Template",
+            text="id: demo\ninfo:\n  name: Demo template\n" + ("description " * 500),
+        )
+        structured_chunks = chunk_document(structured)
+        self.assertEqual(len(structured_chunks), 1)
+        self.assertTrue(structured_chunks[0].metadata["chunk_truncated"])
+        self.assertEqual(
+            structured_chunks[0].text,
+            structured.text[:structured_chunks[0].end_char],
+        )
+
+        markdown_text = (
+            "# Guide\n\nIntro\n\n## First\n\nShort section.\n\n"
+            "## Second\n\nAnother short section.\n\n"
+            "## Third\n\n" + ("Paragraph text. " * 500)
+        )
+        markdown = SourceDocument.create(
+            source_name="tool_docs", source_id="guide.md", title="Guide", text=markdown_text,
+        )
+        markdown_chunks = chunk_document(markdown)
+        self.assertGreaterEqual(len(markdown_chunks), 2)
+        self.assertEqual(markdown_chunks[0].title, "Guide")
+        self.assertIn("## First", markdown_chunks[0].text)
+        self.assertIn("## Second", markdown_chunks[0].text)
+        self.assertTrue(all(chunk.chunk_schema == "bb-kb-chunk-v2" for chunk in markdown_chunks))
+        for chunk in markdown_chunks:
+            self.assertEqual(markdown.text[chunk.start_char:chunk.end_char], chunk.text)
+
     def test_pinned_tooldocs_export_import_search_and_partial_coverage(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         bundle = project_root / "references/redamon/agentic-skills"
@@ -293,7 +323,7 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             {"profile": manifest["profile"], "sources": [spec]},
             {"tool_docs": RedAmonLocalToolDocsProvider(project_root=project_root)},
             source_manifest_sha256=hashlib.sha256(raw_manifest).hexdigest(),
-        ).build(max_chars=1200, overlap_chars=100)
+        ).build(max_chars=1200, overlap_chars=0)
         coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "tool_docs")
         self.assertEqual(coverage["state"], "done")
         self.assertEqual(coverage["fetched_count"], 43)
@@ -303,7 +333,7 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-test-") as temporary:
             temp_root = Path(temporary)
             exported = export_redamon_snapshot(
-                snapshot, temp_root / "snapshots", max_chars=1200, overlap_chars=100,
+                snapshot, temp_root / "snapshots", max_chars=1200, overlap_chars=0,
             )
             index = KBIndex(temp_root / "index.sqlite3")
             stats = import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)

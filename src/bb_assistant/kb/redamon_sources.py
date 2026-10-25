@@ -155,7 +155,7 @@ class RedAmonSourceAdapter:
         self.providers = providers
         self.manifest_sha256 = source_manifest_sha256
 
-    def build(self, *, max_chars: int = 6000, overlap_chars: int = 400) -> RedAmonSnapshot:
+    def build(self, *, max_chars: int = 1920, overlap_chars: int = 0) -> RedAmonSnapshot:
         specs, manifest_blockers = self._source_specs()
         profile = str(self.manifest.get("profile") or "")
         documents: list[SourceDocument] = []
