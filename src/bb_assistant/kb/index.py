@@ -5,10 +5,13 @@ from dataclasses import dataclass, replace
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
+import logging
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
+import struct
 from typing import Iterable, Iterator, Mapping
 
 from ..paths import data_root, ensure_private_directory
@@ -21,6 +24,8 @@ from .ranking import (
     RankedCandidate,
     rank_candidates,
 )
+
+logger = logging.getLogger(__name__)
 
 
 _SCHEMA = """
@@ -61,6 +66,12 @@ CREATE TABLE IF NOT EXISTS chunks (
   chunk_schema TEXT NOT NULL,
   text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+  chunk_id TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+  model_name TEXT NOT NULL,
+  dimensions INTEGER NOT NULL,
+  vector BLOB NOT NULL
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_search USING fts5(
   chunk_id UNINDEXED, source_name UNINDEXED, title, text,
   tokenize='unicode61 remove_diacritics 2'
@@ -88,17 +99,24 @@ class KBHit:
     end_char: int
     bm25: float
     rank_score: float
+    vector_score: float | None = None
+    rerank_score: float | None = None
 
 
 class KBIndex:
     """Lexical retrieval only; vector ranking can be added behind this API."""
 
-    def __init__(self, path: Path | None = None, *, read_only: bool = False) -> None:
+    def __init__(
+        self, path: Path | None = None, *, read_only: bool = False,
+        embedder: object | None = None, reranker: object | None = None,
+    ) -> None:
         requested_path = (path if path is not None else data_root() / "kb" / "index.sqlite3").expanduser()
         if read_only and Path(os.path.abspath(requested_path)) != requested_path.resolve():
             raise ValueError("Read-only KB index path must not contain symbolic links")
         self.path = requested_path.resolve()
         self.read_only = bool(read_only)
+        self._embedder = embedder
+        self._reranker = reranker
         source_root = Path(__file__).resolve().parents[3]
         if self.path == source_root or source_root in self.path.parents:
             raise ValueError("KB indexes must be stored outside the source checkout")
@@ -257,6 +275,7 @@ class KBIndex:
         count = 0
         with self.connect(_maintenance_lock_held=True) as connection:
             connection.execute("DELETE FROM chunk_search")
+            connection.execute("DELETE FROM chunk_embeddings")
             connection.execute("DELETE FROM chunks")
             connection.execute("DELETE FROM source_documents")
             for source in source_rows:
@@ -294,7 +313,7 @@ class KBIndex:
                 )
                 count += 1
             connection.execute(
-                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage')"
+                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','vector_model','vector_dimensions','vector_snapshot_id')"
             )
             connection.executemany(
                 "INSERT INTO kb_meta(key,value) VALUES(?,?)",
@@ -331,6 +350,7 @@ class KBIndex:
             source_count = connection.execute("SELECT COUNT(*) FROM (SELECT DISTINCT source_name FROM source_documents)").fetchone()[0]
             document_count = connection.execute("SELECT COUNT(*) FROM source_documents").fetchone()[0]
             chunk_count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            vector_count = connection.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
             meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
         try:
             source_coverage = json.loads(meta.get("source_coverage", "[]"))
@@ -344,7 +364,144 @@ class KBIndex:
             "coverage_state": meta.get("coverage_state", "unverified"),
             "coverage_report_sha256": meta.get("coverage_report_sha256") or None,
             "source_coverage": source_coverage,
+            "embedded_chunks": vector_count,
+            "embedding_model": meta.get("vector_model") or None,
+            "embedding_snapshot_id": meta.get("vector_snapshot_id") or None,
+            "vector_ready": vector_count > 0 and meta.get("vector_snapshot_id") == meta.get("snapshot_id"),
         }
+
+    def rebuild_embeddings(self, embedder: object, *, batch_size: int = 64) -> int:
+        """Atomically encode the current content chunks using a pinned E5 adapter."""
+        model_name = getattr(embedder, "model_name", None)
+        batch_encoder = getattr(embedder, "embed_documents_batch", None)
+        if not isinstance(model_name, str) or not model_name or not callable(batch_encoder):
+            raise TypeError("embedder must expose model_name and embed_documents_batch")
+        if not 1 <= batch_size <= 256:
+            raise ValueError("embedding batch_size must be between 1 and 256")
+        if self.read_only:
+            raise ValueError("KB index is read-only")
+
+        with project_maintenance_lock(self.path.parent), self.connect(_maintenance_lock_held=True) as connection:
+            meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+            snapshot_id = meta.get("snapshot_id")
+            if not snapshot_id:
+                raise ValueError("Cannot build embeddings without an imported KB snapshot")
+            connection.execute("DROP TABLE IF EXISTS temp.kb_embeddings_staging")
+            connection.execute(
+                "CREATE TEMP TABLE kb_embeddings_staging "
+                "(chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)"
+            )
+            cursor = connection.execute(
+                """SELECT c.chunk_id,c.text FROM chunks c
+                   WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
+                   ORDER BY c.chunk_id"""
+            )
+            total = 0
+            dimensions: int | None = None
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                vectors = batch_encoder([row["text"] for row in rows], batch_size=batch_size)
+                if len(vectors) != len(rows):
+                    raise ValueError("embedder returned a different number of vectors than chunks")
+                encoded_rows = []
+                for row, vector in zip(rows, vectors):
+                    values = [float(value) for value in vector]
+                    if not values or any(not math.isfinite(value) for value in values):
+                        raise ValueError("embedder returned an empty or non-finite vector")
+                    if dimensions is None:
+                        dimensions = len(values)
+                    elif len(values) != dimensions:
+                        raise ValueError("embedder returned inconsistent vector dimensions")
+                    packed = struct.pack(f"<{len(values)}f", *values)
+                    encoded_rows.append((row["chunk_id"], model_name, len(values), packed))
+                connection.executemany(
+                    "INSERT INTO kb_embeddings_staging(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
+                    encoded_rows,
+                )
+                total += len(rows)
+            if total == 0 or dimensions is None:
+                raise ValueError("KB snapshot contains no content chunks to embed")
+            connection.execute("DELETE FROM chunk_embeddings")
+            connection.execute(
+                "INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) "
+                "SELECT chunk_id,model_name,dimensions,vector FROM kb_embeddings_staging"
+            )
+            connection.executemany(
+                "INSERT INTO kb_meta(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (("vector_model", model_name), ("vector_dimensions", str(dimensions)), ("vector_snapshot_id", snapshot_id)),
+            )
+            connection.execute("DROP TABLE temp.kb_embeddings_staging")
+            return total
+
+    def _vector_search(
+        self, query: str, *, top_k: int, source_names: tuple[str, ...],
+    ) -> tuple[list[str], dict[str, float]]:
+        with self.connect() as connection:
+            meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+            model_name = meta.get("vector_model", "")
+            dimensions = int(meta.get("vector_dimensions", "0") or 0)
+            snapshot_id = meta.get("snapshot_id", "")
+            vector_count = connection.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
+        if (
+            vector_count == 0 or not model_name or dimensions <= 0
+            or meta.get("vector_snapshot_id") != snapshot_id
+        ):
+            return [], {}
+        embedder = self._embedder
+        if embedder is None:
+            try:
+                from .embeddings import RedAmonEmbedder
+                embedder = RedAmonEmbedder(local_files_only=True)
+                self._embedder = embedder
+            except Exception as exc:
+                logger.info("KB vector retrieval unavailable: %s", type(exc).__name__)
+                return [], {}
+        if getattr(embedder, "model_name", None) != model_name:
+            logger.warning("KB vector model does not match the stored embedding model; skipping vector search")
+            return [], {}
+        try:
+            query_vector = [float(value) for value in embedder.embed_query(query)]
+            if len(query_vector) != dimensions or not query_vector or any(not math.isfinite(v) for v in query_vector):
+                raise ValueError("query embedding dimensions or values are invalid")
+            import numpy as np
+            query_array = np.asarray(query_vector, dtype=np.float32)
+            sql = """SELECT e.chunk_id,e.vector FROM chunk_embeddings e
+                     JOIN chunks c ON c.chunk_id=e.chunk_id
+                     WHERE e.model_name=? AND e.dimensions=?
+                       AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
+            params: list[object] = [model_name, dimensions]
+            if source_names:
+                sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
+                params.extend(source_names)
+            with self.connect() as connection:
+                rows = connection.execute(sql, params).fetchall()
+            if not rows:
+                return [], {}
+            matrix = np.vstack([np.frombuffer(row["vector"], dtype="<f4") for row in rows])
+            if matrix.shape[1] != dimensions:
+                raise ValueError("stored embedding dimensions are invalid")
+            scores = matrix @ query_array
+            selected = np.argsort(scores)[::-1][:min(top_k, len(rows))]
+            ranked_ids = [rows[int(index)]["chunk_id"] for index in selected]
+            score_map = {rows[int(index)]["chunk_id"]: float(scores[int(index)]) for index in selected}
+            return ranked_ids, score_map
+        except Exception as exc:
+            logger.warning("KB vector retrieval failed; using available lexical results (%s)", type(exc).__name__)
+            return [], {}
+
+    def _get_reranker(self) -> object | None:
+        if self._reranker is not None:
+            return self._reranker
+        try:
+            from .embeddings import RedAmonReranker
+            self._reranker = RedAmonReranker(local_files_only=True)
+            return self._reranker
+        except Exception as exc:
+            logger.info("KB cross-encoder reranking unavailable: %s", type(exc).__name__)
+            return None
 
     def search(self, query: str, *, top_k: int = DEFAULT_TOP_K, source_names: tuple[str, ...] = ()) -> tuple[KBHit, ...]:
         if not (1 <= top_k <= 100):
@@ -365,13 +522,34 @@ class KBIndex:
         if source_names:
             sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
             params.extend(source_names)
+        candidate_limit = max(top_k * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE)
         sql += " ORDER BY score LIMIT ?"
-        params.append(max(top_k * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE))
+        params.append(candidate_limit)
         with self.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
+        fulltext_ids = [row["chunk_id"] for row in rows]
+        fulltext_scores = {row["chunk_id"]: float(row["score"]) for row in rows}
+        vector_ids, vector_scores = self._vector_search(
+            query, top_k=candidate_limit, source_names=source_names,
+        )
+        candidate_ids = list(dict.fromkeys([*fulltext_ids, *vector_ids]))
+        if not candidate_ids:
+            return ()
+        metadata_sql = """SELECT c.chunk_id,c.source_name,c.source_id,c.title,c.text,c.source_locator,c.source_url,
+                               c.source_revision,c.license_id,c.attribution,c.source_sha256,c.chunk_sha256,c.metadata_json,
+                               c.start_char,c.end_char
+                        FROM chunks c WHERE c.chunk_id IN (""" + ",".join("?" for _ in candidate_ids) + ")"
+        metadata_params: list[object] = list(candidate_ids)
+        metadata_sql += " AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
+        if source_names:
+            metadata_sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
+            metadata_params.extend(source_names)
+        with self.connect() as connection:
+            candidate_rows = connection.execute(metadata_sql, metadata_params).fetchall()
         hits_by_id: dict[str, KBHit] = {}
+        rerank_text_by_id: dict[str, str] = {}
         candidates: list[RankedCandidate] = []
-        for row in rows:
+        for row in candidate_rows:
             text = row["text"]
             excerpt = text[:1200]
             hit = KBHit(
@@ -381,19 +559,44 @@ class KBIndex:
                 license_id=row["license_id"], attribution=row["attribution"],
                 source_sha256=row["source_sha256"], chunk_sha256=row["chunk_sha256"],
                 metadata=json.loads(row["metadata_json"]),
-                start_char=row["start_char"], end_char=row["end_char"], bm25=row["score"], rank_score=0.0,
+                start_char=row["start_char"], end_char=row["end_char"],
+                bm25=fulltext_scores.get(row["chunk_id"], 0.0), rank_score=0.0,
+                vector_score=vector_scores.get(row["chunk_id"]),
             )
             hits_by_id[hit.chunk_id] = hit
+            rerank_text_by_id[hit.chunk_id] = text[:1920]
             candidates.append(RankedCandidate(
-                chunk_id=hit.chunk_id, source_name=hit.source_name, title=hit.title, lexical_score=hit.bm25,
+                chunk_id=hit.chunk_id, source_name=hit.source_name, title=hit.title,
+                lexical_score=hit.bm25 if hit.chunk_id in fulltext_scores else None,
+                vector_score=hit.vector_score,
             ))
-        ranked = rank_candidates(
+        rerank_scores: dict[str, float] | None = None
+        pre_ranked = rank_candidates(
             candidates,
-            fulltext_ids=[candidate.chunk_id for candidate in candidates],
+            vector_ids=vector_ids,
+            fulltext_ids=fulltext_ids,
+            top_k=max(len(candidates), 1),
+            mmr_enabled=False,
+        )
+        reranker = self._get_reranker() if len(pre_ranked) > 1 else None
+        scorer = getattr(reranker, "score", None)
+        if callable(scorer) and len(pre_ranked) > 1:
+            pool = pre_ranked[:DEFAULT_RERANK_POOL_SIZE]
+            try:
+                scores = scorer(query, [rerank_text_by_id[item.chunk_id] for item in pool])
+                if len(scores) == len(pool):
+                    rerank_scores = {item.chunk_id: float(score) for item, score in zip(pool, scores)}
+            except Exception as exc:
+                logger.info("KB cross-encoder unavailable; retaining fused ranking (%s)", type(exc).__name__)
+        ranked = rank_candidates(
+            pre_ranked,
+            vector_ids=vector_ids,
+            fulltext_ids=fulltext_ids,
             top_k=top_k,
+            rerank_scores=rerank_scores,
         )
         return tuple(
-            replace(hits_by_id[item.chunk_id], rank_score=item.score)
+            replace(hits_by_id[item.chunk_id], rank_score=item.score, rerank_score=item.rerank_score)
             for item in ranked
         )
 

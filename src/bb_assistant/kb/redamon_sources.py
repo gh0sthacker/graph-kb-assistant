@@ -25,7 +25,7 @@ fields are never copied.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import Callable, Mapping, Sequence
@@ -519,7 +519,17 @@ class RedAmonSourceAdapter:
             start = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
         except ValueError:
             return False
-        return end.tzinfo is not None and start.tzinfo is not None and end - timedelta(days=days) <= start <= end
+        if end.tzinfo is None:
+            return False
+        # NVD's API filters publication timestamps in UTC but some returned
+        # CVE records omit an explicit offset. Match the provider's canonical
+        # interpretation instead of rejecting every such record at import.
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        else:
+            start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        return end - timedelta(days=days) <= start <= end
 
     @staticmethod
     def _exploitdb_record(record: SourceRecord) -> tuple[str, Mapping[str, object], str | None]:

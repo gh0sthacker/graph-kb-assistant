@@ -52,6 +52,7 @@ type Tools struct {
 	graphQueries  *appquery.Service
 	consultations *consultation.Service
 	kbIndex       *kb.Index
+	kbModels      *kb.PythonRetrievalModels
 	allowRawReads bool
 }
 
@@ -112,6 +113,12 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 	index, indexErr := kb.OpenIndex(kbIndexPath)
 	if indexErr == nil {
 		tools.kbIndex = index
+		if python := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_PYTHON")); python != "" && os.Getenv("BB_ASSISTANT_KB_MODELS") != "0" {
+			if models, modelErr := kb.StartPythonRetrievalModels(context.Background(), python); modelErr == nil {
+				tools.kbModels = models
+				index.SetRetrievalModels(models)
+			}
+		}
 	}
 	return tools, nil
 }
@@ -121,6 +128,9 @@ func (t *Tools) Close() error {
 		return nil
 	}
 	var closeErr error
+	if t.kbModels != nil {
+		closeErr = errors.Join(closeErr, t.kbModels.Close())
+	}
 	if t.consultations != nil {
 		closeErr = errors.Join(closeErr, t.consultations.Close())
 	}

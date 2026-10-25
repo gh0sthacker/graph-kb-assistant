@@ -21,6 +21,7 @@ dependencies = ["cryptography>=42"]
 
 [project.optional-dependencies]
 kb = ["PyYAML>=6"]
+kb-ml = ["PyYAML>=6", "numpy>=1.26", "sentence-transformers>=5,<6"]
 mcp = ["mcp>=2,<3"]
 test = ["pytest>=8"]
 

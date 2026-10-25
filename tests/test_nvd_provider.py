@@ -7,7 +7,12 @@ import json
 import unittest
 
 from bb_assistant.kb.nvd import RedAmonNVDProvider, _date_windows
-from bb_assistant.kb.redamon_sources import RedAmonSourceAdapter, SourceRequest
+from bb_assistant.kb.redamon_sources import (
+    RedAmonSourceAdapter,
+    SourceBatch,
+    SourceRecord,
+    SourceRequest,
+)
 
 
 _API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -178,6 +183,46 @@ class NVDProviderTests(unittest.TestCase):
         self.assertEqual(nvd_coverage["state"], "blocked")
         self.assertIn("nvd_requires_composite_terms_and_notice_status", nvd_coverage["blockers"])
         self.assertFalse(called)
+
+    def test_adapter_accepts_naive_nvd_published_timestamps_as_utc(self) -> None:
+        fetched_at = datetime.now(timezone.utc).replace(microsecond=0)
+        # NVD's API date filters are UTC. Some returned CVE timestamps omit
+        # the offset, and the provider already normalizes those to UTC.
+        published = (fetched_at - timedelta(days=1)).replace(tzinfo=None).isoformat()
+        response_sha = "d" * 64
+        revision = f"{fetched_at.isoformat()};response_sha256={response_sha}"
+        record = SourceRecord(
+            source_id="CVE-2026-12345",
+            title="CVE-2026-12345",
+            original_text=json.dumps({"cve": {"id": "CVE-2026-12345", "published": published}}),
+            source_locator="fixture:nvd:CVE-2026-12345",
+            source_revision=revision,
+            metadata={"cve_id": "CVE-2026-12345", "published": published},
+        )
+        batch = SourceBatch(
+            source_revision=revision,
+            records=(record,),
+            expected_count=1,
+            fetched_count=1,
+            parsed_count=1,
+            rejected_count=0,
+            complete=True,
+            artifact_sha256="e" * 64,
+            fetched_at=fetched_at.isoformat(),
+            response_sha256=response_sha,
+            applied_filters=dict(_FILTERS),
+            notices_complete=True,
+        )
+        snapshot = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [_source_spec(eligible=True)]},
+            {"nvd": lambda _request: batch},
+            source_manifest_sha256="f" * 64,
+        ).build()
+
+        nvd_coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "nvd")
+        self.assertEqual(nvd_coverage["state"], "done")
+        self.assertEqual(nvd_coverage["document_count"], 1)
+        self.assertEqual([doc.source_id for doc in snapshot.documents], ["CVE-2026-12345"])
 
     def test_stale_or_wrong_year_cve_notice_is_rejected(self) -> None:
         spec = _source_spec(eligible=True)

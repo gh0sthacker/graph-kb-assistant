@@ -578,6 +578,8 @@ class ReadOnlyAssistantTools:
                     "span": {"start_char": hit.start_char, "end_char": hit.end_char},
                     "bm25": hit.bm25,
                     "rank_score": hit.rank_score,
+                    "vector_score": hit.vector_score,
+                    "rerank_score": hit.rerank_score,
                 }
                 for hit in hits
             ],

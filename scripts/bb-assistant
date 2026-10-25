@@ -68,5 +68,17 @@ elif [[ -n "$neo4j_vault_key" ]]; then
   export BB_ASSISTANT_VAULT_KEY="$neo4j_vault_key"
 fi
 export BB_ASSISTANT_GRAPH_BACKEND="${BB_ASSISTANT_GRAPH_BACKEND:-neo4j}"
+if [[ -z "${BB_ASSISTANT_KB_PYTHON:-}" ]]; then
+  kb_python="$runtime_data_home/kb-models-venv/bin/python"
+  if [[ -x "$kb_python" ]]; then
+    export BB_ASSISTANT_KB_PYTHON="$kb_python"
+  elif command -v python3.11 >/dev/null 2>&1; then
+    export BB_ASSISTANT_KB_PYTHON="$(command -v python3.11)"
+  else
+    export BB_ASSISTANT_KB_PYTHON="$(command -v python3)"
+  fi
+fi
+export BB_ASSISTANT_KB_MODELS="${BB_ASSISTANT_KB_MODELS:-1}"
+export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
 cd "$repo_root"
 exec go run ./cmd/bb-assistant "$@"

@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +151,103 @@ func TestSearchDoesNotReturnLicenseNoticeOnlyMatches(t *testing.T) {
 	result, err := index.Search(context.Background(), "rarequestermonly", SearchOptions{})
 	if err != nil || len(result.Hits) != 0 {
 		t.Fatalf("license-only search = %d hits, %v; want no hits", len(result.Hits), err)
+	}
+}
+
+type syntheticRetrievalModels struct {
+	queryVector []float32
+	rerankCalls int
+}
+
+func (m *syntheticRetrievalModels) EmbedQuery(context.Context, string) ([]float32, error) {
+	return m.queryVector, nil
+}
+
+func (m *syntheticRetrievalModels) Rerank(_ context.Context, _ string, texts []string) ([]float64, error) {
+	m.rerankCalls++
+	scores := make([]float64, len(texts))
+	for n := range scores {
+		scores[n] = float64(n)
+	}
+	return scores, nil
+}
+
+func TestSearchUsesPythonCompatibleVectorCandidatesAndReranker(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "first semantic candidate content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("c", 64)
+	secondText := "second semantic candidate with different content"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,source_revision,
+		license_id,attribution,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, secondID, "synthetic", "document-2", "Different guide", 0,
+		len(secondText), nil, nil, nil, nil, nil, `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err == nil {
+		_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+			chunk_id TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+			model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+			('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64))
+	}
+	encode := func(values []float32) []byte {
+		result := make([]byte, len(values)*4)
+		for n, value := range values {
+			binary.LittleEndian.PutUint32(result[n*4:], math.Float32bits(value))
+		}
+		return result
+	}
+	vectorA, vectorB := make([]float32, 1024), make([]float32, 1024)
+	vectorA[0], vectorA[1], vectorB[0] = 0.8, 0.6, 1
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+			(?,?,1024,?),(?,?,1024,?)`, strings.Repeat("a", 64), "intfloat/e5-large-v2", encode(vectorA),
+			secondID, "intfloat/e5-large-v2", encode(vectorB))
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`,
+			secondID, "synthetic", "Different guide", secondText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare synthetic vector index: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	models := &syntheticRetrievalModels{queryVector: queryVector}
+	index.SetRetrievalModels(models)
+	result, err := index.Search(context.Background(), "zzsemanticquery", SearchOptions{TopK: 2})
+	if err != nil {
+		t.Fatalf("vector Search() error = %v", err)
+	}
+	if result.RetrievalMode != "hybrid" || len(result.Hits) != 2 {
+		t.Fatalf("vector Search() mode/hits = %q/%d", result.RetrievalMode, len(result.Hits))
+	}
+	if result.Hits[0].ChunkID != strings.Repeat("a", 64) || models.rerankCalls != 1 {
+		t.Fatalf("reranked vector results = first:%q calls:%d; want reranker to change the vector order", result.Hits[0].ChunkID, models.rerankCalls)
+	}
+	if result.Hits[0].VectorScore == nil || *result.Hits[0].VectorScore < 0.79 || result.Hits[0].RerankScore == nil || *result.Hits[0].RerankScore != 1 {
+		t.Fatalf("vector/rerank provenance = %+v", result.Hits[0])
+	}
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.EmbeddedChunks != 2 || stats.EmbeddingModel == nil || !stats.VectorReady {
+		t.Fatalf("embedding status = %+v", stats)
 	}
 }
 

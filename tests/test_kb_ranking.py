@@ -1,11 +1,54 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import tempfile
 
 from bb_assistant.kb.ranking import RankedCandidate, rank_candidates, reciprocal_rank_fusion
+from bb_assistant.kb.canonical import SourceDocument, chunk_document
+from bb_assistant.kb.index import KBIndex
+
+
+class _FixtureEmbedder:
+    model_name = "intfloat/e5-large-v2"
+
+    def embed_documents_batch(self, texts, *, batch_size=64):
+        return [[1.0, 0.0] if "alpha" in text else [0.0, 1.0] for text in texts]
+
+    def embed_query(self, text):
+        return [0.0, 1.0]
+
+
+class _FixtureReranker:
+    def score(self, query, texts):
+        return [1.0 if "alpha" in text else 0.0 for text in texts]
 
 
 class RetrievalRankingTests(unittest.TestCase):
+    def test_persisted_vectors_retrieve_semantic_candidate_without_lexical_match(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="alpha.md", title="Alpha",
+                text="alpha authentication flow", metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="gtfobins", source_id="bravo.md", title="Bravo",
+                text="bravo credential renewal", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-vector-test-") as temporary:
+            index = KBIndex(
+                Path(temporary) / "index.sqlite3", embedder=_FixtureEmbedder(),
+                reranker=_FixtureReranker(),
+            )
+            index.replace_snapshot(chunks, "a" * 64, sources=documents)
+            self.assertEqual(index.rebuild_embeddings(_FixtureEmbedder(), batch_size=1), 2)
+            self.assertTrue(index.stats()["vector_ready"])
+            hits = index.search("semantic concept", top_k=2)
+            self.assertEqual({hit.source_id for hit in hits}, {"alpha.md", "bravo.md"})
+            self.assertIsNotNone(next(hit for hit in hits if hit.source_id == "alpha.md").rerank_score)
+
     def test_rrf_combines_ranks_and_ignores_duplicate_ids_within_one_list(self) -> None:
         scores = reciprocal_rank_fusion(
             ["a", "b", "a"], ["b", "a", "c"], rrf_k=60,

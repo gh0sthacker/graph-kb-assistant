@@ -2380,7 +2380,7 @@ This repository is an early public alpha. The following boundaries are deliberat
   snapshots must be exported again before import. Focused provider and CLI
   tests pass. This matches the upstream strategy while keeping stored text an
   exact source substring for citation integrity.
-- Search is still SQLite FTS5 only; the active environment has no
+- At the initial-audit checkpoint, search was SQLite FTS5 only; the active environment had no
   sentence-transformers, PyTorch or FAISS package. The actual lexical path now
   overfetches candidates, applies RedAmon's top-5, RRF (`k=60`), per-source
   boosts and source/title MMR (`lambda=0.65`). The ranking module accepts
@@ -2388,13 +2388,13 @@ This repository is an early public alpha. The following boundaries are deliberat
   vector embeddings are stored or produced and BGE reranking is not wired into
   live search. Therefore these implemented stages do not yet make retrieval
   parity.
-- The running product uses the Go read-only KB index, not the Python CLI
+- At the initial-audit checkpoint, the running product used the Go read-only KB index, not the Python CLI
   search path. The Go MCP runtime now also filters `license_notice` rows,
   overfetches candidate chunks, and applies top-5, single-list RRF-equivalent
   scoring, source boosts and the same source/title MMR proxy. A dedicated Go
   fixture confirms a term present only in a license notice is not returned.
   The focused Go KB, MCP facade, and managed-app tests pass.
-  The live Go path still has no vector candidate provider or BGE reranker, so
+  At that checkpoint the live Go path had no vector candidate provider or BGE reranker, so
   the two-list RRF and cross-encoder stages remain unimplemented at runtime.
 - A new full-profile build is running in a disposable directory, not against
   the application's private index. It uses the 730-day NVD window without a
@@ -2412,3 +2412,27 @@ This repository is an early public alpha. The following boundaries are deliberat
   not KB parity.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
+
+### KB parity follow-up — 2026-10-25
+
+- Implemented the live Go retrieval path for E5 vector candidates plus FTS5,
+  RedAmon-compatible RRF (`k=60`), the seven configured source boosts, BGE
+  cross-encoder reranking of the top 30 candidates, sigmoid-normalized rerank
+  scores, and source/title MMR (`lambda=0.65`) for up to five results. Vector
+  use is bound to the imported snapshot ID, pinned E5 model, and 1024 dimensions;
+  lexical fallback remains explicit when vectors/models are missing.
+- Added an offline Go-to-Python model worker and an opt-in integration smoke
+  test. It passed with the local pinned E5/BGE weights: E5 returned 1024 finite
+  dimensions and BGE returned one finite score. The Python KB suite (15 tests),
+  NVD provider suite (8 tests), and Go `internal/kb`/`internal/mcpserver` suites
+  passed at this checkpoint.
+- Added a CPU-only private model-runtime setup script and documented the
+  snapshot/vector rebuild steps. Model weights remain local runtime files and
+  are not committed.
+- A full 730-day NVD refresh is now running after fixing the offset-less
+  publication-date adapter bug. The last verified corpus remains the earlier
+  `PARTIAL` snapshot until the new fetch, v2 re-chunk, import, vector build,
+  and Go stats check finish. ExploitDB remains `BLOCKED` pending resolution of
+  dataset-specific reuse terms; the KB is therefore not identical to RedAmon
+  yet. The pinned source corpus and retrieval settings are the parity target,
+  while snapshot schema and index storage remain application-owned.

@@ -111,6 +111,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="validate and import an existing source snapshot without fetching feeds",
     )
     import_command.add_argument("snapshot_dir", type=Path, help="version directory containing manifest.json")
+    embed = commands.add_parser("embed", help="build pinned E5 vectors for the imported snapshot")
+    embed.add_argument(
+        "--download-model", action="store_true",
+        help="allow downloading the pinned E5 model; otherwise use local model files only",
+    )
+    models = commands.add_parser("models", help="prepare pinned local RedAmon retrieval models")
+    models.add_argument(
+        "--download", action="store_true",
+        help="download pinned E5 and BGE model revisions and verify local inference",
+    )
     search = commands.add_parser("search", help="search indexed KB chunks")
     search.add_argument("query")
     search.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
@@ -137,6 +147,55 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = import_snapshot(args.snapshot_dir, index)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if result["coverage_state"] == "DONE" else 3
+    if args.command == "models":
+        from .embeddings import (
+            BGE_RERANKER_MODEL,
+            BGE_RERANKER_REVISION,
+            E5_MODEL,
+            E5_REVISION,
+            RedAmonEmbedder,
+            RedAmonReranker,
+        )
+        import importlib.util
+
+        if importlib.util.find_spec("sentence_transformers") is None:
+            raise RuntimeError("Install the pinned retrieval runtime with `pip install -e '.[kb-ml]'`.")
+        if not args.download:
+            print(json.dumps({
+                "models": [
+                    {"model": E5_MODEL, "revision": E5_REVISION},
+                    {"model": BGE_RERANKER_MODEL, "revision": BGE_RERANKER_REVISION},
+                ],
+                "status": "declared; use --download to cache and verify local weights",
+            }, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        import gc
+
+        embedder = RedAmonEmbedder(local_files_only=False)
+        embedder.embed_query("authorization boundary")
+        del embedder
+        gc.collect()
+        reranker = RedAmonReranker(local_files_only=False)
+        scores = reranker.score("authorization boundary", ["synthetic local model check"])
+        del reranker
+        gc.collect()
+        if len(scores) != 1:
+            raise RuntimeError("Pinned BGE model verification returned an invalid result")
+        print(json.dumps({
+            "models": [
+                {"model": E5_MODEL, "revision": E5_REVISION, "status": "cached and verified"},
+                {"model": BGE_RERANKER_MODEL, "revision": BGE_RERANKER_REVISION, "status": "cached and verified"},
+            ],
+            "status": "ready",
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.command == "embed":
+        from .embeddings import RedAmonEmbedder
+        index = KBIndex(_configured_index_path(args.index_path))
+        embedder = RedAmonEmbedder(local_files_only=not args.download_model)
+        count = index.rebuild_embeddings(embedder)
+        print(json.dumps({"embedded_chunks": count, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     index = KBIndex(_configured_index_path(args.index_path))
     hits = index.search(args.query, top_k=args.top_k, source_names=tuple(args.source))
     print(json.dumps([
@@ -154,6 +213,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "span": {"start_char": hit.start_char, "end_char": hit.end_char},
             "bm25": hit.bm25,
             "rank_score": hit.rank_score,
+            "vector_score": hit.vector_score,
+            "rerank_score": hit.rerank_score,
         }
         for hit in hits
     ], ensure_ascii=False, indent=2))
