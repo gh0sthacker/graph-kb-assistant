@@ -65,7 +65,10 @@
   candidate lifecycle handlers.
 - This is a real Hermes runtime/MCP handshake, not a model-backed consultation.
   The OpenAI Codex/ChatGPT provider login is still waiting for account
-  confirmation; no model request or real capture content was sent.
+  confirmation. One synthetic provider smoke prompt ended with Hermes reporting
+  an unknown execution outcome; the lost turn was explicitly discarded and not
+  replayed. Whether the provider processed that prompt is unknown. The prompt
+  contained no HTTP evidence or real capture content.
 
 ## Shared launcher runtime configuration — FIXED IN SOURCE (2026-10-25)
 
