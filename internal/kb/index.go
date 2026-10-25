@@ -428,7 +428,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if utf8.RuneCountInString(query) > 4096 {
 		return SearchResult{}, errors.New("KB query exceeds the 4096-character limit")
 	}
-	terms := queryTerms(query)
+	terms := redAmonFullTextTerms(query)
 	if len(options.SourceNames) > maximumSourceFilters {
 		return SearchResult{}, errors.New("select no more than 32 KB source families")
 	}
@@ -1031,6 +1031,25 @@ func queryTerms(input string) []string {
 		flush()
 	}
 	return terms
+}
+
+// redAmonFullTextTerms mirrors RedAmon's Lucene query sanitization before
+// producing exact FTS5 terms. In particular, punctuation in identifiers such
+// as CVE-2024-12345 must separate terms rather than turn the whole value into
+// a phrase that Lucene would not require.
+func redAmonFullTextTerms(input string) []string {
+	var sanitized strings.Builder
+	for _, character := range input {
+		switch character {
+		case '+', '-', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\', '/':
+			sanitized.WriteByte(' ')
+		default:
+			sanitized.WriteRune(character)
+		}
+	}
+	query := strings.ReplaceAll(sanitized.String(), "&&", " ")
+	query = strings.ReplaceAll(query, "||", " ")
+	return queryTerms(query)
 }
 
 func pointerTooLong(value *string, maximum int) bool {

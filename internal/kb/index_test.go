@@ -178,6 +178,21 @@ func TestSearchUsesCompleteTermsLikeRedAmonFullText(t *testing.T) {
 	}
 }
 
+func TestSearchSanitizesLucenePunctuationLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "CVE 2024 descriptive record for reference 12345"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "CVE-2024-12345", SearchOptions{TopK: 5})
+	if err != nil || len(result.Hits) != 1 {
+		t.Fatalf("Search(CVE-2024-12345) = %d hits, %v; want one Lucene-sanitized match", len(result.Hits), err)
+	}
+}
+
 func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
 	content := "first vector candidate content"

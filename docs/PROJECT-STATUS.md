@@ -11,9 +11,9 @@
   manifest uses RedAmon's retrieval constants: hybrid RRF (`k=60`), the same per-source
   boosts, BGE cross-encoder reranking over 30 candidates, sigmoid score mapping,
   and MMR (`lambda=0.65`). The E5/BGE model revisions are pinned. Go full-text
-  search now matches complete terms rather than expanding each term as a prefix,
-  and source filters happen after the global top-k for both full-text and vector
-  candidates, matching RedAmon's query order more closely. SQLite FTS5 and
+  search now sanitizes Lucene punctuation, matches complete terms instead of
+  prefixes, and applies source filters after global top-k for full-text and
+  vector candidates, matching RedAmon's query order more closely. SQLite FTS5 and
   Neo4j/Lucene analyzers still differ, as do vector storage/query engines;
   output parity has not been measured.
 - The active local snapshot is `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`:
