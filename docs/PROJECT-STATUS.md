@@ -2362,4 +2362,35 @@ This repository is an early public alpha. The following boundaries are deliberat
   one program and checking its current authorization, exact origin, rate/budget,
   allowed methods, and stop conditions before any target traffic.
 
+## RedAmon KB parity audit (2026-10-25) — PARTIAL
+
+- The user's requirement is parity with the pinned RedAmon full-profile KB,
+  including its source corpus and retrieval behavior. The index file format
+  may be rebuilt for this application; that does not reduce the corpus or
+  retrieval-parity requirement.
+- The current implementation does **not** meet that requirement. The latest
+  verified snapshot is partial: 14,300 documents / 16,961 chunks across the
+  declared families; ToolDocs, GTFOBins, LOLBAS, WSTG and Nuclei are done,
+  NVD is partial, and ExploitDB is blocked by unresolved dataset terms.
+- The chunker differs materially: the app currently applies generic
+  6,000-character windows with 400-character overlap, while RedAmon uses
+  atomic structured records and heading/paragraph-aware Markdown chunks with
+  its 256-token preference and 480-token cap.
+- Search is SQLite FTS5 only. RedAmon uses E5-large-v2 vectors and Neo4j
+  full-text candidates, RRF (`k=60`), source boosts, BGE reranking, MMR
+  (`lambda=0.65`), and a default top 5. Local search does not yet provide those
+  stages and defaults to ten results.
+- A new full-profile build is running in a disposable directory, not against
+  the application's private index. It uses the 730-day NVD window without a
+  CVSS floor. At this checkpoint it has not produced a final snapshot; the
+  unauthenticated NVD provider applies a 6.5-second minimum between requests.
+  No coverage is inferred from an in-progress build.
+- The source comparison used the pinned RedAmon checkout
+  `cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`. Next acceptance requires a
+  completed eligible full-profile snapshot with reconciled per-family
+  coverage, RedAmon-compatible source-aware chunking, and deterministic
+  retrieval fixtures covering vector/full-text fusion, boosts, reranking,
+  MMR, top-k, and citation provenance. FTS-only or synthetic-test success is
+  not KB parity.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
