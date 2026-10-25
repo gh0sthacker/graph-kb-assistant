@@ -5,6 +5,7 @@ package neo4jstore
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +28,7 @@ const (
 	maxSnapshotRecords          = 300_000
 	maxSnapshotBytes            = 256 << 20
 	writeBatchSize              = 500
+	rebuildDeleteBatchSize      = 5_000
 	maxSignatureObservations    = behaviorgraph.MaxVariantObservations
 	maxFieldValueTraversalPaths = behaviorgraph.MaxFieldValueTraversalPaths
 )
@@ -37,6 +39,7 @@ var neo4jErrorCodePattern = regexp.MustCompile(`^Neo[.](ClientError|TransientErr
 
 var ErrSignatureIndexUnavailable = errors.New("Neo4j project signature index is unavailable")
 var ErrFieldValueIndexUnavailable = errors.New("Neo4j project field-value index is unavailable")
+var ErrProjectRebuildInProgress = errors.New("Neo4j project graph rebuild is in progress")
 
 // Config contains connection settings only. Passwords are never included in
 // formatted errors or status reports.
@@ -190,10 +193,11 @@ type preparedAssertion struct {
 }
 
 type preparedSnapshot struct {
-	Records    []preparedRecord
-	Refs       []preparedRef
-	Assertions []preparedAssertion
-	Digest     string
+	Records       []preparedRecord
+	Refs          []preparedRef
+	Assertions    []preparedAssertion
+	Digest        string
+	SnapshotBytes int
 }
 
 // ReplaceProjectSnapshot atomically replaces exactly one project's graph
@@ -214,6 +218,9 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 	defer session.Close(ctx)
 	_, err = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		if err := lockProjectForWrite(ctx, tx, projectKey); err != nil {
+			return nil, err
+		}
+		if err := requireProjectNotRebuilding(ctx, tx, projectKey); err != nil {
 			return nil, err
 		}
 		deleteResult, runErr := tx.Run(ctx,
@@ -318,8 +325,277 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 	}
 	return map[string]int{
 		"records": len(prepared.Records), "references": len(prepared.Refs),
-		"assertions": len(prepared.Assertions), "snapshot_bytes": lenMustMarshal(snapshot),
+		"assertions": len(prepared.Assertions), "snapshot_bytes": prepared.SnapshotBytes,
 	}, nil
+}
+
+// RebuildProjectSnapshot replaces one project's projection using short,
+// replayable transactions. The project remains marked "rebuilding" until a
+// full read-back digest matches the validated source snapshot; graph readers
+// fail closed during that maintenance window. The caller must hold the same
+// cross-process project maintenance lock used by intake and projection jobs.
+func (s *Store) RebuildProjectSnapshot(ctx context.Context, projectKey string, snapshot behaviorgraph.Record) (map[string]int, error) {
+	if s == nil || s.driver == nil {
+		return nil, errors.New("Neo4j store is unavailable")
+	}
+	prepared, err := prepareSnapshot(projectKey, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		return nil, err
+	}
+	var tokenBytes [24]byte
+	if _, err := rand.Read(tokenBytes[:]); err != nil {
+		return nil, errors.New("Neo4j graph rebuild token could not be created")
+	}
+	token := hex.EncodeToString(tokenBytes[:])
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: s.database})
+	defer session.Close(ctx)
+
+	var baseGeneration int64
+	_, err = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		if err := lockProjectForWrite(ctx, tx, projectKey); err != nil {
+			return nil, err
+		}
+		result, runErr := tx.Run(ctx, `
+			MERGE (m:GraphProject {project_key: $project_key})
+			WITH m, CASE WHEN m.projection_state = 'rebuilding'
+				THEN coalesce(m.rebuild_base_generation, m.generation, 0)
+				ELSE coalesce(m.generation, 0) END AS base_generation
+			SET m.projection_state = 'rebuilding',
+			    m.rebuild_token = $rebuild_token,
+			    m.rebuild_base_generation = base_generation,
+			    m.rebuild_target_sha256 = $snapshot_sha256,
+			    m.signature_index_generation = null,
+			    m.field_value_index_generation = null
+			RETURN base_generation`,
+			map[string]any{"project_key": projectKey, "rebuild_token": token, "snapshot_sha256": prepared.Digest},
+		)
+		if runErr != nil || !result.Next(ctx) {
+			return nil, errors.New("Neo4j project rebuild could not be started")
+		}
+		value, _ := result.Record().Get("base_generation")
+		generation, ok := value.(int64)
+		if _, runErr = result.Consume(ctx); runErr != nil || !ok || generation < 0 {
+			return nil, errors.New("Neo4j project rebuild metadata is invalid")
+		}
+		baseGeneration = generation
+		return nil, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		deleted := int64(0)
+		err := executeProjectRebuildWrite(ctx, session, projectKey, token, func(tx neo4j.ManagedTransaction) error {
+			result, runErr := tx.Run(ctx, `
+				MATCH (n:GraphRecord {project_key: $project_key})
+				WITH n LIMIT $limit
+				DETACH DELETE n
+				RETURN count(n) AS matched_count`,
+				map[string]any{"project_key": projectKey, "limit": rebuildDeleteBatchSize},
+			)
+			if runErr != nil {
+				return errors.New("Neo4j graph rebuild cleanup failed")
+			}
+			count, countErr := resultCount(ctx, result)
+			if countErr != nil {
+				return errors.New("Neo4j graph rebuild cleanup failed")
+			}
+			deleted = count
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if deleted == 0 {
+			break
+		}
+	}
+
+	for start := 0; start < len(prepared.Records); start += writeBatchSize {
+		end := min(start+writeBatchSize, len(prepared.Records))
+		err := executeProjectRebuildWrite(ctx, session, projectKey, token, func(tx neo4j.ManagedTransaction) error {
+			result, runErr := tx.Run(ctx, `
+				UNWIND $rows AS row
+				MERGE (n:GraphRecord {project_key: $project_key, record_id: row.record_id})
+				SET n.record_type = row.record_type,
+				    n.payload_json = row.payload_json,
+				    n.payload_sha256 = row.payload_sha256,
+				    n.kind = row.kind,
+				    n.request_signature = row.request_signature,
+				    n.response_signature = row.response_signature,
+				    n.field_equality_signature = row.field_equality_signature,
+				    n.predicate = row.predicate,
+				    n.card_endpoint_id = row.card_endpoint_id,
+				    n.card_capture_id = row.card_capture_id
+				RETURN count(*) AS matched_count`,
+				map[string]any{"project_key": projectKey, "rows": recordRows(prepared.Records[start:end])},
+			)
+			if runErr != nil {
+				return fmt.Errorf("Neo4j graph rebuild record batch %d failed (%s)", start/writeBatchSize, safeNeo4jErrorCode(runErr))
+			}
+			count, countErr := resultCount(ctx, result)
+			if countErr != nil || count != int64(end-start) {
+				return fmt.Errorf("Neo4j graph rebuild record batch %d was incomplete", start/writeBatchSize)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	for start := 0; start < len(prepared.Refs); start += writeBatchSize {
+		end := min(start+writeBatchSize, len(prepared.Refs))
+		err := executeProjectRebuildWrite(ctx, session, projectKey, token, func(tx neo4j.ManagedTransaction) error {
+			result, runErr := tx.Run(ctx, `
+				UNWIND $rows AS row
+				MATCH (owner:GraphRecord {project_key: $project_key, record_id: row.owner_id})
+				MATCH (source:GraphRecord {project_key: $project_key, record_id: row.source_id, record_type: 'source'})
+				MERGE (owner)-[r:EVIDENCED_BY {project_key: $project_key}]->(source)
+				RETURN count(*) AS matched_count`,
+				map[string]any{"project_key": projectKey, "rows": refRows(prepared.Refs[start:end])},
+			)
+			if runErr != nil {
+				return errors.New("Neo4j graph rebuild provenance failed")
+			}
+			count, countErr := resultCount(ctx, result)
+			if countErr != nil || count != int64(end-start) {
+				return errors.New("Neo4j graph rebuild provenance is incomplete")
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	for start := 0; start < len(prepared.Assertions); start += writeBatchSize {
+		end := min(start+writeBatchSize, len(prepared.Assertions))
+		err := executeProjectRebuildWrite(ctx, session, projectKey, token, func(tx neo4j.ManagedTransaction) error {
+			result, runErr := tx.Run(ctx, `
+				UNWIND $rows AS row
+				MATCH (assertion:GraphRecord {project_key: $project_key, record_id: row.record_id, record_type: 'assertion'})
+				MATCH (subject:GraphRecord {project_key: $project_key, record_id: row.subject_id})
+				MATCH (object:GraphRecord {project_key: $project_key, record_id: row.object_id})
+				MERGE (assertion)-[s:SUBJECT {project_key: $project_key}]->(subject)
+				MERGE (assertion)-[o:OBJECT {project_key: $project_key}]->(object)
+				RETURN count(*) AS matched_count`,
+				map[string]any{"project_key": projectKey, "rows": assertionRows(prepared.Assertions[start:end])},
+			)
+			if runErr != nil {
+				return errors.New("Neo4j graph rebuild assertion links failed")
+			}
+			count, countErr := resultCount(ctx, result)
+			if countErr != nil || count != int64(end-start) {
+				return errors.New("Neo4j graph rebuild assertion links are incomplete")
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	targetGeneration := baseGeneration + 1
+	err = executeProjectRebuildWrite(ctx, session, projectKey, token, func(tx neo4j.ManagedTransaction) error {
+		result, runErr := tx.Run(ctx, `
+			MATCH (m:GraphProject {project_key: $project_key})
+			WHERE m.rebuild_token = $rebuild_token
+			SET m.snapshot_sha256 = $snapshot_sha256,
+			    m.generation = $generation,
+			    m.schema_version = 2,
+			    m.signature_index_version = 1,
+			    m.signature_index_generation = $generation,
+			    m.field_value_index_version = 1,
+			    m.field_value_index_generation = $generation,
+			    m.projection_state = 'rebuilding',
+			    m.record_count = $record_count,
+			    m.reference_count = $reference_count,
+			    m.assertion_count = $assertion_count
+			RETURN m.project_key AS project_key`,
+			map[string]any{
+				"project_key": projectKey, "rebuild_token": token, "snapshot_sha256": prepared.Digest,
+				"generation": targetGeneration, "record_count": len(prepared.Records),
+				"reference_count": len(prepared.Refs), "assertion_count": len(prepared.Assertions),
+			},
+		)
+		if runErr != nil || !result.Next(ctx) {
+			return errors.New("Neo4j graph rebuild metadata could not be prepared")
+		}
+		if _, runErr = result.Consume(ctx); runErr != nil {
+			return errors.New("Neo4j graph rebuild metadata could not be prepared")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		return s.readProjectSnapshotTx(ctx, tx, projectKey, true, token)
+	})
+	if err != nil {
+		return nil, err
+	}
+	readback, ok := value.(behaviorgraph.Record)
+	if !ok {
+		return nil, errors.New("Neo4j graph rebuild read-back is invalid")
+	}
+	readbackDigest, err := behaviorgraph.SnapshotDigest(readback)
+	if err != nil || readbackDigest != prepared.Digest {
+		return nil, errors.New("Neo4j graph rebuild did not match the source snapshot")
+	}
+
+	err = executeProjectRebuildWrite(ctx, session, projectKey, token, func(tx neo4j.ManagedTransaction) error {
+		result, runErr := tx.Run(ctx, `
+			MATCH (m:GraphProject {project_key: $project_key})
+			WHERE m.rebuild_token = $rebuild_token AND m.generation = $generation
+			SET m.projection_state = 'snapshot'
+			REMOVE m.rebuild_token, m.rebuild_base_generation, m.rebuild_target_sha256
+			RETURN m.project_key AS project_key`,
+			map[string]any{"project_key": projectKey, "rebuild_token": token, "generation": targetGeneration},
+		)
+		if runErr != nil || !result.Next(ctx) {
+			return errors.New("Neo4j graph rebuild could not be published")
+		}
+		if _, runErr = result.Consume(ctx); runErr != nil {
+			return errors.New("Neo4j graph rebuild could not be published")
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]int{
+		"records": len(prepared.Records), "references": len(prepared.Refs),
+		"assertions": len(prepared.Assertions), "snapshot_bytes": prepared.SnapshotBytes,
+	}, nil
+}
+
+func executeProjectRebuildWrite(
+	ctx context.Context,
+	session neo4j.SessionWithContext,
+	projectKey, token string,
+	write func(neo4j.ManagedTransaction) error,
+) error {
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		if err := lockProjectForWrite(ctx, tx, projectKey); err != nil {
+			return nil, err
+		}
+		if err := requireProjectRebuildOwner(ctx, tx, projectKey, token); err != nil {
+			return nil, err
+		}
+		if err := write(tx); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	})
+	if err != nil {
+		return fmt.Errorf("Neo4j graph rebuild transaction failed: %w", err)
+	}
+	return nil
 }
 
 // ApplyOutboxBundle applies one checksummed, sanitized graph import event in an
@@ -360,7 +636,8 @@ func (s *Store) ApplyOutboxBundle(ctx context.Context, projectKey, bundleID stri
 		}
 		marker, runErr := tx.Run(ctx, `
 			OPTIONAL MATCH (i:GraphImport {project_key: $project_key, bundle_id: $bundle_id})
-			RETURN i.payload_sha256 AS payload_sha256`,
+			OPTIONAL MATCH (p:GraphProject {project_key: $project_key})
+			RETURN i.payload_sha256 AS payload_sha256, p.projection_state AS projection_state`,
 			map[string]any{"project_key": projectKey, "bundle_id": bundleID, "payload_sha256": hex.EncodeToString(digest[:])},
 		)
 		if runErr != nil || !marker.Next(ctx) {
@@ -368,9 +645,16 @@ func (s *Store) ApplyOutboxBundle(ctx context.Context, projectKey, bundleID stri
 		}
 		markerRecord := marker.Record()
 		storedDigestValue, _ := markerRecord.Get("payload_sha256")
+		projectionStateValue, _ := markerRecord.Get("projection_state")
 		storedDigest, exists := storedDigestValue.(string)
 		if _, runErr = marker.Consume(ctx); runErr != nil {
 			return nil, errors.New("Neo4j outbox checkpoint could not be read")
+		}
+		if !projectionStateUsable(projectionStateValue) {
+			if projectionState, _ := projectionStateValue.(string); projectionState == "rebuilding" {
+				return nil, ErrProjectRebuildInProgress
+			}
+			return nil, errors.New("Neo4j project projection state is invalid")
 		}
 		if exists {
 			if storedDigest != hex.EncodeToString(digest[:]) {
@@ -426,7 +710,7 @@ func (s *Store) ReadProjectSnapshot(ctx context.Context, projectKey string) (beh
 	session := s.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: s.database, AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 	value, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		return s.readProjectSnapshotTx(ctx, tx, projectKey)
+		return s.readProjectSnapshotTx(ctx, tx, projectKey, false, "")
 	})
 	if err != nil {
 		return nil, err
@@ -465,7 +749,8 @@ func (s *Store) ReadProjectObservationIDsByVariantSignatures(
 			MATCH (project:GraphProject {project_key: $project_key})
 			RETURN project.signature_index_version AS signature_index_version,
 			       project.generation AS generation,
-			       project.signature_index_generation AS signature_index_generation`,
+			       project.signature_index_generation AS signature_index_generation,
+			       project.projection_state AS projection_state`,
 			map[string]any{"project_key": projectKey},
 		)
 		if runErr != nil {
@@ -481,7 +766,12 @@ func (s *Store) ReadProjectObservationIDsByVariantSignatures(
 		versionValue, _ := metadataRecord.Get("signature_index_version")
 		generationValue, _ := metadataRecord.Get("generation")
 		indexedGenerationValue, _ := metadataRecord.Get("signature_index_generation")
-		current := signatureIndexMarkerCurrent(versionValue, generationValue, indexedGenerationValue)
+		projectionStateValue, _ := metadataRecord.Get("projection_state")
+		current := signatureIndexMarkerCurrent(versionValue, generationValue, indexedGenerationValue) && projectionStateUsable(projectionStateValue)
+		generation, generationOK := generationValue.(int64)
+		if projectionState, _ := projectionStateValue.(string); projectionState == "rebuilding" {
+			return nil, ErrProjectRebuildInProgress
+		}
 		if _, runErr = metadata.Consume(ctx); runErr != nil || !current {
 			return nil, fmt.Errorf("%w; reproject the selected graph", ErrSignatureIndexUnavailable)
 		}
@@ -511,6 +801,10 @@ func (s *Store) ReadProjectObservationIDsByVariantSignatures(
 		}
 		if _, queryErr := result.Consume(ctx); queryErr != nil {
 			return nil, errors.New("Neo4j project signature query could not finish")
+		}
+		finalGeneration, generationErr := neighborhoodGeneration(ctx, tx, projectKey)
+		if generationErr != nil || !generationOK || finalGeneration != generation {
+			return nil, errors.New("Neo4j project signature query changed while it was being read")
 		}
 		truncated := len(ids) > limit
 		if truncated {
@@ -591,12 +885,13 @@ func observationIDsByVariantSignaturesQuery(requestSignature, responseSignature 
 		LIMIT $limit_plus_one`
 }
 
-func (s *Store) readProjectSnapshotTx(ctx context.Context, tx neo4j.ManagedTransaction, projectKey string) (behaviorgraph.Record, error) {
+func (s *Store) readProjectSnapshotTx(ctx context.Context, tx neo4j.ManagedTransaction, projectKey string, allowRebuilding bool, rebuildToken string) (behaviorgraph.Record, error) {
 	metadata, err := tx.Run(ctx, `
 		MATCH (m:GraphProject {project_key: $project_key})
 		RETURN m.snapshot_sha256 AS snapshot_sha256, m.record_count AS record_count,
 		       m.reference_count AS reference_count, m.assertion_count AS assertion_count,
-	       m.schema_version AS schema_version, m.generation AS generation`,
+	       m.schema_version AS schema_version, m.generation AS generation,
+	       m.projection_state AS projection_state, m.rebuild_token AS rebuild_token`,
 		map[string]any{"project_key": projectKey},
 	)
 	if err != nil || !metadata.Next(ctx) {
@@ -609,13 +904,25 @@ func (s *Store) readProjectSnapshotTx(ctx context.Context, tx neo4j.ManagedTrans
 	assertionCountValue, _ := meta.Get("assertion_count")
 	schemaVersionValue, _ := meta.Get("schema_version")
 	generationValue, _ := meta.Get("generation")
+	projectionStateValue, _ := meta.Get("projection_state")
+	rebuildTokenValue, _ := meta.Get("rebuild_token")
 	wantDigest, digestOK := snapshotDigestValue.(string)
 	wantRecords, recordsOK := recordCountValue.(int64)
 	wantRefs, refsOK := refCountValue.(int64)
 	wantAssertions, assertionsOK := assertionCountValue.(int64)
 	wantSchema, schemaOK := schemaVersionValue.(int64)
 	wantGeneration, generationOK := generationValue.(int64)
+	projectionState, _ := projectionStateValue.(string)
+	storedRebuildToken, _ := rebuildTokenValue.(string)
+	stateValid := projectionStateUsable(projectionStateValue)
+	if allowRebuilding {
+		stateValid = projectionState == "rebuilding" && rebuildToken != "" && storedRebuildToken == rebuildToken
+	}
+	if !allowRebuilding && projectionState == "rebuilding" {
+		return nil, ErrProjectRebuildInProgress
+	}
 	if _, err := metadata.Consume(ctx); err != nil || !schemaOK || wantSchema != 2 || !generationOK || wantGeneration < 1 ||
+		!stateValid ||
 		(snapshotDigestValue != nil && (!digestOK || !projectKeyPattern.MatchString(wantDigest))) ||
 		(recordCountValue != nil && (!recordsOK || wantRecords < 0)) ||
 		(refCountValue != nil && (!refsOK || wantRefs < 0)) ||
@@ -760,7 +1067,8 @@ func (s *Store) readProjectSnapshotTx(ctx context.Context, tx neo4j.ManagedTrans
 	}
 	finalMetadata, err := tx.Run(ctx, `
 		MATCH (m:GraphProject {project_key: $project_key})
-		RETURN m.generation AS generation`,
+		RETURN m.generation AS generation, m.projection_state AS projection_state,
+		       m.rebuild_token AS rebuild_token`,
 		map[string]any{"project_key": projectKey},
 	)
 	if err != nil || !finalMetadata.Next(ctx) {
@@ -768,7 +1076,17 @@ func (s *Store) readProjectSnapshotTx(ctx context.Context, tx neo4j.ManagedTrans
 	}
 	finalGenerationValue, _ := finalMetadata.Record().Get("generation")
 	finalGeneration, finalGenerationOK := finalGenerationValue.(int64)
-	if _, err := finalMetadata.Consume(ctx); err != nil || !finalGenerationOK || finalGeneration != wantGeneration {
+	finalStateValue, _ := finalMetadata.Record().Get("projection_state")
+	finalTokenValue, _ := finalMetadata.Record().Get("rebuild_token")
+	finalState, _ := finalStateValue.(string)
+	finalToken, _ := finalTokenValue.(string)
+	stateStillCurrent := projectionStateUsable(finalStateValue)
+	if allowRebuilding {
+		stateStillCurrent = finalState == "rebuilding" && finalToken == rebuildToken
+	} else {
+		stateStillCurrent = stateStillCurrent && finalState == projectionState
+	}
+	if _, err := finalMetadata.Consume(ctx); err != nil || !finalGenerationOK || finalGeneration != wantGeneration || !stateStillCurrent {
 		return nil, errors.New("Neo4j graph snapshot changed while it was being read")
 	}
 	return snapshot, nil
@@ -795,6 +1113,60 @@ func lockProjectForWrite(ctx context.Context, tx neo4j.ManagedTransaction, proje
 	project, ok := projectValue.(string)
 	if _, err := result.Consume(ctx); err != nil || !ok || project != projectKey {
 		return errors.New("Neo4j project graph could not be locked for a write")
+	}
+	return nil
+}
+
+func projectionStateUsable(value any) bool {
+	if value == nil {
+		return true // tolerate pre-marker snapshots while keeping rebuild fail-closed
+	}
+	state, ok := value.(string)
+	if !ok {
+		return false
+	}
+	switch state {
+	case "", "snapshot", "incremental":
+		return true
+	default:
+		return false
+	}
+}
+
+func requireProjectNotRebuilding(ctx context.Context, tx neo4j.ManagedTransaction, projectKey string) error {
+	result, err := tx.Run(ctx, `
+		MATCH (m:GraphProject {project_key: $project_key})
+		RETURN m.projection_state AS projection_state`, map[string]any{"project_key": projectKey})
+	if err != nil || !result.Next(ctx) {
+		return errors.New("Neo4j project projection state is unavailable")
+	}
+	value, _ := result.Record().Get("projection_state")
+	state, _ := value.(string)
+	if _, err := result.Consume(ctx); err != nil {
+		return errors.New("Neo4j project projection state is unavailable")
+	}
+	if state == "rebuilding" {
+		return ErrProjectRebuildInProgress
+	}
+	if !projectionStateUsable(value) {
+		return errors.New("Neo4j project projection state is invalid")
+	}
+	return nil
+}
+
+func requireProjectRebuildOwner(ctx context.Context, tx neo4j.ManagedTransaction, projectKey, token string) error {
+	result, err := tx.Run(ctx, `
+		MATCH (m:GraphProject {project_key: $project_key})
+		WHERE m.projection_state = 'rebuilding' AND m.rebuild_token = $rebuild_token
+		RETURN m.project_key AS project_key`,
+		map[string]any{"project_key": projectKey, "rebuild_token": token})
+	if err != nil || !result.Next(ctx) {
+		return ErrProjectRebuildInProgress
+	}
+	value, _ := result.Record().Get("project_key")
+	owner, ok := value.(string)
+	if _, err := result.Consume(ctx); err != nil || !ok || owner != projectKey {
+		return ErrProjectRebuildInProgress
 	}
 	return nil
 }
@@ -933,6 +1305,7 @@ func prepareGraphSnapshot(projectKey string, snapshot behaviorgraph.Record, requ
 		return preparedSnapshot{}, errors.New("graph snapshot exceeds its safe size limit")
 	}
 	var output preparedSnapshot
+	output.SnapshotBytes = len(encoded)
 	seen := make(map[string]struct{})
 	sources := make(map[string]struct{})
 	getList := func(key string) ([]behaviorgraph.Record, error) {

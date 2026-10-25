@@ -247,16 +247,21 @@ func neighborhoodPayloadUpperBound(characterCount int64, remainingBytes int) (in
 func neighborhoodGeneration(ctx context.Context, tx neo4j.ManagedTransaction, project string) (int64, error) {
 	result, err := tx.Run(ctx, `
 		MATCH (m:GraphProject {project_key: $project_key})
-		RETURN m.schema_version AS schema_version, m.generation AS generation`, map[string]any{"project_key": project})
+		RETURN m.schema_version AS schema_version, m.generation AS generation,
+		       m.projection_state AS projection_state`, map[string]any{"project_key": project})
 	if err != nil || !result.Next(ctx) {
 		return 0, errors.New("Neo4j neighborhood project metadata is unavailable")
 	}
 	row := result.Record()
 	schemaValue, _ := row.Get("schema_version")
 	generationValue, _ := row.Get("generation")
+	projectionStateValue, _ := row.Get("projection_state")
 	schema, schemaOK := schemaValue.(int64)
 	generation, generationOK := generationValue.(int64)
-	if result.Next(ctx) || !schemaOK || schema != 2 || !generationOK || generation < 1 {
+	if result.Next(ctx) || !schemaOK || schema != 2 || !generationOK || generation < 1 || !projectionStateUsable(projectionStateValue) {
+		if projectionState, _ := projectionStateValue.(string); projectionState == "rebuilding" {
+			return 0, ErrProjectRebuildInProgress
+		}
 		return 0, errors.New("Neo4j neighborhood project metadata is malformed")
 	}
 	if _, err := result.Consume(ctx); err != nil {

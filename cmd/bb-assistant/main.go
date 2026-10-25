@@ -271,7 +271,7 @@ func backfillNeo4j(args []string) error {
 	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
 		return errors.New("usage: bb-assistant neo4j-backfill --project-key <sha256> [--data-root path]")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	refs, err := project.LoadProjectRefsReadOnly(*root)
 	if err != nil {
@@ -336,7 +336,7 @@ func backfillNeo4j(args []string) error {
 	defer graphStore.Close(context.Background())
 	counts := map[string]int{}
 	if !*verifyOnly {
-		counts, err = graphStore.ReplaceProjectSnapshot(ctx, projectStore.ProjectKey, localSnapshot)
+		counts, err = graphStore.RebuildProjectSnapshot(ctx, projectStore.ProjectKey, localSnapshot)
 		if err != nil {
 			return err
 		}

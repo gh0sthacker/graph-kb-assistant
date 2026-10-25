@@ -109,7 +109,8 @@ func fieldValueIndexGeneration(ctx context.Context, tx neo4j.ManagedTransaction,
 		RETURN project.schema_version AS schema_version,
 		       project.generation AS generation,
 		       project.field_value_index_version AS field_value_index_version,
-		       project.field_value_index_generation AS field_value_index_generation`,
+		       project.field_value_index_generation AS field_value_index_generation,
+		       project.projection_state AS projection_state`,
 		map[string]any{"project_key": projectKey},
 	)
 	if err != nil || !result.Next(ctx) {
@@ -120,10 +121,14 @@ func fieldValueIndexGeneration(ctx context.Context, tx neo4j.ManagedTransaction,
 	generationValue, _ := row.Get("generation")
 	versionValue, _ := row.Get("field_value_index_version")
 	indexedGenerationValue, _ := row.Get("field_value_index_generation")
+	projectionStateValue, _ := row.Get("projection_state")
 	schema, schemaOK := schemaValue.(int64)
 	generation, generationOK := generationValue.(int64)
 	current := signatureIndexMarkerCurrent(versionValue, generationValue, indexedGenerationValue)
-	if _, err := result.Consume(ctx); err != nil || !schemaOK || schema != 2 || !generationOK || !current {
+	if _, err := result.Consume(ctx); err != nil || !schemaOK || schema != 2 || !generationOK || !current || !projectionStateUsable(projectionStateValue) {
+		if projectionState, _ := projectionStateValue.(string); projectionState == "rebuilding" {
+			return 0, ErrProjectRebuildInProgress
+		}
 		return 0, ErrFieldValueIndexUnavailable
 	}
 	return generation, nil

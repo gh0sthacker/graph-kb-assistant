@@ -181,3 +181,116 @@ func TestNeo4jOutboxIntegrationPreservesCanonicalEntityProjection(t *testing.T) 
 		t.Fatalf("signature lookup accepted a stale marker after incremental projection: %v", err)
 	}
 }
+
+func TestNeo4jChunkedSnapshotRebuildFailsClosedAndRecovers(t *testing.T) {
+	if os.Getenv("BB_ASSISTANT_NEO4J_TEST") != "1" {
+		t.Skip("set BB_ASSISTANT_NEO4J_TEST=1 to run against a local Neo4j instance")
+	}
+	config, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatal("Neo4j test configuration is invalid")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	store, err := New(ctx, config)
+	if err != nil {
+		t.Fatal("could not connect to local Neo4j test database")
+	}
+	defer store.Close(context.Background())
+	if err := store.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	projectDigest := sha256.Sum256([]byte(fmt.Sprintf("neo4j-chunked-rebuild-%d", time.Now().UnixNano())))
+	projectKey := hex.EncodeToString(projectDigest[:])
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cleanupCancel()
+		session := store.driver.NewSession(cleanupCtx, neo4j.SessionConfig{DatabaseName: store.database})
+		defer session.Close(cleanupCtx)
+		_, _ = session.ExecuteWrite(cleanupCtx, func(tx neo4j.ManagedTransaction) (any, error) {
+			for _, query := range []string{
+				"MATCH (n:GraphRecord {project_key: $project_key}) DETACH DELETE n",
+				"MATCH (n:GraphImport {project_key: $project_key}) DELETE n",
+				"MATCH (n:GraphProject {project_key: $project_key}) DELETE n",
+			} {
+				result, runErr := tx.Run(cleanupCtx, query, map[string]any{"project_key": projectKey})
+				if runErr != nil {
+					return nil, runErr
+				}
+				if _, runErr = result.Consume(cleanupCtx); runErr != nil {
+					return nil, runErr
+				}
+			}
+			return nil, nil
+		})
+	})
+
+	previous := testSnapshot(projectKey)
+	if _, err := store.ReplaceProjectSnapshot(ctx, projectKey, previous); err != nil {
+		t.Fatalf("write starting synthetic snapshot: %v", err)
+	}
+	session := store.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: store.database})
+	_, err = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, runErr := tx.Run(ctx, `
+			MATCH (m:GraphProject {project_key: $project_key})
+			SET m.projection_state = 'rebuilding',
+			    m.rebuild_token = 'interrupted-fixture',
+			    m.rebuild_base_generation = m.generation
+			RETURN m.project_key`, map[string]any{"project_key": projectKey})
+		if runErr != nil {
+			return nil, runErr
+		}
+		if _, runErr = result.Consume(ctx); runErr != nil {
+			return nil, runErr
+		}
+		return nil, nil
+	})
+	_ = session.Close(ctx)
+	if err != nil {
+		t.Fatalf("mark synthetic interrupted rebuild: %v", err)
+	}
+	if _, err := store.ReadProjectSnapshot(ctx, projectKey); !errors.Is(err, ErrProjectRebuildInProgress) {
+		t.Fatalf("snapshot read during rebuild = %v, want ErrProjectRebuildInProgress", err)
+	}
+	if _, _, err := store.ReadProjectObservationIDsByVariantSignatures(ctx, projectKey, strings.Repeat("f", 64), "", 1); !errors.Is(err, ErrProjectRebuildInProgress) {
+		t.Fatalf("signature read during rebuild = %v, want ErrProjectRebuildInProgress", err)
+	}
+	endpointID := "endpoint-" + strings.Repeat("1", 64)
+	if _, err := store.ReadProjectNeighborhood(ctx, projectKey, []string{endpointID}, 10); !errors.Is(err, ErrProjectRebuildInProgress) {
+		t.Fatalf("neighborhood read during rebuild = %v, want ErrProjectRebuildInProgress", err)
+	}
+	if _, err := store.ReplaceProjectSnapshot(ctx, projectKey, previous); !errors.Is(err, ErrProjectRebuildInProgress) {
+		t.Fatalf("competing atomic replacement = %v, want ErrProjectRebuildInProgress", err)
+	}
+
+	next := testSnapshot(projectKey)
+	source := next["sources"].([]behaviorgraph.Record)[0]
+	entities := next["entities"].([]behaviorgraph.Record)
+	for index := 0; index < 600; index++ {
+		entities = append(entities, behaviorgraph.Record{
+			"id": fmt.Sprintf("asset-%064x", index+1), "kind": "asset",
+			"data":        map[string]any{"label": fmt.Sprintf("fixture-%d", index)},
+			"source_refs": []behaviorgraph.Record{source},
+		})
+	}
+	next["entities"] = entities
+	counts, err := store.RebuildProjectSnapshot(ctx, projectKey, next)
+	if err != nil {
+		t.Fatalf("rebuild synthetic project in bounded transactions: %v", err)
+	}
+	if counts["records"] != 603 || counts["references"] != 602 || counts["assertions"] != 1 {
+		t.Fatalf("rebuilt synthetic counts = %#v", counts)
+	}
+	readback, err := store.ReadProjectSnapshot(ctx, projectKey)
+	if err != nil {
+		t.Fatalf("read published synthetic graph: %v", err)
+	}
+	wantDigest, err := behaviorgraph.SnapshotDigest(next)
+	if err != nil {
+		t.Fatal("synthetic source digest could not be computed")
+	}
+	gotDigest, err := behaviorgraph.SnapshotDigest(readback)
+	if err != nil || gotDigest != wantDigest {
+		t.Fatalf("published synthetic graph digest = %q, want %q (err %v)", gotDigest, wantDigest, err)
+	}
+}

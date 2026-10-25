@@ -35,9 +35,12 @@ its validated SQLite BehaviorGraph and require a read-back digest match:
 ./scripts/bb-assistant neo4j-backfill --project-key <registered-project-sha256>
 ```
 
-Backfill replaces only that project's Neo4j graph snapshot in one transaction.
-The current SQLite graph remains available as the recovery copy. This command
-does not update Caido checkpoints or mark Caido history complete.
+Backfill marks only the selected project's graph unavailable to readers,
+deletes and writes it in bounded transactions, reads it back, and publishes the
+new generation only after its digest matches. If interrupted, that project's
+graph stays unavailable and the command can be rerun from the SQLite recovery
+copy. Other project namespaces remain readable. This command does not update
+Caido checkpoints or mark Caido history complete.
 
 The Compose profile reserves a 2 GiB initial / 8 GiB maximum heap, 1 GiB
 page cache, and up to 6 GiB for an individual or total transaction. These

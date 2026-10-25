@@ -2102,23 +2102,30 @@ This repository is an early public alpha. The following boundaries are deliberat
   API/Neo4j response, Caido import coverage, queue delivery, KB readiness, and
   Hermes consultation.
 
-## Hermes and local Neo4j runtime (2026-10-25) — PARTIAL
+## Neo4j snapshot rebuild and graph API (2026-10-25) — PARTIAL
 
-- Hermes is configured for `openai-codex` with `gpt-6-luna`; a synthetic-only
-  smoke completed successfully. No captured exchange was sent to the model.
-- The local web UI returned HTTP 200, and Neo4j connectivity returned `ready`
-  after restart. These checks do not establish populated graph parity or remote
-  accessibility.
-- The selected-project backfill did not reach parity. It first failed because
-  the host root filesystem was full (8 KiB available); Neo4j's transaction log
-  write was rejected. Only the regenerable Go build cache was removed, which
-  restored 8.3 GiB free, later measured at 11 GiB. A second backfill was
-  interrupted before host memory fell below 1 GiB available. Neo4j was
-  restarted and is responsive; both attempts remain unverified/partial.
-- Latest observed capture metadata remains 1,369 graph-mapped and 31 unmapped;
-  projection queue had 53 pending, 2 dead-letter and 1,345 applied. Historical
-  source reconciliation, vault-key recovery, full graph parity, the failed-job
-  recovery path and external access remain gaps. Captured bodies were not read;
-  Caido was not contacted.
+- Hermes is configured for `openai-codex` with `gpt-6-luna`; an earlier
+  synthetic-only smoke completed successfully. No captured exchange was sent
+  to the model.
+- The selected-project backfill completed with read-back digest verification.
+  The local snapshot and Neo4j snapshot SHA-256 both equal
+  `0b050388683b4b885917471482b72a4836f083f48e8314698271e6adb6fb5aeb`.
+  The published snapshot contains 232,715 records, 233,336 provenance
+  references, and 115,299 assertions (1,369 sources/cards, 114,678 entities,
+  and 115,299 assertions).
+- A bounded read through the local UI API returned HTTP 200 for a selected
+  operation seed: one source, one card, three entities, two assertions, and
+  one capture-provenance link; the response was not truncated. The request and
+  response bodies were not read. This confirms populated graph navigation for
+  that seed, not complete UI or graph coverage.
+- Structural status still reports 1,400 captures, 1,369 mapped and 31
+  unmapped. The projection queue has 53 pending, 2 dead-letter, and 1,345
+  applied jobs. Historical import reconciliation is still partial; the
+  evidence-vault key is missing or invalid, so encrypted evidence access is not
+  confirmed. Browser walkthrough, JavaScript endpoint coverage, external
+  access, pending/dead-letter recovery, and full application acceptance remain
+  gaps.
+- Caido was not contacted, captured bodies were not read, and no captured
+  exchange was sent to Hermes.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
