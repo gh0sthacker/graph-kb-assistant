@@ -79,6 +79,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunk_search USING fts5(
   tokenize='unicode61 remove_diacritics 2'
 );
 CREATE INDEX IF NOT EXISTS chunks_source_idx ON chunks(source_name,source_id);
+CREATE INDEX IF NOT EXISTS chunks_embed_order_idx ON chunks(length(text),chunk_id);
 """
 
 
@@ -452,7 +453,7 @@ class KBIndex:
                        LEFT JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id AND e.model_name=?
                        WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
                          AND e.chunk_id IS NULL
-                       ORDER BY c.chunk_id LIMIT ?""",
+                       ORDER BY length(c.text),c.chunk_id LIMIT ?""",
                     (model_name, batch_size),
                 ).fetchall()
                 if not rows:

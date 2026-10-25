@@ -24,6 +24,15 @@ class _FixtureReranker:
         return [1.0 if "alpha" in text else 0.0 for text in texts]
 
 
+class _RecordingEmbedder(_FixtureEmbedder):
+    def __init__(self):
+        self.batches = []
+
+    def embed_documents_batch(self, texts, *, batch_size=64):
+        self.batches.append(tuple(texts))
+        return super().embed_documents_batch(texts, batch_size=batch_size)
+
+
 class _FailOnSecondBatchEmbedder(_FixtureEmbedder):
     def __init__(self):
         self.calls = 0
@@ -36,6 +45,25 @@ class _FailOnSecondBatchEmbedder(_FixtureEmbedder):
 
 
 class RetrievalRankingTests(unittest.TestCase):
+    def test_embedding_queue_batches_shorter_chunks_first(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="long.md", title="Long",
+                text="long " * 300, metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="gtfobins", source_id="short.md", title="Short",
+                text="short", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-embed-order-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "c" * 64, sources=documents)
+            embedder = _RecordingEmbedder()
+            index.rebuild_embeddings(embedder, batch_size=1)
+        self.assertEqual(len(embedder.batches[0][0]), min(len(chunk.text) for chunk in chunks))
+
     def test_persisted_vectors_retrieve_semantic_candidate_without_lexical_match(self) -> None:
         documents = (
             SourceDocument.create(
