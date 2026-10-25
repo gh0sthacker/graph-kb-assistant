@@ -193,7 +193,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .embeddings import RedAmonEmbedder
         index = KBIndex(_configured_index_path(args.index_path))
         embedder = RedAmonEmbedder(local_files_only=not args.download_model)
-        count = index.rebuild_embeddings(embedder)
+
+        last_progress = 0
+
+        def report_progress(done: int, total: int) -> None:
+            nonlocal last_progress
+            if done == total or done - last_progress >= 4096:
+                print(f"embedded {done}/{total} KB chunks", file=sys.stderr, flush=True)
+                last_progress = done
+
+        count = index.rebuild_embeddings(embedder, progress_callback=report_progress)
         print(json.dumps({"embedded_chunks": count, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     index = KBIndex(_configured_index_path(args.index_path))

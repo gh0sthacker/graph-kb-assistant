@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import sqlite3
 import struct
-from typing import Iterable, Iterator, Mapping
+from typing import Callable, Iterable, Iterator, Mapping
 
 from ..paths import data_root, ensure_private_directory
 from ..project_lock import project_maintenance_lock, project_maintenance_read_lock
@@ -313,7 +313,7 @@ class KBIndex:
                 )
                 count += 1
             connection.execute(
-                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','vector_model','vector_dimensions','vector_snapshot_id')"
+                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
             )
             connection.executemany(
                 "INSERT INTO kb_meta(key,value) VALUES(?,?)",
@@ -370,8 +370,19 @@ class KBIndex:
             "vector_ready": vector_count > 0 and meta.get("vector_snapshot_id") == meta.get("snapshot_id"),
         }
 
-    def rebuild_embeddings(self, embedder: object, *, batch_size: int = 64) -> int:
-        """Atomically encode the current content chunks using a pinned E5 adapter."""
+    def rebuild_embeddings(
+        self,
+        embedder: object,
+        *,
+        batch_size: int = 64,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> int:
+        """Build snapshot-bound vectors in durable batches and publish when complete.
+
+        Completed batches survive process restarts. The ready snapshot marker is
+        written only after every content chunk has a matching vector, so readers
+        never mistake a partial generation for a ready index.
+        """
         model_name = getattr(embedder, "model_name", None)
         batch_encoder = getattr(embedder, "embed_documents_batch", None)
         if not isinstance(model_name, str) or not model_name or not callable(batch_encoder):
@@ -386,20 +397,52 @@ class KBIndex:
             snapshot_id = meta.get("snapshot_id")
             if not snapshot_id:
                 raise ValueError("Cannot build embeddings without an imported KB snapshot")
-            connection.execute("DROP TABLE IF EXISTS temp.kb_embeddings_staging")
-            connection.execute(
-                "CREATE TEMP TABLE kb_embeddings_staging "
-                "(chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)"
+            total = int(connection.execute(
+                "SELECT count(*) FROM chunks WHERE COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content'"
+            ).fetchone()[0])
+            if total == 0:
+                raise ValueError("KB snapshot contains no content chunks to embed")
+            existing_count = int(connection.execute(
+                "SELECT count(*) FROM chunk_embeddings WHERE model_name=?",
+                (model_name,),
+            ).fetchone()[0])
+            if (
+                meta.get("vector_snapshot_id") == snapshot_id
+                and meta.get("vector_model") == model_name
+                and existing_count == total
+            ):
+                if progress_callback is not None:
+                    progress_callback(total, total)
+                return total
+
+            staging_matches = (
+                meta.get("vector_staging_snapshot_id") == snapshot_id
+                and meta.get("vector_staging_model") == model_name
             )
-            cursor = connection.execute(
-                """SELECT c.chunk_id,c.text FROM chunks c
-                   WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
-                   ORDER BY c.chunk_id"""
-            )
-            total = 0
-            dimensions: int | None = None
+            if not staging_matches:
+                connection.execute("DELETE FROM chunk_embeddings")
+                connection.execute(
+                    "DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')"
+                )
+                connection.executemany(
+                    "INSERT INTO kb_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (("vector_staging_snapshot_id", snapshot_id), ("vector_staging_model", model_name)),
+                )
+                connection.execute("DELETE FROM kb_meta WHERE key='vector_staging_dimensions'")
+                connection.commit()
+                dimensions = 0
+            else:
+                dimensions = int(meta.get("vector_staging_dimensions", "0") or 0)
+
             while True:
-                rows = cursor.fetchmany(batch_size)
+                rows = connection.execute(
+                    """SELECT c.chunk_id,c.text FROM chunks c
+                       LEFT JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id AND e.model_name=?
+                       WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
+                         AND e.chunk_id IS NULL
+                       ORDER BY c.chunk_id LIMIT ?""",
+                    (model_name, batch_size),
+                ).fetchall()
                 if not rows:
                     break
                 vectors = batch_encoder([row["text"] for row in rows], batch_size=batch_size)
@@ -410,31 +453,44 @@ class KBIndex:
                     values = [float(value) for value in vector]
                     if not values or any(not math.isfinite(value) for value in values):
                         raise ValueError("embedder returned an empty or non-finite vector")
-                    if dimensions is None:
+                    if dimensions == 0:
                         dimensions = len(values)
                     elif len(values) != dimensions:
                         raise ValueError("embedder returned inconsistent vector dimensions")
                     packed = struct.pack(f"<{len(values)}f", *values)
                     encoded_rows.append((row["chunk_id"], model_name, len(values), packed))
                 connection.executemany(
-                    "INSERT INTO kb_embeddings_staging(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
+                    "INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
                     encoded_rows,
                 )
-                total += len(rows)
-            if total == 0 or dimensions is None:
-                raise ValueError("KB snapshot contains no content chunks to embed")
-            connection.execute("DELETE FROM chunk_embeddings")
-            connection.execute(
-                "INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) "
-                "SELECT chunk_id,model_name,dimensions,vector FROM kb_embeddings_staging"
-            )
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('vector_staging_dimensions',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(dimensions),),
+                )
+                connection.commit()
+                embedded = int(connection.execute(
+                    "SELECT count(*) FROM chunk_embeddings WHERE model_name=?",
+                    (model_name,),
+                ).fetchone()[0])
+                if progress_callback is not None:
+                    progress_callback(embedded, total)
+
+            embedded = int(connection.execute(
+                "SELECT count(*) FROM chunk_embeddings WHERE model_name=?",
+                (model_name,),
+            ).fetchone()[0])
+            if dimensions == 0 or embedded != total:
+                raise ValueError("KB vector generation is incomplete")
             connection.executemany(
                 "INSERT INTO kb_meta(key,value) VALUES(?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (("vector_model", model_name), ("vector_dimensions", str(dimensions)), ("vector_snapshot_id", snapshot_id)),
             )
-            connection.execute("DROP TABLE temp.kb_embeddings_staging")
-            return total
+            connection.execute(
+                "DELETE FROM kb_meta WHERE key IN ('vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
+            )
+            return embedded
 
     def _vector_search(
         self, query: str, *, top_k: int, source_names: tuple[str, ...],

@@ -2429,8 +2429,14 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
 - Added a CPU-only private model-runtime setup script and documented the
   snapshot/vector rebuild steps. Model weights remain local runtime files and
   are not committed.
-- A full 730-day NVD refresh is now running after fixing the offset-less
-  publication-date adapter bug. The last verified corpus remains the earlier
+- E5 vector builds now commit completed batches and resume after interruption.
+  The Go path treats a generation as ready only after all content chunks for
+  the current snapshot have vectors; a partial build cannot enter search.
+- The first full 730-day NVD refresh was terminated before it could save a
+  batch. A new run is in progress using RedAmon's 2,000-record page size and
+  6.5-second unauthenticated spacing, with per-page progress and private batch
+  output. It also includes the offset-less publication-date adapter fix. The
+  last verified corpus remains the earlier
   `PARTIAL` snapshot until the new fetch, v2 re-chunk, import, vector build,
   and Go stats check finish. ExploitDB remains `BLOCKED` pending resolution of
   dataset-specific reuse terms; the KB is therefore not identical to RedAmon

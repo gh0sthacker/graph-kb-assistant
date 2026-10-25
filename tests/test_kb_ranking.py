@@ -24,6 +24,17 @@ class _FixtureReranker:
         return [1.0 if "alpha" in text else 0.0 for text in texts]
 
 
+class _FailOnSecondBatchEmbedder(_FixtureEmbedder):
+    def __init__(self):
+        self.calls = 0
+
+    def embed_documents_batch(self, texts, *, batch_size=64):
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("synthetic interrupted embedding run")
+        return super().embed_documents_batch(texts, batch_size=batch_size)
+
+
 class RetrievalRankingTests(unittest.TestCase):
     def test_persisted_vectors_retrieve_semantic_candidate_without_lexical_match(self) -> None:
         documents = (
@@ -48,6 +59,34 @@ class RetrievalRankingTests(unittest.TestCase):
             hits = index.search("semantic concept", top_k=2)
             self.assertEqual({hit.source_id for hit in hits}, {"alpha.md", "bravo.md"})
             self.assertIsNotNone(next(hit for hit in hits if hit.source_id == "alpha.md").rerank_score)
+
+    def test_embedding_batches_resume_after_interruption_without_publishing_partial_vectors(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="alpha.md", title="Alpha",
+                text="alpha authentication flow", metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="gtfobins", source_id="bravo.md", title="Bravo",
+                text="bravo credential renewal", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-vector-resume-test-") as temporary:
+            path = Path(temporary) / "index.sqlite3"
+            index = KBIndex(path)
+            index.replace_snapshot(chunks, "b" * 64, sources=documents)
+            with self.assertRaisesRegex(RuntimeError, "synthetic interrupted"):
+                index.rebuild_embeddings(_FailOnSecondBatchEmbedder(), batch_size=1)
+
+            partial = index.stats()
+            self.assertEqual(partial["embedded_chunks"], 1)
+            self.assertFalse(partial["vector_ready"])
+
+            resumed = KBIndex(path)
+            embedder = _FixtureEmbedder()
+            self.assertEqual(resumed.rebuild_embeddings(embedder, batch_size=1), 2)
+            self.assertTrue(resumed.stats()["vector_ready"])
 
     def test_rrf_combines_ranks_and_ignores_duplicate_ids_within_one_list(self) -> None:
         scores = reciprocal_rank_fusion(
