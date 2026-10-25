@@ -2128,8 +2128,13 @@ This repository is an early public alpha. The following boundaries are deliberat
   batches applied the pending jobs; final status reported 0 pending, 1,398
   applied, and 2 dead-letter. Both dead-letter revisions have local graph
   revision mappings, and separate bounded UI graph reads for both mapped seeds
-  returned HTTP 200 with non-truncated graph slices. Their queue states remain
-  dead-letter, so worker acknowledgment/recovery is still unresolved.
+  returned HTTP 200 with non-truncated graph slices. A new explicit
+  `projection-reconcile --include-dead-letter` dry-run compared both jobs to
+  the current parity-matched snapshots: 0 exact, 0 missing, 2 conflicting,
+  with no changes. The feature acknowledges dead-letter jobs only when their
+  complete payloads exactly match both snapshots; it never silently retries
+  them. Their queue states therefore remain dead-letter and require a
+  superseded-record review path.
   Historical import reconciliation is still partial; the
   evidence-vault key is missing or invalid, so encrypted evidence access is not
   confirmed. Browser walkthrough, JavaScript endpoint coverage, external

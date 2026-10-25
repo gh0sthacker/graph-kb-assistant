@@ -612,12 +612,13 @@ func reconcileProjectionQueue(args []string) error {
 	maxJobs := flags.Int("max-jobs", ingest.DefaultProjectionReconcileJobs, "maximum pending jobs to scan")
 	maxBytes := flags.Int64("max-bytes", ingest.DefaultProjectionReconcileBytes, "maximum normalized payload bytes to scan")
 	afterSequenceID := flags.Int64("after-sequence-id", 0, "resume after a previously reported sequence ID")
+	includeDeadLetter := flags.Bool("include-dead-letter", false, "also inspect dead-letter jobs; only exact parity matches can be acknowledged")
 	apply := flags.Bool("apply", false, "acknowledge exact matches after full local/Neo4j snapshot parity")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
-		return errors.New("usage: bb-assistant projection-reconcile --project-key <sha256> [--apply] [--max-jobs 5000] [--max-bytes 536870912] [--after-sequence-id 0] [--data-root path]")
+		return errors.New("usage: bb-assistant projection-reconcile --project-key <sha256> [--include-dead-letter] [--apply] [--max-jobs 5000] [--max-bytes 536870912] [--after-sequence-id 0] [--data-root path]")
 	}
 	if *maxJobs < 1 || *maxJobs > 50000 || *maxBytes < 4<<20 || *maxBytes > 1<<30 || *afterSequenceID < 0 {
 		return errors.New("projection reconciliation limits are invalid")
@@ -698,7 +699,8 @@ func reconcileProjectionQueue(args []string) error {
 	}
 	result, reconcileErr := ingest.RunProjectionReconciliation(ctx, projectStore, maintenance,
 		localSnapshot, neo4jSnapshot, ingest.ProjectionReconcileOptions{
-			MaxJobs: *maxJobs, MaxBytes: *maxBytes, AfterSequenceID: *afterSequenceID, Apply: *apply,
+			MaxJobs: *maxJobs, MaxBytes: *maxBytes, AfterSequenceID: *afterSequenceID,
+			IncludeDeadLetter: *includeDeadLetter, Apply: *apply,
 		},
 	)
 	storeCloseErr := projectStore.Close()

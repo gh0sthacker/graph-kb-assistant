@@ -100,6 +100,94 @@ func TestProjectionReconciliationDryRunThenAcknowledgesOnlyExactSubset(t *testin
 	}
 }
 
+func TestProjectionReconciliationIncludesDeadLettersOnlyWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	for _, requestID := range []string{"reconcile-dead-letter"} {
+		accepted, writeErr := writePendingHistoryRevision(ctx, pageWriter,
+			projectionWorkerExchange(selected, requestID, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nsynthetic"))
+		if writeErr != nil || accepted.ProjectionState != "pending" {
+			t.Fatalf("accept synthetic projection %s: result=%+v err=%v", requestID, accepted, writeErr)
+		}
+	}
+	rows, err := projectStore.Database.DB().QueryContext(ctx,
+		"SELECT revision_id FROM projection_jobs ORDER BY sequence_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revisionIDs []string
+	for rows.Next() {
+		var revisionID string
+		if err := rows.Scan(&revisionID); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		revisionIDs = append(revisionIDs, revisionID)
+	}
+	if err := rows.Close(); err != nil || len(revisionIDs) != 1 {
+		t.Fatalf("read synthetic revision IDs: count=%d err=%v", len(revisionIDs), err)
+	}
+	bundles := make([]behaviorgraph.Record, 0, len(revisionIDs))
+	for _, revisionID := range revisionIDs {
+		job, err := behaviorgraph.ProjectionJobByRevision(ctx, projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bundle behaviorgraph.Record
+		if err := json.Unmarshal([]byte(job.PayloadJSON), &bundle); err != nil {
+			t.Fatal(err)
+		}
+		bundles = append(bundles, bundle)
+	}
+	if _, _, err := materializeLocalProjection(ctx, projectStore, bundles); err != nil {
+		t.Fatalf("materialize exact synthetic bundles: %v", err)
+	}
+	if _, err := projectStore.Database.DB().ExecContext(ctx,
+		"UPDATE projection_jobs SET state='dead_letter',attempt_count=8,last_error_code='synthetic_failure' WHERE revision_id=?",
+		revisionIDs[0]); err != nil {
+		t.Fatalf("mark synthetic job dead-letter: %v", err)
+	}
+	snapshot := projectionReconcileTestSnapshot(t, projectStore)
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+
+	defaultDryRun, err := RunProjectionReconciliation(ctx, projectStore, maintenance, snapshot, snapshot,
+		ProjectionReconcileOptions{MaxJobs: 10, MaxBytes: 8 << 20})
+	if err != nil || defaultDryRun.Scanned != 0 || defaultDryRun.ExactMatches != 0 ||
+		defaultDryRun.Pending != 0 || defaultDryRun.DeadLetter != 1 || defaultDryRun.DeadLetterIncluded {
+		t.Fatalf("default reconciliation should leave dead letters excluded: result=%+v err=%v", defaultDryRun, err)
+	}
+
+	deadLetterDryRun, err := RunProjectionReconciliation(ctx, projectStore, maintenance, snapshot, snapshot,
+		ProjectionReconcileOptions{MaxJobs: 10, MaxBytes: 8 << 20, IncludeDeadLetter: true})
+	if err != nil || deadLetterDryRun.Scanned != 1 || deadLetterDryRun.ExactMatches != 1 ||
+		deadLetterDryRun.Applied != 0 || deadLetterDryRun.Pending != 0 || deadLetterDryRun.DeadLetter != 1 ||
+		!deadLetterDryRun.DeadLetterIncluded {
+		t.Fatalf("dead-letter dry-run did not inspect without mutation: result=%+v err=%v", deadLetterDryRun, err)
+	}
+
+	deadLetterDryRun, err = RunProjectionReconciliation(ctx, projectStore, maintenance, snapshot, snapshot,
+		ProjectionReconcileOptions{MaxJobs: 10, MaxBytes: 8 << 20, IncludeDeadLetter: true, Apply: true})
+	if err != nil || deadLetterDryRun.State != "reconciled" || deadLetterDryRun.ExactMatches != 1 ||
+		deadLetterDryRun.Applied != 1 || deadLetterDryRun.Pending != 0 || deadLetterDryRun.DeadLetter != 0 {
+		t.Fatalf("apply should acknowledge only exact dead-letter matches: result=%+v err=%v", deadLetterDryRun, err)
+	}
+	for _, revisionID := range revisionIDs {
+		job, err := behaviorgraph.ProjectionJobByRevision(ctx, projectStore.Database.DB(), projectStore.ProjectKey, revisionID)
+		if err != nil || job.State != "applied" || job.LastErrorCode.Valid {
+			t.Fatalf("reconciled job state = %+v err=%v, want applied with cleared error", job, err)
+		}
+	}
+}
+
 func TestProjectionReconciliationRejectsSnapshotParityMismatch(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)

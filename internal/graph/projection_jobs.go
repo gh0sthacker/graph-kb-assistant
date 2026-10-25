@@ -204,8 +204,35 @@ func MarkReconciledProjectionJobApplied(
 	payloadSHA256 string,
 	appliedAt time.Time,
 ) error {
+	return markReconciledProjectionJobApplied(ctx, tx, projectKey, revisionID, payloadSHA256, "pending", appliedAt)
+}
+
+// MarkReconciledDeadLetterJobApplied acknowledges a dead-letter job only
+// after its exact payload records were verified in a parity-matched snapshot.
+// Callers must make dead-letter inclusion an explicit maintenance choice.
+func MarkReconciledDeadLetterJobApplied(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	revisionID string,
+	payloadSHA256 string,
+	appliedAt time.Time,
+) error {
+	return markReconciledProjectionJobApplied(ctx, tx, projectKey, revisionID, payloadSHA256, "dead_letter", appliedAt)
+}
+
+func markReconciledProjectionJobApplied(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	revisionID string,
+	payloadSHA256 string,
+	expectedState string,
+	appliedAt time.Time,
+) error {
 	if ctx == nil || tx == nil || !graphDigestPattern.MatchString(projectKey) ||
-		!validProjectionRevisionID(revisionID) || !validProjectionRevisionID(payloadSHA256) || appliedAt.IsZero() {
+		!validProjectionRevisionID(revisionID) || !validProjectionRevisionID(payloadSHA256) || appliedAt.IsZero() ||
+		(expectedState != "pending" && expectedState != "dead_letter") {
 		return ErrInvalidProjectionJob
 	}
 	if err := ctx.Err(); err != nil {
@@ -218,7 +245,7 @@ func MarkReconciledProjectionJobApplied(
 	if err != nil {
 		return err
 	}
-	if job.State != "pending" {
+	if job.State != expectedState {
 		return ErrProjectionJobNotPending
 	}
 	if job.PayloadSHA256 != payloadSHA256 {
@@ -228,8 +255,8 @@ func MarkReconciledProjectionJobApplied(
 	result, err := tx.ExecContext(ctx,
 		`UPDATE projection_jobs SET state='applied',lease_token=NULL,lease_until=NULL,
 		 applied_at=?,updated_at=?,last_error_code=NULL
-		 WHERE revision_id=? AND state='pending' AND payload_sha256=?`,
-		now, now, revisionID, payloadSHA256,
+		 WHERE revision_id=? AND state=? AND payload_sha256=?`,
+		now, now, revisionID, expectedState, payloadSHA256,
 	)
 	if err != nil {
 		return errors.New("reconciled projection acknowledgment could not be stored")

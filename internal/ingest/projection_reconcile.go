@@ -30,10 +30,11 @@ const (
 )
 
 type ProjectionReconcileOptions struct {
-	MaxJobs         int
-	MaxBytes        int64
-	AfterSequenceID int64
-	Apply           bool
+	MaxJobs           int
+	MaxBytes          int64
+	AfterSequenceID   int64
+	IncludeDeadLetter bool
+	Apply             bool
 }
 
 type ProjectionReconcileResult struct {
@@ -49,6 +50,8 @@ type ProjectionReconcileResult struct {
 	InvalidJobs         int    `json:"invalid_jobs"`
 	Applied             int    `json:"applied"`
 	Pending             int64  `json:"pending"`
+	DeadLetter          int64  `json:"dead_letter"`
+	DeadLetterIncluded  bool   `json:"dead_letter_included"`
 	NextSequenceID      int64  `json:"next_sequence_id,omitempty"`
 	Truncated           bool   `json:"truncated"`
 	ApplyRequested      bool   `json:"apply_requested"`
@@ -59,6 +62,7 @@ type projectionReconcileRef struct {
 	RevisionID   string
 	PayloadSHA   string
 	PayloadBytes int64
+	State        string
 }
 
 type projectionReconcileCandidate struct {
@@ -66,6 +70,7 @@ type projectionReconcileCandidate struct {
 	RevisionID string
 	PayloadSHA string
 	GraphID    string
+	State      string
 }
 
 // RunProjectionReconciliation acknowledges only pending projection jobs whose
@@ -101,7 +106,10 @@ func RunProjectionReconciliation(
 		options.MaxBytes < maxProjectionPayloadBytes || options.MaxBytes > maxProjectionReconcileBytes {
 		return ProjectionReconcileResult{}, errors.New("projection reconciliation limits are invalid")
 	}
-	result := ProjectionReconcileResult{ProjectKey: selected.ProjectKey, State: "partial", ApplyRequested: options.Apply}
+	result := ProjectionReconcileResult{
+		ProjectKey: selected.ProjectKey, State: "partial", ApplyRequested: options.Apply,
+		DeadLetterIncluded: options.IncludeDeadLetter,
+	}
 	if localSnapshot["program"] != selected.ProjectKey || neo4jSnapshot["program"] != selected.ProjectKey {
 		result.State = "parity_mismatch"
 		pending, countErr := countPendingProjectionJobs(ctx, selected.Database.DB())
@@ -109,6 +117,10 @@ func RunProjectionReconciliation(
 			return result, countErr
 		}
 		result.Pending = pending
+		result.DeadLetter, countErr = countDeadLetterProjectionJobs(ctx, selected.Database.DB())
+		if countErr != nil {
+			return result, countErr
+		}
 		return result, nil
 	}
 	localDigest, err := behaviorgraph.SnapshotDigest(localSnapshot)
@@ -128,14 +140,18 @@ func RunProjectionReconciliation(
 			return result, countErr
 		}
 		result.Pending = pending
+		result.DeadLetter, countErr = countDeadLetterProjectionJobs(ctx, selected.Database.DB())
+		if countErr != nil {
+			return result, countErr
+		}
 		return result, nil
 	}
 	localRecords, err := indexProjectionSnapshot(localSnapshot)
 	if err != nil {
 		return result, err
 	}
-	refs, truncated, err := listPendingProjectionReconcileRefs(
-		ctx, selected.Database.DB(), options.AfterSequenceID, options.MaxJobs, options.MaxBytes,
+	refs, truncated, err := listProjectionReconcileRefs(
+		ctx, selected.Database.DB(), options.AfterSequenceID, options.MaxJobs, options.MaxBytes, options.IncludeDeadLetter,
 	)
 	if err != nil {
 		return result, err
@@ -153,7 +169,7 @@ func RunProjectionReconciliation(
 			continue
 		}
 		job, err := behaviorgraph.ProjectionJobByRevision(ctx, selected.Database.DB(), selected.ProjectKey, ref.RevisionID)
-		if err != nil || job.State != "pending" || job.PayloadSHA256 != ref.PayloadSHA {
+		if err != nil || job.State != ref.State || (job.State != "pending" && (!options.IncludeDeadLetter || job.State != "dead_letter")) || job.PayloadSHA256 != ref.PayloadSHA {
 			result.InvalidJobs++
 			result.Scanned++
 			result.ScannedPayloadBytes += ref.PayloadBytes
@@ -181,7 +197,7 @@ func RunProjectionReconciliation(
 			result.ExactMatches++
 			candidates = append(candidates, projectionReconcileCandidate{
 				SequenceID: ref.SequenceID, RevisionID: job.RevisionID,
-				PayloadSHA: job.PayloadSHA256, GraphID: observationID,
+				PayloadSHA: job.PayloadSHA256, GraphID: observationID, State: job.State,
 			})
 		case "missing_records":
 			result.MissingRecords++
@@ -216,7 +232,11 @@ func RunProjectionReconciliation(
 	if err != nil {
 		return result, err
 	}
-	if !truncated && result.Pending == 0 {
+	result.DeadLetter, err = countDeadLetterProjectionJobs(ctx, selected.Database.DB())
+	if err != nil {
+		return result, err
+	}
+	if !truncated && result.Pending == 0 && result.DeadLetter == 0 {
 		if options.Apply && result.Applied > 0 {
 			result.State = "reconciled"
 		} else {
@@ -308,24 +328,26 @@ func projectionReconcileRecordKey(table string, record behaviorgraph.Record) (st
 	return id, nil
 }
 
-func listPendingProjectionReconcileRefs(
+func listProjectionReconcileRefs(
 	ctx context.Context,
 	db *sql.DB,
 	afterSequenceID int64,
 	maxJobs int,
 	maxBytes int64,
+	includeDeadLetter bool,
 ) ([]projectionReconcileRef, bool, error) {
 	if ctx == nil || db == nil || afterSequenceID < 0 || maxJobs < 1 || maxJobs > maxProjectionReconcileJobs ||
 		maxBytes < maxProjectionPayloadBytes || maxBytes > maxProjectionReconcileBytes {
-		return nil, false, errors.New("pending projection reconciliation query is invalid")
+		return nil, false, errors.New("projection reconciliation query is invalid")
 	}
 	rows, err := db.QueryContext(ctx,
-		`SELECT sequence_id,revision_id,payload_sha256,length(payload_json)
-		 FROM projection_jobs WHERE state='pending' AND sequence_id>?
-		 ORDER BY sequence_id LIMIT ?`, afterSequenceID, maxJobs+1,
+		`SELECT sequence_id,revision_id,payload_sha256,length(payload_json),state
+		 FROM projection_jobs
+		 WHERE sequence_id>? AND (state='pending' OR (?=1 AND state='dead_letter'))
+		 ORDER BY sequence_id LIMIT ?`, afterSequenceID, includeDeadLetter, maxJobs+1,
 	)
 	if err != nil {
-		return nil, false, errors.New("pending projection jobs could not be listed")
+		return nil, false, errors.New("projection jobs could not be listed")
 	}
 	defer rows.Close()
 	refs := make([]projectionReconcileRef, 0, min(maxJobs, 256))
@@ -333,8 +355,8 @@ func listPendingProjectionReconcileRefs(
 	truncated := false
 	for rows.Next() {
 		var ref projectionReconcileRef
-		if err := rows.Scan(&ref.SequenceID, &ref.RevisionID, &ref.PayloadSHA, &ref.PayloadBytes); err != nil {
-			return nil, false, errors.New("pending projection job metadata is invalid")
+		if err := rows.Scan(&ref.SequenceID, &ref.RevisionID, &ref.PayloadSHA, &ref.PayloadBytes, &ref.State); err != nil {
+			return nil, false, errors.New("projection job metadata is invalid")
 		}
 		if len(refs) >= maxJobs {
 			truncated = true
@@ -372,7 +394,7 @@ func applyReconciledProjectionJobs(
 		}
 		for _, candidate := range candidates[start:end] {
 			job, err := behaviorgraph.ProjectionJobByRevision(ctx, conn, selected.ProjectKey, candidate.RevisionID)
-			if err != nil || job.State != "pending" || job.PayloadSHA256 != candidate.PayloadSHA {
+			if err != nil || job.State != candidate.State || job.PayloadSHA256 != candidate.PayloadSHA {
 				rollbackProjectionConn(conn)
 				return applied, errors.New("projection reconciliation candidate changed before acknowledgment")
 			}
@@ -386,9 +408,17 @@ func applyReconciledProjectionJobs(
 				rollbackProjectionConn(conn)
 				return applied, errors.New("reconciled projection mapping could not be persisted")
 			}
-			if err := behaviorgraph.MarkReconciledProjectionJobApplied(
-				ctx, conn, selected.ProjectKey, candidate.RevisionID, candidate.PayloadSHA, now,
-			); err != nil {
+			var markErr error
+			if candidate.State == "dead_letter" {
+				markErr = behaviorgraph.MarkReconciledDeadLetterJobApplied(
+					ctx, conn, selected.ProjectKey, candidate.RevisionID, candidate.PayloadSHA, now,
+				)
+			} else {
+				markErr = behaviorgraph.MarkReconciledProjectionJobApplied(
+					ctx, conn, selected.ProjectKey, candidate.RevisionID, candidate.PayloadSHA, now,
+				)
+			}
+			if markErr != nil {
 				rollbackProjectionConn(conn)
 				return applied, errors.New("reconciled projection acknowledgment could not be stored")
 			}
@@ -410,6 +440,17 @@ func countPendingProjectionJobs(ctx context.Context, db *sql.DB) (int64, error) 
 	var count int64
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs WHERE state='pending'").Scan(&count); err != nil {
 		return 0, errors.New("pending projection queue count could not be read")
+	}
+	return count, nil
+}
+
+func countDeadLetterProjectionJobs(ctx context.Context, db *sql.DB) (int64, error) {
+	if ctx == nil || db == nil {
+		return 0, errors.New("dead-letter projection count is unavailable")
+	}
+	var count int64
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM projection_jobs WHERE state='dead_letter'").Scan(&count); err != nil {
+		return 0, errors.New("dead-letter projection count could not be read")
 	}
 	return count, nil
 }

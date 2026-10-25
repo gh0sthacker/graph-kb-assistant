@@ -19,6 +19,21 @@ card with the current local snapshot. It reports exact matches, missing or
 conflicting records, invalid jobs, queue size, and the snapshot digests. The
 default limits are 5,000 jobs and 512 MiB of normalized payload bytes.
 
+## Inspect dead-letter jobs
+
+Dead-letter jobs are excluded by default. Add `--include-dead-letter` to scan
+them in the same dry-run report. This does not retry or change them. With
+`--apply --include-dead-letter`, only jobs whose complete normalized payload
+is an exact subset of both parity-matched snapshots can be acknowledged as
+applied. Missing, conflicting, or invalid dead-letter jobs remain in
+`dead_letter`; they are never moved back to the worker queue automatically.
+
+```sh
+./scripts/bb-assistant projection-reconcile \
+  --project-key <registered-project-sha256> \
+  --include-dead-letter
+```
+
 ## Apply exact matches
 
 ```sh
