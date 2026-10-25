@@ -794,6 +794,10 @@ func (s *Service) RecordProposal(ctx context.Context, request RecordProposalRequ
 		!validOpaqueIDs(request.EvidenceReferenceIDs) || !validOpaqueIDs(request.ComparisonIDs) {
 		return ProposalRecord{}, ErrInvalidInput
 	}
+	// Treat omitted and explicitly empty comparison lists identically. The
+	// proposal record and digest are persisted and recomputed after resume, so
+	// preserve one canonical representation for either JSON form.
+	request.ComparisonIDs = append([]string(nil), request.ComparisonIDs...)
 	normalized := request
 	normalized.Proposal = proposal
 	hash, err := digestJSON(normalized)
