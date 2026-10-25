@@ -465,7 +465,10 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	}
 	match := make([]string, 0, len(terms))
 	for _, term := range terms {
-		match = append(match, `"`+strings.ReplaceAll(term, `"`, `""`)+`"*`)
+		// RedAmon's Neo4j/Lucene full-text query matches complete analyzed
+		// terms. Prefix expansion here (for example auth*) returns candidates
+		// RedAmon would not, changing the hybrid RRF pool and final results.
+		match = append(match, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
 	}
 	statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
 		substr(c.source_id,1,1025),substr(c.title,1,2049),substr(c.text,1,?),
