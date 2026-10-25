@@ -2414,6 +2414,32 @@ This repository is an early public alpha. The following boundaries are deliberat
   MMR, top-k, and citation provenance. FTS-only or synthetic-test success is
   not KB parity.
 
+## Latest local delivery checkpoint (2026-10-25, verified runtime state)
+
+- The installed local UI's read-only `/api/runtime-capabilities` endpoint
+  returned HTTP 200 and reported `evidence_vault_key_state=verified`. No
+  existing capture body or project database was opened in this check. This
+  supersedes earlier checkpoints that described the vault key as missing or
+  invalid, but does not prove completeness or integrity of every retained
+  capture.
+- The current imported KB snapshot is
+  `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`, with
+  161,240 documents and 162,413 chunks. Six source families are `done`; the
+  only source-coverage blocker is ExploitDB reuse terms. Therefore this is not
+  exact full-corpus parity with RedAmon.
+- E5 vectorization is actively running and restartable. The latest read-only
+  SQLite count is 1,856/162,413 stored vectors; `vector_snapshot_id` is not
+  published for this partial generation, so vector search is not ready yet.
+- Verification after the latest embedding-order optimization: all 19 Python
+  KB CLI/ranking/provider tests passed, as did `go test -count=1
+  ./internal/kb ./internal/mcpserver`. These tests use fixtures; they do not
+  establish complete vector search or access to real target traffic.
+- KB code commit `3e7ec26` and this status update commit are pushed to
+  `codex/consultation-empty-comparisons`. The app's broader delivery remains
+  `PARTIAL`: the plan's synthetic graph/evidence/consultation paths are
+  implemented, but project-data completeness, external client reachability,
+  and real-target readiness have not been established here.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
 
 ### RedAmon KB parity update — 2026-10-25 (PARTIAL)
