@@ -2388,6 +2388,14 @@ This repository is an early public alpha. The following boundaries are deliberat
   vector embeddings are stored or produced and BGE reranking is not wired into
   live search. Therefore these implemented stages do not yet make retrieval
   parity.
+- The running product uses the Go read-only KB index, not the Python CLI
+  search path. The Go MCP runtime now also filters `license_notice` rows,
+  overfetches candidate chunks, and applies top-5, single-list RRF-equivalent
+  scoring, source boosts and the same source/title MMR proxy. A dedicated Go
+  fixture confirms a term present only in a license notice is not returned.
+  The focused Go KB, MCP facade, and managed-app tests pass.
+  The live Go path still has no vector candidate provider or BGE reranker, so
+  the two-list RRF and cross-encoder stages remain unimplemented at runtime.
 - A new full-profile build is running in a disposable directory, not against
   the application's private index. It uses the 730-day NVD window without a
   CVSS floor. It began before the chunk-schema update, so it can establish

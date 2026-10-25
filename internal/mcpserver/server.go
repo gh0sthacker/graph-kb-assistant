@@ -759,7 +759,7 @@ func (t *Tools) searchKB(ctx context.Context, args kbSearchArgs) (map[string]any
 	if strings.TrimSpace(args.Query) == "" || utf8.RuneCountInString(args.Query) > 4096 {
 		return nil, errors.New("KB query must contain 1 to 4096 characters")
 	}
-	topK := 10
+	topK := kb.DefaultSearchTopK
 	if args.TopK != nil {
 		topK = *args.TopK
 	}
@@ -778,7 +778,9 @@ func (t *Tools) searchKB(ctx context.Context, args kbSearchArgs) (map[string]any
 			"source_url": hit.SourceURL, "source_revision": hit.SourceRevision,
 			"license_id": hit.LicenseID, "attribution": hit.Attribution,
 			"source_sha256": hit.SourceSHA256, "chunk_sha256": hit.ChunkSHA256,
-			"span": map[string]int{"start_char": hit.StartChar, "end_char": hit.EndChar}, "bm25": hit.BM25,
+			"span": map[string]int{"start_char": hit.StartChar, "end_char": hit.EndChar},
+			"bm25": hit.BM25, "rank_score": hit.RankScore,
+			"vector_score": hit.VectorScore, "rerank_score": hit.RerankScore,
 		})
 	}
 	output := map[string]any{

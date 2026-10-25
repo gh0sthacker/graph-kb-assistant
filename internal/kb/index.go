@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,7 +26,7 @@ import (
 )
 
 const (
-	DefaultSearchTopK          = 10
+	DefaultSearchTopK          = 5
 	MaximumSearchTopK          = 100
 	maximumSourceFilters       = 32
 	maximumSourceNameBytes     = 128
@@ -128,6 +129,9 @@ type Hit struct {
 	StartChar      int            `json:"start_char"`
 	EndChar        int            `json:"end_char"`
 	BM25           float64        `json:"bm25"`
+	RankScore      float64        `json:"rank_score"`
+	VectorScore    *float64       `json:"vector_score,omitempty"`
+	RerankScore    *float64       `json:"rerank_score,omitempty"`
 }
 
 // OpenIndex validates the path and required Python index schema without
@@ -430,7 +434,8 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		CASE WHEN length(CAST(c.metadata_json AS BLOB))<=? THEN c.metadata_json END,c.start_char,c.end_char,
 		bm25(chunk_search,0.0,0.0,4.0,1.0)
 		FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
-		WHERE chunk_search MATCH ?`
+		WHERE chunk_search MATCH ?
+		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
 	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, strings.Join(match, " OR ")}
 	if len(sources) != 0 {
 		placeholders := make([]string, len(sources))
@@ -440,8 +445,9 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		}
 		statement += " AND c.source_name IN (" + strings.Join(placeholders, ",") + ")"
 	}
+	candidateLimit := max(options.TopK*6, 30)
 	statement += " ORDER BY 16 LIMIT ?"
-	args = append(args, options.TopK)
+	args = append(args, candidateLimit)
 	rows, err := tx.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return SearchResult{}, errors.New("KB full-text search failed")
@@ -487,6 +493,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if err := rows.Close(); err != nil {
 		return SearchResult{}, errors.New("KB full-text search could not finish")
 	}
+	result.Hits = rankFullTextHits(result.Hits, options.TopK)
 	encoded, err := json.Marshal(result)
 	if err != nil || len(encoded) > maximumSearchResultBytes {
 		return SearchResult{}, errors.New("KB search result exceeds the output limit")
@@ -495,6 +502,78 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		return SearchResult{}, errors.New("KB read transaction could not finish")
 	}
 	return result, nil
+}
+
+var redAmonSourceBoosts = map[string]float64{
+	"tool_docs": 1.20, "gtfobins": 1.15, "lolbas": 1.15,
+	"owasp": 1.05, "nuclei": 1.00, "nvd": 0.90, "exploitdb": 0.85,
+}
+
+func rankFullTextHits(hits []Hit, topK int) []Hit {
+	if topK < 1 || len(hits) == 0 {
+		return []Hit{}
+	}
+	for rank := range hits {
+		boost := redAmonSourceBoosts[hits[rank].SourceName]
+		if boost == 0 {
+			boost = 1
+		}
+		hits[rank].RankScore = boost / float64(61+rank)
+	}
+	sort.SliceStable(hits, func(a, b int) bool { return hits[a].RankScore > hits[b].RankScore })
+	if len(hits) <= topK {
+		return hits
+	}
+	selected := make([]Hit, 0, topK)
+	selected = append(selected, hits[0])
+	remaining := append([]Hit(nil), hits[1:]...)
+	for len(selected) < topK && len(remaining) > 0 {
+		bestIndex := 0
+		bestScore := math.Inf(-1)
+		for index, candidate := range remaining {
+			maxSimilarity := 0.0
+			for _, chosen := range selected {
+				if similarity := kbChunkSimilarity(candidate, chosen); similarity > maxSimilarity {
+					maxSimilarity = similarity
+				}
+			}
+			mmr := 0.65*candidate.RankScore - 0.35*maxSimilarity
+			if mmr > bestScore {
+				bestIndex, bestScore = index, mmr
+			}
+		}
+		selected = append(selected, remaining[bestIndex])
+		remaining = append(remaining[:bestIndex], remaining[bestIndex+1:]...)
+	}
+	return selected
+}
+
+func kbChunkSimilarity(a, b Hit) float64 {
+	score := 0.0
+	if a.SourceName != "" && a.SourceName == b.SourceName {
+		score += 0.4
+	}
+	tokensA, tokensB := strings.Fields(strings.ToLower(a.Title)), strings.Fields(strings.ToLower(b.Title))
+	setA, setB := make(map[string]struct{}, len(tokensA)), make(map[string]struct{}, len(tokensB))
+	for _, token := range tokensA {
+		setA[token] = struct{}{}
+	}
+	for _, token := range tokensB {
+		setB[token] = struct{}{}
+	}
+	if len(setA)+len(setB) > 0 {
+		intersection := 0
+		for token := range setA {
+			if _, exists := setB[token]; exists {
+				intersection++
+			}
+		}
+		union := len(setA) + len(setB) - intersection
+		if union > 0 {
+			score += 0.6 * float64(intersection) / float64(union)
+		}
+	}
+	return math.Min(score, 1.0)
 }
 
 func (i *Index) validate(ctx context.Context) error {

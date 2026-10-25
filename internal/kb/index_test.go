@@ -118,6 +118,40 @@ func TestOpenIndexReadsPythonCompatibleFTSIndexReadOnly(t *testing.T) {
 	}
 }
 
+func TestSearchDoesNotReturnLicenseNoticeOnlyMatches(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "ordinary authentication reference content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice := "rarequestermonly"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, strings.Repeat("b", 64), "synthetic", "NOTICE:license", "License", 0,
+		len(notice), `{"document_role":"license_notice"}`, digestHex(notice), digestHex(notice), "bb-kb-chunk-v1", notice)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`,
+			strings.Repeat("b", 64), "synthetic", "License", notice)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("add synthetic license-only row: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "rarequestermonly", SearchOptions{})
+	if err != nil || len(result.Hits) != 0 {
+		t.Fatalf("license-only search = %d hits, %v; want no hits", len(result.Hits), err)
+	}
+}
+
 func TestOpenIndexDoesNotCreateMissingIndex(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "missing", "index.sqlite3")
 	if _, err := OpenIndex(indexPath); err == nil {
@@ -125,6 +159,36 @@ func TestOpenIndexDoesNotCreateMissingIndex(t *testing.T) {
 	}
 	if _, err := os.Stat(indexPath); !os.IsNotExist(err) {
 		t.Fatalf("OpenIndex() created a missing index or returned an unexpected stat error: %v", err)
+	}
+}
+
+func TestRankFullTextHitsUsesRedAmonBoostsDiversityAndTopK(t *testing.T) {
+	hits := []Hit{
+		{ChunkID: "a", SourceName: "tool_docs", Title: "Authentication Guide"},
+		{ChunkID: "b", SourceName: "tool_docs", Title: "Authentication Guide duplicate"},
+		{ChunkID: "c", SourceName: "gtfobins", Title: "Linux privilege escalation"},
+		{ChunkID: "d", SourceName: "nvd", Title: "CVE record"},
+	}
+	ranked := rankFullTextHits(hits, 2)
+	if len(ranked) != 2 || ranked[0].ChunkID != "a" || ranked[1].ChunkID != "c" {
+		t.Fatalf("rankFullTextHits() IDs = %#v, want [a c]", []string{ranked[0].ChunkID, ranked[1].ChunkID})
+	}
+	if ranked[0].RankScore <= ranked[1].RankScore || ranked[1].RankScore <= 0 {
+		t.Fatalf("rankFullTextHits() scores = %f, %f", ranked[0].RankScore, ranked[1].RankScore)
+	}
+}
+
+func TestKBChunkSimilarityMatchesSourceAndTitleProxy(t *testing.T) {
+	similar := kbChunkSimilarity(
+		Hit{SourceName: "owasp", Title: "Session authentication testing"},
+		Hit{SourceName: "owasp", Title: "Session authentication checks"},
+	)
+	different := kbChunkSimilarity(
+		Hit{SourceName: "owasp", Title: "Session authentication testing"},
+		Hit{SourceName: "nvd", Title: "Kernel memory corruption"},
+	)
+	if similar <= different || similar > 1 || different < 0 {
+		t.Fatalf("similarity values = %f and %f", similar, different)
 	}
 }
 
