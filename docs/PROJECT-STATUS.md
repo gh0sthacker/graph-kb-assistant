@@ -17,15 +17,34 @@
 - A real browser smoke check against a disposable SQLite project verified graph
   navigation, exact stored HTTP viewing, a byte comparison across two capture
   revisions, a four-span redacted packet with synthetic Authorization headers
-  removed, saving an unaccepted local review session, and reopening that same
-  session by its ID. The session was not accepted for Hermes access and no
-  provider/model call was made. The disposable fixture was stopped afterward.
-- The next step is action-time operator acceptance of that exact synthetic
-  packet, followed by the candidate/save/resume browser path. Hermes ChatGPT
-  OAuth is pending the user's own sign-in in the opened browser; its first
-  login attempt timed out before browser completion. Current runtime Neo4j delivery and
-  existing-vault use remain unverified;
-  KB expansion and target recon coverage are outside this delivery criterion.
+  removed, saving a local review session, and reopening that same session by
+  its ID. That initial pass did not accept the session or call a provider/model;
+  the follow-up synthetic pass below accepted and resumed it. The disposable
+  fixture was stopped afterward.
+- The accepted synthetic session was then resumed, a byte comparison was
+  attached, and an evidence-linked candidate was saved and recovered. The
+  candidate remains `candidate`, with four verified evidence references and
+  one comparison; this is not a finding or impact confirmation. No Hermes model
+  invocation was made. Current runtime Neo4j delivery and existing-vault use
+  remain unverified; KB expansion and target recon coverage are outside this
+  delivery criterion.
+
+## Synthetic Hermes candidate save/resume — VERIFIED IN LOCAL FIXTURE (2026-10-25)
+
+- A local browser run accepted the exact synthetic redacted packet, resumed its
+  saved consultation, attached the exact-revision comparison, validated the
+  proposal citations, saved the candidate, and resumed again. The candidate
+  and its four evidence references plus comparison ID were present after
+  recovery.
+- Fixed the UI receipt status check to match the server's
+  `references_validated` value; previously the browser rejected a valid server
+  receipt and did not finish saving the candidate. Attaching a comparison now
+  immediately refreshes the candidate comparison selector without requiring a
+  session resume.
+- Validation used only the disposable synthetic SQLite fixture. No live
+  Caido traffic, Neo4j runtime, real evidence, or Hermes/ChatGPT provider call
+  was used. Browser acceptance does not establish production deployment or
+  model-backed readiness.
 
 ## Shared launcher runtime configuration — FIXED IN SOURCE (2026-10-25)
 

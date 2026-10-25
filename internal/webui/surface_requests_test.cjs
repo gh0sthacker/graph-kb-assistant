@@ -926,13 +926,17 @@ test("a graph comparison can be attached to a resumed accepted consultation only
   assert.equal(request.right_revision_id, selectedRevision);
   assert.ok(request.idempotency_key);
 
-  app.requests[2].resolve({ comparison_id: "comparison-saved", session_version: 4 });
+  const savedComparisonID = "d".repeat(43);
+  app.requests[2].resolve({ comparison_id: savedComparisonID, session_version: 4 });
   await attach;
   assert.equal(app.state.consultation.version, 4);
   assert.equal(app.elements.comparisonAttachButton.disabled, true);
-  assert.match(app.elements.comparisonAttachStatus.textContent, /comparison-saved/);
+  assert.match(app.elements.comparisonAttachStatus.textContent, new RegExp(savedComparisonID));
   assert.equal(app.elements.comparisonAttachStatus.textContent.includes("GET /item?id=1"), false);
   assert.equal(app.elements.consultationReview.hidden, false);
+  const candidateComparisons = app.elements.candidateComparisons.querySelectorAll("input");
+  assert.equal(candidateComparisons.length, 1);
+  assert.equal(candidateComparisons[0].value, savedComparisonID);
 });
 
 test("candidate workflow validates selected session citations before saving an explicitly unconfirmed candidate", async () => {
@@ -990,7 +994,7 @@ test("candidate workflow validates selected session citations before saving an e
   const validateRequest = JSON.parse(app.requests[3].body);
   assert.equal(validateRequest.expected_version, 4);
   assert.equal(validateRequest.proposal_id, "proposal-1");
-  app.requests[3].resolve({ receipt_id: "receipt-1", session_version: 5, status: "references_valid" });
+  app.requests[3].resolve({ receipt_id: "receipt-1", session_version: 5, status: "references_validated" });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.requests[4].url.pathname, "/api/consultation/candidate");
   const candidateRequest = JSON.parse(app.requests[4].body);
@@ -1080,7 +1084,7 @@ test("resuming after an interrupted proposal validates the saved proposal instea
   assert.equal(validateRequest.expected_version, 5);
   assert.equal(validateRequest.proposal_id, proposalID);
   app.requests[1].resolve({ receipt_id: "g".repeat(43), proposal_id: proposalID, proposal_digest: "f".repeat(64),
-    evidence_reference_ids: [referenceID], comparison_ids: [comparisonID], status: "references_valid", session_version: 6 });
+    evidence_reference_ids: [referenceID], comparison_ids: [comparisonID], status: "references_validated", session_version: 6 });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.requests[2].url.pathname, "/api/consultation/candidate");
   assert.equal(JSON.parse(app.requests[2].body).expected_version, 6);
@@ -1108,7 +1112,7 @@ test("resuming with a matching valid receipt saves its candidate without validat
     evidence_references: [{ evidence_reference_id: referenceID, evidence_index: 0, side: "request", source_integrity_status: "verified", sha256: "f".repeat(64) }],
     proposals: [{ proposal_id: proposalID, proposal_digest: digest, evidence_reference_ids: [referenceID], comparison_ids: [] }],
     validation_receipts: [{ receipt_id: receiptID, proposal_id: proposalID, proposal_digest: digest,
-      evidence_reference_ids: [referenceID], comparison_ids: [], status: "references_valid" }],
+      evidence_reference_ids: [referenceID], comparison_ids: [], status: "references_validated" }],
   });
   await resume;
   assert.match(app.elements.candidateRecoveryList.children[0].children[1].textContent, /Matching valid receipt/);

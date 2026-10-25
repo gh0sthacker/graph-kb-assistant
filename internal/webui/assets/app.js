@@ -1029,7 +1029,7 @@ function sameCandidateIDs(left, right) {
 }
 
 function matchingCandidateReceipt(session, proposal) {
-  return (session?.validationReceipts || []).find(receipt => receipt?.status === "references_valid" &&
+  return (session?.validationReceipts || []).find(receipt => receipt?.status === "references_validated" &&
     receipt.proposal_id === proposal?.proposal_id && receipt.proposal_digest === proposal?.proposal_digest &&
     sameCandidateIDs(receipt.evidence_reference_ids, proposal.evidence_reference_ids) &&
     sameCandidateIDs(receipt.comparison_ids, proposal.comparison_ids));
@@ -1167,7 +1167,7 @@ async function runCandidateWorkflow(session, projectKey, { proposal: proposalDra
         proposal_id: proposal.proposal_id,
       });
       if (state.consultation !== session || state.projectKey !== projectKey) return;
-      if (receipt.status !== "references_valid") throw new Error("The server did not validate the candidate references.");
+      if (receipt.status !== "references_validated") throw new Error("The server did not validate the candidate references.");
       session.version = receipt.session_version;
       session.validationReceipts = appendCandidateRecord(session.validationReceipts, receipt, "receipt_id");
     }
@@ -1300,6 +1300,7 @@ async function attachComparisonToConsultation() {
     session.comparisons = [...(session.comparisons || []), record];
     comparison.attachedComparisonId = record.comparison_id;
     delete comparison.attachError;
+    renderConsultationCandidate(session);
     updateComparisonAttachmentControl();
   } catch (error) {
     if (state.comparison !== comparison || state.consultation !== session || state.projectKey !== projectKey) return;
