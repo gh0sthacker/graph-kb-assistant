@@ -541,6 +541,7 @@ func buildHistoricalBundles(projectKey string, rootKey []byte, prepared []prepar
 	defer clear(fieldValueKey)
 	bundles := make([]behaviorgraph.Record, 0, len(prepared))
 	graphObservationIDs := make([]string, 0, len(prepared))
+	exchanges := make([]caido.HttpExchange, 0, len(prepared))
 	for index, item := range prepared {
 		ref := sourceRefs[index]
 		requestSignature, signatureErr := behaviorgraph.VariantSignature(item.exchange, true, indexKey, responseKey)
@@ -563,6 +564,10 @@ func buildHistoricalBundles(projectKey string, rootKey []byte, prepared []prepar
 		}
 		bundles = append(bundles, bundle)
 		graphObservationIDs = append(graphObservationIDs, observationID)
+		exchanges = append(exchanges, item.exchange)
+	}
+	if err := behaviorgraph.AddPageNavigationAssertions(bundles, exchanges); err != nil {
+		return nil, nil, err
 	}
 	return bundles, graphObservationIDs, nil
 }

@@ -887,6 +887,18 @@ func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]
 		item.graphObservationID = graphObservationID
 		prepared = append(prepared, item)
 	}
+	pageBundles := make([]behaviorgraph.Record, 0, len(prepared))
+	pageExchanges := make([]caido.HttpExchange, 0, len(prepared))
+	for _, item := range prepared {
+		pageBundles = append(pageBundles, item.bundle)
+		pageExchanges = append(pageExchanges, item.exchange)
+	}
+	if err := behaviorgraph.AddPageNavigationAssertions(pageBundles, pageExchanges); err != nil {
+		return nil, err
+	}
+	for index := range prepared {
+		prepared[index].bundle = pageBundles[index]
+	}
 	return prepared, nil
 }
 

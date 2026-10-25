@@ -95,6 +95,8 @@ const relationLabels = {
   contradicts: "contradicts hypothesis",
   contains: "contains",
   precedes: "precedes",
+  referrer_context_for: "referer matches",
+  redirects_to: "redirects to",
 };
 const MASKED_PATH_HELP = "Graph route labels hide dynamic values so IDs and secrets do not become graph data. To inspect one saved request's exact path, open its linked capture with Open stored HTTP; live-only records remain in Caido.";
 const kindColors = { observation: "#83c8cf", endpoint: "#e0b56b", operation: "#83b5e8", parameter: "#b8a3da", asset: "#b2d88a" };

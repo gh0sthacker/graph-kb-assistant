@@ -96,6 +96,12 @@ function renderedText(root) {
   return [root.textContent || "", ...(root.children || []).map(renderedText)].join(" ");
 }
 
+test("navigation assertions have readable graph relationship labels", () => {
+  const app = createApp();
+  assert.equal(app.relationLabels.referrer_context_for, "referer matches");
+  assert.equal(app.relationLabels.redirects_to, "redirects to");
+});
+
 test("flow evidence order can be edited, saved in order, and reopened as numbered analyst-defined steps", async () => {
   const app = createApp();
   const projectKey = "a".repeat(64);

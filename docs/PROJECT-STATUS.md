@@ -1,5 +1,29 @@
 # Project status and known limitations
 
+## Stage 3 exact HTTP navigation links during page import — PARTIAL (2026-10-25)
+
+- The Go historical and live import paths now add request-to-request
+  `referrer_context_for` links when a request's unique, valid `Referer` URL
+  exactly matches one request in the same imported page. They add
+  `redirects_to` links when a unique 3xx response `Location` exactly matches
+  another request in that page. Ambiguous duplicate matches, duplicate
+  headers, malformed URLs, and credential-bearing URLs are skipped.
+- Assertions retain both exchange receipt references and record the exact
+  match basis as `referrer_exact_url` or `redirect_exact_url`, with
+  `causality=navigation_evidence_only`. The predecessor observation is
+  included in the same projection bundle, so an out-of-order worker does not
+  lose the endpoint before applying the assertion. URL values are used only in
+  memory for matching and are not added to graph context. No `precedes`
+  assertion is inferred.
+- Graph labels now render these predicates as `referer matches` and
+  `redirects to`. Synthetic tests passed with
+  `TMPDIR=/var/tmp go test -count=1 ./internal/graph ./internal/ingest` and
+  77/77 Node UI tests; `git diff --check` passed. No Caido, runtime project
+  database, Neo4j service, or model was accessed.
+- Matching across separate imported pages and against prior historical/live
+  candidates remains incomplete; runtime Neo4j projection remains unverified.
+  Stage 3 remains `PARTIAL`.
+
 ## Stage 4 analyst-defined flow order — PARTIAL (2026-10-25)
 
 - Before accepting the consultation review, an analyst can select evidence
