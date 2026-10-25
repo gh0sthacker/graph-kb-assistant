@@ -194,6 +194,40 @@ func TestPrepareSnapshotPromotesFieldEqualitySignatureForProjectScopedTraversal(
 	}
 }
 
+func TestPrepareSnapshotKeepsURLReferencesSeparateFromFieldEqualityLookup(t *testing.T) {
+	projectKey := strings.Repeat("a", 64)
+	snapshot := testSnapshot(projectKey)
+	source := snapshot["sources"].([]behaviorgraph.Record)[0]
+	urlID := "url_reference-" + strings.Repeat("c", 64)
+	signature := strings.Repeat("d", 64)
+	snapshot["entities"] = append(snapshot["entities"].([]behaviorgraph.Record), behaviorgraph.Record{
+		"id": urlID, "kind": "url_reference",
+		"data": behaviorgraph.Record{
+			"program": projectKey, "token_version": "project-url-hmac-v1",
+			"normalization": "http_url_index_v1", "equality_signature": signature,
+		},
+		"source_refs": []behaviorgraph.Record{source},
+	})
+	prepared, err := prepareSnapshot(projectKey, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range prepared.Records {
+		if record.ID != urlID {
+			continue
+		}
+		if record.Kind != "url_reference" || record.FieldEqualitySignature != "" || !strings.Contains(record.Payload, signature) {
+			t.Fatal("native graph preparation lost URL identity or mixed it with field equality")
+		}
+		rows := recordRows([]preparedRecord{record})
+		if rows[0]["kind"] != "url_reference" {
+			t.Fatal("native Neo4j row lost the URL reference kind")
+		}
+		return
+	}
+	t.Fatal("native graph preparation omitted the URL reference")
+}
+
 func TestFieldValueTraversalQueryIsProjectScopedBoundedAndDoesNotReturnSignature(t *testing.T) {
 	query := fieldValueTraversalSeedsQuery
 	if strings.Count(query, "project_key: $project_key") < 10 ||

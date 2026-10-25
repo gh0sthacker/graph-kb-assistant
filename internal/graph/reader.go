@@ -42,7 +42,7 @@ var (
 	allowedKinds       = map[string]struct{}{
 		"asset": {}, "endpoint": {}, "operation": {}, "actor": {}, "session_context": {}, "object": {},
 		"observation": {}, "parameter": {}, "condition": {}, "flow": {},
-		"field_occurrence": {}, "value_reference": {},
+		"field_occurrence": {}, "value_reference": {}, "url_reference": {},
 		"classifier_signal": {}, "hypothesis": {}, "request_variant": {}, "response_variant": {},
 	}
 )
@@ -687,7 +687,7 @@ func validateEntity(record Record, schema int, program string) error {
 			return errors.New("parameter ID does not match its content")
 		}
 	}
-	if kind == "field_occurrence" || kind == "value_reference" {
+	if kind == "field_occurrence" || kind == "value_reference" || kind == "url_reference" {
 		expectedID, err := historicalEntityID(kind, Record(data))
 		if err != nil || expectedID != id {
 			return errors.New("field correlation entity ID does not match its content")
@@ -774,6 +774,15 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 			!okType || !validOccurrenceType || !validNonnegativeInteger(data["occurrence_index"]) ||
 			!validFieldSourceSpan(data["source_span"], expectedBasis) || !validOptionalFieldValueSpan(data["value_span"], data["source_span"]) {
 			return errors.New("invalid field occurrence metadata")
+		}
+	case "url_reference":
+		if !exactKeys(data, "program", "token_version", "normalization", "equality_signature") ||
+			data["program"] != program || data["token_version"] != "project-url-hmac-v1" || data["normalization"] != "http_url_index_v1" {
+			return errors.New("invalid project-keyed URL reference")
+		}
+		token, okToken := data["equality_signature"].(string)
+		if !okToken || !graphDigestPattern.MatchString(token) {
+			return errors.New("invalid project-keyed URL token")
 		}
 	case "value_reference":
 		tokenVersion := data["token_version"]

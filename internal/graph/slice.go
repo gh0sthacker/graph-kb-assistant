@@ -27,6 +27,7 @@ var allowedPredicates = map[string]struct{}{
 	"owned_by":      {}, "visible_to": {}, "value_used_in": {}, "requires": {}, "produces": {},
 	"supports": {}, "contradicts": {}, "contains": {}, "precedes": {}, "uses_request_variant": {},
 	"received_response": {}, "referrer_context_for": {}, "redirects_to": {},
+	"uses_request_url": {}, "referrer_url_matches": {}, "redirect_url_matches": {},
 }
 
 var allowedOrigins = map[string]struct{}{"parsed": {}, "operator_asserted": {}, "model_proposed": {}, "check_result": {}}

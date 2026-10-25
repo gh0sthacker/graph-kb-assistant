@@ -562,6 +562,9 @@ func buildHistoricalBundles(projectKey string, rootKey []byte, prepared []prepar
 		if err != nil || observationID == "" {
 			return nil, nil, errors.New("historical graph bundle could not be built")
 		}
+		if err := behaviorgraph.AddNavigationURLReferences(bundle, item.exchange, observationID, indexKey); err != nil {
+			return nil, nil, err
+		}
 		bundles = append(bundles, bundle)
 		graphObservationIDs = append(graphObservationIDs, observationID)
 		exchanges = append(exchanges, item.exchange)

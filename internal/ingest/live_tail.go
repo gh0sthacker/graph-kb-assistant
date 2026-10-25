@@ -892,6 +892,9 @@ func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]
 		if err != nil || !strings.HasPrefix(graphObservationID, "observation-") {
 			return nil, errors.New("live-tail graph bundle could not be built")
 		}
+		if err := behaviorgraph.AddNavigationURLReferences(bundle, exchange, graphObservationID, w.indexKey); err != nil {
+			return nil, err
+		}
 		item.bundle = bundle
 		item.graphObservationID = graphObservationID
 		prepared = append(prepared, item)

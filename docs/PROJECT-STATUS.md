@@ -1,5 +1,33 @@
 # Project status and known limitations
 
+## Stage 3 project URL references across import pages — PARTIAL (2026-10-25)
+
+- New historical and live projections include versioned `url_reference`
+  nodes keyed by a project HMAC of the normalized URL. `uses_request_url`,
+  `referrer_url_matches`, and `redirect_url_matches` assertions cite only the
+  originating capture's receipt. Shared nodes connect captures from separate
+  pages and preserve every duplicate match without selecting an initiator.
+  Raw URL values are absent from these records.
+- Relative navigation headers resolve against the request's full URL,
+  including its directory and query. An unresolved response-status mismatch
+  cannot generate a redirect match. Writer validation checks URL-reference
+  identities, project boundaries, version, and exact receipt locators.
+- Focused graph navigation exposes URL matches and their request/Referer/
+  redirect roles. The inspector explains duplicate matches and unknown order
+  and causality; URL signatures are omitted from UI labels and properties.
+  URL nodes are hidden in the overview alongside other capture-level details.
+- Synthetic acceptance imports a redirect source and matching captures in
+  separate historical pages, then projects the real local graph and queries
+  the shared application graph API. Both duplicate targets are returned; a
+  different query value is excluded. Project separation, replay identity,
+  raw-value absence, relative resolution, and native Neo4j row preparation
+  are also checked. Go graph/ingest/graphaccess/search/webui tests and 78/78
+  Node tests passed. Native row preparation used unit tests only.
+- Existing accepted projections are immutable and have not been rewritten;
+  adding these references to older captures still requires an explicit
+  versioned backfill. Runtime Neo4j, Caido, and model verification remain
+  outside this synthetic checkpoint. Stage 3 remains `PARTIAL`.
+
 ## Stage 3 exact HTTP navigation links during page import — PARTIAL (2026-10-25)
 
 - The Go historical and live import paths now add request-to-request
@@ -38,7 +66,7 @@
   `TMPDIR=/var/tmp go test -count=1 ./internal/graph ./internal/ingest` and
   77/77 Node UI tests; `git diff --check` passed. No Caido, runtime project
   database, Neo4j service, or model was accessed.
-- Historical matching across page boundaries and retroactive re-evaluation
+- Direct observation matching across historical page boundaries and retroactive re-evaluation
   when later duplicate URLs are discovered remain incomplete; runtime Neo4j
   projection remains unverified.
   Stage 3 remains `PARTIAL`.

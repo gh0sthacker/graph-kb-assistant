@@ -533,10 +533,13 @@ func (w *Writer) normalizeBundle(bundle Record) (Record, error) {
 }
 
 func requiresExactSourceRefs(record Record) bool {
-	if record["kind"] == "field_occurrence" {
+	if record["kind"] == "field_occurrence" || record["kind"] == "url_reference" {
 		return true
 	}
 	if record["predicate"] == "has_occurrence" || record["predicate"] == "occurrence_of" || record["predicate"] == "value_used_in" {
+		return true
+	}
+	if record["predicate"] == "uses_request_url" || record["predicate"] == "referrer_url_matches" || record["predicate"] == "redirect_url_matches" {
 		return true
 	}
 	return false

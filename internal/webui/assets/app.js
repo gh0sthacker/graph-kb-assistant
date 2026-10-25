@@ -5,7 +5,7 @@ const MAX_GRAPH_ZOOM = 10;
 const MIN_GRAPH_ZOOM = 0.35;
 const MAX_EVIDENCE_PREVIEW_BYTES = 2 << 20;
 const FIELD_VALUE_TRAVERSAL_STATES = new Set(["expanded", "bounded", "index_unavailable", "no_matches", "not_applicable"]);
-const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant", "field_occurrence", "value_reference"];
+const OVERVIEW_HIDDEN_KINDS = ["observation", "request_variant", "response_variant", "field_occurrence", "value_reference", "url_reference"];
 const state = {
   projects: [], projectCursor: null, projectKey: "", endpoints: [], endpointCursor: null, surfaceGaps: [],
   operationAliases: new Map(), operationAliasRequestId: 0,
@@ -71,14 +71,14 @@ const nodeLabels = {
   asset: "HOST", actor: "ACTOR", object: "OBJECT", session_context: "SESSION CONTEXT",
   condition: "CONDITION", flow: "FLOW", classifier_signal: "SIGNAL",
   hypothesis: "HYPOTHESIS", request_variant: "REQUEST SHAPE", response_variant: "RESPONSE SHAPE",
-  field_occurrence: "FIELD OCCURRENCE", value_reference: "VALUE MATCH",
+  field_occurrence: "FIELD OCCURRENCE", value_reference: "VALUE MATCH", url_reference: "URL MATCH",
 };
 const filterLabels = {
   observation: "Requests", endpoint: "Endpoints", operation: "Operations", parameter: "Parameters", asset: "Hosts",
   actor: "Actors", object: "Objects", session_context: "Contexts",
   condition: "Conditions", flow: "Flows", classifier_signal: "Signals",
   hypothesis: "Hypotheses", request_variant: "Request shapes", response_variant: "Response shapes",
-  field_occurrence: "Field occurrences", value_reference: "Value matches",
+  field_occurrence: "Field occurrences", value_reference: "Value matches", url_reference: "URL matches",
 };
 const relationLabels = {
   belongs_to_operation: "belongs to operation",
@@ -97,6 +97,9 @@ const relationLabels = {
   precedes: "precedes",
   referrer_context_for: "referer matches",
   redirects_to: "redirects to",
+  uses_request_url: "request URL matches",
+  referrer_url_matches: "Referer URL matches",
+  redirect_url_matches: "redirect URL matches",
 };
 const MASKED_PATH_HELP = "Graph route labels hide dynamic values so IDs and secrets do not become graph data. To inspect one saved request's exact path, open its linked capture with Open stored HTTP; live-only records remain in Caido.";
 const kindColors = { observation: "#83c8cf", endpoint: "#e0b56b", operation: "#83b5e8", parameter: "#b8a3da", asset: "#b2d88a" };
@@ -2215,6 +2218,7 @@ function displayTitle(node) {
   if (node.kind === "parameter") return displayPath(data.path || data.name || "Parameter");
   if (node.kind === "field_occurrence") return displayPath(data.path || "Field occurrence");
   if (node.kind === "value_reference") return "Project value match";
+  if (node.kind === "url_reference") return "Project URL match";
   if (node.kind === "request_variant") return "Request shape";
   if (node.kind === "response_variant") return "Response shape";
   if (node.kind === "asset") return data.origin || "Host";
@@ -2233,6 +2237,7 @@ function displaySubtitle(node) {
     return [data.location, occurrence, span ? formatSourceSpan(span) : "source span unavailable"].filter(Boolean).join(" · ");
   }
   if (node.kind === "value_reference") return "Same decoded value · project scoped";
+  if (node.kind === "url_reference") return "Same normalized URL · project scoped";
   if (node.kind === "request_variant" || node.kind === "response_variant") {
     const headers = Array.isArray(data.header_metadata) ? data.header_metadata.length : 0;
     const fields = Array.isArray(data.fields) ? data.fields.length : 0;
@@ -2302,6 +2307,12 @@ function renderInspector(node) {
     const note = el("div", "detail-explainer");
     note.append(el("strong", "", "What this link means"));
     note.append(el("span", "", "The decoded query value matched under this project's keyed equality signature. This is a correlation only; it does not establish causality, object identity, ownership, or data flow."));
+    elements.inspector.append(note);
+  }
+  if (node.kind === "url_reference") {
+    const note = el("div", "detail-explainer");
+    note.append(el("strong", "", "Matching navigation URLs"));
+    note.append(el("span", "", "Expand this node to see captures with the same request target, Referer, or redirect URL. Several captures can match. URL equality does not establish request order, an initiating request, or causality."));
     elements.inspector.append(note);
   }
   if (rows.length) {
@@ -2419,6 +2430,7 @@ function safeDetails(node) {
     ["Source bytes", node.kind === "field_occurrence" && data.source_span ? formatSourceSpan(data.source_span) : undefined],
     ["Value bytes", node.kind === "field_occurrence" && data.value_span ? formatSourceSpan(data.value_span) : undefined],
     ["Match basis", node.kind === "value_reference" ? "same project-keyed decoded value" : undefined],
+    ["Match basis", node.kind === "url_reference" ? "same normalized URL within this project" : undefined],
     ["Context", data.context?.scenario],
   ];
   return candidates.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => [label, value === "unknown" ? (label === "Time" ? "not specified" : "unknown") : formatValue(value)]);

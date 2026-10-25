@@ -53,12 +53,12 @@ func AddPageNavigationAssertions(bundles []Record, exchanges []caido.HttpExchang
 		current := pageNavigationItem{bundle: bundle, observationID: observationID, requestURL: requestURL}
 		if okURL {
 			if value, ok := uniqueHTTPHeader(exchanges[index].RequestRaw, "referer"); ok {
-				current.refererURL, _ = resolveNavigationURL(value, exchanges[index])
+				current.refererURL, _ = resolveNavigationReference(value, exchanges[index])
 			}
 		}
 		if okURL && responseStatusIsRedirect(exchanges[index]) {
 			if value, ok := uniqueHTTPHeader(exchanges[index].ResponseRaw, "location"); ok {
-				current.redirectURL, _ = resolveNavigationURL(value, exchanges[index])
+				current.redirectURL, _ = resolveNavigationReference(value, exchanges[index])
 			}
 		}
 		items[index] = current
@@ -103,7 +103,7 @@ func NavigationURLIndexKeys(exchange caido.HttpExchange, key []byte) (string, st
 	}
 	var refererKey, redirectKey string
 	if value, exists := uniqueHTTPHeader(exchange.RequestRaw, "referer"); exists {
-		if resolved, valid := resolveNavigationURL(value, exchange); valid {
+		if resolved, valid := resolveNavigationReference(value, exchange); valid {
 			refererKey, err = URLIndexKey(resolved, "", key)
 			if err != nil {
 				return "", "", "", errors.New("navigation Referer URL key could not be computed")
@@ -112,7 +112,7 @@ func NavigationURLIndexKeys(exchange caido.HttpExchange, key []byte) (string, st
 	}
 	if responseStatusIsRedirect(exchange) {
 		if value, exists := uniqueHTTPHeader(exchange.ResponseRaw, "location"); exists {
-			if resolved, valid := resolveNavigationURL(value, exchange); valid {
+			if resolved, valid := resolveNavigationReference(value, exchange); valid {
 				redirectKey, err = URLIndexKey(resolved, "", key)
 				if err != nil {
 					return "", "", "", errors.New("navigation redirect URL key could not be computed")
@@ -283,7 +283,7 @@ func uniqueHTTPHeader(raw []byte, name string) (string, bool) {
 }
 
 func responseStatusIsRedirect(exchange caido.HttpExchange) bool {
-	if !exchange.HasResponse || exchange.ResponseStatus == nil {
+	if !exchange.HasResponse || exchange.ResponseStatus == nil || exchange.ResponseStatusMetadataMismatch {
 		return false
 	}
 	status := *exchange.ResponseStatus
@@ -294,6 +294,22 @@ func exchangeNavigationURL(exchange caido.HttpExchange) (string, bool) {
 	_, target := requestLine(exchange.RequestRaw)
 	target = firstNavigationValue(exchange.Target, target)
 	return resolveNavigationURL(target, exchange)
+}
+
+func resolveNavigationReference(value string, exchange caido.HttpExchange) (string, bool) {
+	if value == "" || len(value) > 65_536 {
+		return "", false
+	}
+	baseURL, ok := exchangeNavigationURL(exchange)
+	if !ok {
+		return "", false
+	}
+	base, baseErr := url.Parse(baseURL)
+	reference, referenceErr := url.Parse(strings.TrimSpace(value))
+	if baseErr != nil || referenceErr != nil || reference.User != nil {
+		return "", false
+	}
+	return resolveNavigationURL(base.ResolveReference(reference).String(), exchange)
 }
 
 func resolveNavigationURL(target string, exchange caido.HttpExchange) (string, bool) {

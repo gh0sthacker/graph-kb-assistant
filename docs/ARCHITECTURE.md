@@ -12,6 +12,15 @@ BB Graph Assistant is a local-first, human-led analysis companion. It helps an a
 
 The graph is the navigation layer for the investigation, not a vulnerability verdict or a causal trace. The assistant does not send target requests in the current workflow.
 
+Navigation across capture pages uses project-scoped `url_reference` nodes.
+Request targets, Referer headers and redirect Location headers connect to the
+same node when their normalized URLs match under a project-keyed HMAC. URL
+values remain outside the graph. Each relation cites its own capture receipt;
+the shared node can connect multiple matching captures without choosing an
+initiating request. Relative Location values resolve against the request URL,
+including its directory. The UI exposes URL matches in focused navigation and
+explains that equality does not prove request order or causality.
+
 ## Evidence graph and model boundary
 
 Keep three kinds of information distinct:

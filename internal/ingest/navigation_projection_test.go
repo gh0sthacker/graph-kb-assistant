@@ -186,3 +186,110 @@ func assertProjectedNavigationLinks(t *testing.T, slice map[string]any) {
 		t.Fatalf("projected navigation links=%v; want exactly one redirect and one Referer link", links)
 	}
 }
+
+func TestHistoricalURLNavigationAcrossPagesRetainsEveryDuplicateMatch(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateValue := "fixture-url-correlation"
+	requestIDs := []string{"historical-url-source", "historical-url-target", "historical-url-duplicate", "historical-url-other"}
+	paths := []string{"/dir/start", "/dir/next?trace=" + privateValue, "/dir/next?trace=" + privateValue, "/dir/next?trace=other-value"}
+	for i, id := range requestIDs {
+		exchange := projectionWorkerExchange(selected, id, "HTTP/1.1 200 OK\r\n\r\n")
+		exchange.RequestRaw = []byte("GET " + paths[i] + " HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n")
+		exchange.Target = "https://api.fixture.invalid" + paths[i]
+		if i == 0 {
+			status := 302
+			exchange.ResponseStatus = &status
+			exchange.ResponseRaw = []byte("HTTP/1.1 302 Found\r\nLocation: next?trace=" + privateValue + "\r\n\r\n")
+		}
+		if result, err := writePendingHistoryRevision(ctx, pageWriter, exchange); err != nil || result.Stored != 1 {
+			t.Fatalf("accept separate historical page %d: result=%+v err=%v", i, result, err)
+		}
+	}
+	pageWriter.Close()
+	var targetRevision string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id FROM captures WHERE request_id=?", requestIDs[1],
+	).Scan(&targetRevision); err != nil {
+		t.Fatal(err)
+	}
+	targetJob, err := behaviorgraph.ProjectionJobByRevision(ctx, projectStore.Database.DB(), projectStore.ProjectKey, targetRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targetURLID string
+	for _, entity := range projectionRecordsMust(t, targetJob.PayloadBundle["entities"]) {
+		if entity["kind"] == "url_reference" {
+			targetURLID, _ = entity["id"].(string)
+		}
+	}
+	if targetURLID == "" {
+		t.Fatal("historical capture job has no project URL reference")
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectStore.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = maintenance.Close() })
+	now := time.Now().UTC().Add(time.Minute)
+	for i := range requestIDs {
+		// The local graph import is real. Backend readiness is a synthetic seam.
+		result, err := runProjectionWorkerOnce(ctx, projectStore, maintenance,
+			ProjectionWorkerOptions{LeaseDuration: time.Minute, MaxAttempts: 3}, materializeLocalProjection,
+			now.Add(time.Duration(i)*time.Second))
+		if err != nil || result.State != "applied" {
+			t.Fatalf("project separate page %d: result=%+v err=%v", i, result, err)
+		}
+	}
+	dataRoot := filepath.Dir(filepath.Dir(projectStore.Directory))
+	assertAbsentFromProjectFiles(t, projectStore.Directory, privateValue)
+	if err := projectStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := maintenance.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := store.OpenProjectReadOnly(ctx, selected, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	service := graphaccess.NewService()
+	defer service.Close(ctx)
+	slice, err := search.GraphSliceWithService(ctx, service, readOnly, []string{targetURLID}, 100, 300, 1, nil)
+	if err != nil {
+		t.Fatalf("navigate across historical pages using the shared URL: %v", err)
+	}
+	matches := make(map[string]bool)
+	for _, capture := range slice["capture_provenance"].([]map[string]any) {
+		id, _ := capture["request_id"].(string)
+		matches[id] = true
+	}
+	if len(matches) != 3 || !matches[requestIDs[0]] || !matches[requestIDs[1]] || !matches[requestIDs[2]] || matches[requestIDs[3]] {
+		t.Fatalf("URL navigation lost a duplicate or included a different query: matches=%v", matches)
+	}
+	links := make(map[string]int)
+	for _, assertion := range projectionRecordsMust(t, slice["assertions"]) {
+		predicate, _ := assertion["predicate"].(string)
+		if predicate == "precedes" || predicate == "redirects_to" {
+			t.Fatal("URL equality was promoted to an initiating-request observation link")
+		}
+		if predicate != "uses_request_url" && predicate != "redirect_url_matches" {
+			continue
+		}
+		links[predicate]++
+		context, _ := projectionRecord(assertion["context"])
+		if context["link_basis"] != "project_keyed_url_equality" || context["causality"] != "url_match_only" ||
+			len(projectionRecordsMust(t, assertion["source_refs"])) != 1 {
+			t.Fatal("cross-page URL match lost its exact source or equality-only interpretation")
+		}
+	}
+	if links["uses_request_url"] != 2 || links["redirect_url_matches"] != 1 {
+		t.Fatalf("shared URL links=%v; want two matching requests and the redirect source", links)
+	}
+}

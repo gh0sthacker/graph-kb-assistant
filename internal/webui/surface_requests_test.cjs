@@ -102,6 +102,27 @@ test("navigation assertions have readable graph relationship labels", () => {
   assert.equal(app.relationLabels.redirects_to, "redirects to");
 });
 
+test("URL matches show navigation meaning without displaying keyed URL signatures", () => {
+  const app = createApp();
+  const signature = "a".repeat(64);
+  const match = { id: "url_reference-" + "b".repeat(64), kind: "url_reference", data: {
+    program: "A", token_version: "project-url-hmac-v1", normalization: "http_url_index_v1", equality_signature: signature,
+  }, source_refs: [] };
+  assert.equal(app.displayTitle(match), "Project URL match");
+  assert.equal(app.displaySubtitle(match), "Same normalized URL · project scoped");
+  assert.equal(app.relationLabels.uses_request_url, "request URL matches");
+  assert.equal(app.relationLabels.referrer_url_matches, "Referer URL matches");
+  assert.equal(app.relationLabels.redirect_url_matches, "redirect URL matches");
+  app.state.graph = { project_key: "A", entities: [match], assertions: [], capture_provenance: [] };
+  app.state.selectedNode = match.id;
+  app.renderInspector(match);
+  const text = renderedText(app.elements.inspector);
+  assert.ok(text.includes("Several captures can match"));
+  assert.ok(text.includes("does not establish request order"));
+  assert.ok(!text.includes(signature));
+  assert.ok(!JSON.stringify(app.safeDetails(match)).includes(signature));
+});
+
 test("flow evidence order can be edited, saved in order, and reopened as numbered analyst-defined steps", async () => {
   const app = createApp();
   const projectKey = "a".repeat(64);
