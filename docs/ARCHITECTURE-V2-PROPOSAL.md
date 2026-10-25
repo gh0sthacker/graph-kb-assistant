@@ -293,8 +293,9 @@ capabilities.
 
 The operator approved the architecture and this sequence on 2026-10-23.
 Routine implementation, local verification and Git commits follow this plan.
-ChatGPT/Codex Subscription with `gpt-6-luna` was selected on 2026-10-25; KB
-remains deferred.
+ChatGPT/Codex Subscription with `gpt-6-luna` was selected on 2026-10-25.
+The original approval deferred KB expansion; the user's later exact RedAmon KB
+parity request adds that requirement to overall delivery (see Section 11).
 
 | Stage | Deliverable | Acceptance criteria |
 | --- | --- | --- |
