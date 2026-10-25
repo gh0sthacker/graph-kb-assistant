@@ -2104,11 +2104,11 @@ This repository is an early public alpha. The following boundaries are deliberat
 
 ## Neo4j snapshot rebuild and graph API (2026-10-25) — PARTIAL
 
-- Hermes is configured for `openai-codex` with `gpt-6-luna`; an earlier
-  synthetic-only smoke completed successfully. No captured exchange was sent
-  to the model.
+- Hermes is configured for `openai-codex` with `gpt-6-luna`. A synthetic-only
+  smoke after selecting this model returned the expected sentinel. No captured
+  exchange was sent to the model.
 - The selected-project backfill completed with read-back digest verification.
-  The local snapshot and Neo4j snapshot SHA-256 both equal
+  At completion, the local snapshot and Neo4j snapshot SHA-256 both equaled
   `0b050388683b4b885917471482b72a4836f083f48e8314698271e6adb6fb5aeb`.
   The published snapshot contains 232,715 records, 233,336 provenance
   references, and 115,299 assertions (1,369 sources/cards, 114,678 entities,
@@ -2119,8 +2119,15 @@ This repository is an early public alpha. The following boundaries are deliberat
   response bodies were not read. This confirms populated graph navigation for
   that seed, not complete UI or graph coverage.
 - Structural status still reports 1,400 captures, 1,369 mapped and 31
-  unmapped. The projection queue has 53 pending, 2 dead-letter, and 1,345
-  applied jobs. Historical import reconciliation is still partial; the
+  unmapped. A bounded read-only projection reconciliation scanned all 53
+  pending jobs against the parity-verified snapshots: 0 exact matches, 31
+  missing records, 22 conflicting records, 0 invalid jobs, with no changes
+  applied. Before the next worker run, aggregate queue metadata showed 43
+  untried pending jobs, 10 pending jobs with `neo4j_unavailable`, and two
+  dead-letter jobs (`graph_records_write_failed` and `projection_unavailable`).
+  One bounded `projection-worker --max-jobs 1` run then applied one job without
+  dead-lettering; subsequent status reported 52 pending, 2 dead-letter, and
+  1,346 applied. Historical import reconciliation is still partial; the
   evidence-vault key is missing or invalid, so encrypted evidence access is not
   confirmed. Browser walkthrough, JavaScript endpoint coverage, external
   access, pending/dead-letter recovery, and full application acceptance remain
