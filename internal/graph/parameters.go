@@ -43,10 +43,11 @@ type historicalFieldOccurrence struct {
 }
 
 type historicalBodyAnalysis struct {
-	fields          []historicalParameterField
-	html            Record
-	characteristics Record
-	complete        bool
+	fields              []historicalParameterField
+	html                Record
+	characteristics     Record
+	complete            bool
+	occurrencesComplete bool
 }
 
 var errHistoricalBodyFieldLimit = errors.New("historical body field limit exceeded")
@@ -83,6 +84,11 @@ func historicalMessageBodyFields(raw []byte, location string, source Record, rem
 		bodyOffset, spanAvailable, fieldValueKey, wireFidelity)
 	analysis.complete = analysis.complete && headersComplete && !historicalConflictingContentType(headers) &&
 		historicalBodyExtentComplete(headers, body) && isExplicitFalse(truncated)
+	if len(body) == 0 {
+		analysis.occurrencesComplete = analysis.complete
+	} else {
+		analysis.occurrencesComplete = analysis.occurrencesComplete && analysis.complete && spanAvailable
+	}
 	return analysis
 }
 
@@ -208,7 +214,7 @@ func historicalBodyParameterFields(body []byte, contentType, location string, so
 		return historicalBodyAnalysis{}
 	}
 	if len(body) == 0 {
-		return historicalBodyAnalysis{complete: true}
+		return historicalBodyAnalysis{complete: true, occurrencesComplete: true}
 	}
 	mediaType, parameters, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -219,11 +225,11 @@ func historicalBodyParameterFields(body []byte, contentType, location string, so
 	case mediaType == "application/x-www-form-urlencoded":
 		fields, complete := historicalFormParameterFields(body, location, source, remaining,
 			bodyOffset, sourceSpanAvailable, fieldValueKey, wireFidelity)
-		return historicalBodyAnalysis{fields: fields, complete: complete}
+		return historicalBodyAnalysis{fields: fields, complete: complete, occurrencesComplete: complete && sourceSpanAvailable}
 	case mediaType == "application/json", strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json"):
 		fields, complete := historicalJSONParameterFields(body, location, source, remaining,
 			bodyOffset, sourceSpanAvailable, fieldValueKey, wireFidelity)
-		return historicalBodyAnalysis{fields: fields, complete: complete}
+		return historicalBodyAnalysis{fields: fields, complete: complete, occurrencesComplete: complete && sourceSpanAvailable}
 	case mediaType == "text/html", mediaType == "application/xhtml+xml":
 		htmlAnalysis := historicalHTMLBodyFields(body, location, source, remaining)
 		return historicalBodyAnalysis{
@@ -231,8 +237,9 @@ func historicalBodyParameterFields(body []byte, contentType, location string, so
 			characteristics: htmlAnalysis.characteristics, complete: htmlAnalysis.complete,
 		}
 	case mediaType == "multipart/form-data":
-		fields, complete := historicalMultipartParameterFields(body, parameters["boundary"], location, source, remaining)
-		return historicalBodyAnalysis{fields: fields, complete: complete}
+		fields, complete, occurrencesComplete := historicalMultipartParameterFields(body, parameters["boundary"], location, source,
+			remaining, bodyOffset, sourceSpanAvailable, fieldValueKey, wireFidelity)
+		return historicalBodyAnalysis{fields: fields, complete: complete, occurrencesComplete: occurrencesComplete}
 	default:
 		return historicalBodyAnalysis{}
 	}
@@ -245,23 +252,58 @@ type historicalMultipartField struct {
 	bytes       *int64
 	contentType string
 	filename    bool
+	simpleText  bool
 }
 
-func historicalMultipartParameterFields(body []byte, boundary, location string, source Record, remaining int) ([]historicalParameterField, bool) {
+type historicalMultipartSourcePart struct {
+	start int
+	end   int
+}
+
+func historicalMultipartParameterFields(body []byte, boundary, location string, source Record, remaining, bodyOffset int, sourceSpanAvailable bool, fieldValueKey []byte, wireFidelity string) ([]historicalParameterField, bool, bool) {
 	parts, complete := parseHistoricalMultipart(body, boundary, remaining)
 	fields := make([]historicalParameterField, 0, len(parts))
 	occurrences := make(map[string][]int)
 	maskedNames := make(map[string]string)
-	for _, part := range parts {
+	sourceParts, sourceComplete := []historicalMultipartSourcePart(nil), false
+	if sourceSpanAvailable {
+		sourceParts, sourceComplete = historicalMultipartSourceParts(body, boundary, historicalMaxParameterFields)
+	}
+	sourceAligned := sourceComplete && len(sourceParts) == len(parts)
+	occurrencesComplete := sourceSpanAvailable && complete && sourceAligned
+	for partPosition, part := range parts {
 		partLocation := location + ".part[" + strconv.Itoa(part.index) + "]"
 		name, err := historicalSafeMultipartFieldName(part.name, source, location, maskedNames)
 		if err != nil {
 			complete = false
+			occurrencesComplete = false
 			continue
 		}
 		occurrence := len(occurrences[name])
 		occurrences[name] = append(occurrences[name], len(fields))
 		path := location + "[" + strconv.Quote(name) + "][" + strconv.Itoa(occurrence) + "]"
+		var fieldOccurrence *historicalFieldOccurrence
+		if sourceSpanAvailable && sourceAligned && part.simpleText && partPosition < len(sourceParts) && part.typeName == "string" {
+			sourcePart := sourceParts[partPosition]
+			value := body[sourcePart.start:sourcePart.end]
+			if utf8.Valid(value) {
+				span := Record{
+					"start": bodyOffset + sourcePart.start, "end": bodyOffset + sourcePart.end,
+					"unit": "byte", "offset_basis": historicalMessageOffsetBasis(location), "wire_fidelity": wireFidelity,
+				}
+				fieldOccurrence = &historicalFieldOccurrence{index: occurrence, sourceSpan: span, valueSpan: cloneRecord(span)}
+				if len(fieldValueKey) == 32 && len(value) > 0 && len(value) <= 4_096 && name == part.name &&
+					!secretNamePattern.MatchString(part.name) && safeEqualityString(string(value)) {
+					fieldOccurrence.valueToken = fieldValueTokenForNormalization(fieldValueKey, string(value), "decoded_utf8_scalar_v2")
+					fieldOccurrence.valueTokenVersion = "field-equality-v2"
+					fieldOccurrence.valueNormalization = "decoded_utf8_scalar_v2"
+				}
+			} else {
+				occurrencesComplete = false
+			}
+		} else {
+			occurrencesComplete = false
+		}
 		metadata := Record{"bytes": nil, "content_type": part.contentType}
 		if part.bytes != nil {
 			metadata["bytes"] = *part.bytes
@@ -275,17 +317,101 @@ func historicalMultipartParameterFields(body []byte, boundary, location string, 
 			metadata["filename"] = filename
 		}
 		fields = append(fields, historicalParameterField{
-			path: path, typeName: part.typeName,
-			location: location, metadata: metadata,
+			path: path, typeName: part.typeName, location: location,
+			metadata: metadata, occurrence: fieldOccurrence,
 		})
 	}
 	for _, indices := range occurrences {
 		if len(indices) == 1 {
 			index := indices[0]
 			fields[index].path = historicalTemplateParameterPath(fields[index].path)
+			if fields[index].occurrence != nil {
+				fields[index].occurrence.index = 0
+			}
+			continue
+		}
+		for occurrenceIndex, fieldIndex := range indices {
+			if fields[fieldIndex].occurrence != nil {
+				fields[fieldIndex].occurrence.index = occurrenceIndex
+			}
 		}
 	}
-	return fields, complete
+	return fields, complete, occurrencesComplete
+}
+
+func historicalMultipartSourceParts(body []byte, boundary string, maxParts int) ([]historicalMultipartSourcePart, bool) {
+	if boundary == "" || len(boundary) > 200 || maxParts < 0 || maxParts > historicalMaxParameterFields {
+		return nil, false
+	}
+	marker := []byte("--" + boundary)
+	if !bytes.HasPrefix(body, marker) {
+		return nil, false
+	}
+	cursor := len(marker)
+	if bytes.HasPrefix(body[cursor:], []byte("--")) {
+		cursor += 2
+		if bytes.HasPrefix(body[cursor:], []byte("\r\n")) {
+			cursor += 2
+		}
+		return []historicalMultipartSourcePart{}, cursor == len(body)
+	}
+	if !bytes.HasPrefix(body[cursor:], []byte("\r\n")) {
+		return nil, false
+	}
+	cursor += 2
+	parts := make([]historicalMultipartSourcePart, 0, minInt(maxParts, 32))
+	for {
+		if len(parts) >= maxParts {
+			return nil, false
+		}
+		headerEnd := bytes.Index(body[cursor:], []byte("\r\n\r\n"))
+		if headerEnd < 0 || headerEnd > 65_536 {
+			return nil, false
+		}
+		partStart := cursor + headerEnd + 4
+		boundaryAt, found := historicalFindMultipartBoundary(body, partStart, marker)
+		if !found {
+			return nil, false
+		}
+		parts = append(parts, historicalMultipartSourcePart{start: partStart, end: boundaryAt})
+		markerStart := boundaryAt + 2
+		suffixStart := markerStart + len(marker)
+		if suffixStart+2 > len(body) {
+			return nil, false
+		}
+		switch {
+		case bytes.Equal(body[suffixStart:suffixStart+2], []byte("--")):
+			cursor = suffixStart + 2
+			if bytes.HasPrefix(body[cursor:], []byte("\r\n")) {
+				cursor += 2
+			}
+			return parts, cursor == len(body)
+		case bytes.Equal(body[suffixStart:suffixStart+2], []byte("\r\n")):
+			cursor = suffixStart + 2
+		default:
+			return nil, false
+		}
+	}
+}
+
+func historicalFindMultipartBoundary(body []byte, start int, marker []byte) (int, bool) {
+	delimiter := make([]byte, 0, len(marker)+2)
+	delimiter = append(delimiter, '\r', '\n')
+	delimiter = append(delimiter, marker...)
+	for cursor := start; cursor < len(body); {
+		index := bytes.Index(body[cursor:], delimiter)
+		if index < 0 {
+			return 0, false
+		}
+		boundaryAt := cursor + index
+		suffixStart := boundaryAt + len(delimiter)
+		if suffixStart+2 <= len(body) &&
+			(bytes.Equal(body[suffixStart:suffixStart+2], []byte("\r\n")) || bytes.Equal(body[suffixStart:suffixStart+2], []byte("--"))) {
+			return boundaryAt, true
+		}
+		cursor = boundaryAt + 2
+	}
+	return 0, false
 }
 
 func parseHistoricalMultipart(body []byte, boundary string, maxFields int) ([]historicalMultipartField, bool) {
@@ -319,23 +445,27 @@ func parseHistoricalMultipart(body []byte, boundary string, maxFields int) ([]hi
 			visitedParts++
 
 			partContentType := "text/plain"
-			if values := part.Header.Values("Content-Type"); len(values) > 1 {
+			contentTypeValues := part.Header.Values("Content-Type")
+			contentTypeValid := len(contentTypeValues) <= 1
+			if len(contentTypeValues) > 1 {
 				complete = false
-			} else if len(values) == 1 {
-				parsed, _, parseErr := mime.ParseMediaType(values[0])
+			} else if len(contentTypeValues) == 1 {
+				parsed, _, parseErr := mime.ParseMediaType(contentTypeValues[0])
 				if parseErr != nil {
 					complete = false
+					contentTypeValid = false
 					partContentType = "unknown"
 				} else {
 					partContentType = strings.ToLower(parsed)
 				}
 			}
-			if values := part.Header.Values("Content-Transfer-Encoding"); len(values) > 1 {
+			transferEncodings := part.Header.Values("Content-Transfer-Encoding")
+			if len(transferEncodings) > 1 {
 				complete = false
 			}
 			transferEncoding := ""
-			if values := part.Header.Values("Content-Transfer-Encoding"); len(values) > 0 {
-				transferEncoding = strings.ToLower(strings.TrimSpace(values[0]))
+			if len(transferEncodings) > 0 {
+				transferEncoding = strings.ToLower(strings.TrimSpace(transferEncodings[0]))
 			}
 
 			if strings.HasPrefix(strings.ToLower(partContentType), "multipart/") {
@@ -361,19 +491,24 @@ func parseHistoricalMultipart(body []byte, boundary string, maxFields int) ([]hi
 			partIndex++
 			name := ""
 			hasFilename := false
+			dispositionIsFormData := false
 			dispositions := part.Header.Values("Content-Disposition")
 			if len(dispositions) != 1 {
 				complete = false
 			} else {
-				_, parameters, parseErr := mime.ParseMediaType(dispositions[0])
+				dispositionType, parameters, parseErr := mime.ParseMediaType(dispositions[0])
 				if parseErr != nil {
 					complete = false
 				} else if value, exists := parameters["name"]; exists {
 					name = value
+					dispositionIsFormData = strings.EqualFold(dispositionType, "form-data")
 				} else {
 					complete = false
 				}
 				_, hasFilename = parameters["filename"]
+				if _, hasExtendedFilename := parameters["filename*"]; hasExtendedFilename {
+					hasFilename = true
+				}
 			}
 			payloadSize, payloadComplete := historicalMultipartPayloadSize(part, transferEncoding, int64(maxParsedBodyBytes)-totalDecodedBytes)
 			if payloadComplete && payloadSize != nil {
@@ -386,9 +521,11 @@ func parseHistoricalMultipart(body []byte, boundary string, maxFields int) ([]hi
 			if hasFilename {
 				fieldType = "file"
 			}
+			simpleText := depth == 1 && dispositionIsFormData && !hasFilename && contentTypeValid &&
+				partContentType == "text/plain" && len(transferEncodings) == 0
 			fields = append(fields, historicalMultipartField{
 				name: name, index: index, typeName: fieldType, bytes: payloadSize,
-				contentType: safeMediaType(partContentType), filename: hasFilename,
+				contentType: safeMediaType(partContentType), filename: hasFilename, simpleText: simpleText,
 			})
 		}
 	}

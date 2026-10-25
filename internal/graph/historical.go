@@ -215,6 +215,9 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	if !requestBodyComplete || !responseBodyComplete {
 		cardMissing = append(cardMissing, "Request or response body fields could not be mapped completely because of missing data, unsupported media, truncation, or parser limits.")
 	}
+	if !requestBodyAnalysis.occurrencesComplete || exchange.HasResponse && !responseBodyAnalysis.occurrencesComplete {
+		cardMissing = append(cardMissing, "Some request or response body field occurrences could not be bound to revision-bound source byte spans; value links were omitted.")
+	}
 	responseAnalysis := Record{"parse_state": "incomplete", "status": nil}
 	requestAnalysis := Record{"parse_state": "incomplete"}
 	if projection.Search.ResponseStatus != nil {
