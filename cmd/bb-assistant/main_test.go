@@ -25,6 +25,47 @@ import (
 	"bb-graph-assistant/internal/store"
 )
 
+func TestNormalizeTailScope(t *testing.T) {
+	valid, err := normalizeTailScope("HTTPS", "API.FIXTURE.INVALID", 443, true)
+	if err != nil {
+		t.Fatalf("normalizeTailScope(valid): %v", err)
+	}
+	if valid == nil || valid.Scheme != "https" || valid.Host != "api.fixture.invalid" || valid.Port != 443 {
+		t.Fatalf("normalized scope = %+v", valid)
+	}
+	if scope, err := normalizeTailScope("", "", 0, false); err != nil || scope != nil {
+		t.Fatalf("optional empty scope = %+v, %v", scope, err)
+	}
+	for _, input := range []struct {
+		scheme   string
+		host     string
+		port     int
+		required bool
+	}{
+		{required: true},
+		{scheme: "https", host: "api.fixture.invalid", required: true},
+		{scheme: "ftp", host: "api.fixture.invalid", port: 443, required: true},
+		{scheme: "https", host: "*.fixture.invalid", port: 443, required: true},
+		{scheme: "https", host: "api.fixture.invalid", port: 65536, required: true},
+	} {
+		if _, err := normalizeTailScope(input.scheme, input.host, input.port, input.required); err == nil {
+			t.Fatalf("normalizeTailScope(%+v) succeeded; want validation error", input)
+		}
+	}
+}
+
+func TestLiveTailScopePortDefault(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_CAIDO_SCOPE_PORT", "8443")
+	port, err := liveTailScopePortDefault()
+	if err != nil || port != 8443 {
+		t.Fatalf("liveTailScopePortDefault() = %d, %v; want 8443", port, err)
+	}
+	t.Setenv("BB_ASSISTANT_CAIDO_SCOPE_PORT", "not-a-port")
+	if _, err := liveTailScopePortDefault(); err == nil {
+		t.Fatal("liveTailScopePortDefault accepted malformed environment input")
+	}
+}
+
 func TestGraphSliceCLIUsesSharedQueryServiceAndPreservesContext(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
 	ctx := t.Context()

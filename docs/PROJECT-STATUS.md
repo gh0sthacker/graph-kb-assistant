@@ -2331,7 +2331,8 @@ This repository is an early public alpha. The following boundaries are deliberat
   validates the exact HTTP origin, filters Caido metadata before fetching
   message details, applies the same filter during delayed-response refresh, and
   stores a separate durable cursor for each origin. The receipt reports scope
-  and excluded metadata rows.
+  and excluded metadata rows. The managed systemd unit requires an origin scope;
+  the exact scheme, host, and port are read from its private environment file.
 - Existing captures in a selected project are not removed or hidden by this
   intake filter. A clean dedicated Caido project remains recommended; the exact
   origin filter protects only newly read details and graph intake.

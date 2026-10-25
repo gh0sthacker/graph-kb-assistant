@@ -1173,6 +1173,40 @@ func parseCaidoReconcileOptions(args []string) (caidoReconcileOptions, error) {
 	}, nil
 }
 
+func liveTailScopePortDefault() (int, error) {
+	value := strings.TrimSpace(os.Getenv("BB_ASSISTANT_CAIDO_SCOPE_PORT"))
+	if value == "" {
+		return 0, nil
+	}
+	port, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, errors.New("configured live-tail scope port is invalid")
+	}
+	return port, nil
+}
+
+func normalizeTailScope(scheme, host string, port int, required bool) (*ingest.LiveTailScope, error) {
+	selected := scheme != "" || host != "" || port != 0
+	if !selected {
+		if required {
+			return nil, errors.New("live-tail origin scope is required by configuration")
+		}
+		return nil, nil
+	}
+	if scheme == "" || host == "" || port < 1 || port > 65535 {
+		return nil, errors.New("exact live-tail scope requires --scope-scheme, --scope-host, and --scope-port")
+	}
+	scheme = strings.ToLower(scheme)
+	if scheme != "http" && scheme != "https" {
+		return nil, errors.New("exact live-tail scope scheme must be http or https")
+	}
+	normalizedHost, err := caido.NormalizeRequestHost(host)
+	if err != nil {
+		return nil, errors.New("exact live-tail scope host is invalid")
+	}
+	return &ingest.LiveTailScope{Scheme: scheme, Host: normalizedHost, Port: port}, nil
+}
+
 func tailCaidoHistory(args []string) error {
 	flags := flag.NewFlagSet("caido-tail", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -1184,9 +1218,14 @@ func tailCaidoHistory(args []string) error {
 	tokenFile := flags.String("token-file", "", "private Caido MCP token JSON file")
 	pageSize := flags.Int("page-size", 50, "Caido metadata rows per page (1-100)")
 	maxPages := flags.Int("max-pages", 1, "maximum pages in this bounded invocation (1-100)")
-	scopeScheme := flags.String("scope-scheme", "", "exact in-scope HTTP scheme (http or https); pair with --scope-host and --scope-port")
-	scopeHost := flags.String("scope-host", "", "exact in-scope HTTP host; pair with --scope-scheme and --scope-port")
-	scopePort := flags.Int("scope-port", 0, "exact in-scope HTTP port; pair with --scope-scheme and --scope-host")
+	scopeScheme := flags.String("scope-scheme", os.Getenv("BB_ASSISTANT_CAIDO_SCOPE_SCHEME"), "exact in-scope HTTP scheme (http or https); pair with --scope-host and --scope-port")
+	scopeHost := flags.String("scope-host", os.Getenv("BB_ASSISTANT_CAIDO_SCOPE_HOST"), "exact in-scope HTTP host; pair with --scope-scheme and --scope-port")
+	scopePortDefault, err := liveTailScopePortDefault()
+	if err != nil {
+		return err
+	}
+	scopePort := flags.Int("scope-port", scopePortDefault, "exact in-scope HTTP port; pair with --scope-scheme and --scope-host")
+	requireScope := flags.Bool("require-scope", false, "fail unless an exact HTTP origin scope is configured")
 	watch := flags.Bool("watch", false, "repeat bounded live-tail cycles until interrupted")
 	pollInterval := flags.Duration("poll-interval", 10*time.Second, "delay between --watch cycles (1s-10m)")
 	overlap := flags.Int("overlap-seconds", 90, "time overlap used to recover delayed records (1-3600)")
@@ -1195,25 +1234,14 @@ func tailCaidoHistory(args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: bb-assistant caido-tail --project-key <sha256> [--scope-scheme <http|https> --scope-host <host> --scope-port <port>] [--page-size 50] [--max-pages 1] [--watch --poll-interval 10s]")
+		return errors.New("usage: bb-assistant caido-tail --project-key <sha256> [--scope-scheme <http|https> --scope-host <host> --scope-port <port>] [--require-scope] [--page-size 50] [--max-pages 1] [--watch --poll-interval 10s]")
 	}
 	if len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
 		return errors.New("select exactly one registered project with --project-key <sha256>")
 	}
-	scopeSelected := *scopeScheme != "" || *scopeHost != "" || *scopePort != 0
-	if scopeSelected && (*scopeScheme == "" || *scopeHost == "" || *scopePort < 1 || *scopePort > 65535) {
-		return errors.New("exact live-tail scope requires --scope-scheme, --scope-host, and --scope-port")
-	}
-	if scopeSelected {
-		*scopeScheme = strings.ToLower(*scopeScheme)
-		if *scopeScheme != "http" && *scopeScheme != "https" {
-			return errors.New("exact live-tail scope scheme must be http or https")
-		}
-		normalizedHost, hostErr := caido.NormalizeRequestHost(*scopeHost)
-		if hostErr != nil {
-			return errors.New("exact live-tail scope host is invalid")
-		}
-		*scopeHost = normalizedHost
+	scope, err := normalizeTailScope(*scopeScheme, *scopeHost, *scopePort, *requireScope)
+	if err != nil {
+		return err
 	}
 	if *pageSize < 1 || *pageSize > 100 || *maxPages < 1 || *maxPages > 100 ||
 		*overlap < 1 || *overlap > 3600 || *bodyLimit < 64<<10 || *bodyLimit > 16<<20 ||
@@ -1279,8 +1307,8 @@ func tailCaidoHistory(args []string) error {
 			defer selectedStore.Close()
 			var tailWriter *ingest.LiveTailWriter
 			var writerErr error
-			if scopeSelected {
-				tailWriter, writerErr = ingest.OpenLiveTailWriterForScope(localCtx, selectedStore, *scopeScheme, *scopeHost, *scopePort)
+			if scope != nil {
+				tailWriter, writerErr = ingest.OpenLiveTailWriterForScope(localCtx, selectedStore, scope.Scheme, scope.Host, scope.Port)
 			} else {
 				tailWriter, writerErr = ingest.OpenLiveTailWriter(localCtx, selectedStore)
 			}

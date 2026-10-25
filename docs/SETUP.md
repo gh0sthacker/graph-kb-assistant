@@ -129,9 +129,10 @@ declare historical capture coverage complete.
 
 The checked-in units in [`systemd/`](../systemd/) run the Go web UI, bounded
 Caido live intake, and the durable projection worker. They are templates; this
-repository does not install or start them. The live-tail unit reads every
-request in its selected Caido project, so enable it only for a dedicated
-project whose traffic is authorized for collection.
+repository does not install or start them. The live-tail unit requires an exact
+scheme/host/port scope, supplied through its private environment file. It filters
+new intake but does not remove unrelated captures already in the project, so a
+dedicated authorized project remains recommended.
 
 The examples assume a `bbassist` system account, an installation at
 `/opt/bb-graph-assistant`, and private state at `/var/lib/bb-graph-assistant`.
@@ -156,11 +157,15 @@ Prepare `/etc/bb-graph-assistant/runtime.env` with the same data root,
 Neo4j connection, graph backend, and vault key used by the selected local
 project. Prepare `/etc/bb-graph-assistant/caido-tail.env` with
 `CAIDO_URL`, `BB_ASSISTANT_CAIDO_MCP_COMMAND`, the verified MCP executable
-SHA-256, and `BB_ASSISTANT_CAIDO_TOKEN_FILE`. Keep both environment files
-root-owned with mode `0600`; keep the token file owned by `bbassist` with mode
-`0600`. Do not put token or vault-key values in the unit file, this repository,
-or service arguments. Restarted services receive the key through the private
-runtime environment; the backup archive does not contain it.
+SHA-256, `BB_ASSISTANT_CAIDO_TOKEN_FILE`, and the exact
+`BB_ASSISTANT_CAIDO_SCOPE_SCHEME`, `BB_ASSISTANT_CAIDO_SCOPE_HOST`, and
+`BB_ASSISTANT_CAIDO_SCOPE_PORT` values. The managed tail unit requires a scope
+and will fail closed if any of the three values is missing or invalid. Keep
+both environment files root-owned with mode `0600`; keep the token file owned
+by `bbassist` with mode `0600`. Do not put token or vault-key values in the
+unit file, this repository, or service arguments. Restarted services receive
+the key through the private runtime environment; the backup archive does not
+contain it.
 
 Before enabling services, list the registered project and run its local audit:
 
@@ -180,8 +185,9 @@ sudo systemctl enable --now bb-assistant-projection-worker@<registered-project-s
 sudo systemctl enable --now bb-assistant-caido-tail@<registered-project-sha256>.service
 ```
 
-The UI listens only on `127.0.0.1:8765`. Inspect current state and service logs
-with:
+The UI listens only on `127.0.0.1:8765`. The managed live-tail unit passes
+`--require-scope` and reads the exact origin from its private environment file.
+Inspect current state and service logs with:
 
 ```sh
 ./scripts/bb-assistant project-audit --project-key <registered-project-sha256> --data-root /var/lib/bb-graph-assistant/data
