@@ -436,6 +436,119 @@ func TestFullTextCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testin
 	}
 }
 
+func TestSearchAppliesCVSSAndSeverityAfterFusedCandidatePool(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	baseText := "needle baseline document without NVD metadata"
+	createPythonCompatibleIndex(t, indexPath, baseText, digestHex(baseText), digestHex(baseText))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertChunk := func(id, sourceID, title, text, metadata string, searchable bool) {
+		t.Helper()
+		_, insertErr := db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "nvd", sourceID, title, 0, len(text), metadata,
+			digestHex(text), digestHex(text), "bb-kb-chunk-v2", text)
+		if insertErr != nil {
+			t.Fatalf("insert synthetic NVD chunk: %v", insertErr)
+		}
+		if searchable {
+			if _, insertErr = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "nvd", title, text); insertErr != nil {
+				t.Fatalf("insert synthetic FTS row: %v", insertErr)
+			}
+		}
+	}
+
+	exactID := strings.Repeat("b", 64)
+	belowID := strings.Repeat("c", 64)
+	wrongSeverityID := strings.Repeat("d", 64)
+	vectorBelowID := strings.Repeat("e", 64)
+	vectorNullID := strings.Repeat("f", 64)
+	insertChunk(exactID, "cve-exact", "Exact boundary", "needle NVD exact CVSS boundary", `{"cvss_score":7.0,"severity":"high"}`, true)
+	insertChunk(belowID, "cve-below", "Below boundary", "needle NVD below CVSS boundary", `{"cvss_score":6.99,"severity":"high"}`, true)
+	insertChunk(wrongSeverityID, "cve-medium", "Wrong severity", "needle NVD wrong severity", `{"cvss_score":9.8,"severity":"medium"}`, true)
+	insertChunk(vectorBelowID, "cve-vector-below", "Vector below", "semantic-only low CVSS vector candidate", `{"cvss_score":6.5,"severity":"high"}`, false)
+	insertChunk(vectorNullID, "cve-vector-null", "Vector null", "semantic-only null CVSS vector candidate", `{"cvss_score":null,"severity":null}`, false)
+	if _, err := db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+		('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64)); err != nil {
+		t.Fatal(err)
+	}
+	encodeVector := func(score float32) []byte {
+		vector := make([]byte, 1024*4)
+		binary.LittleEndian.PutUint32(vector, math.Float32bits(score))
+		return vector
+	}
+	if _, err := db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+		(?,?,1024,?),(?,?,1024,?)`, vectorBelowID, "intfloat/e5-large-v2", encodeVector(1.0),
+		vectorNullID, "intfloat/e5-large-v2", encodeVector(0.9)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	index.SetRetrievalModels(&syntheticRetrievalModels{queryVector: queryVector})
+	minCVSS := 7.0
+	result, err := index.Search(context.Background(), "needle", SearchOptions{
+		TopK: 10, MinCVSS: &minCVSS, Severity: "high",
+	})
+	if err != nil {
+		t.Fatalf("filtered Search() error = %v", err)
+	}
+	if result.SnapshotID != strings.Repeat("1", 64) || result.CoverageState != "PARTIAL" || result.CoverageReportHash != strings.Repeat("2", 64) {
+		t.Fatalf("filtered Search() lost snapshot coverage provenance: %+v", result)
+	}
+	got := make(map[string]bool, len(result.Hits))
+	for _, hit := range result.Hits {
+		got[hit.ChunkID] = true
+	}
+	if !got[strings.Repeat("a", 64)] || !got[exactID] || !got[vectorNullID] {
+		t.Fatalf("filters excluded a non-NVD or inclusive/null candidate: %#v", got)
+	}
+	if got[belowID] || got[wrongSeverityID] || got[vectorBelowID] {
+		t.Fatalf("filters retained a below-boundary, wrong-severity, or vector-only excluded candidate: %#v", got)
+	}
+}
+
+func TestSearchValidatesOptionalCVSSAndSeverityFilters(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic filter validation content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	ctx := context.Background()
+	for _, value := range []float64{-0.01, 10.01, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if _, err := index.Search(ctx, "synthetic", SearchOptions{MinCVSS: &value}); err == nil {
+			t.Errorf("Search accepted invalid min_cvss %v", value)
+		}
+	}
+	for _, value := range []string{"Critical", " high", "high ", "severe", strings.Repeat("x", maximumSeverityFilterBytes+1)} {
+		if _, err := index.Search(ctx, "synthetic", SearchOptions{Severity: value}); err == nil {
+			t.Errorf("Search accepted invalid severity %q", value)
+		}
+	}
+	for _, value := range []float64{0, 10} {
+		if _, err := index.Search(ctx, "synthetic", SearchOptions{MinCVSS: &value}); err != nil {
+			t.Errorf("Search rejected valid min_cvss %v: %v", value, err)
+		}
+	}
+}
+
 type syntheticRetrievalModels struct {
 	queryVector []float32
 	rerankCalls int

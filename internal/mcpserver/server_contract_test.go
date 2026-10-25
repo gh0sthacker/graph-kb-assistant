@@ -4,12 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+
+	"bb-graph-assistant/internal/kb"
+	_ "modernc.org/sqlite"
 )
 
 func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
@@ -151,6 +157,29 @@ func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
 				t.Errorf("graph neighborhood does not require project and seeds: %#v", schema["required"])
 			}
 		}
+		if name == "bb_kb_search" {
+			properties, _ := schema["properties"].(map[string]any)
+			minCVSS, _ := properties["min_cvss"].(map[string]any)
+			if minCVSS["type"] != "number" || minCVSS["minimum"] != float64(0) || minCVSS["maximum"] != float64(10) {
+				t.Errorf("KB min_cvss schema is not bounded to 0-10: %#v", minCVSS)
+			}
+			severity, _ := properties["severity"].(map[string]any)
+			enum, ok := severity["enum"].([]any)
+			wantSeverities := map[string]bool{
+				"critical": true, "high": true, "medium": true, "low": true,
+				"none": true, "info": true, "informational": true, "unknown": true,
+			}
+			if ok {
+				for _, value := range enum {
+					if text, valid := value.(string); valid {
+						delete(wantSeverities, text)
+					}
+				}
+			}
+			if severity["type"] != "string" || !ok || len(enum) != 8 || len(wantSeverities) != 0 {
+				t.Errorf("KB severity schema does not expose the accepted values: %#v", severity)
+			}
+		}
 		if name == "bb_graph_slice" {
 			sliceContinuationAdvertised = true
 			description, _ := spec["description"].(string)
@@ -231,6 +260,96 @@ func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("read-only MCP setup created files in its empty synthetic data root: %v", entries)
+	}
+}
+
+func TestKBSearchMCPArgumentsForwardMetadataFilters(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "kb-index.sqlite3")
+	createKBFilterIndex(t, indexPath)
+	index, err := kb.OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	var args kbSearchArgs
+	if err := json.Unmarshal([]byte(`{"query":"synthetic","min_cvss":7.0,"severity":"high"}`), &args); err != nil {
+		t.Fatalf("decode MCP KB search arguments: %v", err)
+	}
+	if args.MinCVSS == nil || *args.MinCVSS != 7 || args.Severity != "high" {
+		t.Fatalf("decoded MCP filter arguments = %+v", args)
+	}
+	tools := &Tools{kbIndex: index}
+	result, err := tools.searchKB(context.Background(), args)
+	if err != nil {
+		t.Fatalf("searchKB() error = %v", err)
+	}
+	hits, ok := result["hits"].([]map[string]any)
+	if !ok || len(hits) != 1 || hits[0]["source_id"] != "cve-high" {
+		t.Fatalf("MCP search returned %#v; want only the inclusive high-severity boundary hit", result["hits"])
+	}
+	invalidCVSS := 10.1
+	if _, err := tools.searchKB(context.Background(), kbSearchArgs{Query: "synthetic", MinCVSS: &invalidCVSS}); err == nil {
+		t.Fatal("searchKB accepted min_cvss above 10")
+	}
+	if _, err := tools.searchKB(context.Background(), kbSearchArgs{Query: "synthetic", Severity: "Critical"}); err == nil {
+		t.Fatal("searchKB accepted a noncanonical severity")
+	}
+}
+
+func createKBFilterIndex(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	statements := []string{
+		`CREATE TABLE kb_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		`CREATE TABLE source_documents (source_name TEXT NOT NULL, source_id TEXT NOT NULL, title TEXT NOT NULL,
+			source_url TEXT, source_locator TEXT, source_revision TEXT, license_id TEXT, attribution TEXT,
+			metadata_json TEXT NOT NULL, content_sha256 TEXT NOT NULL, text TEXT NOT NULL,
+			PRIMARY KEY(source_name,source_id))`,
+		`CREATE TABLE chunks (chunk_id TEXT PRIMARY KEY, source_name TEXT NOT NULL, source_id TEXT NOT NULL,
+			title TEXT NOT NULL, start_char INTEGER NOT NULL, end_char INTEGER NOT NULL, source_locator TEXT,
+			source_url TEXT, source_revision TEXT, license_id TEXT, attribution TEXT, metadata_json TEXT NOT NULL,
+			source_sha256 TEXT NOT NULL, chunk_sha256 TEXT NOT NULL, chunk_schema TEXT NOT NULL, text TEXT NOT NULL)`,
+		`CREATE VIRTUAL TABLE chunk_search USING fts5(chunk_id UNINDEXED,source_name UNINDEXED,title,text,
+			tokenize='unicode61 remove_diacritics 2')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("create KB search fixture schema: %v", err)
+		}
+	}
+	for key, value := range map[string]string{
+		"snapshot_id": strings.Repeat("1", 64), "coverage_state": "PARTIAL",
+		"coverage_report_sha256": strings.Repeat("2", 64), "source_coverage": `[]`,
+	} {
+		if _, err := db.Exec(`INSERT INTO kb_meta(key,value) VALUES(?,?)`, key, value); err != nil {
+			t.Fatalf("insert KB metadata %s: %v", key, err)
+		}
+	}
+	for n, row := range []struct {
+		id, severity string
+		score        float64
+	}{
+		{id: "cve-high", severity: "high", score: 7.0},
+		{id: "cve-low", severity: "high", score: 6.9},
+	} {
+		text := "synthetic CVSS severity fixture " + row.id
+		hash := sha256.Sum256([]byte(text))
+		digest := hex.EncodeToString(hash[:])
+		metadata, _ := json.Marshal(map[string]any{"cvss_score": row.score, "severity": row.severity})
+		chunkID := strings.Repeat(string(rune('a'+n)), 64)
+		if _, err := db.Exec(`INSERT INTO chunks(chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,
+			source_sha256,chunk_sha256,chunk_schema,text) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			chunkID, "nvd", row.id, row.id, 0, len(text), string(metadata), digest, digest, "bb-kb-chunk-v2", text); err != nil {
+			t.Fatalf("insert KB fixture chunk %s: %v", row.id, err)
+		}
+		if _, err := db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, chunkID, "nvd", row.id, text); err != nil {
+			t.Fatalf("insert KB fixture FTS row %s: %v", row.id, err)
+		}
 	}
 }
 

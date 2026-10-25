@@ -30,6 +30,7 @@ const (
 	DefaultSearchTopK          = 5
 	MaximumSearchTopK          = 100
 	maximumSourceFilters       = 32
+	maximumSeverityFilterBytes = 16
 	maximumSourceNameBytes     = 128
 	maximumSourceIDBytes       = 1024
 	maximumSourceReadIDBytes   = 512
@@ -78,6 +79,8 @@ func (i *Index) SetRetrievalModels(models RetrievalModels) {
 type SearchOptions struct {
 	TopK        int
 	SourceNames []string
+	MinCVSS     *float64
+	Severity    string
 }
 
 // SearchResult includes snapshot coverage so a partial corpus is visible to
@@ -433,6 +436,19 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if options.TopK < 1 || options.TopK > MaximumSearchTopK {
 		return SearchResult{}, errors.New("KB top-k must be between 1 and 100")
 	}
+	if options.MinCVSS != nil && (math.IsNaN(*options.MinCVSS) || math.IsInf(*options.MinCVSS, 0) || *options.MinCVSS < 0 || *options.MinCVSS > 10) {
+		return SearchResult{}, errors.New("KB minimum CVSS must be between 0 and 10")
+	}
+	if options.Severity != "" {
+		if len(options.Severity) > maximumSeverityFilterBytes || options.Severity != strings.TrimSpace(options.Severity) {
+			return SearchResult{}, errors.New("KB severity filter is invalid")
+		}
+		switch options.Severity {
+		case "critical", "high", "medium", "low", "none", "info", "informational", "unknown":
+		default:
+			return SearchResult{}, errors.New("KB severity filter is invalid")
+		}
+	}
 	if utf8.RuneCountInString(query) > 4096 {
 		return SearchResult{}, errors.New("KB query exceeds the 4096-character limit")
 	}
@@ -531,6 +547,11 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 			result.Hits = append(result.Hits, vectorHits...)
 		}
 	}
+	// Match RedAmon's filter_chunks stage: form the global FTS/vector candidate
+	// pool first, then filter the retrieved chunk metadata. Keep the original
+	// ranked ID lists intact so excluded candidates still occupy their original
+	// rank positions and cannot be replaced by lower-ranked per-filter hits.
+	result.Hits = filterHitsByNVDMetadata(result.Hits, options.MinCVSS, options.Severity)
 	preRanked := rankHybridHits(result.Hits, vectorIDs, vectorScores, fulltextIDs, nil, candidateLimit)
 	if i.models != nil && len(preRanked) > 1 {
 		pool := preRanked[:min(len(preRanked), defaultRerankPoolSize)]
@@ -809,6 +830,52 @@ func filterHitsBySources(hits []Hit, sources []string) []Hit {
 		}
 	}
 	return filtered
+}
+
+func filterHitsByNVDMetadata(hits []Hit, minCVSS *float64, severity string) []Hit {
+	if minCVSS == nil && severity == "" {
+		return hits
+	}
+	filtered := make([]Hit, 0, len(hits))
+	for _, hit := range hits {
+		if minCVSS != nil {
+			if value, present := hit.Metadata["cvss_score"]; present && value != nil {
+				score, ok := metadataNumber(value)
+				if !ok || score < *minCVSS {
+					continue
+				}
+			}
+		}
+		if severity != "" {
+			if value, present := hit.Metadata["severity"]; present && value != nil {
+				level, ok := value.(string)
+				if !ok || level != severity {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, hit)
+	}
+	return filtered
+}
+
+func metadataNumber(value any) (float64, bool) {
+	switch number := value.(type) {
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+	case float64:
+		return number, !math.IsNaN(number) && !math.IsInf(number, 0)
+	case float32:
+		parsed := float64(number)
+		return parsed, !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	default:
+		return 0, false
+	}
 }
 
 func rankHybridHits(hits []Hit, vectorIDs []string, vectorScores map[string]float64, fulltextIDs []string, rerankScores map[string]float64, limit int) []Hit {
