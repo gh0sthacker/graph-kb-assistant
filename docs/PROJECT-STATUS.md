@@ -25,7 +25,12 @@
   Node tests passed. Native row preparation used unit tests only.
 - Existing accepted projections are immutable and have not been rewritten;
   adding these references to older captures still requires an explicit
-  versioned backfill. Runtime Neo4j, Caido, and model verification remain
+  versioned backfill. Reimporting an unchanged historical capture preserves
+  its registered canonical payload even when the current parser can emit
+  additional records. Synthetic pending and applied-job scenarios verify that
+  replay keeps the original payload hash, delivery state, and single capture
+  revision. Live-first revisions retain their existing source/mapping checks.
+  Runtime Neo4j, Caido, and model verification remain
   outside this synthetic checkpoint. Stage 3 remains `PARTIAL`.
 
 ## Stage 3 exact HTTP navigation links during page import — PARTIAL (2026-10-25)

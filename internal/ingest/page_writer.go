@@ -599,9 +599,9 @@ func enqueueProjectionJobs(
 		if _, _, err := behaviorgraph.EnqueueProjectionJob(
 			ctx, conn, selected.ProjectKey, item.revisionID, item.observationID, payload, time.Now().UTC(),
 		); errors.Is(err, behaviorgraph.ErrProjectionJobConflict) {
-			canonical, graphObservationID, reuseErr := existingLiveProjectionForRevision(ctx, conn, selected, item)
+			canonical, graphObservationID, reuseErr := existingProjectionForRevision(ctx, conn, selected, item)
 			if reuseErr != nil {
-				return errors.New("conflicting projection job is not a matching live revision")
+				return errors.New("conflicting projection job does not match its registered capture revision")
 			}
 			bundles[index] = canonical
 			graphObservationIDs[index] = graphObservationID
@@ -631,7 +631,10 @@ func enqueueProjectionJobs(
 	return nil
 }
 
-func existingLiveProjectionForRevision(
+// existingProjectionForRevision preserves the first accepted immutable graph
+// payload for an unchanged capture revision. New parser/enrichment records need
+// an explicit backfill; ordinary source replay must not replace accepted jobs.
+func existingProjectionForRevision(
 	ctx context.Context,
 	conn *sql.Conn,
 	selected *store.ProjectStore,
@@ -640,25 +643,30 @@ func existingLiveProjectionForRevision(
 	var observationID, sourceKind, graphObservationID string
 	if err := conn.QueryRowContext(ctx,
 		"SELECT observation_id,source_kind FROM capture_revision_registry WHERE revision_id=?", item.revisionID,
-	).Scan(&observationID, &sourceKind); err != nil || observationID != item.observationID || sourceKind != "live" {
-		return nil, "", errors.New("revision is not first registered by the live source")
-	}
-	if err := conn.QueryRowContext(ctx,
-		`SELECT graph_observation_id FROM live_capture_index
-		 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=? AND observation_id=?`,
-		selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID, item.observationID,
-	).Scan(&graphObservationID); err != nil || graphObservationID == "" {
-		return nil, "", errors.New("matching live capture mapping is unavailable")
+	).Scan(&observationID, &sourceKind); err != nil || observationID != item.observationID || !validRegisteredRevisionSource(sourceKind) {
+		return nil, "", errors.New("revision does not match its registered capture source")
 	}
 	job, err := behaviorgraph.ProjectionJobByRevision(ctx, conn, selected.ProjectKey, item.revisionID)
 	if err != nil {
 		return nil, "", err
 	}
-	var bundle behaviorgraph.Record
-	if err := json.Unmarshal([]byte(job.PayloadJSON), &bundle); err != nil || !hasProjectionObservation(bundle, graphObservationID, item.observationID, "live_capture") {
-		return nil, "", errors.New("stored job does not contain the matching live graph observation")
+	observationKind := "historical_capture"
+	graphObservationID = job.GraphObservationID
+	if sourceKind == "live" {
+		observationKind = "live_capture"
+		if err := conn.QueryRowContext(ctx,
+			`SELECT graph_observation_id FROM live_capture_index
+			 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=? AND observation_id=?`,
+			selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID, item.observationID,
+		).Scan(&graphObservationID); err != nil || graphObservationID == "" || graphObservationID != job.GraphObservationID {
+			return nil, "", errors.New("matching live capture mapping is unavailable")
+		}
 	}
-	return bundle, graphObservationID, nil
+	if job.ObservationID != item.observationID || graphObservationID == "" ||
+		!hasProjectionObservation(job.PayloadBundle, graphObservationID, item.observationID, observationKind) {
+		return nil, "", errors.New("stored job does not contain its registered graph observation")
+	}
+	return job.PayloadBundle, graphObservationID, nil
 }
 
 func hasProjectionObservation(bundle behaviorgraph.Record, observationID, captureID, observationKind string) bool {
