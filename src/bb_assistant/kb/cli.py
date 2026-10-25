@@ -18,7 +18,7 @@ from .nuclei import RedAmonNucleiProvider
 from .owasp import RedAmonOWASPProvider
 from .redamon_local import RedAmonLocalToolDocsProvider
 from .redamon_sources import RedAmonSourceAdapter
-from .rebuild import export_redamon_snapshot, import_snapshot
+from .rebuild import export_redamon_snapshot, import_snapshot, rechunk_index
 from .ranking import DEFAULT_TOP_K
 
 
@@ -106,6 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("build", help="build available pinned sources and import the KB index")
     commands.add_parser("stats", help="show KB source and coverage counts")
+    commands.add_parser("rechunk", help="rebuild installed chunks from stored source documents without fetching")
     import_command = commands.add_parser(
         "import-snapshot",
         help="validate and import an existing source snapshot without fetching feeds",
@@ -146,6 +147,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         index = KBIndex(_configured_index_path(args.index_path))
         print(json.dumps(index.stats(), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
+    if args.command == "rechunk":
+        index = KBIndex(_configured_index_path(args.index_path))
+        last_progress = 0
+
+        def report_progress(done: int, total: int) -> None:
+            nonlocal last_progress
+            if done == total or done - last_progress >= 10000:
+                print(f"rechunked {done}/{total} KB sources", file=sys.stderr, flush=True)
+                last_progress = done
+
+        result = rechunk_index(index, project_root=args.project_root, progress_callback=report_progress)
+        print(json.dumps({**result, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if result["coverage_state"] == "DONE" else 3
     if args.command == "import-snapshot":
         index = KBIndex(_configured_index_path(args.index_path))
         result = import_snapshot(args.snapshot_dir, index)

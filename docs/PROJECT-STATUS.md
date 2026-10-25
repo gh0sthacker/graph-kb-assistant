@@ -2543,15 +2543,22 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   text/title mismatches against that algorithm. This verifies chunk algorithm
   parity for the current document set only; it does not establish source-set,
   active-profile, vector, or query-result parity.
-- The imported SQLite index has not yet been rebuilt from the corrected
-  chunker. Comparing its current rows with the corrected output found 5,801
-  chunk-content mismatches, 161,084 chunk-title mismatches, 1,507 source-span
-  changes, and six documents with a different chunk count. Its current count
-  remains 162,413 chunks. The live index therefore remains non-identical.
+- The installed SQLite index has now been rebuilt from the corrected chunker:
+  161,240 source documents and 162,398 chunks. SQLite `quick_check` is `ok`,
+  there are no foreign-key violations, and the FTS row count matches the chunk
+  count. The rebuild now batches and checkpoints by source ID, persists its
+  cursor and fails closed in Python and Go while incomplete, so it can resume
+  after the command's runtime limit without exposing a partial index.
 - The embedding process was stopped cleanly at 6,560/162,413 vectors because
   it was embedding the stale chunk snapshot. Its staging marker is not a ready
   vector snapshot; vector retrieval is unavailable until the corrected index
   is installed and embedding completes.
+- The first full-index refresh attempt was interrupted before changing the
+  snapshot marker: its single SQLite rollback journal reached 878 MB while the
+  transaction was still preparing writes. SQLite recovered the original index
+  on reopen (162,413 chunks and 6,560 vectors remain). The maintenance command
+  has since been changed to bounded resumable transactions, sets a durable
+  marker, and makes Python/Go readers fail closed during an incomplete refresh.
 - Source-set parity remains `PARTIAL`: the index contains six populated
   families, while ExploitDB remains blocked by unresolved dataset reuse terms.
   The checked-out RedAmon profile defaults to `lite`; the parity target in the
@@ -2559,8 +2566,12 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   identified. No exact KB parity claim is justified yet.
 - Code changes now use RedAmon's actual section trimming/merging, paragraph
   splitting, structured truncation/title behavior, and explicit exact-vs-
-  covering source-span metadata. Full Python test suite passes (155 tests plus
-  8 subtests). The next
-  step is a safe live-index refresh that preserves valid chunk vectors where
-  content identities match, followed by the missing corpus/terms and retrieval
-  parity gates.
+  covering source-span metadata. Full Python test suite passes (157 tests plus
+  8 subtests); focused Go KB, MCP and app tests pass. The `bb-assistant-kb
+  rechunk` maintenance command rebuilds chunks directly from stored source
+  documents without network fetches. The app has been restarted against the
+  repaired index. Vector search remains unavailable: only 6,496 of 162,398
+  chunks have vectors and the vector snapshot is not ready. Next:
+  finish embedding, resolve the ExploitDB dataset-rights blocker, identify the
+  exact deployed RedAmon profile/snapshot, and complete retrieval-parity
+  checks before claiming that the KB is identical.

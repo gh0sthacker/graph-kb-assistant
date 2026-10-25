@@ -154,6 +154,38 @@ func TestSearchDoesNotReturnLicenseNoticeOnlyMatches(t *testing.T) {
 	}
 }
 
+func TestKBReadsFailClosedWhileRechunkMarkerIsPresent(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic source content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO kb_meta(key,value) VALUES('rechunk_target_snapshot_id',?)`, strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	ctx := context.Background()
+	stats, err := index.Stats(ctx)
+	if err != nil || stats.MaintenanceState == nil || *stats.MaintenanceState != strings.Repeat("b", 64) {
+		t.Fatalf("Stats maintenance state = %+v, %v", stats.MaintenanceState, err)
+	}
+	if _, err := index.Search(ctx, "synthetic", SearchOptions{TopK: 5}); err == nil {
+		t.Fatal("Search succeeded while the KB snapshot was only partially refreshed")
+	}
+	if _, err := index.GetSource(ctx, "synthetic", "document-1", 512); err == nil {
+		t.Fatal("GetSource succeeded while the KB snapshot was only partially refreshed")
+	}
+}
+
 func TestSearchUsesCompleteTermsLikeRedAmonFullText(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
 	content := "authentication guidance for the synthetic application"

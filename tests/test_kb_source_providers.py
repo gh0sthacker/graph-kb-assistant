@@ -20,7 +20,7 @@ from bb_assistant.kb.pinned_github_archive import read_pinned_archive
 from bb_assistant.kb.index import KBIndex
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
 from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider
-from bb_assistant.kb.rebuild import _source_document_from_record, export_redamon_snapshot, import_snapshot
+from bb_assistant.kb.rebuild import _source_document_from_record, export_redamon_snapshot, import_snapshot, rechunk_index
 from bb_assistant.kb.redamon_sources import (
     RedAmonSourceAdapter,
     SourceBatch,
@@ -281,6 +281,93 @@ class SourceRightsAndCoverageGateTests(unittest.TestCase):
 
 
 class VendoredToolDocsSnapshotTests(unittest.TestCase):
+    def test_snapshot_refresh_reuses_vectors_for_unchanged_chunk_identities(self) -> None:
+        class FakeEmbedder:
+            model_name = "fixture-model"
+
+            def __init__(self) -> None:
+                self.encoded: list[str] = []
+
+            def embed_documents_batch(self, texts: list[str], *, batch_size: int) -> list[list[float]]:
+                self.encoded.extend(texts)
+                return [[float(len(text)), 1.0] for text in texts]
+
+        stable = SourceDocument.create(
+            source_name="nvd", source_id="CVE-2026-0001", title="Retired title marker", text="Stable source content",
+        )
+        stable_after = SourceDocument.create(
+            source_name="nvd", source_id="CVE-2026-0001", title="Current title marker", text="Stable source content",
+        )
+        changed_before = SourceDocument.create(
+            source_name="nvd", source_id="CVE-2026-0002", title="CVE-2026-0002", text="Old source content",
+        )
+        changed_after = SourceDocument.create(
+            source_name="nvd", source_id="CVE-2026-0002", title="CVE-2026-0002", text="New source content",
+        )
+        before_chunks = (*chunk_document(stable), *chunk_document(changed_before))
+        after_chunks = (*chunk_document(stable_after), *chunk_document(changed_after))
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-vector-reuse-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            embedder = FakeEmbedder()
+            index.replace_snapshot(before_chunks, "1" * 64, sources=(stable, changed_before))
+            self.assertEqual(index.rebuild_embeddings(embedder, batch_size=2), 2)
+            first_encoded = list(embedder.encoded)
+
+            index.replace_snapshot(after_chunks, "2" * 64, sources=(stable_after, changed_after))
+            with index.connect() as connection:
+                retained = connection.execute("SELECT chunk_id FROM chunk_embeddings").fetchall()
+            self.assertEqual([row[0] for row in retained], [before_chunks[0].chunk_id])
+            self.assertEqual(index.search("retired"), ())
+            self.assertEqual(index.search("current")[0].chunk_id, after_chunks[0].chunk_id)
+            self.assertEqual(index.rebuild_embeddings(embedder, batch_size=2), 2)
+            self.assertEqual(len(embedder.encoded) - len(first_encoded), 1)
+            self.assertEqual(index.stats()["embedding_snapshot_id"], "2" * 64)
+            refreshed = rechunk_index(index, project_root=Path(__file__).resolve().parents[1])
+            self.assertEqual(refreshed["source_documents"], 2)
+            self.assertEqual(refreshed["chunks"], 2)
+            self.assertEqual(index.rebuild_embeddings(embedder, batch_size=2), 2)
+            self.assertTrue(index.stats()["vector_ready"])
+            self.assertEqual(len(embedder.encoded) - len(first_encoded), 1)
+
+    def test_rechunk_resumes_after_a_committed_source_batch(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="nvd", source_id="CVE-2026-0001", title="CVE-2026-0001",
+                text="Authorization boundary regression fixture one.",
+            ),
+            SourceDocument.create(
+                source_name="nvd", source_id="CVE-2026-0002", title="CVE-2026-0002",
+                text="Authorization boundary regression fixture two.",
+            ),
+        )
+        initial_chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-rechunk-resume-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(initial_chunks, "1" * 64, sources=documents)
+
+            def interrupt_after_first_batch(done: int, total: int) -> None:
+                if done == 1:
+                    raise RuntimeError("simulated process interruption")
+
+            with self.assertRaisesRegex(RuntimeError, "simulated process interruption"):
+                rechunk_index(
+                    index,
+                    project_root=Path(__file__).resolve().parents[1],
+                    batch_documents=1,
+                    progress_callback=interrupt_after_first_batch,
+                )
+            self.assertEqual(index.stats()["maintenance_state"], "rechunking")
+            with self.assertRaisesRegex(RuntimeError, "maintenance is in progress"):
+                index.search("authorization")
+
+            result = rechunk_index(
+                index, project_root=Path(__file__).resolve().parents[1], batch_documents=1,
+            )
+            self.assertEqual(result["source_documents"], 2)
+            self.assertEqual(result["chunks"], 2)
+            self.assertIsNone(index.stats()["maintenance_state"])
+            self.assertEqual(len(index.search("authorization")), 2)
+
     def test_snapshot_preserves_raw_upstream_json_separately_from_search_text(self) -> None:
         raw = '{"cve":{"id":"CVE-2026-12345","future":"retained"}}'
         document = SourceDocument.create(

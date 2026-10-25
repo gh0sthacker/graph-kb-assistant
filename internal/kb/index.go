@@ -86,6 +86,7 @@ type SearchResult struct {
 	SnapshotID         string `json:"snapshot_id"`
 	CoverageState      string `json:"coverage_state"`
 	CoverageReportHash string `json:"coverage_report_sha256,omitempty"`
+	MaintenanceState   string `json:"maintenance_state,omitempty"`
 	RetrievalMode      string `json:"retrieval_mode"`
 	Hits               []Hit  `json:"hits"`
 }
@@ -103,6 +104,7 @@ type StatsResult struct {
 	CoverageState                string           `json:"coverage_state"`
 	CoverageReportHash           *string          `json:"coverage_report_sha256"`
 	SourceCoverage               []map[string]any `json:"source_coverage"`
+	MaintenanceState             *string          `json:"maintenance_state,omitempty"`
 	ReferenceMaterialIsUntrusted bool             `json:"reference_material_is_untrusted"`
 }
 
@@ -235,6 +237,9 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 		SourceCoverage:               []map[string]any{},
 		ReferenceMaterialIsUntrusted: true,
 	}
+	if info.MaintenanceState != "" {
+		result.MaintenanceState = optionalString(info.MaintenanceState)
+	}
 	if err := tx.QueryRowContext(ctx, "SELECT count(DISTINCT source_name), count(*) FROM source_documents").Scan(&result.SourceFamilies, &result.SourceDocuments); err != nil {
 		return StatsResult{}, errors.New("KB source counts could not be read")
 	}
@@ -335,6 +340,9 @@ func (i *Index) GetSource(ctx context.Context, sourceName, sourceID string, maxC
 	info, err := readSnapshotInfo(ctx, tx)
 	if err != nil {
 		return SourceResult{}, err
+	}
+	if info.MaintenanceState != "" {
+		return SourceResult{}, errors.New("KB index maintenance is in progress")
 	}
 	result := SourceResult{
 		SnapshotID: info.SnapshotID, CoverageState: info.CoverageState,
@@ -454,6 +462,9 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	result, err := readSnapshotInfo(ctx, tx)
 	if err != nil {
 		return SearchResult{}, err
+	}
+	if result.MaintenanceState != "" {
+		return SearchResult{}, errors.New("KB index maintenance is in progress")
 	}
 	result.Hits = []Hit{}
 	result.RetrievalMode = "fulltext"
@@ -989,8 +1000,8 @@ type rowQueryer interface {
 func readSnapshotInfo(ctx context.Context, queryer rowQueryer) (SearchResult, error) {
 	result := SearchResult{}
 	err := queryer.QueryRowContext(ctx,
-		"SELECT max(CASE WHEN key='snapshot_id' THEN substr(value,1,65) END), max(CASE WHEN key='coverage_state' THEN substr(value,1,257) END), max(CASE WHEN key='coverage_report_sha256' THEN substr(value,1,65) END) FROM kb_meta",
-	).Scan(&result.SnapshotID, &result.CoverageState, &result.CoverageReportHash)
+		"SELECT max(CASE WHEN key='snapshot_id' THEN substr(value,1,65) END), max(CASE WHEN key='coverage_state' THEN substr(value,1,257) END), max(CASE WHEN key='coverage_report_sha256' THEN substr(value,1,65) END), coalesce(max(CASE WHEN key='rechunk_target_snapshot_id' THEN substr(value,1,65) END),'') FROM kb_meta",
+	).Scan(&result.SnapshotID, &result.CoverageState, &result.CoverageReportHash, &result.MaintenanceState)
 	if err != nil || !snapshotDigestPattern.MatchString(result.SnapshotID) || len(result.CoverageState) > maximumCoverageStateBytes ||
 		(result.CoverageState != "DONE" && result.CoverageState != "PARTIAL" && result.CoverageState != "BLOCKED" && result.CoverageState != "unverified") {
 		return SearchResult{}, errors.New("KB snapshot metadata could not be read")

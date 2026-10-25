@@ -301,46 +301,121 @@ class KBIndex:
                 if chunk.metadata.get("source_span_exact", True) and source.text[chunk.start_char:chunk.end_char] != chunk.text:
                     raise ValueError("Exact KB chunk does not match its source document span")
 
-        count = 0
         with self.connect(_maintenance_lock_held=True) as connection:
-            connection.execute("DELETE FROM chunk_search")
-            connection.execute("DELETE FROM chunk_embeddings")
-            connection.execute("DELETE FROM chunks")
-            connection.execute("DELETE FROM source_documents")
-            for source in source_rows:
-                connection.execute(
-                    """INSERT INTO source_documents(
-                         source_name,source_id,title,source_url,source_locator,source_revision,
-                         license_id,attribution,metadata_json,content_sha256,text,raw_source_sha256,raw_source_text
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        source.source_name, source.source_id, source.title, source.source_url,
-                        source.source_locator, source.source_revision, source.license_id,
-                        source.attribution,
-                        json.dumps(source.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-                        source.content_sha256, source.text, source.raw_source_sha256, source.raw_source_text,
-                    ),
-                )
-            for chunk in chunk_rows:
-                connection.execute(
-                    """INSERT INTO chunks(
-                         chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,
-                         source_revision,license_id,attribution,metadata_json,source_sha256,chunk_sha256,
-                         chunk_schema,text
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        chunk.chunk_id, chunk.source_name, chunk.source_id, chunk.title, chunk.start_char,
-                        chunk.end_char, chunk.source_locator, chunk.source_url, chunk.source_revision,
-                        chunk.license_id, chunk.attribution,
-                        json.dumps(chunk.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-                        chunk.source_sha256, chunk.chunk_sha256, chunk.chunk_schema, chunk.text,
-                    ),
-                )
-                connection.execute(
-                    "INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)",
-                    (chunk.chunk_id, chunk.source_name, chunk.title, chunk.text),
-                )
-                count += 1
+            connection.execute("PRAGMA temp_store=MEMORY")
+            connection.executescript("""
+                CREATE TEMP TABLE incoming_sources(
+                  source_name TEXT NOT NULL, source_id TEXT NOT NULL, title TEXT NOT NULL,
+                  source_url TEXT, source_locator TEXT, source_revision TEXT, license_id TEXT,
+                  attribution TEXT, metadata_json TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+                  text TEXT NOT NULL, raw_source_sha256 TEXT, raw_source_text TEXT,
+                  PRIMARY KEY(source_name,source_id));
+                CREATE TEMP TABLE incoming_chunks(
+                  chunk_id TEXT PRIMARY KEY, source_name TEXT NOT NULL, source_id TEXT NOT NULL,
+                  title TEXT NOT NULL, start_char INTEGER NOT NULL, end_char INTEGER NOT NULL,
+                  source_locator TEXT, source_url TEXT, source_revision TEXT, license_id TEXT,
+                  attribution TEXT, metadata_json TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+                  chunk_sha256 TEXT NOT NULL, chunk_schema TEXT NOT NULL, text TEXT NOT NULL);
+            """)
+            connection.executemany(
+                "INSERT INTO incoming_sources VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    (source.source_name, source.source_id, source.title, source.source_url,
+                     source.source_locator, source.source_revision, source.license_id,
+                     source.attribution,
+                     json.dumps(source.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                     source.content_sha256, source.text, source.raw_source_sha256, source.raw_source_text)
+                    for source in source_rows
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO incoming_chunks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    (chunk.chunk_id, chunk.source_name, chunk.source_id, chunk.title, chunk.start_char,
+                     chunk.end_char, chunk.source_locator, chunk.source_url, chunk.source_revision,
+                     chunk.license_id, chunk.attribution,
+                     json.dumps(chunk.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                     chunk.source_sha256, chunk.chunk_sha256, chunk.chunk_schema, chunk.text)
+                    for chunk in chunk_rows
+                ),
+            )
+
+            # Keep identical chunk rows (and their vectors) in place. Replace
+            # only changed FTS rows and remove identities absent from the new
+            # snapshot; chunk_id binds source hash, content hash and span.
+            connection.execute("""
+                DELETE FROM chunk_search WHERE chunk_id IN (
+                  SELECT f.chunk_id FROM chunk_search f
+                  LEFT JOIN incoming_chunks i ON i.chunk_id=f.chunk_id
+                  WHERE i.chunk_id IS NULL OR f.title IS NOT i.title OR f.text IS NOT i.text)
+            """)
+            connection.execute("""
+                DELETE FROM chunks WHERE NOT EXISTS (
+                  SELECT 1 FROM incoming_chunks i WHERE i.chunk_id=chunks.chunk_id)
+            """)
+            connection.execute("""
+                DELETE FROM chunk_embeddings WHERE NOT EXISTS (
+                  SELECT 1 FROM incoming_chunks i WHERE i.chunk_id=chunk_embeddings.chunk_id)
+            """)
+            connection.execute("""
+                DELETE FROM source_documents WHERE NOT EXISTS (
+                  SELECT 1 FROM incoming_sources i
+                  WHERE i.source_name=source_documents.source_name AND i.source_id=source_documents.source_id)
+            """)
+            connection.execute("""
+                INSERT INTO source_documents(
+                  source_name,source_id,title,source_url,source_locator,source_revision,license_id,
+                  attribution,metadata_json,content_sha256,text,raw_source_sha256,raw_source_text)
+                SELECT source_name,source_id,title,source_url,source_locator,source_revision,license_id,
+                  attribution,metadata_json,content_sha256,text,raw_source_sha256,raw_source_text
+                FROM incoming_sources WHERE 1
+                ON CONFLICT(source_name,source_id) DO UPDATE SET
+                  title=excluded.title,source_url=excluded.source_url,source_locator=excluded.source_locator,
+                  source_revision=excluded.source_revision,license_id=excluded.license_id,
+                  attribution=excluded.attribution,metadata_json=excluded.metadata_json,
+                  content_sha256=excluded.content_sha256,text=excluded.text,
+                  raw_source_sha256=excluded.raw_source_sha256,raw_source_text=excluded.raw_source_text
+                WHERE source_documents.title IS NOT excluded.title
+                  OR source_documents.source_url IS NOT excluded.source_url
+                  OR source_documents.source_locator IS NOT excluded.source_locator
+                  OR source_documents.source_revision IS NOT excluded.source_revision
+                  OR source_documents.license_id IS NOT excluded.license_id
+                  OR source_documents.attribution IS NOT excluded.attribution
+                  OR source_documents.metadata_json IS NOT excluded.metadata_json
+                  OR source_documents.content_sha256 IS NOT excluded.content_sha256
+                  OR source_documents.text IS NOT excluded.text
+                  OR source_documents.raw_source_sha256 IS NOT excluded.raw_source_sha256
+                  OR source_documents.raw_source_text IS NOT excluded.raw_source_text
+            """)
+            connection.execute("""
+                INSERT INTO chunks(
+                  chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,
+                  source_revision,license_id,attribution,metadata_json,source_sha256,chunk_sha256,chunk_schema,text)
+                SELECT chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,
+                  source_revision,license_id,attribution,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+                FROM incoming_chunks WHERE 1
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                  source_name=excluded.source_name,source_id=excluded.source_id,title=excluded.title,
+                  start_char=excluded.start_char,end_char=excluded.end_char,source_locator=excluded.source_locator,
+                  source_url=excluded.source_url,source_revision=excluded.source_revision,
+                  license_id=excluded.license_id,attribution=excluded.attribution,
+                  metadata_json=excluded.metadata_json,source_sha256=excluded.source_sha256,
+                  chunk_sha256=excluded.chunk_sha256,chunk_schema=excluded.chunk_schema,text=excluded.text
+                WHERE chunks.source_name IS NOT excluded.source_name OR chunks.source_id IS NOT excluded.source_id
+                  OR chunks.title IS NOT excluded.title OR chunks.start_char IS NOT excluded.start_char
+                  OR chunks.end_char IS NOT excluded.end_char OR chunks.source_locator IS NOT excluded.source_locator
+                  OR chunks.source_url IS NOT excluded.source_url OR chunks.source_revision IS NOT excluded.source_revision
+                  OR chunks.license_id IS NOT excluded.license_id OR chunks.attribution IS NOT excluded.attribution
+                  OR chunks.metadata_json IS NOT excluded.metadata_json OR chunks.source_sha256 IS NOT excluded.source_sha256
+                  OR chunks.chunk_sha256 IS NOT excluded.chunk_sha256 OR chunks.chunk_schema IS NOT excluded.chunk_schema
+                  OR chunks.text IS NOT excluded.text
+            """)
+            connection.execute("""
+                INSERT INTO chunk_search(chunk_id,source_name,title,text)
+                SELECT i.chunk_id,i.source_name,i.title,i.text FROM incoming_chunks i
+                WHERE NOT EXISTS (SELECT 1 FROM chunk_search f WHERE f.chunk_id=i.chunk_id)
+            """)
+            count = len(chunk_rows)
             connection.execute(
                 "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
             )
@@ -362,8 +437,177 @@ class KBIndex:
             )
         return count
 
+    def refresh_chunks(
+        self,
+        chunks: Iterable[CanonicalChunk],
+        snapshot_id: str,
+        *,
+        coverage_state: str,
+        coverage_report_sha256: str | None,
+        batch_size: int = 2048,
+    ) -> int:
+        """Idempotently refresh chunk rows in bounded, resumable transactions.
+
+        A durable maintenance marker blocks readers after interruption. Each
+        batch is committed separately to bound rollback-journal size; rerunning
+        the operation safely reapplies the same target snapshot.
+        """
+        if self.read_only:
+            raise ValueError("KB index is read-only")
+        if not re.fullmatch(r"[a-f0-9]{64}", snapshot_id):
+            raise ValueError("snapshot_id must be a lowercase SHA-256 digest")
+        if coverage_state not in {"DONE", "PARTIAL", "BLOCKED", "unverified"}:
+            raise ValueError("unsupported KB coverage state")
+        if coverage_report_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", coverage_report_sha256):
+            raise ValueError("coverage report SHA-256 is invalid")
+        if not 1 <= batch_size <= 10_000:
+            raise ValueError("chunk refresh batch_size must be between 1 and 10000")
+
+        chunk_rows = list(chunks)
+        if not chunk_rows:
+            raise ValueError("cannot refresh an empty KB chunk snapshot")
+        seen: set[str] = set()
+        for chunk in chunk_rows:
+            self._validate_chunk(chunk)
+            if chunk.chunk_id in seen:
+                raise ValueError("duplicate chunk identity in refresh")
+            seen.add(chunk.chunk_id)
+
+        with project_maintenance_lock(self.path.parent):
+            with self.connect(_maintenance_lock_held=True) as connection:
+                meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+                previous_snapshot = meta.get("snapshot_id")
+                if not previous_snapshot:
+                    raise ValueError("Cannot refresh chunks without an installed snapshot")
+                retained_model = meta.get("vector_staging_model") or meta.get("vector_model")
+                retained_dimensions = meta.get("vector_staging_dimensions") or meta.get("vector_dimensions")
+
+                connection.execute("PRAGMA temp_store=MEMORY")
+                connection.executescript("""
+                    CREATE TEMP TABLE IF NOT EXISTS incoming_refresh_chunks(
+                      batch_no INTEGER NOT NULL, chunk_id TEXT PRIMARY KEY,
+                      source_name TEXT NOT NULL, source_id TEXT NOT NULL, title TEXT NOT NULL,
+                      start_char INTEGER NOT NULL, end_char INTEGER NOT NULL, source_locator TEXT,
+                      source_url TEXT, source_revision TEXT, license_id TEXT, attribution TEXT,
+                      metadata_json TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+                      chunk_sha256 TEXT NOT NULL, chunk_schema TEXT NOT NULL, text TEXT NOT NULL);
+                    DELETE FROM incoming_refresh_chunks;
+                """)
+                connection.executemany(
+                    "INSERT INTO incoming_refresh_chunks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        (ordinal // batch_size, chunk.chunk_id, chunk.source_name, chunk.source_id,
+                         chunk.title, chunk.start_char, chunk.end_char, chunk.source_locator, chunk.source_url,
+                         chunk.source_revision, chunk.license_id, chunk.attribution,
+                         json.dumps(chunk.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                         chunk.source_sha256, chunk.chunk_sha256, chunk.chunk_schema, chunk.text)
+                        for ordinal, chunk in enumerate(chunk_rows)
+                    ),
+                )
+                connection.commit()
+
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('rechunk_target_snapshot_id',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (snapshot_id,),
+                )
+                connection.execute(
+                    "DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')"
+                )
+                connection.commit()
+
+                connection.execute("""
+                    DELETE FROM chunk_search WHERE chunk_id NOT IN
+                      (SELECT chunk_id FROM incoming_refresh_chunks)
+                """)
+                connection.execute("""
+                    DELETE FROM chunks WHERE NOT EXISTS
+                      (SELECT 1 FROM incoming_refresh_chunks i WHERE i.chunk_id=chunks.chunk_id)
+                """)
+                connection.execute("""
+                    DELETE FROM chunk_embeddings WHERE NOT EXISTS
+                      (SELECT 1 FROM incoming_refresh_chunks i WHERE i.chunk_id=chunk_embeddings.chunk_id)
+                """)
+                connection.commit()
+
+                batch_count = (len(chunk_rows) + batch_size - 1) // batch_size
+                for batch_no in range(batch_count):
+                    connection.execute("""
+                        DELETE FROM chunk_search WHERE chunk_id IN (
+                          SELECT f.chunk_id FROM chunk_search f
+                          JOIN incoming_refresh_chunks i ON i.chunk_id=f.chunk_id
+                          WHERE i.batch_no=? AND (f.title IS NOT i.title OR f.text IS NOT i.text))
+                    """, (batch_no,))
+                    connection.execute("""
+                        INSERT INTO chunks(
+                          chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,
+                          source_revision,license_id,attribution,metadata_json,source_sha256,chunk_sha256,chunk_schema,text)
+                        SELECT chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,
+                          source_revision,license_id,attribution,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+                        FROM incoming_refresh_chunks WHERE batch_no=?
+                        ON CONFLICT(chunk_id) DO UPDATE SET
+                          source_name=excluded.source_name,source_id=excluded.source_id,title=excluded.title,
+                          start_char=excluded.start_char,end_char=excluded.end_char,source_locator=excluded.source_locator,
+                          source_url=excluded.source_url,source_revision=excluded.source_revision,
+                          license_id=excluded.license_id,attribution=excluded.attribution,
+                          metadata_json=excluded.metadata_json,source_sha256=excluded.source_sha256,
+                          chunk_sha256=excluded.chunk_sha256,chunk_schema=excluded.chunk_schema,text=excluded.text
+                        WHERE chunks.source_name IS NOT excluded.source_name OR chunks.source_id IS NOT excluded.source_id
+                          OR chunks.title IS NOT excluded.title OR chunks.start_char IS NOT excluded.start_char
+                          OR chunks.end_char IS NOT excluded.end_char OR chunks.source_locator IS NOT excluded.source_locator
+                          OR chunks.source_url IS NOT excluded.source_url OR chunks.source_revision IS NOT excluded.source_revision
+                          OR chunks.license_id IS NOT excluded.license_id OR chunks.attribution IS NOT excluded.attribution
+                          OR chunks.metadata_json IS NOT excluded.metadata_json OR chunks.source_sha256 IS NOT excluded.source_sha256
+                          OR chunks.chunk_sha256 IS NOT excluded.chunk_sha256 OR chunks.chunk_schema IS NOT excluded.chunk_schema
+                          OR chunks.text IS NOT excluded.text
+                    """, (batch_no,))
+                    connection.execute("""
+                        INSERT INTO chunk_search(chunk_id,source_name,title,text)
+                        SELECT i.chunk_id,i.source_name,i.title,i.text FROM incoming_refresh_chunks i
+                        WHERE i.batch_no=? AND NOT EXISTS
+                          (SELECT 1 FROM chunk_search f WHERE f.chunk_id=i.chunk_id)
+                    """, (batch_no,))
+                    connection.commit()
+
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("snapshot_id", snapshot_id),
+                )
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('chunk_count',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(len(chunk_rows)),),
+                )
+                if coverage_report_sha256:
+                    connection.execute(
+                        "INSERT INTO kb_meta(key,value) VALUES('coverage_report_sha256',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (coverage_report_sha256,),
+                    )
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('coverage_state',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (coverage_state,),
+                )
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('vector_staging_snapshot_id',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (snapshot_id,),
+                )
+                if retained_model:
+                    connection.execute(
+                        "INSERT INTO kb_meta(key,value) VALUES('vector_staging_model',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (retained_model,),
+                    )
+                if retained_dimensions:
+                    connection.execute(
+                        "INSERT INTO kb_meta(key,value) VALUES('vector_staging_dimensions',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (retained_dimensions,),
+                    )
+                connection.execute("DELETE FROM kb_meta WHERE key='rechunk_target_snapshot_id'")
+                connection.commit()
+        return len(chunk_rows)
+
     def get_source(self, source_name: str, source_id: str) -> dict[str, object] | None:
         with self.connect() as connection:
+            if connection.execute("SELECT 1 FROM kb_meta WHERE key='rechunk_target_snapshot_id'").fetchone():
+                raise RuntimeError("KB index maintenance is in progress")
             row = connection.execute(
                 "SELECT * FROM source_documents WHERE source_name=? AND source_id=?",
                 (source_name, source_id),
@@ -397,6 +641,7 @@ class KBIndex:
             "embedding_model": meta.get("vector_model") or None,
             "embedding_snapshot_id": meta.get("vector_snapshot_id") or None,
             "vector_ready": vector_count > 0 and meta.get("vector_snapshot_id") == meta.get("snapshot_id"),
+            "maintenance_state": "rechunking" if meta.get("rechunk_target_snapshot_id") else None,
         }
 
     def rebuild_embeddings(
@@ -426,6 +671,8 @@ class KBIndex:
             snapshot_id = meta.get("snapshot_id")
             if not snapshot_id:
                 raise ValueError("Cannot build embeddings without an imported KB snapshot")
+            if meta.get("rechunk_target_snapshot_id"):
+                raise ValueError("Cannot build vectors while the KB index is being re-chunked")
             total = int(connection.execute(
                 "SELECT count(*) FROM chunks WHERE COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content'"
             ).fetchone()[0])
@@ -449,7 +696,11 @@ class KBIndex:
                 and meta.get("vector_staging_model") == model_name
             )
             if not staging_matches:
-                connection.execute("DELETE FROM chunk_embeddings")
+                connection.execute(
+                    "DELETE FROM chunk_embeddings WHERE chunk_id NOT IN ("
+                    "SELECT chunk_id FROM chunks WHERE "
+                    "COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content')"
+                )
                 connection.execute(
                     "DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')"
                 )
@@ -459,7 +710,13 @@ class KBIndex:
                 )
                 connection.execute("DELETE FROM kb_meta WHERE key='vector_staging_dimensions'")
                 _commit_with_busy_retry(connection)
-                dimensions = 0
+                dimension_rows = connection.execute(
+                    "SELECT DISTINCT dimensions FROM chunk_embeddings WHERE model_name=?",
+                    (model_name,),
+                ).fetchall()
+                if len(dimension_rows) > 1:
+                    raise ValueError("existing matching vectors have inconsistent dimensions")
+                dimensions = int(dimension_rows[0][0]) if dimension_rows else 0
             else:
                 dimensions = int(meta.get("vector_staging_dimensions", "0") or 0)
 
@@ -611,6 +868,8 @@ class KBIndex:
         sql += " ORDER BY score LIMIT ?"
         params.append(candidate_limit)
         with self.connect() as connection:
+            if connection.execute("SELECT 1 FROM kb_meta WHERE key='rechunk_target_snapshot_id'").fetchone():
+                raise RuntimeError("KB index maintenance is in progress")
             rows = connection.execute(sql, params).fetchall()
         fulltext_ids = [row["chunk_id"] for row in rows]
         fulltext_scores = {row["chunk_id"]: float(row["score"]) for row in rows}

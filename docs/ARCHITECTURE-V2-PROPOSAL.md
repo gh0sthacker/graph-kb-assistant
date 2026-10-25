@@ -363,6 +363,16 @@ the algorithm against the current documents, not KB parity; delivery remains
 `PARTIAL` until the installed corpus, complete vector generation, and
 representative query results pass the acceptance criteria above.
 
+The `bb-assistant-kb rechunk` command is implemented to refresh the installed
+index from already stored source documents, with no source fetch. It uses
+bounded, resumable transactions and a durable maintenance marker; Python and
+Go readers refuse to serve a partially refreshed index. Unchanged
+content-bound chunk identities keep their vectors, obsolete vectors are
+removed, and changed chunks remain pending in the resumable embedding process.
+Synthetic tests cover interruption-state reporting, reader fail-closed behavior,
+source-span validation, FTS title replacement, vector reuse, and readiness. It
+has not yet been applied to the installed 2.1 GB index.
+
 ## Review scope and limits
 
 Reviewed intake, storage, graph writer/readers, Neo4j materialization and
