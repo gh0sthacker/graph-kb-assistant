@@ -2440,6 +2440,28 @@ This repository is an early public alpha. The following boundaries are deliberat
   implemented, but project-data completeness, external client reachability,
   and real-target readiness have not been established here.
 
+### Runtime KB wiring correction — 2026-10-25
+
+- Inspection of the active web and Hermes MCP processes found they were
+  defaulting to the older nested 222 MB index and had no local model-worker
+  executable configured. The 161,240-document RedAmon-compatible snapshot was
+  in a separate 2.1 GB index. The web service and Hermes profile now both point
+  to that snapshot and the already-installed pinned-model Python runtime; both
+  processes were restarted and their non-secret environment settings verified.
+- The local UI root and LAN proxy returned HTTP 200 after the web restart.
+  Hermes reconnected to `bb_assistant` and discovered all 15 allowed tools.
+  A temporary-project MCP search over the imported NVD snapshot returned
+  relevant CVEs and non-null BGE rerank scores. E5 vector scores were absent,
+  as expected while the vector snapshot is incomplete.
+- That verification read only KB source material; no existing project
+  exchange, Caido record, or external target was opened. The 730-day NVD
+  content and source manifest remain `PARTIAL` because ExploitDB terms are
+  unresolved.
+- After a temporary database-lock error at a batch commit, the resumable
+  builder retained all durable rows and resumed from 2,624 with batches of
+  32. At this checkpoint it had stored 2,720/162,413 vectors; the build is
+  still incomplete and the published vector snapshot marker remains absent.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
 
 ### RedAmon KB parity update — 2026-10-25 (PARTIAL)
