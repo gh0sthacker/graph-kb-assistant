@@ -2416,6 +2416,36 @@ This repository is an early public alpha. The following boundaries are deliberat
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
 
+### RedAmon KB parity update — 2026-10-25 (PARTIAL)
+
+- The approved architecture v2 treats KB expansion as deferred for the core
+  HTTP-evidence → graph → navigation/comparison → Hermes workflow. The user
+  separately requested that this application's KB match the pinned RedAmon
+  full-profile KB; this parity work is therefore tracked as an explicit
+  additional requirement and is not represented as complete.
+- The imported local snapshot is
+  `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`:
+  161,240 documents and 162,413 chunks. NVD completed its 730-day profile
+  (146,938 CVEs plus two source notices); ToolDocs, GTFOBins, LOLBAS, OWASP,
+  and Nuclei report `done`. The source coverage manifest reports `PARTIAL`
+  solely because ExploitDB is blocked pending express dataset-reuse rights.
+- RedAmon-normalized NVD text, the 480-token clipping rule, 2,000-record
+  provider pages, and live Go retrieval fusion/reranking are implemented in
+  the commits above. ExploitDB has not been copied into the KB because its
+  dataset terms remain unresolved; a repository's code license does not grant
+  rights to copy the dataset. No exact-corpus-parity claim should be made
+  unless those rights are obtained.
+- The local E5 vector build is currently resumable and running against the
+  imported snapshot. At the latest read-only progress check it had stored
+  1,088 of 162,413 content vectors. The generation is not ready for vector
+  search until every vector has been stored and the snapshot marker is
+  published. This in-progress count is a checkpoint, not a completion claim.
+- A full 730-day NVD refresh was fetched and reconciled (146,938 expected,
+  fetched, and parsed records; 77 pages at 2,000 per page); raw CVE JSON is
+  preserved in the local snapshot while model-facing chunks use RedAmon's
+  normalized text. Completion of vector generation and a local Go search
+  smoke check remain outstanding.
+
 ### KB parity follow-up — 2026-10-25
 
 - Implemented the live Go retrieval path for E5 vector candidates plus FTS5,
