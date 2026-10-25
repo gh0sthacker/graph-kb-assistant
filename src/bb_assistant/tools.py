@@ -590,6 +590,9 @@ class ReadOnlyAssistantTools:
         if source is None:
             raise ToolCallError("The requested KB source was not found")
         text = source.pop("text")
+        # Raw upstream JSON is retained in the local index for provenance, but
+        # the model-facing tool exposes only the normalized, indexed document.
+        source.pop("raw_source_text", None)
         maximum = args.get("max_chars", 12000)
         source.update({
             "text": text[:maximum],

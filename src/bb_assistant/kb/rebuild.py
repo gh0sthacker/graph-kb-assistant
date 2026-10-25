@@ -240,7 +240,10 @@ def _validate_metadata(value: object, field_name: str) -> dict[str, str | int | 
 
 def _source_document_from_record(value: dict[str, object]) -> SourceDocument:
     expected_keys = {item.name for item in fields(SourceDocument)}
-    if set(value) != expected_keys:
+    # Older snapshots predate the separate raw-upstream payload. They remain
+    # importable with the optional provenance columns defaulting to null.
+    legacy_keys = expected_keys - {"raw_source_text", "raw_source_sha256"}
+    if not legacy_keys.issubset(value) or not set(value).issubset(expected_keys):
         raise ValueError("snapshot source document has an unexpected schema")
     string_fields = ("source_name", "source_id", "title", "text", "content_sha256")
     if any(not isinstance(value.get(key), str) for key in string_fields):
@@ -250,10 +253,24 @@ def _source_document_from_record(value: dict[str, object]) -> SourceDocument:
     optional_fields = ("source_url", "source_locator", "source_revision", "license_id", "attribution")
     if any(value.get(key) is not None and not isinstance(value.get(key), str) for key in optional_fields):
         raise ValueError("snapshot source document has invalid optional fields")
+    if value.get("raw_source_text") is not None and not isinstance(value.get("raw_source_text"), str):
+        raise ValueError("snapshot source document has invalid raw source text")
+    if value.get("raw_source_sha256") is not None and not _is_sha256(value.get("raw_source_sha256")):
+        raise ValueError("snapshot source document has invalid raw source hash")
     metadata = _validate_metadata(value.get("metadata"), "metadata")
-    document = SourceDocument(**{**value, "metadata": metadata})  # type: ignore[arg-type]
+    document = SourceDocument(**{
+        "raw_source_text": None,
+        "raw_source_sha256": None,
+        **value,
+        "metadata": metadata,
+    })  # type: ignore[arg-type]
     if hashlib.sha256(document.text.encode("utf-8")).hexdigest() != document.content_sha256:
         raise ValueError(f"snapshot source document content hash mismatch: {document.source_name}/{document.source_id}")
+    if document.raw_source_text is None:
+        if document.raw_source_sha256 is not None:
+            raise ValueError("snapshot source document has a raw hash without raw source text")
+    elif hashlib.sha256(document.raw_source_text.encode("utf-8")).hexdigest() != document.raw_source_sha256:
+        raise ValueError(f"snapshot raw source hash mismatch: {document.source_name}/{document.source_id}")
     return document
 
 

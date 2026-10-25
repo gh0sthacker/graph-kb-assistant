@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS source_documents (
   metadata_json TEXT NOT NULL,
   content_sha256 TEXT NOT NULL,
   text TEXT NOT NULL,
+  raw_source_sha256 TEXT,
+  raw_source_text TEXT,
   PRIMARY KEY(source_name,source_id)
 );
 CREATE TABLE IF NOT EXISTS chunks (
@@ -170,6 +172,11 @@ class KBIndex:
     def _initialize(self) -> None:
         with self.connect(_maintenance_lock_held=True) as connection:
             connection.executescript(_SCHEMA)
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(source_documents)")}
+            if "raw_source_sha256" not in columns:
+                connection.execute("ALTER TABLE source_documents ADD COLUMN raw_source_sha256 TEXT")
+            if "raw_source_text" not in columns:
+                connection.execute("ALTER TABLE source_documents ADD COLUMN raw_source_text TEXT")
 
     def replace_snapshot(
         self,
@@ -259,6 +266,11 @@ class KBIndex:
             expected = hashlib.sha256(source.text.encode("utf-8")).hexdigest()
             if source.content_sha256 != expected:
                 raise ValueError(f"Source hash mismatch for source ID {source.source_id!r}")
+            if source.raw_source_text is None:
+                if source.raw_source_sha256 is not None:
+                    raise ValueError(f"Raw source hash has no text for source ID {source.source_id!r}")
+            elif hashlib.sha256(source.raw_source_text.encode("utf-8")).hexdigest() != source.raw_source_sha256:
+                raise ValueError(f"Raw source hash mismatch for source ID {source.source_id!r}")
             key = (source.source_name, source.source_id)
             if key in source_lookup:
                 raise ValueError("duplicate source document identity")
@@ -282,14 +294,14 @@ class KBIndex:
                 connection.execute(
                     """INSERT INTO source_documents(
                          source_name,source_id,title,source_url,source_locator,source_revision,
-                         license_id,attribution,metadata_json,content_sha256,text
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                         license_id,attribution,metadata_json,content_sha256,text,raw_source_sha256,raw_source_text
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         source.source_name, source.source_id, source.title, source.source_url,
                         source.source_locator, source.source_revision, source.license_id,
                         source.attribution,
                         json.dumps(source.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-                        source.content_sha256, source.text,
+                        source.content_sha256, source.text, source.raw_source_sha256, source.raw_source_text,
                     ),
                 )
             for chunk in chunk_rows:

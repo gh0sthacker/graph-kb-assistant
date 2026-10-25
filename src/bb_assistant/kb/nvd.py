@@ -139,6 +139,66 @@ def _millisecond_iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _redamon_search_text(vulnerability: Mapping[str, Any]) -> tuple[str, dict[str, object]]:
+    """Match the pinned RedAmon NVD normalization and ``to_chunks`` text."""
+    cve = vulnerability.get("cve")
+    if not isinstance(cve, Mapping):
+        raise NVDProviderError("NVD vulnerability record has no cve object")
+    descriptions = cve.get("descriptions", [])
+    description = ""
+    if isinstance(descriptions, list):
+        for item in descriptions:
+            if isinstance(item, Mapping) and item.get("lang") == "en":
+                description = item.get("value", "") if isinstance(item.get("value", ""), str) else ""
+                break
+
+    cvss_score: object = None
+    severity = ""
+    metrics = cve.get("metrics", {})
+    if isinstance(metrics, Mapping):
+        for metric_name in ("cvssMetricV31", "cvssMetricV30"):
+            rows = metrics.get(metric_name, [])
+            if rows:
+                first = rows[0] if isinstance(rows, list) else None
+                cvss = first.get("cvssData", {}) if isinstance(first, Mapping) else {}
+                if isinstance(cvss, Mapping):
+                    cvss_score = cvss.get("baseScore")
+                    raw_severity = cvss.get("baseSeverity", "")
+                    severity = raw_severity.lower() if isinstance(raw_severity, str) else ""
+                break
+
+    products: list[str] = []
+    configurations = cve.get("configurations", [])
+    if isinstance(configurations, list):
+        for config in configurations:
+            nodes = config.get("nodes", []) if isinstance(config, Mapping) else []
+            if not isinstance(nodes, list):
+                continue
+            for node in nodes:
+                matches = node.get("cpeMatch", []) if isinstance(node, Mapping) else []
+                if not isinstance(matches, list):
+                    continue
+                for match in matches:
+                    criteria = match.get("criteria", "") if isinstance(match, Mapping) else ""
+                    if isinstance(criteria, str) and criteria:
+                        products.append(criteria)
+
+    content = description
+    if cvss_score is not None:
+        content += f"\nCVSS: {cvss_score} ({severity})"
+    if products:
+        content += f"\nAffected: {', '.join(products[:10])}"
+    published = cve.get("published", "")
+    published_date = published[:10] if isinstance(published, str) and published else None
+    metadata: dict[str, object] = {
+        "cvss_score": cvss_score,
+        "severity": severity,
+        "affected_products": ", ".join(products[:10]),
+        "published_date": published_date,
+    }
+    return content, metadata
+
+
 def _date_windows(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
     """Return non-overlapping millisecond windows below NVD's 120-day limit."""
     if start.tzinfo is None or end.tzinfo is None or start > end:
@@ -318,6 +378,7 @@ class RedAmonNVDProvider:
         for vulnerability, win_start, win_end, page_start, position, page_hash in pending_records:
             cve = vulnerability["cve"]
             cve_id = str(cve["id"])
+            search_text, normalized_metadata = _redamon_search_text(vulnerability)
             records.append(SourceRecord(
                 source_id=cve_id,
                 title=cve_id,
@@ -340,7 +401,9 @@ class RedAmonNVDProvider:
                     "page_start_index": page_start,
                     "page_record_index": position,
                     "page_sha256": page_hash,
+                    **normalized_metadata,
                 },
+                search_text=search_text,
             ))
 
         attribution = str(request.source_spec.get("attribution") or "NIST National Vulnerability Database")

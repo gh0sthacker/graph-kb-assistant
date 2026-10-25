@@ -1,22 +1,24 @@
 # Project status and known limitations
 
-## KB diagnostics after parity review (2026-10-25)
+## KB parity checkpoint (2026-10-25)
 
-- The approved RedAmon-derived source profile declares seven families, but the
-  last verified source snapshot remains `PARTIAL`; the corpus and retrieval
-  behavior are not yet equivalent to RedAmon. The latest documented source
-  snapshot had five completed families, NVD partial, and ExploitDB blocked on
-  dataset terms. Retrieval in this application is FTS5-only; RedAmon's pinned
-  retrieval pipeline also uses semantic candidates and ranking stages.
-- NVD source failures now retain a fixed, non-sensitive `coverage_code` in the
-  per-source coverage blockers while provider messages and response contents
-  remain suppressed. This makes a later controlled source attempt diagnosable
-  without logging response bodies or raw exception text. Synthetic NVD and
-  source-adapter checks passed (7 and 8 tests respectively).
-- A fresh read-only MCP `kb_stats` request timed out after 300 seconds. No
-  source fetch, snapshot build, index replacement, or reindex was run for this
-  change. Current KB integrity and source parity remain unverified and
-  `PARTIAL`.
+- The retrieval runtime now follows the pinned RedAmon stages in the Go
+  application: lexical/vector reciprocal-rank fusion (`k=60`), source boosts,
+  BGE cross-encoder reranking of the top 30, sigmoid score mapping, and MMR
+  selection (`lambda=0.65`). The E5/BGE revisions are pinned and have been
+  exercised through the Go-to-local-model-worker path.
+- NVD search content now follows RedAmon's exact normalization order: English
+  description, optional CVSS 3.1/3.0 score and lower-case severity, and the
+  first ten CPE criteria. Full upstream JSON remains locally preserved with a
+  separate digest; model-facing KB source reads expose only normalized text.
+  Offline provider and SQLite snapshot checks cover this split.
+- These code-level matches do **not** make the corpus identical. The approved
+  seven-family source manifest still has unresolved source coverage, including
+  ExploitDB dataset rights. A full NVD snapshot is being fetched; import and
+  vector indexing are pending, so deployed corpus completeness and retrieval
+  quality remain unverified. Keep the overall KB state `PARTIAL` until a
+  completed snapshot, matching source counts, vectors, and retrieval checks are
+  recorded.
 
 ## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 

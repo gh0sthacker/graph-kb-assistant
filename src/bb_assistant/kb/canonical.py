@@ -27,6 +27,8 @@ class SourceDocument:
     attribution: str | None
     metadata: dict[str, str | int | float | bool | None]
     content_sha256: str
+    raw_source_text: str | None = None
+    raw_source_sha256: str | None = None
 
     @classmethod
     def create(
@@ -42,6 +44,7 @@ class SourceDocument:
         license_id: str | None = None,
         attribution: str | None = None,
         metadata: dict[str, str | int | float | bool | None] | None = None,
+        raw_source_text: str | None = None,
     ) -> "SourceDocument":
         return cls(
             source_name=source_name,
@@ -55,6 +58,11 @@ class SourceDocument:
             attribution=attribution,
             metadata=metadata or {},
             content_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            raw_source_text=raw_source_text,
+            raw_source_sha256=(
+                hashlib.sha256(raw_source_text.encode("utf-8")).hexdigest()
+                if raw_source_text is not None else None
+            ),
         )
 
 

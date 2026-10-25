@@ -20,7 +20,7 @@ from bb_assistant.kb.pinned_github_archive import read_pinned_archive
 from bb_assistant.kb.index import KBIndex
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
 from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider
-from bb_assistant.kb.rebuild import export_redamon_snapshot, import_snapshot
+from bb_assistant.kb.rebuild import _source_document_from_record, export_redamon_snapshot, import_snapshot
 from bb_assistant.kb.redamon_sources import (
     RedAmonSourceAdapter,
     SourceBatch,
@@ -281,6 +281,44 @@ class SourceRightsAndCoverageGateTests(unittest.TestCase):
 
 
 class VendoredToolDocsSnapshotTests(unittest.TestCase):
+    def test_snapshot_preserves_raw_upstream_json_separately_from_search_text(self) -> None:
+        raw = '{"cve":{"id":"CVE-2026-12345","future":"retained"}}'
+        document = SourceDocument.create(
+            source_name="nvd", source_id="CVE-2026-12345", title="CVE-2026-12345",
+            text="Normalized RedAmon CVE description.\nCVSS: 9.8 (critical)",
+            raw_source_text=raw,
+        )
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-raw-source-") as temporary:
+            root = Path(temporary)
+            chunks = chunk_document(document)
+            index = KBIndex(root / "index.sqlite3")
+            index.replace_snapshot(chunks, "1" * 64, sources=(document,))
+            stored = index.get_source("nvd", "CVE-2026-12345")
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored["text"], document.text)
+            self.assertEqual(stored["raw_source_text"], raw)
+            self.assertEqual(stored["raw_source_sha256"], hashlib.sha256(raw.encode()).hexdigest())
+
+    def test_legacy_snapshot_source_rows_remain_importable(self) -> None:
+        document = SourceDocument.create(
+            source_name="gtfobins", source_id="curl", title="curl", text="Legacy source text.",
+        )
+        row = {
+            "source_name": document.source_name,
+            "source_id": document.source_id,
+            "title": document.title,
+            "text": document.text,
+            "source_url": document.source_url,
+            "source_locator": document.source_locator,
+            "source_revision": document.source_revision,
+            "license_id": document.license_id,
+            "attribution": document.attribution,
+            "metadata": document.metadata,
+            "content_sha256": document.content_sha256,
+        }
+        restored = _source_document_from_record(row)
+        self.assertEqual(restored, document)
+
     def test_redamon_chunking_keeps_atomic_records_and_heading_based_markdown(self) -> None:
         structured = SourceDocument.create(
             source_name="nuclei", source_id="template.yaml", title="Template",

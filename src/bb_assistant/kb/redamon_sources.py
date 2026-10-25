@@ -79,6 +79,7 @@ class SourceRecord:
     source_revision: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
     document_role: str = "content"
+    search_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,6 +464,8 @@ class RedAmonSourceAdapter:
                     continue
             else:
                 text = record.original_text
+            if record.search_text is not None:
+                text = record.search_text
             if not text.strip():
                 rejected += 1
                 blockers.append("original_source_document_missing_or_blank")
@@ -479,6 +482,7 @@ class RedAmonSourceAdapter:
                 license_id=_string(spec.get("license_id")) or _string(spec.get("repository_license_id")),
                 attribution=_string(record.metadata.get("attribution")) or _string(spec.get("attribution")),
                 metadata=self._metadata(metadata, family, spec, batch, profile, record.document_role),
+                raw_source_text=record.original_text if record.search_text is not None else None,
             ))
 
         if spec.get("kind") in {"github_archive", "local_markdown"} and not any(
