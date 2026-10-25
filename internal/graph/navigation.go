@@ -160,32 +160,11 @@ func AddNavigationEvidenceAssertion(
 	if !okOwnerEntities || !okSubjectEntities || !okObjectEntities {
 		return errors.New("navigation assertion observations are unavailable")
 	}
-	refs := append(append([]Record(nil), subjectRefs...), objectRefs...)
+	assertionRefs := navigationSourceRefs(append(append([]Record(nil), subjectRefs...), objectRefs...))
+	bundleRefs := append([]Record(nil), assertionRefs...)
 	if ownerRefs, ok := ownerBundle["sources"].([]Record); ok {
-		refs = append(refs, ownerRefs...)
+		bundleRefs = append(bundleRefs, ownerRefs...)
 	}
-	seen := make(map[string]struct{}, len(refs))
-	uniqueRefs := refs[:0]
-	for _, ref := range refs {
-		sha, _ := ref["sha256"].(string)
-		locator, _ := ref["record_locator"].(string)
-		key := sha + "\x00" + locator
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		uniqueRefs = append(uniqueRefs, ref)
-	}
-	sort.Slice(uniqueRefs, func(i, j int) bool {
-		leftSHA, _ := uniqueRefs[i]["sha256"].(string)
-		rightSHA, _ := uniqueRefs[j]["sha256"].(string)
-		if leftSHA != rightSHA {
-			return leftSHA < rightSHA
-		}
-		leftLocator, _ := uniqueRefs[i]["record_locator"].(string)
-		rightLocator, _ := uniqueRefs[j]["record_locator"].(string)
-		return leftLocator < rightLocator
-	})
 	ownerEntities = appendNavigationEntity(ownerEntities, subjectEntities, subjectID)
 	ownerEntities = appendNavigationEntity(ownerEntities, objectEntities, objectID)
 	if !containsNavigationEntity(ownerEntities, subjectID) || !containsNavigationEntity(ownerEntities, objectID) {
@@ -195,12 +174,12 @@ func AddNavigationEvidenceAssertion(
 		return ownerEntities[i]["id"].(string) < ownerEntities[j]["id"].(string)
 	})
 	ownerBundle["entities"] = ownerEntities
-	ownerBundle["sources"] = uniqueRefs
+	ownerBundle["sources"] = navigationSourceRefs(bundleRefs)
 	context := Record{
 		"program": program, "link_basis": basis,
 		"causality": "navigation_evidence_only",
 	}
-	assertion, err := historicalAssertion(program, subjectID, predicate, objectID, context, uniqueRefs)
+	assertion, err := historicalAssertion(program, subjectID, predicate, objectID, context, assertionRefs)
 	if err != nil {
 		return errors.New("navigation assertion identity could not be computed")
 	}
@@ -219,6 +198,30 @@ func AddNavigationEvidenceAssertion(
 	})
 	ownerBundle["assertions"] = assertions
 	return nil
+}
+
+func navigationSourceRefs(refs []Record) []Record {
+	seen := make(map[string]struct{}, len(refs))
+	unique := make([]Record, 0, len(refs))
+	for _, ref := range refs {
+		key := sourcePair(ref)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, ref)
+	}
+	sort.Slice(unique, func(i, j int) bool {
+		leftSHA, _ := unique[i]["sha256"].(string)
+		rightSHA, _ := unique[j]["sha256"].(string)
+		if leftSHA != rightSHA {
+			return leftSHA < rightSHA
+		}
+		leftLocator, _ := unique[i]["record_locator"].(string)
+		rightLocator, _ := unique[j]["record_locator"].(string)
+		return leftLocator < rightLocator
+	})
+	return unique
 }
 
 func appendNavigationEntity(owner, source []Record, observationID string) []Record {

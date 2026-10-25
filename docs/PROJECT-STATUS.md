@@ -24,6 +24,15 @@
   lose the endpoint before applying the assertion. URL values are used only in
   memory for matching and are not added to graph context. No `precedes`
   assertion is inferred.
+- Each navigation assertion cites only its two endpoints' receipts, while
+  the enclosing bundle retains the union needed by all its records. Replaying
+  links in a different order now preserves their IDs and does not create
+  duplicate assertions. A synthetic integration scenario imports three
+  related captures, reopens the store, projects the dependent job first,
+  applies the remaining jobs, and replays the page in reverse order. The real
+  local graph writer and application graph query resolve both links and all
+  three exact capture revisions. Neo4j readiness is a test seam in this
+  scenario; it does not verify a Neo4j runtime.
 - Graph labels now render these predicates as `referer matches` and
   `redirects to`. Synthetic tests passed with
   `TMPDIR=/var/tmp go test -count=1 ./internal/graph ./internal/ingest` and

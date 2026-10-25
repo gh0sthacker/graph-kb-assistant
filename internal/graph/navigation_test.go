@@ -199,6 +199,64 @@ func TestAddPageNavigationAssertionsSkipsInvalidRequestURLWithoutFailingImport(t
 	}
 }
 
+func TestNavigationAssertionsKeepExactSourcesAndStableIdentityAcrossReplayOrder(t *testing.T) {
+	project := caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
+	program, err := project.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(order []int) Record {
+		t.Helper()
+		bundles, ids := make([]Record, 3), make([]string, 3)
+		for i := range bundles {
+			exchange := navigationExchange(project, fmt.Sprintf("stable-nav-%d", i),
+				fmt.Sprintf("https://app.invalid/step%d", i), "", "200 OK", "")
+			bundles[i], ids[i], err = BuildHistoricalBundle(exchange, program, Record{
+				"path":   fmt.Sprintf("/synthetic/navigation-%d.json", i),
+				"sha256": strings.Repeat(string(rune('a'+i)), 64), "record_locator": "$",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, i := range order {
+			predicate, basis := "referrer_context_for", "referrer_exact_url"
+			if i == 1 {
+				predicate, basis = "redirects_to", "redirect_exact_url"
+			}
+			if err := AddNavigationEvidenceAssertion(bundles[2], bundles[i], ids[i], bundles[2], ids[2], predicate, basis); err != nil {
+				t.Fatal(err)
+			}
+		}
+		links := 0
+		for _, assertion := range bundles[2]["assertions"].([]Record) {
+			if assertion["predicate"] != "referrer_context_for" && assertion["predicate"] != "redirects_to" {
+				continue
+			}
+			links++
+			refs := assertion["source_refs"].([]Record)
+			if len(refs) != 2 {
+				t.Errorf("navigation assertion cites %d sources; want its two endpoints only", len(refs))
+			}
+		}
+		if links != 2 || len(bundles[2]["sources"].([]Record)) != 3 {
+			t.Errorf("replay produced %d links and %d bundle sources; want 2 and 3", links, len(bundles[2]["sources"].([]Record)))
+		}
+		return bundles[2]
+	}
+	forward, err := canonicalJSON(build([]int{0, 1, 0, 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverse, err := canonicalJSON(build([]int{1, 0, 1, 0}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(forward, reverse) {
+		t.Fatal("the same navigation evidence produced a different bundle after reordered replay")
+	}
+}
+
 func TestResolveNavigationURLRejectsMalformedURLsAndNormalizesSafeOriginParts(t *testing.T) {
 	exchange := navigationExchange(
 		caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"},
