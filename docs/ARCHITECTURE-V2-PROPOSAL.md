@@ -323,6 +323,33 @@ new grouping projections must have explicit versions, replay rules and a
 rollback path. The approved architecture is being implemented incrementally;
 this document is not a claim that the above services already exist.
 
+## 11. Post-approval scope extension — RedAmon KB parity (2026-10-25)
+
+The user explicitly added exact RedAmon KB parity to this delivery. This
+supersedes the original Section 1/9 statement that KB expansion is deferred for
+the current delivery; it does not change the six core application stages.
+
+The current Graph Assistant manifest targets RedAmon's `full` profile. The
+checked-out RedAmon configuration defaults to `lite`; its active deployed
+profile and exact snapshot are not available in this workspace. Treat `full`
+as the working target, and do not claim parity against the deployed RedAmon
+instance until its active profile and snapshot are identified.
+
+KB parity acceptance requires all of the following:
+
+- The same selected profile, source families, pinned revisions, filters,
+  source document counts, and normalized/chunked content. Record per-source
+  counts and content digests; keep generated corpus/index files outside Git.
+- The same pinned E5 and BGE model revisions and complete vector coverage for
+  the selected corpus. Compare representative retrieval outputs against the
+  same RedAmon snapshot; matching configuration constants alone is insufficient.
+- Every source has recorded license/terms evidence and required attribution.
+  ExploitDB remains excluded from the parity claim until its dataset-terms
+  status is resolved; do not bypass the provider's rights gate.
+- A live retrieval check confirms the running application uses that completed
+  snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
+  query-parity item remains incomplete or unverified.
+
 ## Review scope and limits
 
 Reviewed intake, storage, graph writer/readers, Neo4j materialization and
