@@ -1435,62 +1435,58 @@ func writeCanonicalJSONString(writer io.Writer, value string) error {
 	}
 	start := 0
 	for index := 0; index < len(value); {
-		r, size := utf8.DecodeRuneInString(value[index:])
-		escaped := true
-		switch r {
+		current := value[index]
+		var escaped string
+		switch current {
 		case '"':
-			if err := writeEscape(value[start:index], `\"`); err != nil {
-				return err
-			}
+			escaped = `\"`
 		case '\\':
-			if err := writeEscape(value[start:index], `\\`); err != nil {
-				return err
-			}
+			escaped = `\\`
 		case '\b':
-			if err := writeEscape(value[start:index], `\b`); err != nil {
-				return err
-			}
+			escaped = `\b`
 		case '\f':
-			if err := writeEscape(value[start:index], `\f`); err != nil {
-				return err
-			}
+			escaped = `\f`
 		case '\n':
-			if err := writeEscape(value[start:index], `\n`); err != nil {
-				return err
-			}
+			escaped = `\n`
 		case '\r':
-			if err := writeEscape(value[start:index], `\r`); err != nil {
-				return err
-			}
+			escaped = `\r`
 		case '\t':
-			if err := writeEscape(value[start:index], `\t`); err != nil {
-				return err
-			}
+			escaped = `\t`
 		default:
-			switch {
-			case r == utf8.RuneError && size == 1:
-				if err := writeEscape(value[start:index], "�"); err != nil {
-					return err
-				}
-			case r < 0x20:
+			if current < 0x20 {
 				const hex = "0123456789abcdef"
-				escape := []byte{'\\', 'u', '0', '0', hex[byte(r)>>4], hex[byte(r)&0xf]}
+				escape := []byte{'\\', 'u', '0', '0', hex[current>>4], hex[current&0xf]}
 				if err := writeCanonicalText(writer, value[start:index]); err != nil {
 					return err
 				}
 				if _, err := writer.Write(escape); err != nil {
 					return err
 				}
-			default:
-				escaped = false
+				index++
+				start = index
+				continue
 			}
-		}
-		if escaped {
+			if current < utf8.RuneSelf {
+				index++
+				continue
+			}
+			_, size := utf8.DecodeRuneInString(value[index:])
+			if size == 1 {
+				if err := writeEscape(value[start:index], "�"); err != nil {
+					return err
+				}
+				index++
+				start = index
+				continue
+			}
 			index += size
-			start = index
-		} else {
-			index += size
+			continue
 		}
+		if err := writeEscape(value[start:index], escaped); err != nil {
+			return err
+		}
+		index++
+		start = index
 	}
 	if err := writeCanonicalText(writer, value[start:]); err != nil {
 		return err
