@@ -14,16 +14,16 @@
   acquires the existing per-project lease, drains workers on shutdown, and
   reports graph connectivity as unchecked. Focused lifecycle/CLI tests passed;
   no Neo4j container, live project, or Caido process was started.
-- A real browser acceptance against a disposable SQLite project verified graph
+- A real browser smoke check against a disposable SQLite project verified graph
   navigation, exact stored HTTP viewing, a byte comparison across two capture
   revisions, a four-span redacted packet with synthetic Authorization headers
-  removed, and saving an unaccepted local review session. The session was not
-  accepted for Hermes access and no provider/model call was made. The session
-  auto-expires with the disposable fixture.
-- The next step is operator review/acceptance of that exact test packet and
-  completion of the candidate/save/resume browser path. Hermes ChatGPT OAuth is
-  pending the user's own sign-in in the opened browser; its first login attempt
-  timed out before browser completion. Current runtime Neo4j delivery and
+  removed, saving an unaccepted local review session, and reopening that same
+  session by its ID. The session was not accepted for Hermes access and no
+  provider/model call was made. The disposable fixture was stopped afterward.
+- The next step is action-time operator acceptance of that exact synthetic
+  packet, followed by the candidate/save/resume browser path. Hermes ChatGPT
+  OAuth is pending the user's own sign-in in the opened browser; its first
+  login attempt timed out before browser completion. Current runtime Neo4j delivery and
   existing-vault use remain unverified;
   KB expansion and target recon coverage are outside this delivery criterion.
 
