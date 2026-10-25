@@ -18,6 +18,7 @@ from bb_assistant.kb.nuclei import RedAmonNucleiProvider
 from bb_assistant.kb.owasp import RedAmonOWASPProvider
 from bb_assistant.kb.pinned_github_archive import read_pinned_archive
 from bb_assistant.kb.index import KBIndex
+from bb_assistant.kb.canonical import SourceDocument, chunk_document
 from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider
 from bb_assistant.kb.rebuild import export_redamon_snapshot, import_snapshot
 from bb_assistant.kb.redamon_sources import (
@@ -314,6 +315,7 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             self.assertRegex(hit.source_sha256, r"^[a-f0-9]{64}$")
             self.assertRegex(hit.chunk_sha256, r"^[a-f0-9]{64}$")
             self.assertGreater(hit.end_char, hit.start_char)
+            self.assertFalse(any(item.source_id == "NOTICE:license" for item in hits))
 
             chunks_path = temp_root / "snapshots" / exported["snapshot_id"] / "chunks.jsonl"
             original_chunks = chunks_path.read_bytes()
@@ -321,6 +323,24 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "JSONL hash mismatch"):
                 import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
             self.assertEqual(index.stats()["snapshot_id"], exported["snapshot_id"])
+
+    def test_search_does_not_return_license_notice_records(self) -> None:
+        content = SourceDocument.create(
+            source_name="tool_docs", source_id="guide.md", title="Synthetic guide",
+            text="Use PKINIT in this synthetic fixture.", metadata={"document_role": "content"},
+        )
+        notice = SourceDocument.create(
+            source_name="tool_docs", source_id="NOTICE:LICENSE", title="MIT License",
+            text="This synthetic notice includes the rare term sublicensing.",
+            metadata={"document_role": "license_notice"},
+        )
+        documents = (content, notice)
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-search-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "f" * 64, sources=documents)
+            self.assertEqual(index.search("PKINIT")[0].source_id, "guide.md")
+            self.assertEqual(index.search("sublicensing"), ())
 
 
 if __name__ == "__main__":

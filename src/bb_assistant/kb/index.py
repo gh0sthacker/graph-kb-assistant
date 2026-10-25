@@ -351,7 +351,8 @@ class KBIndex:
                         c.source_revision,c.license_id,c.attribution,c.source_sha256,c.chunk_sha256,c.metadata_json,
                         c.start_char,c.end_char,bm25(chunk_search,0.0,0.0,4.0,1.0) AS score
                  FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
-                 WHERE chunk_search MATCH ?"""
+                 WHERE chunk_search MATCH ?
+                   AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content') = 'content'"""
         params: list[object] = [match_query]
         if source_names:
             sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
