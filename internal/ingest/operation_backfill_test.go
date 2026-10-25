@@ -127,6 +127,10 @@ func TestOperationBackfillExtractsOperationFromHistoricalProjectionFixture(t *te
 	if !found || assertion["object"] != operation["id"] {
 		t.Fatal("historical projection did not connect its endpoint to the operation")
 	}
+	endpoint, found := operationBackfillEntity(bundle, "endpoint")
+	if !found || assertion["subject"] != endpoint["id"] {
+		t.Fatal("historical projection did not retain the endpoint entity for repair")
+	}
 	data, ok := operationBackfillRecord(operation["data"])
 	if !ok || data["route_family"] != "/api/products/{value}" {
 		t.Fatalf("operation route family = %#v, want /api/products/{value}", data["route_family"])
@@ -155,7 +159,14 @@ func TestBuildOperationBackfillBundlesMergesOperationSourcesAndBoundsPages(t *te
 				"route_family_version": "route-family-v1", "route_family": "/api/items/{value}",
 			}, "source_refs": []behaviorgraph.Record{source},
 		}
-		additions = append(additions, operationBackfillAddition{source: source, operation: operation, assertion: assertion})
+		endpoint := behaviorgraph.Record{
+			"id": "endpoint-" + strings.Repeat("d", 64), "kind": "endpoint", "data": behaviorgraph.Record{
+				"program": program, "origin": "http://example.invalid", "method": "GET", "route": "/api/items/{value}",
+			}, "source_refs": []behaviorgraph.Record{source},
+		}
+		additions = append(additions, operationBackfillAddition{
+			source: source, endpoint: endpoint, operation: operation, assertion: assertion,
+		})
 	}
 
 	bundles, err := buildOperationBackfillBundles(program, additions)
@@ -173,10 +184,14 @@ func TestBuildOperationBackfillBundlesMergesOperationSourcesAndBoundsPages(t *te
 	}
 	firstEntities := first["entities"].([]behaviorgraph.Record)
 	firstAssertions := first["assertions"].([]behaviorgraph.Record)
-	if len(firstEntities) != 1 || firstEntities[0]["id"] != opID ||
-		len(firstEntities[0]["source_refs"].([]behaviorgraph.Record)) != operationBackfillBundleSources ||
+	if len(firstEntities) != 2 ||
 		len(firstAssertions) != operationBackfillBundleSources || len(first["cards"].([]behaviorgraph.Record)) != 0 {
 		t.Fatal("operation bundles did not retain deduplicated nodes and per-capture provenance")
+	}
+	for _, entity := range firstEntities {
+		if len(entity["source_refs"].([]behaviorgraph.Record)) != operationBackfillBundleSources {
+			t.Fatalf("merged %s provenance=%d, want %d", entity["kind"], len(entity["source_refs"].([]behaviorgraph.Record)), operationBackfillBundleSources)
+		}
 	}
 }
 

@@ -234,7 +234,8 @@ function renderOperationBackfillPreview(result) {
   const details = [
     ["State", result.state], ["Coverage", result.coverage_state || "unknown"],
     ["Scanned", result.scanned], ["Eligible captures", result.eligible_captures],
-    ["New operations", result.new_operation_groups], ["New links", result.new_assertion_links],
+    ["New operations", result.new_operation_groups], ["New endpoint entities", result.new_endpoint_entities],
+    ["New links", result.new_assertion_links],
     ["Skipped", Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0) + Number(result.skipped_endpoint_missing || 0)],
     ["Request bytes inspected", formatBytes(result.request_bytes)],
   ];
@@ -291,7 +292,7 @@ async function applyOperationBackfill() {
   const result = preview.result;
   const skipped = Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0) + Number(result.skipped_endpoint_missing || 0);
   const coverageNote = result.coverage_state === "partial" ? `\n${skipped} captures are excluded; only eligible captures will be applied.\n` : "";
-  const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${result.new_assertion_links} links${coverageNote}\nThis commits the local graph and then syncs its selected-project Neo4j outbox in order. Earlier graph events for this project may be applied first. It does not contact Caido or send data to Hermes.`;
+  const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${Number(result.new_endpoint_entities || 0)} endpoints · ${result.new_assertion_links} links${coverageNote}\nThis commits the local graph and then syncs its selected-project Neo4j outbox in order. Earlier graph events for this project may be applied first. It does not contact Caido or send data to Hermes.`;
   if (!window.confirm(message)) return;
   const requestId = ++state.operationBackfillRequestId;
   elements.operationBackfillPreview.disabled = true;

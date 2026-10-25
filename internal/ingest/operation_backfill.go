@@ -57,6 +57,7 @@ type OperationBackfillPreview struct {
 	NewOperationGroups     int                       `json:"new_operation_groups"`
 	AssertionLinks         int                       `json:"assertion_links"`
 	NewAssertionLinks      int                       `json:"new_assertion_links"`
+	NewEndpointEntities    int                       `json:"new_endpoint_entities"`
 	SkippedUnmapped        int                       `json:"skipped_unmapped"`
 	SkippedOversized       int                       `json:"skipped_oversized"`
 	SkippedNoOperation     int                       `json:"skipped_no_operation"`
@@ -79,6 +80,7 @@ type OperationBackfillApplyResult struct {
 
 type operationBackfillAddition struct {
 	source    behaviorgraph.Record
+	endpoint  behaviorgraph.Record
 	operation behaviorgraph.Record
 	assertion behaviorgraph.Record
 }
@@ -191,13 +193,15 @@ func PreviewHistoricalOperationBackfill(
 			return preview, errors.New("a verified historical request could not be projected into a canonical operation")
 		}
 		operation, foundOperation := operationBackfillEntity(bundle, "operation")
+		projectedEndpoint, foundEndpoint := operationBackfillEntity(bundle, "endpoint")
 		assertion, foundAssertion := operationBackfillAssertion(bundle, "belongs_to_operation")
-		if !foundOperation || !foundAssertion {
+		if !foundOperation || !foundEndpoint || !foundAssertion {
 			preview.SkippedNoOperation++
 			continue
 		}
 		assertionSubject, _ := assertion["subject"].(string)
-		if assertionSubject != endpointID || !entityIDs[assertionSubject] {
+		projectedEndpointID, _ := projectedEndpoint["id"].(string)
+		if assertionSubject != endpointID || projectedEndpointID != endpointID {
 			preview.SkippedEndpointMissing++
 			continue
 		}
@@ -206,7 +210,11 @@ func PreviewHistoricalOperationBackfill(
 		if operationID == "" || assertionID == "" {
 			return preview, errors.New("canonical operation projection returned an invalid identity")
 		}
-		additions = append(additions, operationBackfillAddition{source: refs[0], operation: operation, assertion: assertion})
+		addition := operationBackfillAddition{source: refs[0], operation: operation, assertion: assertion}
+		if !entityIDs[endpointID] {
+			addition.endpoint = projectedEndpoint
+		}
+		additions = append(additions, addition)
 		preview.EligibleCaptures++
 	}
 
@@ -216,13 +224,19 @@ func PreviewHistoricalOperationBackfill(
 	}
 	preview.Bundles = bundles
 	operationIDs := make(map[string]behaviorgraph.Record)
+	endpointIDs := make(map[string]behaviorgraph.Record)
 	assertionIDsCandidate := make(map[string]struct{})
 	newAssertions := make(map[string]struct{})
 	for _, bundle := range bundles {
 		entities, _ := operationBackfillRecords(bundle["entities"])
 		for _, entity := range entities {
 			id, _ := entity["id"].(string)
-			operationIDs[id] = entity
+			switch entity["kind"] {
+			case "operation":
+				operationIDs[id] = entity
+			case "endpoint":
+				endpointIDs[id] = entity
+			}
 		}
 		assertions, _ := operationBackfillRecords(bundle["assertions"])
 		for _, assertion := range assertions {
@@ -236,6 +250,11 @@ func PreviewHistoricalOperationBackfill(
 	preview.OperationGroups = len(operationIDs)
 	preview.AssertionLinks = len(assertionIDsCandidate)
 	preview.NewAssertionLinks = len(newAssertions)
+	for id := range endpointIDs {
+		if !entityIDs[id] {
+			preview.NewEndpointEntities++
+		}
+	}
 	for id, operation := range operationIDs {
 		if !entityIDs[id] {
 			preview.NewOperationGroups++
@@ -551,6 +570,28 @@ func buildOperationBackfillBundles(projectKey string, additions []operationBackf
 				entitiesByID[operationID] = copyRecord
 			} else {
 				entitiesByID[operationID] = cloneOperationBackfillRecord(addition.operation)
+			}
+			if addition.endpoint != nil {
+				endpointID, _ := addition.endpoint["id"].(string)
+				if endpointID == "" || addition.endpoint["kind"] != "endpoint" {
+					return nil, errors.New("operation backfill endpoint identity is invalid")
+				}
+				if existing, found := entitiesByID[endpointID]; found {
+					oldRefs, okOld := operationBackfillRecords(existing["source_refs"])
+					newRefs, okNew := operationBackfillRecords(addition.endpoint["source_refs"])
+					if !okOld || !okNew {
+						return nil, errors.New("endpoint backfill provenance is invalid")
+					}
+					combined, err := mergeOperationBackfillRefs(append(oldRefs, newRefs...))
+					if err != nil {
+						return nil, err
+					}
+					copyRecord := cloneOperationBackfillRecord(existing)
+					copyRecord["source_refs"] = combined
+					entitiesByID[endpointID] = copyRecord
+				} else {
+					entitiesByID[endpointID] = cloneOperationBackfillRecord(addition.endpoint)
+				}
 			}
 			if existing, found := assertionsByID[assertionID]; found {
 				if !sameOperationBackfillRecord(existing, addition.assertion) {
