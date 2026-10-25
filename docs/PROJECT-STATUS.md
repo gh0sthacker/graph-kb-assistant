@@ -2110,7 +2110,7 @@ This repository is an early public alpha. The following boundaries are deliberat
 - The selected-project backfill completed with read-back digest verification.
   At completion, the local snapshot and Neo4j snapshot SHA-256 both equaled
   `0b050388683b4b885917471482b72a4836f083f48e8314698271e6adb6fb5aeb`.
-  The published snapshot contains 232,715 records, 233,336 provenance
+  That backfill contained 232,715 records, 233,336 provenance
   references, and 115,299 assertions (1,369 sources/cards, 114,678 entities,
   and 115,299 assertions).
 - A bounded read through the local UI API returned HTTP 200 for a selected
@@ -2142,5 +2142,10 @@ This repository is an early public alpha. The following boundaries are deliberat
   application acceptance remain gaps.
 - Caido was not contacted, captured bodies were not read, and no captured
   exchange was sent to Hermes.
+- The requested LAN route was already configured: `proxmox2:8765` forwards to
+  the Nginx listener on `10.10.10.10:8766`, which proxies to the loopback UI.
+  The UI root and runtime-capabilities endpoint both returned HTTP 200 through
+  the Proxmox hairpin path from the app host. A separate client-device check
+  remains outstanding; the LAN URL is `http://192.168.1.148:8765/`.
 
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
