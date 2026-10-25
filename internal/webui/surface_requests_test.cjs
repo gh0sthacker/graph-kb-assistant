@@ -11,26 +11,43 @@ const BBGraphFocus = require("./assets/graph-focus.js");
 // transport deliberately ignores abort so stale-response guards are required.
 function createApp() {
   const nodes = new Map();
-  function node() {
-    return {
+  function node(tagName = "div") {
+    const result = {
+      tagName: tagName.toLowerCase(),
       textContent: "", value: "", hidden: false, disabled: false, open: false, isConnected: true, focused: false, children: [],
       options: [], listeners: {}, dataset: {},
       classList: { add() {}, remove() {}, toggle() {} },
       append(...children) { this.children.push(...children); },
+      prepend(...children) { this.children.unshift(...children); },
       replaceChildren(...children) { this.children = children; },
-      setAttribute() {}, addEventListener(name, callback) { this.listeners[name] = callback; },
+      setAttribute(name, value) { this.attributes ||= {}; this.attributes[name] = value; },
+      getAttribute(name) { return this.attributes?.[name] ?? null; },
+      addEventListener(name, callback) { this.listeners[name] = callback; },
       showModal() { this.open = true; },
       close() { this.open = false; this.listeners.close?.(); },
       focus() { this.focused = true; },
-      querySelector() { return node(); },
+      querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+      querySelectorAll(selector) {
+        const match = child => {
+          if (selector === "input:checked") return child.tagName === "input" && child.checked === true;
+          if (selector === "input") return child.tagName === "input";
+          if (selector === "button") return child.tagName === "button";
+          return false;
+        };
+        const found = [];
+        const visit = child => { if (match(child)) found.push(child); for (const nested of child.children || []) visit(nested); };
+        for (const child of this.children) visit(child);
+        return found;
+      },
     };
+    return result;
   }
   const document = {
     querySelector(selector) {
       if (!nodes.has(selector)) nodes.set(selector, node());
       return nodes.get(selector);
     },
-    createElement: node, createElementNS: node,
+    createElement: tag => node(tag), createElementNS: (_namespace, tag) => node(tag),
     createTextNode: text => ({ textContent: text }),
     addEventListener() {},
   };
@@ -56,7 +73,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, resumeConsultationByID, acceptConsultationReview, saveConsultationCandidate, continueConsultationCandidateProposal, updateCandidateControl, renderConsultationCandidate, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, saveContextAnnotation, updateContextAnnotationControl, moveContextEvidence, selectedContextEvidenceReferenceIDs, orderedContextEvidenceReferenceIDs, resumeConsultationByID, acceptConsultationReview, saveConsultationCandidate, continueConsultationCandidateProposal, updateCandidateControl, renderConsultationCandidate, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -74,6 +91,55 @@ function page(host, extra = {}) {
 }
 
 function snapshot(value) { return JSON.parse(JSON.stringify(value)); }
+
+function renderedText(root) {
+  return [root.textContent || "", ...(root.children || []).map(renderedText)].join(" ");
+}
+
+test("flow evidence order can be edited, saved in order, and reopened as numbered analyst-defined steps", async () => {
+  const app = createApp();
+  const projectKey = "a".repeat(64);
+  const refs = [
+    { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "req-a", revision_id: "rev-a" },
+    { evidence_reference_id: "ref-b", evidence_index: 1, side: "response", request_id: "req-b", revision_id: "rev-b" },
+  ];
+  app.state.projectKey = projectKey;
+  app.state.evidencePacketPreview = { projectKey };
+  app.state.consultation = { id: "session-a", projectKey, version: 1, reviewLoaded: true, accepted: false, contextAnnotations: [] };
+  app.elements.consultationContextKind.value = "flow";
+  app.elements.consultationContextLabel.value = "checkout-flow";
+  app.renderConsultationContext({ evidence_references: refs, evidence: [], context_annotations: [] }, false);
+  const checkboxes = app.elements.consultationContextEvidence.querySelectorAll("input");
+  checkboxes[0].checked = true;
+  checkboxes[1].checked = true;
+  checkboxes[1].listeners.change();
+  const moveDown = app.elements.consultationContextEvidence.querySelectorAll("button").find(button => button.textContent === "Move down");
+  moveDown.listeners.click();
+  app.updateContextAnnotationControl();
+  assert.deepEqual(Array.from(app.orderedContextEvidenceReferenceIDs(
+    app.selectedContextEvidenceReferenceIDs(), refs, "flow", app.state.contextFlowOrder,
+  )), ["ref-b", "ref-a"]);
+
+  const saving = app.saveContextAnnotation();
+  const post = app.requests.find(request => request.url.pathname === "/api/consultation/context-annotation");
+  assert.ok(post);
+  assert.deepEqual(JSON.parse(post.body).evidence_reference_ids, ["ref-b", "ref-a"]);
+  post.resolve({});
+  await new Promise(resolve => setImmediate(resolve));
+  const reload = app.requests.find(request => request.url.pathname === "/api/consultation/review");
+  assert.ok(reload);
+  reload.resolve({
+    consultation_id: "session-a", version: 2, question: "", evidence: [], evidence_references: refs,
+    context_annotations: [{ kind: "flow", label: "checkout-flow", evidence_reference_ids: ["ref-b", "ref-a"] }],
+  });
+  await saving;
+
+  const reopened = app.elements.consultationContextList;
+  const text = renderedText(reopened);
+  assert.ok(text.includes("Flow step 1 · Evidence 2"));
+  assert.ok(text.includes("Flow step 2 · Evidence 1"));
+  assert.ok(text.includes("analyst-defined order; not observed causality"));
+});
 
 test("saved-consultation entry point opens the review panel without selecting another capture", () => {
   const app = createApp();

@@ -72,6 +72,23 @@ test("context labels resolve to exact evidence references and bounded redacted e
   assert.equal(JSON.stringify(references).includes("secret"), false, "raw input fields must not be returned");
 });
 
+test("flow context references preserve saved operator order while other kinds keep evidence order", () => {
+  const evidenceReferences = [
+    { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "1", revision_id: "rev-a" },
+    { evidence_reference_id: "ref-b", evidence_index: 1, side: "response", request_id: "2", revision_id: "rev-b" },
+  ];
+  const packet = { evidence: [] };
+  const flow = contextAnnotationEvidenceReferences({
+    kind: "flow", evidence_reference_ids: ["ref-b", "ref-a"],
+  }, evidenceReferences, packet);
+  const actor = contextAnnotationEvidenceReferences({
+    kind: "actor", evidence_reference_ids: ["ref-b", "ref-a"],
+  }, evidenceReferences, packet);
+
+  assert.deepEqual(flow.map(reference => [reference.evidenceIndex, reference.flowStep]), [[1, 1], [0, 2]]);
+  assert.deepEqual(actor.map(reference => [reference.evidenceIndex, reference.flowStep]), [[0, undefined], [1, undefined]]);
+});
+
 test("context evidence excerpt refuses unavailable spans and caps malformed long previews", () => {
   const references = contextAnnotationEvidenceReferences({ evidence_reference_ids: ["ref-a", "ref-b"] }, [
     { evidence_reference_id: "ref-a", evidence_index: 0, side: "request", request_id: "1", revision_id: "rev-a", span_start: 0, span_end: 9 },
@@ -143,6 +160,27 @@ test("accepted analyst context resolves only exact project and observation revis
   }]);
   assert.equal(JSON.stringify(contextAnnotationsForObservation(observation, provenance, session, "project-a"))
     .includes("must not be returned"), false);
+});
+
+test("accepted flow context preserves analyst order for exact observation references", () => {
+  const observation = { id: "observation-flow", kind: "observation" };
+  const revision = "c".repeat(64);
+  const session = {
+    id: "consultation-flow", projectKey: "project-a", version: 2, accepted: true, reviewLoaded: true,
+    evidenceReferences: [
+      { evidence_reference_id: "request-ref", evidence_index: 0, side: "request", request_id: "239", revision_id: revision },
+      { evidence_reference_id: "response-ref", evidence_index: 1, side: "response", request_id: "239", revision_id: revision },
+    ],
+    contextAnnotations: [{
+      context_annotation_id: "flow-annotation", session_version: 2, kind: "flow", label: "submit-response",
+      evidence_reference_ids: ["response-ref", "request-ref"], origin: "analyst", evidence_state: "analyst_provided",
+    }],
+  };
+  const annotations = contextAnnotationsForObservation(observation, [
+    { graph_observation_id: observation.id, request_id: "239", revision_id: revision },
+  ], session, "project-a");
+
+  assert.deepEqual(annotations[0].evidenceReferences.map(reference => [reference.evidenceIndex, reference.flowStep]), [[1, 1], [0, 2]]);
 });
 
 test("accepted analyst context rejects unaccepted, foreign, or mismatched evidence", () => {

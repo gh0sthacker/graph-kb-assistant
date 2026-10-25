@@ -169,14 +169,20 @@
 
   function contextAnnotationEvidenceReferences(annotation, evidenceReferences, evidencePacket) {
     if (!annotation || !Array.isArray(annotation.evidence_reference_ids) || !Array.isArray(evidenceReferences)) return [];
-    const selected = new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0));
+    const selectedIDs = [...new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0))];
+    const selected = new Set(selectedIDs);
     const packetRows = Array.isArray(evidencePacket?.evidence) ? evidencePacket.evidence : [];
-    return evidenceReferences
+    let references = evidenceReferences
       .filter(reference => selected.has(reference?.evidence_reference_id) &&
         Number.isInteger(reference?.evidence_index) && reference.evidence_index >= 0 &&
         (reference.side === "request" || reference.side === "response") &&
         reference.request_id !== undefined && reference.request_id !== null && String(reference.request_id).length > 0)
-      .sort((left, right) => left.evidence_index - right.evidence_index)
+      .sort((left, right) => left.evidence_index - right.evidence_index);
+    if (annotation.kind === "flow") {
+      const byID = new Map(references.map(reference => [reference.evidence_reference_id, reference]));
+      references = selectedIDs.map(id => byID.get(id)).filter(Boolean);
+    }
+    return references
       .map(reference => {
         const packetEvidence = packetRows[reference.evidence_index];
         const exactPacketMatch = packetEvidence &&
@@ -196,7 +202,7 @@
           excerpt += character;
           excerptBytes += characterBytes;
         }
-        return {
+        const result = {
           evidenceIndex: reference.evidence_index,
           side: reference.side,
           requestId: String(reference.request_id),
@@ -206,6 +212,8 @@
           excerpt,
           excerptTruncated: excerpt.length < rawExcerpt.length,
         };
+        if (annotation.kind === "flow") result.flowStep = selectedIDs.indexOf(reference.evidence_reference_id) + 1;
+        return result;
       });
   }
 
@@ -243,9 +251,10 @@
           typeof annotation.label !== "string" || !annotation.label.trim() ||
           annotation.origin !== "analyst" || annotation.evidence_state !== "analyst_provided" ||
           !Array.isArray(annotation.evidence_reference_ids)) continue;
-      const selectedIDs = new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0));
-      const evidenceReferences = matchedReferences
-        .filter(reference => selectedIDs.has(reference.evidence_reference_id))
+      const selectedIDs = [...new Set(annotation.evidence_reference_ids.filter(id => typeof id === "string" && id.length > 0))];
+      const selectedSet = new Set(selectedIDs);
+      let evidenceReferences = matchedReferences
+        .filter(reference => selectedSet.has(reference.evidence_reference_id))
         .map(reference => ({
           referenceID: reference.evidence_reference_id,
           evidenceIndex: reference.evidence_index,
@@ -253,6 +262,11 @@
           requestId: String(reference.request_id),
           revisionId: reference.revision_id,
         }));
+      if (annotation.kind === "flow") {
+        const byID = new Map(evidenceReferences.map(reference => [reference.referenceID, reference]));
+        evidenceReferences = selectedIDs.map(id => byID.get(id)).filter(Boolean)
+          .map((reference, index) => ({ ...reference, flowStep: index + 1 }));
+      }
       if (!evidenceReferences.length) continue;
       const key = `${annotation.context_annotation_id}\u0000${evidenceReferences.map(reference => reference.referenceID).join("\u0000")}`;
       if (seen.has(key)) continue;

@@ -1,5 +1,20 @@
 # Project status and known limitations
 
+## Stage 4 analyst-defined flow order — PARTIAL (2026-10-25)
+
+- Before accepting the consultation review, an analyst can select evidence
+  references for a `flow` context label and move the selected references up or
+  down. The exact selected order is saved in `evidence_reference_ids` and is
+  restored as numbered flow steps when the review is reopened.
+- Review, graph-inspector, and exact-comparison displays label this order
+  `analyst-defined order; not observed causality`. It does not create a graph
+  `precedes` assertion or imply that one exchange initiated another.
+- `node --test internal/webui/graph_focus_test.cjs
+  internal/webui/surface_requests_test.cjs` passed 76/76 synthetic UI tests;
+  `git diff --check` passed. No Go build/tests, Neo4j, containers, runtime
+  database, Caido, or live browser verification was run. Runtime coverage
+  remains `PARTIAL`; no live data or graph was changed.
+
 ## Stage 3 request ordering in observation inspector — PARTIAL (2026-10-25)
 
 - The observation inspector shows direction only for a current-slice

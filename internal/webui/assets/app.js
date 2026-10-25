@@ -19,6 +19,7 @@ const state = {
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
   evidencePacketPreview: null, consultation: null,
   consultationCreateKey: "", contextAnnotationKey: "", consultationResumeRequestId: 0,
+  contextEvidenceReferences: [], contextEvidenceAccepted: false, contextFlowOrder: [],
 };
 
 const elements = {
@@ -206,6 +207,9 @@ function clearEvidence(closeDialog = true, preserveAcceptedConsultation = false)
   state.evidence = null;
   state.comparison = null;
   state.evidencePacketPreview = null;
+  state.contextEvidenceReferences = [];
+  state.contextEvidenceAccepted = false;
+  state.contextFlowOrder = [];
   resetConsultationUI("Preview the selected evidence before creating a consultation.");
   if (consultationToPreserve?.projectKey === state.projectKey) state.consultation = consultationToPreserve;
   const trigger = state.evidenceTrigger;
@@ -726,19 +730,11 @@ function consultationResumeSessionID(value, projectKey) {
 
 function renderConsultationContext(review, accepted) {
   elements.consultationContext.hidden = false;
-  elements.consultationContextEvidence.replaceChildren();
   elements.consultationContextList.replaceChildren();
-  for (const reference of review.evidence_references || []) {
-    const label = el("label");
-    const checkbox = el("input");
-    checkbox.type = "checkbox";
-    checkbox.value = reference.evidence_reference_id;
-    checkbox.disabled = accepted;
-    checkbox.addEventListener("change", () => { state.contextAnnotationKey = ""; updateContextAnnotationControl(); });
-    const title = `Evidence ${Number(reference.evidence_index) + 1} · ${reference.side} · Caido ${reference.request_id}`;
-    label.append(checkbox, document.createTextNode(title));
-    elements.consultationContextEvidence.append(label);
-  }
+  state.contextEvidenceReferences = Array.isArray(review.evidence_references) ? review.evidence_references : [];
+  state.contextEvidenceAccepted = accepted;
+  state.contextFlowOrder = [];
+  renderContextEvidenceOptions([]);
   const annotations = Array.isArray(review.context_annotations) ? review.context_annotations : [];
   for (const annotation of annotations) {
     const selectedIDs = Array.isArray(annotation.evidence_reference_ids)
@@ -750,7 +746,7 @@ function renderConsultationContext(review, accepted) {
     );
     const unresolvedCount = Math.max(0, selectedCount - references.length);
     const item = el("details", "context-label-item");
-    item.append(el("summary", "", `${annotation.kind}: ${annotation.label} · ${references.length} linked evidence item${references.length === 1 ? "" : "s"}${unresolvedCount ? ` · ${unresolvedCount} unresolved` : ""} · analyst-provided`));
+    item.append(el("summary", "", `${annotation.kind}: ${annotation.label} · ${references.length} linked evidence item${references.length === 1 ? "" : "s"}${unresolvedCount ? ` · ${unresolvedCount} unresolved` : ""} · analyst-provided${annotation.kind === "flow" ? " · analyst-defined order; not observed causality" : ""}`));
     const referenceList = el("ul", "context-label-references");
     if (references.length) {
       for (const reference of references) {
@@ -758,7 +754,8 @@ function renderConsultationContext(review, accepted) {
         const span = reference.spanStart !== null && reference.spanEnd !== null
           ? ` · bytes [${reference.spanStart}, ${reference.spanEnd})`
           : " · byte span unknown";
-        row.append(el("div", "", `Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido ${reference.requestId}${span}`));
+        const flowStep = reference.flowStep ? `Flow step ${reference.flowStep} · ` : "";
+        row.append(el("div", "", `${flowStep}Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido ${reference.requestId}${span}`));
         if (reference.available) {
           const excerpt = el("pre", "context-evidence-excerpt", reference.excerpt || "The selected redacted excerpt is empty.");
           excerpt.tabIndex = 0;
@@ -771,6 +768,7 @@ function renderConsultationContext(review, accepted) {
         referenceList.append(row);
       }
     }
+    if (annotation.kind === "flow") referenceList.prepend?.(el("li", "", "analyst-defined order; not observed causality"));
     if (unresolvedCount) {
       referenceList.append(el("li", "", `${unresolvedCount} evidence reference${unresolvedCount === 1 ? "" : "s"} could not be resolved.`));
     } else if (!references.length) {
@@ -792,18 +790,93 @@ function updateContextAnnotationControl() {
     !elements.consultationContextLabel.value.trim() || !hasSelectedEvidence;
 }
 
+function selectedContextEvidenceReferenceIDs() {
+  return [...elements.consultationContextEvidence.querySelectorAll("input:checked")].map(input => input.value);
+}
+
+function orderedContextEvidenceReferenceIDs(selectedIDs, evidenceReferences, kind, flowOrder = []) {
+  const available = new Set((evidenceReferences || []).map(reference => reference?.evidence_reference_id)
+    .filter(id => typeof id === "string" && id.length > 0));
+  const selected = new Set((selectedIDs || []).filter(id => available.has(id)));
+  const evidenceOrder = (evidenceReferences || []).map(reference => reference?.evidence_reference_id)
+    .filter(id => selected.has(id));
+  if (kind !== "flow") return evidenceOrder;
+  const ordered = [...new Set((flowOrder || []).filter(id => selected.has(id)))];
+  for (const id of evidenceOrder) if (!ordered.includes(id)) ordered.push(id);
+  return ordered;
+}
+
+function renderContextEvidenceOptions(selectedIDs = selectedContextEvidenceReferenceIDs()) {
+  elements.consultationContextEvidence.replaceChildren();
+  const kind = elements.consultationContextKind.value;
+  const order = orderedContextEvidenceReferenceIDs(selectedIDs, state.contextEvidenceReferences, kind, state.contextFlowOrder);
+  if (kind === "flow") state.contextFlowOrder = order;
+  const position = new Map(order.map((id, index) => [id, index]));
+  for (const reference of state.contextEvidenceReferences) {
+    const referenceID = reference?.evidence_reference_id;
+    if (typeof referenceID !== "string" || !referenceID) continue;
+    const row = el("div", "context-evidence-row");
+    const label = el("label");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.value = referenceID;
+    checkbox.checked = selectedIDs.includes(referenceID);
+    checkbox.disabled = state.contextEvidenceAccepted;
+    checkbox.addEventListener("change", () => {
+      const selected = selectedContextEvidenceReferenceIDs();
+      if (kind === "flow") state.contextFlowOrder = orderedContextEvidenceReferenceIDs(selected, state.contextEvidenceReferences, kind, state.contextFlowOrder);
+      state.contextAnnotationKey = "";
+      renderContextEvidenceOptions(selected);
+      updateContextAnnotationControl();
+    });
+    const step = kind === "flow" && position.has(referenceID) ? `Flow step ${position.get(referenceID) + 1} · ` : "";
+    label.append(checkbox, document.createTextNode(`${step}Evidence ${Number(reference.evidence_index) + 1} · ${reference.side} · Caido ${reference.request_id}`));
+    row.append(label);
+    if (kind === "flow") {
+      for (const [direction, delta] of [["Move up", -1], ["Move down", 1]]) {
+        const button = el("button", "context-order-button", direction);
+        button.type = "button";
+        button.setAttribute("aria-label", `${direction} flow evidence ${Number(reference.evidence_index) + 1}`);
+        const index = position.get(referenceID);
+        button.disabled = state.contextEvidenceAccepted || index === undefined || index + delta < 0 || index + delta >= order.length;
+        button.addEventListener("click", () => moveContextEvidence(referenceID, delta));
+        row.append(button);
+      }
+    }
+    elements.consultationContextEvidence.append(row);
+  }
+  if (kind === "flow") elements.consultationContextEvidence.append(el("p", "context-flow-note", "analyst-defined order; not observed causality"));
+}
+
+function moveContextEvidence(referenceID, delta) {
+  const selected = selectedContextEvidenceReferenceIDs();
+  const order = orderedContextEvidenceReferenceIDs(selected, state.contextEvidenceReferences, "flow", state.contextFlowOrder);
+  const index = order.indexOf(referenceID);
+  const next = index + delta;
+  if (index < 0 || next < 0 || next >= order.length) return;
+  [order[index], order[next]] = [order[next], order[index]];
+  state.contextFlowOrder = order;
+  state.contextAnnotationKey = "";
+  renderContextEvidenceOptions(selected);
+  updateContextAnnotationControl();
+}
+
 async function saveContextAnnotation() {
   const preview = state.evidencePacketPreview;
   const session = state.consultation;
   if (!preview || !session || !session.reviewLoaded || session.accepted || preview.projectKey !== state.projectKey ||
       elements.consultationContextSave.disabled) return;
-  const evidenceReferenceIDs = [...elements.consultationContextEvidence.querySelectorAll("input:checked")].map(input => input.value);
+  const evidenceReferenceIDs = orderedContextEvidenceReferenceIDs(
+    selectedContextEvidenceReferenceIDs(), state.contextEvidenceReferences,
+    elements.consultationContextKind.value, state.contextFlowOrder,
+  );
   state.contextAnnotationKey ||= newIdempotencyKey();
   const requestKey = state.contextAnnotationKey;
   elements.consultationContextSave.disabled = true;
   elements.consultationContextKind.disabled = true;
   elements.consultationContextLabel.disabled = true;
   for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = true;
+  for (const button of elements.consultationContextEvidence.querySelectorAll("button")) button.disabled = true;
   elements.consultationAccept.disabled = true;
   elements.consultationStatus.textContent = "Saving analyst context to the local review…";
   let saved = false;
@@ -835,7 +908,7 @@ async function saveContextAnnotation() {
       : `Context label was not saved: ${error.message}`;
     elements.consultationContextKind.disabled = false;
     elements.consultationContextLabel.disabled = false;
-    for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = false;
+    renderContextEvidenceOptions(selectedContextEvidenceReferenceIDs());
     elements.consultationAccept.disabled = false;
     updateContextAnnotationControl();
     updateEvidencePacketControl();
@@ -856,10 +929,12 @@ async function acceptConsultationReview() {
     if (state.consultation !== session || state.projectKey !== preview.projectKey) return;
     session.version = accepted.version;
     session.accepted = Boolean(accepted.review_accepted);
+    state.contextEvidenceAccepted = session.accepted;
     elements.consultationAccept.hidden = true;
     elements.consultationContextKind.disabled = true;
     elements.consultationContextLabel.disabled = true;
     for (const checkbox of elements.consultationContextEvidence.querySelectorAll("input")) checkbox.disabled = true;
+    for (const button of elements.consultationContextEvidence.querySelectorAll("button")) button.disabled = true;
     elements.consultationContextSave.hidden = true;
     elements.consultationStatus.textContent = `Accepted · consultation ${session.id} · Hermes can now resume this session.`;
     renderConsultationCandidate(session);
@@ -1347,8 +1422,9 @@ function formatComparisonAnalystContext(comparison, side, title) {
   for (const annotation of annotations) {
     const annotationVersion = annotation.annotationVersion === null ? "unknown" : String(annotation.annotationVersion);
     lines.push(`${annotation.kind}: ${annotation.label} · analyst-provided · consultation ${annotation.sessionID} · accepted version ${annotation.sessionVersion} · annotation version ${annotationVersion}`);
+    if (annotation.kind === "flow") lines.push("analyst-defined order; not observed causality");
     for (const reference of annotation.evidenceReferences) {
-      lines.push(`Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido request ${reference.requestId} · revision ${reference.revisionId} · reference ${reference.referenceID}`);
+      lines.push(`${reference.flowStep ? `Flow step ${reference.flowStep} · ` : ""}Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido request ${reference.requestId} · revision ${reference.revisionId} · reference ${reference.referenceID}`);
     }
   }
   return lines.join("\n");
@@ -2407,8 +2483,9 @@ function renderAcceptedContextAnnotations(node) {
     const version = annotation.annotationVersion === null ? "unknown" : String(annotation.annotationVersion);
     item.append(el("b", "", `${annotation.kind}: ${annotation.label} · analyst-provided`));
     item.append(el("span", "", `Consultation ${annotation.sessionID} · accepted version ${annotation.sessionVersion} · annotation version ${version}`));
+    if (annotation.kind === "flow") item.append(el("span", "", "analyst-defined order; not observed causality"));
     for (const reference of annotation.evidenceReferences) {
-      item.append(el("span", "", `Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido request ${reference.requestId} · revision ${reference.revisionId} · reference ${reference.referenceID}`));
+      item.append(el("span", "", `${reference.flowStep ? `Flow step ${reference.flowStep} · ` : ""}Evidence ${reference.evidenceIndex + 1} · ${reference.side} · Caido request ${reference.requestId} · revision ${reference.revisionId} · reference ${reference.referenceID}`));
     }
     section.append(item);
   }
@@ -2622,6 +2699,11 @@ elements.candidateSave.addEventListener("click", () => { void saveConsultationCa
 for (const field of candidateProposalFields()) field.addEventListener("input", updateCandidateControl);
 elements.consultationContextKind.addEventListener("change", () => {
   elements.consultationContextLabel.placeholder = `${elements.consultationContextKind.value.replaceAll("_", "-")}-a`;
+  const selected = selectedContextEvidenceReferenceIDs();
+  if (elements.consultationContextKind.value === "flow") {
+    state.contextFlowOrder = orderedContextEvidenceReferenceIDs(selected, state.contextEvidenceReferences, "flow", state.contextFlowOrder);
+  }
+  renderContextEvidenceOptions(selected);
   state.contextAnnotationKey = "";
   updateContextAnnotationControl();
 });
