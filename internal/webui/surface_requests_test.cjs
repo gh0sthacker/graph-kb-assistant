@@ -85,6 +85,18 @@ test("saved-consultation entry point opens the review panel without selecting an
   assert.equal(app.elements.consultationResumeID.focused, true);
 });
 
+test("saved-consultation entry point is enabled after the first project is selected", async () => {
+  const app = createApp();
+  const projectKey = "b".repeat(64);
+  const selecting = app.selectProject(projectKey);
+  assert.equal(app.state.projectKey, projectKey);
+  assert.equal(app.elements.consultationOpen.disabled, false);
+
+  const surface = app.requests.find(request => request.url.pathname === "/api/surface");
+  surface.resolve({ operations: [], total_operations: 0, coverage_state: "partial", coverage_gaps: [] });
+  await selecting;
+});
+
 test("field value correlation nodes show exact spans and explain equality without exposing the signature", () => {
   const app = createApp();
   const signature = "hmac:synthetic-private-equality-signature";

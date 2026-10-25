@@ -1453,6 +1453,7 @@ async function selectProject(projectKey) {
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = projectKey;
+  updateConsultationResumeControl();
   state.operationAliasRequestId++;
   state.operationAliases = new Map();
   state.endpoints = [];
