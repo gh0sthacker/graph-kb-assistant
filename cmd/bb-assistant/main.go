@@ -1184,6 +1184,8 @@ func tailCaidoHistory(args []string) error {
 	tokenFile := flags.String("token-file", "", "private Caido MCP token JSON file")
 	pageSize := flags.Int("page-size", 50, "Caido metadata rows per page (1-100)")
 	maxPages := flags.Int("max-pages", 1, "maximum pages in this bounded invocation (1-100)")
+	scopeHost := flags.String("scope-host", "", "optional exact in-scope HTTP host; pair with --scope-port")
+	scopePort := flags.Int("scope-port", 0, "optional exact in-scope HTTP port; pair with --scope-host")
 	watch := flags.Bool("watch", false, "repeat bounded live-tail cycles until interrupted")
 	pollInterval := flags.Duration("poll-interval", 10*time.Second, "delay between --watch cycles (1s-10m)")
 	overlap := flags.Int("overlap-seconds", 90, "time overlap used to recover delayed records (1-3600)")
@@ -1192,10 +1194,13 @@ func tailCaidoHistory(args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: bb-assistant caido-tail --project-key <sha256> [--page-size 50] [--max-pages 1] [--watch --poll-interval 10s]")
+		return errors.New("usage: bb-assistant caido-tail --project-key <sha256> [--scope-host <host> --scope-port <port>] [--page-size 50] [--max-pages 1] [--watch --poll-interval 10s]")
 	}
 	if len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) {
 		return errors.New("select exactly one registered project with --project-key <sha256>")
+	}
+	if (*scopeHost == "") != (*scopePort == 0) || *scopePort < 0 || *scopePort > 65535 {
+		return errors.New("exact live-tail scope requires both --scope-host and --scope-port")
 	}
 	if *pageSize < 1 || *pageSize > 100 || *maxPages < 1 || *maxPages > 100 ||
 		*overlap < 1 || *overlap > 3600 || *bodyLimit < 64<<10 || *bodyLimit > 16<<20 ||
@@ -1259,7 +1264,13 @@ func tailCaidoHistory(args []string) error {
 				return ingest.LiveTailResult{}, openErr
 			}
 			defer selectedStore.Close()
-			tailWriter, writerErr := ingest.OpenLiveTailWriter(localCtx, selectedStore)
+			var tailWriter *ingest.LiveTailWriter
+			var writerErr error
+			if *scopeHost != "" {
+				tailWriter, writerErr = ingest.OpenLiveTailWriterForScope(localCtx, selectedStore, *scopeHost, *scopePort)
+			} else {
+				tailWriter, writerErr = ingest.OpenLiveTailWriter(localCtx, selectedStore)
+			}
 			if writerErr != nil {
 				return ingest.LiveTailResult{}, writerErr
 			}

@@ -57,9 +57,14 @@ type LiveTailCheckpoint struct {
 }
 
 type LiveTailResult struct {
-	ProjectKey             string  `json:"project_key"`
-	State                  string  `json:"state"`
-	RequestsSeen           int     `json:"requests_seen"`
+	ProjectKey   string `json:"project_key"`
+	ScopeHost    string `json:"scope_host,omitempty"`
+	ScopePort    int    `json:"scope_port,omitempty"`
+	State        string `json:"state"`
+	RequestsSeen int    `json:"requests_seen"`
+	// RequestsExcluded counts out-of-scope metadata rows across intake and
+	// response-refresh pages; a row may be counted during both passes.
+	RequestsExcluded       int     `json:"requests_excluded_by_scope"`
 	RequestsAdded          int     `json:"requests_added"`
 	ResponsesRefreshed     int     `json:"responses_refreshed"`
 	PendingResponses       int     `json:"pending_responses"`
@@ -118,12 +123,61 @@ type liveSourceReceipt struct {
 
 type LiveTailWriter struct {
 	selected      *store.ProjectStore
+	sourceKey     string
+	scope         *LiveTailScope
 	indexKey      []byte
 	responseKey   []byte
 	fieldValueKey []byte
 }
 
+// LiveTailScope restricts capture-detail reads and graph ingestion to one
+// exact HTTP origin. The host and port are also included in the durable
+// checkpoint key, so a changed scope cannot resume another scope's cursor.
+type LiveTailScope struct {
+	Host string
+	Port int
+}
+
 func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*LiveTailWriter, error) {
+	return openLiveTailWriter(ctx, selected, nil)
+}
+
+// OpenLiveTailWriterForScope opens a live-tail writer with an exact host/port
+// filter. The filter is applied to request metadata before any message detail
+// is fetched.
+func OpenLiveTailWriterForScope(ctx context.Context, selected *store.ProjectStore, host string, port int) (*LiveTailWriter, error) {
+	scope, sourceKey, err := normalizeLiveTailScope(&LiveTailScope{Host: host, Port: port})
+	if err != nil {
+		return nil, err
+	}
+	return openLiveTailWriterWithKey(ctx, selected, scope, sourceKey)
+}
+
+func openLiveTailWriter(ctx context.Context, selected *store.ProjectStore, scope *LiveTailScope) (*LiveTailWriter, error) {
+	normalized, sourceKey, err := normalizeLiveTailScope(scope)
+	if err != nil {
+		return nil, err
+	}
+	return openLiveTailWriterWithKey(ctx, selected, normalized, sourceKey)
+}
+
+func normalizeLiveTailScope(scope *LiveTailScope) (*LiveTailScope, string, error) {
+	if scope == nil {
+		return nil, liveTailSourceKey, nil
+	}
+	if scope.Host == "" || scope.Port < 1 || scope.Port > 65535 {
+		return nil, "", errors.New("live-tail exact origin scope is invalid")
+	}
+	host, err := caido.NormalizeRequestHost(scope.Host)
+	if err != nil {
+		return nil, "", errors.New("live-tail exact origin scope is invalid")
+	}
+	normalized := &LiveTailScope{Host: host, Port: scope.Port}
+	digest := sha256.Sum256([]byte(host + ":" + strconv.Itoa(scope.Port)))
+	return normalized, liveTailSourceKey + ":origin:" + hex.EncodeToString(digest[:]), nil
+}
+
+func openLiveTailWriterWithKey(ctx context.Context, selected *store.ProjectStore, scope *LiveTailScope, sourceKey string) (*LiveTailWriter, error) {
 	if err := validateSelectedProject(selected); err != nil {
 		return nil, err
 	}
@@ -142,7 +196,7 @@ func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*Liv
 		clear(responseKey)
 		return nil, errors.New("live-tail field-value key could not be derived")
 	}
-	return &LiveTailWriter{selected: selected, indexKey: indexKey, responseKey: responseKey, fieldValueKey: fieldValueKey}, nil
+	return &LiveTailWriter{selected: selected, sourceKey: sourceKey, scope: scope, indexKey: indexKey, responseKey: responseKey, fieldValueKey: fieldValueKey}, nil
 }
 
 func (w *LiveTailWriter) Close() {
@@ -158,7 +212,7 @@ func (w *LiveTailWriter) Close() {
 }
 
 func (w *LiveTailWriter) validateOpen() error {
-	if w == nil || w.selected == nil || w.selected.Database == nil || w.selected.Database.ReadOnly() ||
+	if w == nil || w.selected == nil || w.selected.Database == nil || w.selected.Database.ReadOnly() || w.sourceKey == "" ||
 		len(w.indexKey) != 32 || len(w.responseKey) != 32 || len(w.fieldValueKey) != 32 {
 		return errors.New("live-tail writer is unavailable")
 	}
@@ -189,7 +243,7 @@ func (w *LiveTailWriter) BeginCycle(ctx context.Context, now time.Time, overlapS
 		}
 	}()
 
-	progress, err := readLiveProgress(ctx, conn)
+	progress, err := readLiveProgress(ctx, conn, w.sourceKey)
 	if err != nil {
 		return LiveTailCheckpoint{}, err
 	}
@@ -234,7 +288,7 @@ func (w *LiveTailWriter) BeginCycle(ctx context.Context, now time.Time, overlapS
 		 VALUES(?,?,?,?,?,'running',?,?)
 		 ON CONFLICT(source_key) DO UPDATE SET watermark=excluded.watermark,window_since=excluded.window_since,
 		 window_until=excluded.window_until,cursor=excluded.cursor,state='running',updated_at=excluded.updated_at`,
-		liveTailSourceKey, checkpoint.Watermark, checkpoint.WindowSince, checkpoint.WindowUntil,
+		w.sourceKey, checkpoint.Watermark, checkpoint.WindowSince, checkpoint.WindowUntil,
 		checkpoint.Cursor, nullableProgressLastPolled(progress), nowText,
 	); err != nil {
 		return LiveTailCheckpoint{}, errors.New("live-tail checkpoint could not be started")
@@ -356,7 +410,7 @@ func (w *LiveTailWriter) ResponseRefreshCursor(ctx context.Context) (*string, er
 	}
 	var cursor sql.NullString
 	err := w.selected.Database.DB().QueryRowContext(ctx,
-		"SELECT response_refresh_cursor FROM live_sync_state WHERE source_key=?", liveTailSourceKey,
+		"SELECT response_refresh_cursor FROM live_sync_state WHERE source_key=?", w.sourceKey,
 	).Scan(&cursor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -372,13 +426,16 @@ func (w *LiveTailWriter) PendingLiveResponseCount(ctx context.Context) (int, err
 		return 0, err
 	}
 	var count int
-	err := w.selected.Database.DB().QueryRowContext(ctx,
-		`SELECT count(*) FROM live_capture_index l WHERE l.caido_instance_id=? AND l.caido_project_id=?
+	query := `SELECT count(*) FROM live_capture_index l WHERE l.caido_instance_id=? AND l.caido_project_id=?
 		 AND l.response_size IS NULL AND NOT EXISTS (SELECT 1 FROM captures c
 			WHERE c.caido_instance_id=l.caido_instance_id AND c.caido_project_id=l.caido_project_id
-			AND c.request_id=l.request_id)`,
-		w.selected.Project.InstanceID, w.selected.Project.ProjectID,
-	).Scan(&count)
+			AND c.request_id=l.request_id)`
+	args := []any{w.selected.Project.InstanceID, w.selected.Project.ProjectID}
+	if w.scope != nil {
+		query += ` AND l.host=? AND l.port=?`
+		args = append(args, w.scope.Host, w.scope.Port)
+	}
+	err := w.selected.Database.DB().QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
 		return 0, errors.New("pending live response count could not be read")
 	}
@@ -421,7 +478,7 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 			_ = conn.Close()
 		}
 	}()
-	if err := liveCheckpointMatches(ctx, conn, checkpoint); err != nil {
+	if err := liveCheckpointMatches(ctx, conn, checkpoint, w.sourceKey); err != nil {
 		return LivePageResult{}, err
 	}
 	added, refreshed, accepted, err := persistLiveCaptures(ctx, conn, w.selected, prepared)
@@ -439,7 +496,7 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 		updated.WindowUntil = ""
 		updated.Cursor = nil
 	}
-	if err := updateLiveCheckpoint(ctx, conn, checkpoint, updated, !page.HasMore); err != nil {
+	if err := updateLiveCheckpoint(ctx, conn, checkpoint, updated, !page.HasMore, w.sourceKey); err != nil {
 		return LivePageResult{}, err
 	}
 	if err := commitImmediate(ctx, conn); err != nil {
@@ -493,7 +550,7 @@ func (w *LiveTailWriter) WriteResponseRefreshPage(
 	}()
 	var current sql.NullString
 	if err := conn.QueryRowContext(ctx,
-		"SELECT response_refresh_cursor FROM live_sync_state WHERE source_key=?", liveTailSourceKey,
+		"SELECT response_refresh_cursor FROM live_sync_state WHERE source_key=?", w.sourceKey,
 	).Scan(&current); err != nil || !nullableMatches(current, previousCursor) {
 		return LivePageResult{}, errors.New("pending response refresh cursor changed before this page could commit")
 	}
@@ -508,7 +565,7 @@ func (w *LiveTailWriter) WriteResponseRefreshPage(
 	result, err := conn.ExecContext(ctx,
 		`UPDATE live_sync_state SET response_refresh_cursor=?,updated_at=?
 		 WHERE source_key=? AND response_refresh_cursor IS ?`,
-		nextCursor, utcNow(), liveTailSourceKey, previousCursor,
+		nextCursor, utcNow(), w.sourceKey, previousCursor,
 	)
 	if err != nil {
 		return LivePageResult{}, errors.New("pending response refresh cursor could not be advanced")
@@ -546,12 +603,12 @@ func (w *LiveTailWriter) MarkPartial(ctx context.Context, checkpoint LiveTailChe
 		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		_ = conn.Close()
 	}()
-	if err := liveCheckpointMatches(ctx, conn, checkpoint); err != nil {
+	if err := liveCheckpointMatches(ctx, conn, checkpoint, w.sourceKey); err != nil {
 		return err
 	}
 	updated := checkpoint
 	updated.State = "partial"
-	if err := updateLiveCheckpoint(ctx, conn, checkpoint, updated, false); err != nil {
+	if err := updateLiveCheckpoint(ctx, conn, checkpoint, updated, false, w.sourceKey); err != nil {
 		return err
 	}
 	if err := commitImmediate(ctx, conn); err != nil {
@@ -611,6 +668,10 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		return LiveTailResult{}, err
 	}
 	result := LiveTailResult{ProjectKey: projectKey, State: checkpoint.State, Watermark: checkpoint.Watermark, CursorPending: checkpoint.Cursor != nil}
+	if writer.scope != nil {
+		result.ScopeHost = writer.scope.Host
+		result.ScopePort = writer.scope.Port
+	}
 	fetchedThisRun := make(map[string]struct{})
 	markPartial := func(cause error) (LiveTailResult, error) {
 		partialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -638,8 +699,10 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		if err := validateMetadataPage(metadata, selected, options.PageSize, checkpoint.Cursor); err != nil {
 			return markPartial(err)
 		}
-		requestIDs := make([]string, len(metadata.Requests))
-		for index, request := range metadata.Requests {
+		scopedMetadata, excluded := filterLiveMetadataPage(metadata, writer.scope)
+		result.RequestsExcluded += excluded
+		requestIDs := make([]string, len(scopedMetadata.Requests))
+		for index, request := range scopedMetadata.Requests {
 			requestIDs[index] = request.RequestID
 		}
 		known, err := writer.KnownRequestIDs(ctx, requestIDs)
@@ -651,11 +714,11 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 				fetchedThisRun[requestID] = struct{}{}
 			}
 		}
-		page, err := source.FetchHistoryPage(selected, metadata, known, options.MaxBodyBytes)
+		page, err := source.FetchHistoryPage(selected, scopedMetadata, known, options.MaxBodyBytes)
 		if err != nil {
 			return markPartial(err)
 		}
-		if err := validateLiveFetchedPage(page, metadata, known, selected); err != nil {
+		if err := validateLiveFetchedPage(page, scopedMetadata, known, selected); err != nil {
 			clearHistoryPage(&page)
 			return markPartial(err)
 		}
@@ -722,8 +785,10 @@ func finishLiveTailResponseRefresh(
 			result.ResponseRefreshPending = true
 			return result, err
 		}
-		requestIDs := make([]string, len(metadata.Requests))
-		for index, request := range metadata.Requests {
+		scopedMetadata, excluded := filterLiveMetadataPage(metadata, writer.scope)
+		result.RequestsExcluded += excluded
+		requestIDs := make([]string, len(scopedMetadata.Requests))
+		for index, request := range scopedMetadata.Requests {
 			requestIDs[index] = request.RequestID
 		}
 		pending, err := writer.PendingResponseRequestIDs(ctx, requestIDs)
@@ -743,9 +808,9 @@ func finishLiveTailResponseRefresh(
 				skipped[requestID] = struct{}{}
 			}
 		}
-		page := caido.HistoryPage{NextCursor: cloneCursor(metadata.NextCursor), HasMore: metadata.HasMore}
+		page := caido.HistoryPage{NextCursor: cloneCursor(scopedMetadata.NextCursor), HasMore: scopedMetadata.HasMore}
 		if len(pending) != 0 {
-			page, err = source.FetchHistoryPage(selected, metadata, skipped, options.MaxBodyBytes)
+			page, err = source.FetchHistoryPage(selected, scopedMetadata, skipped, options.MaxBodyBytes)
 			if err != nil {
 				clearHistoryPage(&page)
 				result.State = "partial"
@@ -753,13 +818,13 @@ func finishLiveTailResponseRefresh(
 				return result, err
 			}
 		}
-		if err := validateLiveFetchedPage(page, metadata, skipped, selected); err != nil {
+		if err := validateLiveFetchedPage(page, scopedMetadata, skipped, selected); err != nil {
 			clearHistoryPage(&page)
 			result.State = "partial"
 			result.ResponseRefreshPending = true
 			return result, err
 		}
-		pageResult, pageErr := writer.WriteResponseRefreshPage(ctx, cursor, metadata, page, skipped)
+		pageResult, pageErr := writer.WriteResponseRefreshPage(ctx, cursor, scopedMetadata, page, skipped)
 		clearHistoryPage(&page)
 		if pageErr != nil {
 			result.State = "partial"
@@ -771,8 +836,8 @@ func finishLiveTailResponseRefresh(
 		if pageResult.ProjectionState == "pending" {
 			result.ProjectionPendingPages++
 		}
-		if metadata.HasMore {
-			cursor = cloneCursor(metadata.NextCursor)
+		if scopedMetadata.HasMore {
+			cursor = cloneCursor(scopedMetadata.NextCursor)
 			result.ResponseRefreshPending = true
 		} else {
 			cursor = nil
@@ -1283,6 +1348,50 @@ func liveHTTPQL(since, until string) string {
 	return fmt.Sprintf(`req.created_at.gt:"%s" AND req.created_at.lt:"%s"`, since, until)
 }
 
+func filterLiveMetadataPage(page caido.RequestMetadataPage, scope *LiveTailScope) (caido.RequestMetadataPage, int) {
+	if scope == nil {
+		return page, 0
+	}
+	filtered := page
+	filtered.Requests = make([]caido.RequestMetadata, 0, len(page.Requests))
+	excluded := 0
+	for _, request := range page.Requests {
+		if metadataMatchesLiveScope(request, *scope) {
+			filtered.Requests = append(filtered.Requests, request)
+		} else {
+			excluded++
+		}
+	}
+	return filtered, excluded
+}
+
+func metadataMatchesLiveScope(request caido.RequestMetadata, scope LiveTailScope) bool {
+	parsed, err := url.Parse(request.URL)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil {
+		return false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	host, err := caido.NormalizeRequestHost(parsed.Hostname())
+	if err != nil || host != scope.Host {
+		return false
+	}
+	port := 0
+	if value := parsed.Port(); value != "" {
+		port, err = strconv.Atoi(value)
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+	} else if scheme == "https" {
+		port = 443
+	} else {
+		port = 80
+	}
+	return port == scope.Port
+}
+
 func liveBaseURL(exchange caido.HttpExchange) (string, error) {
 	parsed, _ := url.Parse(exchange.Target)
 	scheme := strings.ToLower(exchange.Scheme)
@@ -1346,11 +1455,11 @@ func beginSelectedImmediate(ctx context.Context, selected *store.ProjectStore) (
 	return conn, nil
 }
 
-func readLiveProgress(ctx context.Context, conn *sql.Conn) (*liveProgressRow, error) {
+func readLiveProgress(ctx context.Context, conn *sql.Conn, sourceKey string) (*liveProgressRow, error) {
 	var row liveProgressRow
 	err := conn.QueryRowContext(ctx,
 		`SELECT watermark,window_since,window_until,cursor,state,last_polled_at,updated_at,response_refresh_cursor
-		 FROM live_sync_state WHERE source_key=?`, liveTailSourceKey,
+		 FROM live_sync_state WHERE source_key=?`, sourceKey,
 	).Scan(&row.watermark, &row.windowSince, &row.windowUntil, &row.cursor, &row.state, &row.lastPolledAt, &row.updatedAt, &row.responseRefreshCursor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1402,8 +1511,8 @@ func validateLiveCheckpoint(checkpoint LiveTailCheckpoint) error {
 	return nil
 }
 
-func liveCheckpointMatches(ctx context.Context, conn *sql.Conn, expected LiveTailCheckpoint) error {
-	current, err := readLiveProgress(ctx, conn)
+func liveCheckpointMatches(ctx context.Context, conn *sql.Conn, expected LiveTailCheckpoint, sourceKey string) error {
+	current, err := readLiveProgress(ctx, conn, sourceKey)
 	if err != nil || current == nil || !nullableMatches(current.watermark, expected.Watermark) ||
 		!nullableMatches(current.windowSince, stringPointerValue(expected.WindowSince)) ||
 		!nullableMatches(current.windowUntil, stringPointerValue(expected.WindowUntil)) ||
@@ -1413,7 +1522,7 @@ func liveCheckpointMatches(ctx context.Context, conn *sql.Conn, expected LiveTai
 	return nil
 }
 
-func updateLiveCheckpoint(ctx context.Context, conn *sql.Conn, before, after LiveTailCheckpoint, terminal bool) error {
+func updateLiveCheckpoint(ctx context.Context, conn *sql.Conn, before, after LiveTailCheckpoint, terminal bool, sourceKey string) error {
 	var since, until, cursor any = after.WindowSince, after.WindowUntil, after.Cursor
 	lastPolledAt := any(nil)
 	if terminal {
@@ -1423,7 +1532,7 @@ func updateLiveCheckpoint(ctx context.Context, conn *sql.Conn, before, after Liv
 	result, err := conn.ExecContext(ctx,
 		`UPDATE live_sync_state SET watermark=?,window_since=?,window_until=?,cursor=?,state=?,last_polled_at=COALESCE(?,last_polled_at),updated_at=?
 		 WHERE source_key=? AND watermark IS ? AND window_since=? AND window_until=? AND cursor IS ? AND state=?`,
-		after.Watermark, since, until, cursor, after.State, lastPolledAt, utcNow(), liveTailSourceKey,
+		after.Watermark, since, until, cursor, after.State, lastPolledAt, utcNow(), sourceKey,
 		before.Watermark, before.WindowSince, before.WindowUntil, before.Cursor, before.State,
 	)
 	if err != nil {

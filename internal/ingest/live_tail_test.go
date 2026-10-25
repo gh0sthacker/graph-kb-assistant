@@ -142,6 +142,149 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	}
 }
 
+func TestRunLiveTailExactOriginScopeFiltersInitialAndResponseRefreshPages(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, unscopedWriter := newLiveTailFixture(t)
+	unscopedWriter.Close()
+	writer, err := OpenLiveTailWriterForScope(ctx, projectStore, "API.FIXTURE.INVALID", 443)
+	if err != nil {
+		t.Fatalf("OpenLiveTailWriterForScope() error = %v", err)
+	}
+	t.Cleanup(writer.Close)
+	status := 200
+	requestID := "scoped-request"
+	otherPortID := "out-of-scope-port"
+	otherHostID := "out-of-scope-host"
+	capturedAt := "2026-10-25T12:00:00Z"
+	requestRaw := []byte("GET /api/items HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n")
+	withoutResponse := caido.HttpExchange{
+		Ref: caido.ExchangeRef{Project: selected, RequestID: requestID}, CapturedAt: &capturedAt,
+		RequestRaw: requestRaw, HasResponse: false, Method: "GET", Scheme: "https",
+		Host: "api.fixture.invalid", Port: 443, Target: "https://api.fixture.invalid/api/items",
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "unknown",
+	}
+	withResponse := cloneLiveFixtureExchange(withoutResponse)
+	withResponse.ResponseRaw = []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	withResponse.HasResponse = true
+	withResponse.ResponseStatus = &status
+	withResponse.ResponseWireFidelity = "source_bytes"
+	makeRows := func() []caido.RequestMetadata {
+		return []caido.RequestMetadata{
+			{RequestID: requestID, Method: "GET", URL: "https://api.fixture.invalid/api/items"},
+			{RequestID: otherPortID, Method: "GET", URL: "https://api.fixture.invalid:8443/api/items"},
+			{RequestID: otherHostID, Method: "GET", URL: "https://elsewhere.fixture.invalid/api/items"},
+		}
+	}
+	page := func() caido.RequestMetadataPage { return caido.RequestMetadataPage{Requests: makeRows()} }
+	source := &liveTailSourceFixture{
+		project:           selected,
+		pages:             []caido.RequestMetadataPage{page(), page()},
+		refreshPages:      []caido.RequestMetadataPage{page(), page()},
+		exchangeSnapshots: map[string][]caido.HttpExchange{requestID: {withoutResponse, withResponse}},
+	}
+	options := LiveTailOptions{PageSize: 3, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
+	first, err := RunLiveTail(ctx, source, writer, selected, options)
+	if err != nil {
+		t.Fatalf("first scoped RunLiveTail() error = %v", err)
+	}
+	if first.ScopeHost != "api.fixture.invalid" || first.ScopePort != 443 || first.RequestsSeen != 3 || first.RequestsExcluded != 4 ||
+		first.RequestsAdded != 1 || !first.ResponseRefreshPending {
+		t.Fatalf("first scoped RunLiveTail() = %+v, want only the exact origin imported and pending response retained", first)
+	}
+	second, err := RunLiveTail(ctx, source, writer, selected, options)
+	if err != nil {
+		t.Fatalf("second scoped RunLiveTail() error = %v", err)
+	}
+	if second.RequestsSeen != 3 || second.RequestsExcluded != 4 || second.RequestsAdded != 0 || second.ResponsesRefreshed != 1 || second.ResponseRefreshPending {
+		t.Fatalf("second scoped RunLiveTail() = %+v, want scoped response refresh and no unrelated rows", second)
+	}
+	if len(source.fetchedExchanges) != 2 {
+		t.Fatalf("detail fetches = %d, want initial request and one in-scope response refresh", len(source.fetchedExchanges))
+	}
+	for _, exchange := range source.fetchedExchanges {
+		if exchange.Ref.RequestID != requestID {
+			t.Fatalf("detail fetch escaped exact origin filter: request ID %q", exchange.Ref.RequestID)
+		}
+		clear(exchange.RequestRaw)
+		clear(exchange.ResponseRaw)
+	}
+	var count int
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM live_capture_index").Scan(&count); err != nil {
+		t.Fatalf("count scoped captures: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("live capture count = %d, want exactly one in-scope capture", count)
+	}
+}
+
+func TestLiveTailScopeUsesIndependentDurableCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	_, projectStore, unscopedWriter := newLiveTailFixture(t)
+	unscopedWriter.Close()
+	first, err := OpenLiveTailWriterForScope(ctx, projectStore, "one.fixture.invalid", 443)
+	if err != nil {
+		t.Fatalf("first scoped writer: %v", err)
+	}
+	defer first.Close()
+	second, err := OpenLiveTailWriterForScope(ctx, projectStore, "two.fixture.invalid", 443)
+	if err != nil {
+		t.Fatalf("second scoped writer: %v", err)
+	}
+	defer second.Close()
+	if first.sourceKey == second.sourceKey {
+		t.Fatal("distinct origins share one durable live-tail checkpoint key")
+	}
+	firstCheckpoint, err := first.BeginCycle(ctx, time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC), 90)
+	if err != nil {
+		t.Fatalf("first BeginCycle(): %v", err)
+	}
+	if err := first.MarkPartial(ctx, firstCheckpoint); err != nil {
+		t.Fatalf("mark first scope partial: %v", err)
+	}
+	secondCheckpoint, err := second.BeginCycle(ctx, time.Date(2026, 10, 25, 12, 1, 0, 0, time.UTC), 90)
+	if err != nil {
+		t.Fatalf("second BeginCycle(): %v", err)
+	}
+	if secondCheckpoint.Watermark != nil || secondCheckpoint.WindowUntil == firstCheckpoint.WindowUntil {
+		t.Fatalf("second scope reused first scope checkpoint: first=%+v second=%+v", firstCheckpoint, secondCheckpoint)
+	}
+	if err := second.MarkPartial(ctx, secondCheckpoint); err != nil {
+		t.Fatalf("mark second scope partial: %v", err)
+	}
+	var count int
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM live_sync_state WHERE source_key LIKE ?", liveTailSourceKey+":origin:%").Scan(&count); err != nil {
+		t.Fatalf("count scoped checkpoints: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("scoped checkpoint count = %d, want 2", count)
+	}
+}
+
+func TestNormalizeLiveTailScopeRejectsInvalidOrigin(t *testing.T) {
+	for _, scope := range []*LiveTailScope{
+		{Host: "*.fixture.invalid", Port: 443},
+		{Host: "api.fixture.invalid", Port: 0},
+		{Host: "api.fixture.invalid/path", Port: 443},
+	} {
+		if _, _, err := normalizeLiveTailScope(scope); err == nil {
+			t.Fatalf("normalizeLiveTailScope(%+v) succeeded; want invalid scope rejected", scope)
+		}
+	}
+	for _, request := range []caido.RequestMetadata{
+		{URL: "https://api.fixture.invalid:bad/path"},
+		{URL: "ftp://api.fixture.invalid/path"},
+		{URL: "/relative/path"},
+		{URL: "https://user:secret@api.fixture.invalid/path"},
+	} {
+		if metadataMatchesLiveScope(request, LiveTailScope{Host: "api.fixture.invalid", Port: 443}) {
+			t.Fatalf("malformed or unsupported URL matched exact scope: %q", request.URL)
+		}
+	}
+	if !metadataMatchesLiveScope(caido.RequestMetadata{URL: "HTTPS://API.FIXTURE.INVALID/path"}, LiveTailScope{Host: "api.fixture.invalid", Port: 443}) {
+		t.Fatal("uppercase HTTPS URL did not match normalized exact origin")
+	}
+}
+
 func TestRunLiveTailReturnsPendingWithoutSynchronousProjection(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, writer := newLiveTailFixture(t)

@@ -107,6 +107,7 @@ from the repository checkout:
 ```sh
 ./scripts/bb-assistant caido-tail \
   --project-key <registered-project-sha256> \
+  --scope-host <exact-authorized-host> --scope-port <exact-authorized-port> \
   --mcp-command <verified-caido-mcp-executable> \
   --mcp-sha256 <verified-executable-sha256> \
   --token-file <private-caido-token-file> \
@@ -114,10 +115,14 @@ from the repository checkout:
   --overlap-seconds 90 --body-limit 262144
 ```
 
-Live intake imports every request in that Caido project during the overlap
-window. Keep the project restricted to traffic authorized for collection. The
-command persists its cursor and deduplicates previously indexed request IDs;
-it does not declare historical capture coverage complete.
+With `--scope-host` and `--scope-port`, live intake filters metadata to that
+exact HTTP origin before reading request or response details. The pair is
+optional for compatibility, but omit it only when the selected project itself
+is already restricted to authorized traffic. A project may contain unrelated
+records captured earlier; this filter does not delete or hide those existing
+records. The command persists an independent cursor per exact origin and
+deduplicates previously indexed request IDs; it does not declare historical
+capture coverage complete.
 
 ## Managed Go runtime (Linux/systemd)
 
