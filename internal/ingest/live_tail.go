@@ -95,6 +95,8 @@ type preparedLiveCapture struct {
 	requestSignature   string
 	responseSignature  *string
 	requestURLKey      string
+	refererURLKey      string
+	redirectURLKey     string
 }
 
 type liveSourceReceipt struct {
@@ -105,6 +107,8 @@ type liveSourceReceipt struct {
 	RequestSignature     string                     `json:"request_signature"`
 	ResponseSignature    *string                    `json:"response_signature"`
 	RequestURLKey        string                     `json:"request_url_key"`
+	RefererURLKey        string                     `json:"referer_url_key,omitempty"`
+	RedirectURLKey       string                     `json:"redirect_url_key,omitempty"`
 	Search               behaviorgraph.SearchRecord `json:"search_record"`
 	RequestWireFidelity  string                     `json:"request_wire_fidelity"`
 	ResponseWireFidelity string                     `json:"response_wire_fidelity"`
@@ -852,6 +856,10 @@ func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]
 		if err != nil || !validDigest(requestURLKey) {
 			return nil, errors.New("live-tail URL key could not be built")
 		}
+		navigationRequestKey, refererURLKey, redirectURLKey, err := behaviorgraph.NavigationURLIndexKeys(exchange, w.indexKey)
+		if err != nil || navigationRequestKey != requestURLKey {
+			return nil, errors.New("live-tail navigation URL keys could not be verified")
+		}
 		requestHash := sha256Hex(exchange.RequestRaw)
 		var responseHash *string
 		var responseSize *int
@@ -872,6 +880,7 @@ func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]
 		item := preparedLiveCapture{
 			exchange: exchange, projection: projection, observationID: observationID, revisionID: revisionID,
 			requestSignature: requestSignature, responseSignature: responseSignature, requestURLKey: requestURLKey,
+			refererURLKey: refererURLKey, redirectURLKey: redirectURLKey,
 		}
 		source, err := writeLiveSourceReceipt(w.selected, item)
 		if err != nil {
@@ -907,6 +916,7 @@ func writeLiveSourceReceipt(selected *store.ProjectStore, item preparedLiveCaptu
 		SchemaVersion: 1, Source: "caido_http_live_tail", ProjectKey: selected.ProjectKey,
 		ObservationID: item.observationID, RequestSignature: item.requestSignature,
 		ResponseSignature: item.responseSignature, RequestURLKey: item.requestURLKey,
+		RefererURLKey: item.refererURLKey, RedirectURLKey: item.redirectURLKey,
 		Search: item.projection.Search, RequestWireFidelity: item.exchange.RequestWireFidelity,
 		ResponseWireFidelity: item.exchange.ResponseWireFidelity,
 		RequestTruncated:     item.exchange.RequestTruncated, ResponseTruncated: item.exchange.ResponseTruncated,
@@ -930,6 +940,151 @@ func writeLiveSourceReceipt(selected *store.ProjectStore, item preparedLiveCaptu
 	return behaviorgraph.Record{"path": path, "sha256": digest, "record_locator": "$"}, nil
 }
 
+type liveNavigationCandidate struct {
+	requestID, observationID, graphObservationID string
+	revisionID                                   sql.NullString
+	bundle                                       behaviorgraph.Record
+}
+
+func addPersistedLiveNavigationAssertions(
+	ctx context.Context,
+	conn *sql.Conn,
+	selected *store.ProjectStore,
+	prepared []preparedLiveCapture,
+) error {
+	if len(prepared) == 0 {
+		return nil
+	}
+	pageRequestIDs := make(map[string]struct{}, len(prepared))
+	for _, item := range prepared {
+		pageRequestIDs[item.exchange.Ref.RequestID] = struct{}{}
+	}
+	for index := range prepared {
+		item := &prepared[index]
+		if item.refererURLKey != "" {
+			candidates, err := liveNavigationCandidates(ctx, conn, selected, "request_url_key", item.refererURLKey, pageRequestIDs)
+			if err != nil {
+				return err
+			}
+			if len(candidates) == 1 {
+				if err := behaviorgraph.AddNavigationEvidenceAssertion(
+					item.bundle, candidates[0].bundle, candidates[0].graphObservationID,
+					item.bundle, item.graphObservationID, "referrer_context_for", "referrer_exact_url",
+				); err != nil {
+					return errors.New("live-tail Referer assertion could not be attached")
+				}
+			}
+		}
+		if item.redirectURLKey != "" {
+			candidates, err := liveNavigationCandidates(ctx, conn, selected, "request_url_key", item.redirectURLKey, pageRequestIDs)
+			if err != nil {
+				return err
+			}
+			if len(candidates) == 1 {
+				if err := behaviorgraph.AddNavigationEvidenceAssertion(
+					item.bundle, item.bundle, item.graphObservationID,
+					candidates[0].bundle, candidates[0].graphObservationID,
+					"redirects_to", "redirect_exact_url",
+				); err != nil {
+					return errors.New("live-tail redirect assertion could not be attached")
+				}
+			}
+		}
+		candidates, err := liveNavigationCandidates(ctx, conn, selected, "redirect_url_key", item.requestURLKey, pageRequestIDs)
+		if err != nil {
+			return err
+		}
+		if len(candidates) == 1 {
+			if err := behaviorgraph.AddNavigationEvidenceAssertion(
+				item.bundle, candidates[0].bundle, candidates[0].graphObservationID,
+				item.bundle, item.graphObservationID, "redirects_to", "redirect_exact_url",
+			); err != nil {
+				return errors.New("live-tail incoming redirect assertion could not be attached")
+			}
+		}
+	}
+	return nil
+}
+
+func liveNavigationCandidates(
+	ctx context.Context,
+	conn *sql.Conn,
+	selected *store.ProjectStore,
+	keyColumn, key string,
+	pageRequestIDs map[string]struct{},
+) ([]liveNavigationCandidate, error) {
+	if (keyColumn != "request_url_key" && keyColumn != "redirect_url_key") || !validDigest(key) {
+		return nil, errors.New("live-tail navigation index query is invalid")
+	}
+	args := []any{selected.Project.InstanceID, selected.Project.ProjectID, key}
+	placeholders := make([]string, 0, len(pageRequestIDs))
+	for requestID := range pageRequestIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, requestID)
+	}
+	query := `SELECT l.request_id,l.observation_id,l.graph_observation_id,l.current_revision_id
+		FROM live_capture_index l
+		WHERE l.caido_instance_id=? AND l.caido_project_id=? AND l.` + keyColumn + `=? `
+	if len(placeholders) > 0 {
+		query += `AND l.request_id NOT IN (` + strings.Join(placeholders, ",") + `) `
+	}
+	query += `ORDER BY l.request_id LIMIT 2`
+	rows, err := conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, errors.New("live-tail navigation candidates could not be read")
+	}
+	defer rows.Close()
+	candidates := make([]liveNavigationCandidate, 0, 2)
+	for rows.Next() {
+		var candidate liveNavigationCandidate
+		if err := rows.Scan(&candidate.requestID, &candidate.observationID, &candidate.graphObservationID, &candidate.revisionID); err != nil {
+			return nil, errors.New("live-tail navigation candidate is malformed")
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("live-tail navigation candidate query failed")
+	}
+	if len(candidates) != 1 || !candidates[0].revisionID.Valid {
+		return nil, nil
+	}
+	var payload []byte
+	if err := conn.QueryRowContext(ctx,
+		"SELECT payload_json FROM projection_jobs WHERE revision_id=?", candidates[0].revisionID.String,
+	).Scan(&payload); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, errors.New("live-tail navigation candidate projection could not be read")
+	}
+	bundle, err := behaviorgraph.DecodeBundleJSON(payload)
+	if err != nil || bundle["program"] != selected.ProjectKey ||
+		!hasProjectionObservation(bundle, candidates[0].graphObservationID, candidates[0].observationID, "live_capture") {
+		return nil, errors.New("live-tail navigation candidate projection is inconsistent")
+	}
+	if err := normalizeNavigationCandidateBundle(bundle); err != nil {
+		return nil, err
+	}
+	candidates[0].bundle = bundle
+	return candidates, nil
+}
+
+func normalizeNavigationCandidateBundle(bundle behaviorgraph.Record) error {
+	entities, ok := projectionRecords(bundle["entities"])
+	if !ok {
+		return errors.New("live-tail navigation candidate entities are malformed")
+	}
+	for index := range entities {
+		refs, ok := projectionRecords(entities[index]["source_refs"])
+		if !ok {
+			return errors.New("live-tail navigation candidate source references are malformed")
+		}
+		entities[index]["source_refs"] = refs
+	}
+	bundle["entities"] = entities
+	return nil
+}
+
 func persistLiveCaptures(
 	ctx context.Context,
 	conn *sql.Conn,
@@ -939,6 +1094,9 @@ func persistLiveCaptures(
 	added := 0
 	refreshed := 0
 	accepted := make([]preparedLiveCapture, 0, len(prepared))
+	if err := addPersistedLiveNavigationAssertions(ctx, conn, selected, prepared); err != nil {
+		return 0, 0, nil, err
+	}
 	for _, item := range prepared {
 		var existing struct {
 			observationID, graphObservationID, requestSignature, requestURLKey string
@@ -971,13 +1129,14 @@ func persistLiveCaptures(
 				 graph_observation_id,synced_at,method,host,port,route,response_status,request_content_type,
 				 response_content_type,request_size,response_size,request_signature,response_signature,request_url_key,
 				 referer_url_key,redirect_url_key,field_names_json,header_names_json,parse_state,current_revision_id)
-				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?)`,
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				item.observationID, selected.Project.InstanceID, selected.Project.ProjectID, item.exchange.Ref.RequestID,
 				item.graphObservationID, utcNow(), item.projection.Search.Method, item.projection.Search.Host,
 				item.projection.Search.Port, item.projection.Search.Route, item.projection.Search.ResponseStatus,
 				item.projection.Search.RequestContentType, item.projection.Search.ResponseContentType,
 				len(item.exchange.RequestRaw), responseSize, item.requestSignature, item.responseSignature,
-				item.requestURLKey, jsonString(item.projection.Search.FieldNames), jsonString(item.projection.Search.HeaderNames),
+				item.requestURLKey, nullableStringArg(item.refererURLKey), nullableStringArg(item.redirectURLKey),
+				jsonString(item.projection.Search.FieldNames), jsonString(item.projection.Search.HeaderNames),
 				item.projection.ParseState, item.revisionID,
 			); err != nil {
 				return 0, 0, nil, errors.New("live-tail capture index could not be written")
@@ -1011,13 +1170,13 @@ func persistLiveCaptures(
 			result, err := conn.ExecContext(ctx,
 				`UPDATE live_capture_index SET graph_observation_id=?,synced_at=?,response_status=?,
 				 response_content_type=?,response_size=?,response_signature=?,field_names_json=?,
-				 header_names_json=?,parse_state=?,current_revision_id=?
+				 header_names_json=?,parse_state=?,redirect_url_key=?,current_revision_id=?
 				 WHERE caido_instance_id=? AND caido_project_id=? AND request_id=? AND observation_id=?
 				 AND request_signature=? AND request_url_key=? AND response_size IS NULL AND response_signature IS NULL`,
 				item.graphObservationID, utcNow(), item.projection.Search.ResponseStatus,
 				item.projection.Search.ResponseContentType, len(item.exchange.ResponseRaw), item.responseSignature,
 				jsonString(item.projection.Search.FieldNames), jsonString(item.projection.Search.HeaderNames),
-				item.projection.ParseState, item.revisionID, selected.Project.InstanceID,
+				item.projection.ParseState, nullableStringArg(item.redirectURLKey), item.revisionID, selected.Project.InstanceID,
 				selected.Project.ProjectID, item.exchange.Ref.RequestID, item.observationID,
 				item.requestSignature, item.requestURLKey,
 			)
@@ -1276,6 +1435,13 @@ func updateLiveCheckpoint(ctx context.Context, conn *sql.Conn, before, after Liv
 
 func nullableMatches(value sql.NullString, expected *string) bool {
 	return value.Valid == (expected != nil) && (!value.Valid || value.String == *expected)
+}
+
+func nullableStringArg(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func stringPointerValue(value string) *string {

@@ -86,42 +86,84 @@ func AddPageNavigationAssertions(bundles []Record, exchanges []caido.HttpExchang
 	return nil
 }
 
+// NavigationURLIndexKeys returns project-keyed URL identities for a request,
+// its unique Referer, and its unique redirect Location. Invalid or ambiguous
+// navigation metadata produces an empty optional key instead of raw data.
+func NavigationURLIndexKeys(exchange caido.HttpExchange, key []byte) (string, string, string, error) {
+	if len(key) != 32 {
+		return "", "", "", errors.New("navigation index key is invalid")
+	}
+	requestURL, ok := exchangeNavigationURL(exchange)
+	if !ok {
+		return "", "", "", nil
+	}
+	requestKey, err := URLIndexKey(requestURL, "", key)
+	if err != nil {
+		return "", "", "", errors.New("navigation request URL key could not be computed")
+	}
+	var refererKey, redirectKey string
+	if value, exists := uniqueHTTPHeader(exchange.RequestRaw, "referer"); exists {
+		if resolved, valid := resolveNavigationURL(value, exchange); valid {
+			refererKey, err = URLIndexKey(resolved, "", key)
+			if err != nil {
+				return "", "", "", errors.New("navigation Referer URL key could not be computed")
+			}
+		}
+	}
+	if responseStatusIsRedirect(exchange) {
+		if value, exists := uniqueHTTPHeader(exchange.ResponseRaw, "location"); exists {
+			if resolved, valid := resolveNavigationURL(value, exchange); valid {
+				redirectKey, err = URLIndexKey(resolved, "", key)
+				if err != nil {
+					return "", "", "", errors.New("navigation redirect URL key could not be computed")
+				}
+			}
+		}
+	}
+	return requestKey, refererKey, redirectKey, nil
+}
+
 func appendNavigationAssertion(predecessor, current pageNavigationItem, predicate, basis string) error {
-	predecessorRefs, okPrevious := observationSourceRefs(predecessor.bundle, predecessor.observationID)
-	currentRefs, okCurrent := observationSourceRefs(current.bundle, current.observationID)
-	if !okPrevious || !okCurrent || len(predecessorRefs) == 0 || len(currentRefs) == 0 {
+	return AddNavigationEvidenceAssertion(
+		current.bundle, predecessor.bundle, predecessor.observationID,
+		current.bundle, current.observationID, predicate, basis,
+	)
+}
+
+// AddNavigationEvidenceAssertion attaches an exact, source-backed navigation
+// assertion to ownerBundle. Subject and object may come from different
+// persisted capture bundles; their observation records and receipt references
+// are copied into the owning bundle for idempotent asynchronous projection.
+func AddNavigationEvidenceAssertion(
+	ownerBundle, subjectBundle Record, subjectID string, objectBundle Record, objectID string,
+	predicate, basis string,
+) error {
+	if predicate != "referrer_context_for" && predicate != "redirects_to" ||
+		(predicate == "referrer_context_for" && basis != "referrer_exact_url") ||
+		(predicate == "redirects_to" && basis != "redirect_exact_url") {
+		return errors.New("navigation assertion basis is invalid")
+	}
+	program, ownerOK := ownerBundle["program"].(string)
+	subjectProgram, subjectOK := subjectBundle["program"].(string)
+	objectProgram, objectOK := objectBundle["program"].(string)
+	if !ownerOK || !subjectOK || !objectOK || program == "" || program != subjectProgram || program != objectProgram {
+		return errors.New("navigation assertion project namespaces do not match")
+	}
+	subjectRefs, okSubject := observationSourceRefs(subjectBundle, subjectID)
+	objectRefs, okObject := observationSourceRefs(objectBundle, objectID)
+	if !okSubject || !okObject || len(subjectRefs) == 0 || len(objectRefs) == 0 {
 		return errors.New("navigation assertion source receipts are unavailable")
 	}
-	predecessorEntities, okPreviousEntities := predecessor.bundle["entities"].([]Record)
-	currentEntities, okCurrentEntities := current.bundle["entities"].([]Record)
-	if !okPreviousEntities || !okCurrentEntities {
+	ownerEntities, okOwnerEntities := ownerBundle["entities"].([]Record)
+	subjectEntities, okSubjectEntities := subjectBundle["entities"].([]Record)
+	objectEntities, okObjectEntities := objectBundle["entities"].([]Record)
+	if !okOwnerEntities || !okSubjectEntities || !okObjectEntities {
 		return errors.New("navigation assertion observations are unavailable")
 	}
-	var predecessorEntity Record
-	for _, entity := range predecessorEntities {
-		if entity["id"] == predecessor.observationID && entity["kind"] == "observation" {
-			predecessorEntity = entity
-			break
-		}
+	refs := append(append([]Record(nil), subjectRefs...), objectRefs...)
+	if ownerRefs, ok := ownerBundle["sources"].([]Record); ok {
+		refs = append(refs, ownerRefs...)
 	}
-	if predecessorEntity == nil {
-		return errors.New("navigation predecessor observation is unavailable")
-	}
-	entityPresent := false
-	for _, entity := range currentEntities {
-		if entity["id"] == predecessor.observationID {
-			entityPresent = true
-			break
-		}
-	}
-	if !entityPresent {
-		currentEntities = append(currentEntities, predecessorEntity)
-		sort.Slice(currentEntities, func(i, j int) bool {
-			return currentEntities[i]["id"].(string) < currentEntities[j]["id"].(string)
-		})
-		current.bundle["entities"] = currentEntities
-	}
-	refs := append(append([]Record(nil), predecessorRefs...), currentRefs...)
 	seen := make(map[string]struct{}, len(refs))
 	uniqueRefs := refs[:0]
 	for _, ref := range refs {
@@ -144,17 +186,25 @@ func appendNavigationAssertion(predecessor, current pageNavigationItem, predicat
 		rightLocator, _ := uniqueRefs[j]["record_locator"].(string)
 		return leftLocator < rightLocator
 	})
-	current.bundle["sources"] = uniqueRefs
-	program, _ := current.bundle["program"].(string)
+	ownerEntities = appendNavigationEntity(ownerEntities, subjectEntities, subjectID)
+	ownerEntities = appendNavigationEntity(ownerEntities, objectEntities, objectID)
+	if !containsNavigationEntity(ownerEntities, subjectID) || !containsNavigationEntity(ownerEntities, objectID) {
+		return errors.New("navigation assertion endpoint observations are unavailable")
+	}
+	sort.Slice(ownerEntities, func(i, j int) bool {
+		return ownerEntities[i]["id"].(string) < ownerEntities[j]["id"].(string)
+	})
+	ownerBundle["entities"] = ownerEntities
+	ownerBundle["sources"] = uniqueRefs
 	context := Record{
 		"program": program, "link_basis": basis,
 		"causality": "navigation_evidence_only",
 	}
-	assertion, err := historicalAssertion(program, predecessor.observationID, predicate, current.observationID, context, uniqueRefs)
+	assertion, err := historicalAssertion(program, subjectID, predicate, objectID, context, uniqueRefs)
 	if err != nil {
 		return errors.New("navigation assertion identity could not be computed")
 	}
-	assertions, ok := current.bundle["assertions"].([]Record)
+	assertions, ok := ownerBundle["assertions"].([]Record)
 	if !ok {
 		return errors.New("navigation bundle assertions are malformed")
 	}
@@ -167,8 +217,31 @@ func appendNavigationAssertion(predecessor, current pageNavigationItem, predicat
 	sort.Slice(assertions, func(i, j int) bool {
 		return assertions[i]["id"].(string) < assertions[j]["id"].(string)
 	})
-	current.bundle["assertions"] = assertions
+	ownerBundle["assertions"] = assertions
 	return nil
+}
+
+func appendNavigationEntity(owner, source []Record, observationID string) []Record {
+	for _, entity := range owner {
+		if entity["id"] == observationID {
+			return owner
+		}
+	}
+	for _, entity := range source {
+		if entity["kind"] == "observation" && entity["id"] == observationID {
+			return append(owner, entity)
+		}
+	}
+	return owner
+}
+
+func containsNavigationEntity(entities []Record, observationID string) bool {
+	for _, entity := range entities {
+		if entity["kind"] == "observation" && entity["id"] == observationID {
+			return true
+		}
+	}
+	return false
 }
 
 func observationSourceRefs(bundle Record, observationID string) ([]Record, bool) {

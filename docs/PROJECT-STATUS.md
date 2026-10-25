@@ -9,6 +9,14 @@
   another request in that page. Ambiguous duplicate matches, duplicate
   headers, malformed URLs, and credential-bearing URLs are skipped without
   failing the surrounding capture import.
+- Live-tail import also stores project-keyed HMAC identities for request,
+  Referer, and redirect URLs in its existing index and source receipt. It can
+  connect an exact unique Referer/redirect match across already imported live
+  pages. The graph job carries the matched observation and both capture
+  receipts so asynchronous projection remains correct if jobs run out of
+  order. Raw matched URL values are not persisted. Historical imports across
+  page boundaries and retroactive re-evaluation when a later duplicate URL is
+  discovered remain incomplete.
 - Assertions retain both exchange receipt references and record the exact
   match basis as `referrer_exact_url` or `redirect_exact_url`, with
   `causality=navigation_evidence_only`. The predecessor observation is
@@ -21,8 +29,9 @@
   `TMPDIR=/var/tmp go test -count=1 ./internal/graph ./internal/ingest` and
   77/77 Node UI tests; `git diff --check` passed. No Caido, runtime project
   database, Neo4j service, or model was accessed.
-- Matching across separate imported pages and against prior historical/live
-  candidates remains incomplete; runtime Neo4j projection remains unverified.
+- Historical matching across page boundaries and retroactive re-evaluation
+  when later duplicate URLs are discovered remain incomplete; runtime Neo4j
+  projection remains unverified.
   Stage 3 remains `PARTIAL`.
 
 ## Stage 4 analyst-defined flow order — PARTIAL (2026-10-25)

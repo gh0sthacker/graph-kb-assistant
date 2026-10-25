@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -296,7 +297,8 @@ func TestRunLiveTailResumesFromCommittedCursorAfterStoreRestart(t *testing.T) {
 	dataRoot := filepath.Dir(filepath.Dir(projectStore.Directory))
 
 	firstRequestRaw := []byte("GET /api/first HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\nfirst-page-marker")
-	secondRequestRaw := []byte("GET /api/second HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\nsecond-page-marker")
+	secondRequestRaw := []byte("GET /api/second HTTP/1.1\r\nHost: api.fixture.invalid\r\n" +
+		"Referer: https://api.fixture.invalid/api/first\r\n\r\nsecond-page-marker")
 	firstID, secondID := "fixture-request-first", "fixture-request-second"
 	firstExchange := caido.HttpExchange{
 		Ref: caido.ExchangeRef{Project: selected, RequestID: firstID}, RequestRaw: firstRequestRaw,
@@ -363,6 +365,58 @@ func TestRunLiveTailResumesFromCommittedCursorAfterStoreRestart(t *testing.T) {
 	}
 	if secondRun.State != "idle" || secondRun.RequestsSeen != 1 || secondRun.RequestsAdded != 1 || secondRun.PagesCompleted != 1 || secondRun.CursorPending {
 		t.Fatalf("resumed RunLiveTail() result = %+v, want one final page and an idle checkpoint", secondRun)
+	}
+	var refererKey sql.NullString
+	var secondRevisionID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		`SELECT referer_url_key,current_revision_id FROM live_capture_index WHERE request_id=?`, secondID,
+	).Scan(&refererKey, &secondRevisionID); err != nil || !refererKey.Valid || !validDigest(refererKey.String) {
+		t.Fatalf("second-page keyed Referer index = %q, %v; want a persisted HMAC key (err=%v)", refererKey.String, refererKey.Valid, err)
+	}
+	var secondPayload []byte
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT payload_json FROM projection_jobs WHERE revision_id=?", secondRevisionID,
+	).Scan(&secondPayload); err != nil {
+		t.Fatalf("read second-page projection job: %v", err)
+	}
+	secondBundle, err := behaviorgraph.DecodeBundleJSON(secondPayload)
+	if err != nil {
+		t.Fatalf("decode second-page projection job: %v", err)
+	}
+	assertions, ok := projectionRecords(secondBundle["assertions"])
+	if !ok {
+		t.Fatal("second-page assertions are malformed")
+	}
+	var firstGraphObservationID, secondGraphObservationID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT graph_observation_id FROM live_capture_index WHERE request_id=?", firstID,
+	).Scan(&firstGraphObservationID); err != nil {
+		t.Fatalf("read first graph observation ID: %v", err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT graph_observation_id FROM live_capture_index WHERE request_id=?", secondID,
+	).Scan(&secondGraphObservationID); err != nil {
+		t.Fatalf("read second graph observation ID: %v", err)
+	}
+	linked := false
+	for _, assertion := range assertions {
+		if assertion["predicate"] != "referrer_context_for" {
+			continue
+		}
+		linked = assertion["subject"] == firstGraphObservationID && assertion["object"] == secondGraphObservationID
+		context, _ := projectionRecord(assertion["context"])
+		if context["link_basis"] != "referrer_exact_url" || context["causality"] != "navigation_evidence_only" {
+			t.Fatalf("cross-page Referer context = %#v", context)
+		}
+		if len(projectionRecordsMust(t, assertion["source_refs"])) != 2 {
+			t.Fatal("cross-page Referer assertion must cite both capture receipts")
+		}
+	}
+	if !linked {
+		t.Fatal("second page did not link its exact Referer to the first page observation")
+	}
+	if bytes.Contains(secondPayload, []byte("https://api.fixture.invalid/api/first")) {
+		t.Fatal("cross-page graph projection persisted the matched URL value instead of its HMAC")
 	}
 	if len(source.cursors) != 2 || source.cursors[0] != "" || source.cursors[1] != nextCursor {
 		t.Fatalf("metadata cursors = %v, want [empty %q]", source.cursors, nextCursor)
@@ -440,6 +494,148 @@ func TestRunLiveTailResumesFromCommittedCursorAfterStoreRestart(t *testing.T) {
 	for _, marker := range []string{"first-page-marker", "second-page-marker"} {
 		assertAbsentFromProjectFiles(t, projectStore.Directory, marker)
 	}
+}
+
+func TestLiveTailLinksRedirectAcrossImportedPages(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, writer := newLiveTailFixture(t)
+	checkpoint, err := writer.BeginCycle(ctx, time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC), 90)
+	if err != nil {
+		t.Fatalf("BeginCycle(): %v", err)
+	}
+	firstID, secondID := "fixture-redirect-source", "fixture-redirect-target"
+	status := 302
+	first := caido.HttpExchange{
+		Ref:         caido.ExchangeRef{Project: selected, RequestID: firstID},
+		RequestRaw:  []byte("GET /start HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"),
+		ResponseRaw: []byte("HTTP/1.1 302 Found\r\nLocation: /next\r\n\r\n"), HasResponse: true,
+		Method: "GET", Scheme: "https", Host: "api.fixture.invalid", Port: 443,
+		Target: "https://api.fixture.invalid/start", ResponseStatus: &status,
+		RequestWireFidelity: "source_bytes", ResponseWireFidelity: "source_bytes",
+	}
+	cursor := "redirect-page-2"
+	firstPage, err := writer.WritePage(ctx, checkpoint, caido.HistoryPage{Exchanges: []caido.HttpExchange{first}, NextCursor: &cursor, HasMore: true})
+	if err != nil || firstPage.RequestsAdded != 1 {
+		t.Fatalf("write redirect source page: result=%+v err=%v", firstPage, err)
+	}
+	second := caido.HttpExchange{
+		Ref:        caido.ExchangeRef{Project: selected, RequestID: secondID},
+		RequestRaw: []byte("GET /next HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"),
+		Method:     "GET", Scheme: "https", Host: "api.fixture.invalid", Port: 443,
+		Target: "https://api.fixture.invalid/next", RequestWireFidelity: "source_bytes", ResponseWireFidelity: "unknown",
+	}
+	secondPage, err := writer.WritePage(ctx, firstPage.Checkpoint, caido.HistoryPage{Exchanges: []caido.HttpExchange{second}})
+	if err != nil || secondPage.RequestsAdded != 1 {
+		t.Fatalf("write redirect target page: result=%+v err=%v", secondPage, err)
+	}
+	var sourceKey, targetKey, revisionID, sourceGraphID, targetGraphID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		`SELECT redirect_url_key,graph_observation_id FROM live_capture_index WHERE request_id=?`, firstID,
+	).Scan(&sourceKey, &sourceGraphID); err != nil || !validDigest(sourceKey) {
+		t.Fatalf("redirect source HMAC key = %q, err=%v", sourceKey, err)
+	}
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		`SELECT request_url_key,current_revision_id,graph_observation_id FROM live_capture_index WHERE request_id=?`, secondID,
+	).Scan(&targetKey, &revisionID, &targetGraphID); err != nil || sourceKey != targetKey {
+		t.Fatalf("redirect HMAC keys do not match: source=%q target=%q err=%v", sourceKey, targetKey, err)
+	}
+	var payload []byte
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT payload_json FROM projection_jobs WHERE revision_id=?", revisionID,
+	).Scan(&payload); err != nil {
+		t.Fatalf("read cross-page redirect projection: %v", err)
+	}
+	bundle, err := behaviorgraph.DecodeBundleJSON(payload)
+	if err != nil {
+		t.Fatalf("decode cross-page redirect projection: %v", err)
+	}
+	assertions, ok := projectionRecords(bundle["assertions"])
+	if !ok {
+		t.Fatal("redirect projection assertions are malformed")
+	}
+	for _, assertion := range assertions {
+		if assertion["predicate"] != "redirects_to" || assertion["subject"] != sourceGraphID || assertion["object"] != targetGraphID {
+			continue
+		}
+		if len(projectionRecordsMust(t, assertion["source_refs"])) != 2 {
+			t.Fatal("cross-page redirect must cite both capture receipts")
+		}
+		if bytes.Contains(payload, []byte("https://api.fixture.invalid/next")) {
+			t.Fatal("cross-page redirect projection persisted the matched URL value")
+		}
+		return
+	}
+	t.Fatal("redirect source in the earlier page was not linked to the exact target request")
+}
+
+func TestLiveTailSkipsAmbiguousCrossPageRefererMatches(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, writer := newLiveTailFixture(t)
+	checkpoint, err := writer.BeginCycle(ctx, time.Date(2026, 10, 25, 13, 0, 0, 0, time.UTC), 90)
+	if err != nil {
+		t.Fatalf("BeginCycle(): %v", err)
+	}
+	makeExchange := func(id string, referer string) caido.HttpExchange {
+		raw := "GET /same HTTP/1.1\r\nHost: api.fixture.invalid\r\n"
+		if referer != "" {
+			raw += "Referer: " + referer + "\r\n"
+		}
+		raw += "\r\n"
+		return caido.HttpExchange{
+			Ref: caido.ExchangeRef{Project: selected, RequestID: id}, RequestRaw: []byte(raw),
+			Method: "GET", Scheme: "https", Host: "api.fixture.invalid", Port: 443,
+			Target: "https://api.fixture.invalid/same", RequestWireFidelity: "source_bytes", ResponseWireFidelity: "unknown",
+		}
+	}
+	firstID, duplicateID, currentID := "fixture-ambiguous-a", "fixture-ambiguous-b", "fixture-ambiguous-current"
+	cursor := "ambiguous-page-2"
+	firstPage, err := writer.WritePage(ctx, checkpoint, caido.HistoryPage{
+		Exchanges:  []caido.HttpExchange{makeExchange(firstID, ""), makeExchange(duplicateID, "")},
+		NextCursor: &cursor, HasMore: true,
+	})
+	if err != nil || firstPage.RequestsAdded != 2 {
+		t.Fatalf("write duplicate URL page: result=%+v err=%v", firstPage, err)
+	}
+	current, err := writer.WritePage(ctx, firstPage.Checkpoint, caido.HistoryPage{Exchanges: []caido.HttpExchange{
+		makeExchange(currentID, "https://api.fixture.invalid/same"),
+	}})
+	if err != nil || current.RequestsAdded != 1 {
+		t.Fatalf("write Referer page: result=%+v err=%v", current, err)
+	}
+	var revisionID string
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT current_revision_id FROM live_capture_index WHERE request_id=?", currentID,
+	).Scan(&revisionID); err != nil {
+		t.Fatalf("read current revision: %v", err)
+	}
+	var payload []byte
+	if err := projectStore.Database.DB().QueryRowContext(ctx,
+		"SELECT payload_json FROM projection_jobs WHERE revision_id=?", revisionID,
+	).Scan(&payload); err != nil {
+		t.Fatalf("read current projection: %v", err)
+	}
+	bundle, err := behaviorgraph.DecodeBundleJSON(payload)
+	if err != nil {
+		t.Fatalf("decode current projection: %v", err)
+	}
+	assertions, ok := projectionRecords(bundle["assertions"])
+	if !ok {
+		t.Fatal("current assertions are malformed")
+	}
+	for _, assertion := range assertions {
+		if assertion["predicate"] == "referrer_context_for" {
+			t.Fatal("ambiguous URL match was assigned to one prior observation")
+		}
+	}
+}
+
+func projectionRecordsMust(t *testing.T, value any) []behaviorgraph.Record {
+	t.Helper()
+	records, ok := projectionRecords(value)
+	if !ok {
+		t.Fatal("projection record list is malformed")
+	}
+	return records
 }
 
 type liveTailSourceFixture struct {

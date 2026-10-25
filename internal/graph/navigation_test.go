@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
 	"strings"
@@ -89,6 +90,31 @@ func TestAddPageNavigationAssertionsLinksExactRefererAndRedirectEvidence(t *test
 		if assertion["predicate"] == "precedes" {
 			t.Fatal("navigation evidence must not be promoted to a precedes assertion")
 		}
+	}
+	payload, err := marshalBoundedJSON(bundles[1], MaxBundleJSONBytes)
+	if err != nil {
+		t.Fatalf("encode page navigation bundle: %v", err)
+	}
+	if _, _, err := validateProjectionBundleWithRecord(payload, projectKey); err != nil {
+		t.Fatalf("navigation bundle failed projection validation: %v", err)
+	}
+	var captureID string
+	for _, entity := range bundles[1]["entities"].([]Record) {
+		if entity["id"] == observationIDs[1] {
+			data, _ := asRecord(entity["data"])
+			captureID, _ = data["capture_id"].(string)
+		}
+	}
+	projectedObservationID, err := ProjectionObservationID(payload, projectKey, captureID)
+	if err != nil || projectedObservationID != observationIDs[1] {
+		t.Fatalf("projection job did not retain its owning observation with a linked endpoint: %q, %v", projectedObservationID, err)
+	}
+	requestKey, refererKey, redirectKey, err := NavigationURLIndexKeys(next, bytes.Repeat([]byte{0x5a}, 32))
+	if err != nil || len(requestKey) != 64 || len(refererKey) != 64 || redirectKey != "" {
+		t.Fatalf("NavigationURLIndexKeys() = %q, %q, %q, %v", requestKey, refererKey, redirectKey, err)
+	}
+	if strings.Contains(requestKey+refererKey+redirectKey, privateQuery) {
+		t.Fatal("navigation URL index keys contain a raw query value")
 	}
 }
 

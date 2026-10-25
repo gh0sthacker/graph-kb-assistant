@@ -618,7 +618,9 @@ func validateStoredProjectionJob(job ProjectionJob, projectKey, observationID st
 
 // ProjectionObservationID validates a project-bound graph bundle and returns
 // the one observation entity whose capture_id matches the accepted capture.
-// A bundle for a single capture revision must contain exactly one observation.
+// A revision may carry source-backed navigation endpoints from other captures
+// in the same project so the asynchronous projector can apply its assertions
+// even when jobs are processed out of order.
 func ProjectionObservationID(payload []byte, projectKey, captureID string) (string, error) {
 	if strings.TrimSpace(captureID) == "" {
 		return "", ErrInvalidProjectionJob
@@ -651,21 +653,23 @@ func projectionObservationIDFromBundle(bundle Record, captureID string) (string,
 		return "", ErrInvalidProjectionJob
 	}
 	var graphObservationID string
-	observationCount := 0
+	matchingObservationCount := 0
 	for _, entity := range entities {
 		if entity["kind"] != "observation" {
 			continue
 		}
-		observationCount++
-		data, ok := entity["data"].(map[string]any)
+		data, ok := asRecord(entity["data"])
 		id, okID := entity["id"].(string)
 		entityCaptureID, okCaptureID := data["capture_id"].(string)
-		if !ok || !okID || !okCaptureID || entityCaptureID != captureID || !graphIDPattern.MatchString(id) {
+		if !ok || !okID || !okCaptureID || strings.TrimSpace(entityCaptureID) == "" || !graphIDPattern.MatchString(id) {
 			return "", ErrInvalidProjectionJob
 		}
-		graphObservationID = id
+		if entityCaptureID == captureID {
+			matchingObservationCount++
+			graphObservationID = id
+		}
 	}
-	if observationCount != 1 || graphObservationID == "" {
+	if matchingObservationCount != 1 || graphObservationID == "" {
 		return "", ErrInvalidProjectionJob
 	}
 	return graphObservationID, nil
