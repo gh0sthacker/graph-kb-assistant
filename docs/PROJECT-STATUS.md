@@ -1,6 +1,6 @@
 # Project status and known limitations
 
-## RedAmon KB parity re-check (2026-10-25 23:15 UTC) — PARTIAL
+## RedAmon KB parity re-check (2026-10-25 23:22 UTC) — PARTIAL
 
 - Compared this checkout with RedAmon upstream master at
   `4585b3442cf3c6e075fca5d3b512a8f47be501b6`. Its pinned source revisions
@@ -14,19 +14,23 @@
   RedAmon's default installed profile is `lite`, so the deployment's selected
   profile still must be identified before claiming equality with a live
   RedAmon installation.
-- The current private index remains partial: snapshot
-  `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`,
-  162,398 chunks across six source families, no ExploitDB rows, and 7,392 of
-  162,390 eligible E5 vectors at the latest read-only count. Coverage is
+- The installed index was re-chunked from its 161,240 stored source documents
+  using the corrected RedAmon-compatible chunker, without fetching new data.
+  Its new snapshot is
+  `0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216`, with
+  162,398 chunks in both `chunks` and FTS5 across six families; `quick_check`
+  returned `ok`. It still has no ExploitDB rows and 7,392 of 162,390 eligible
+  E5 vectors at the latest read-only count. Coverage is
   `PARTIAL` and the vector snapshot is unpublished, so semantic retrieval is
   not ready. The ExploitDB provider is
   implemented but the source is still excluded while its dataset reuse terms
   are unresolved.
-- The existing resumable vector process (PID 1121967) repeatedly entered
-  Linux's stopped state (`T`) even while its transient systemd unit reports
-  active/running. It was resumed once; `S`/`R` was observed briefly, then it
-  returned to `T`. No new worker was started and the durable count remains
-  7,392. The cause of the repeated stop is not yet identified.
+- The previous resumable vector process (PID 1121967) repeatedly entered
+  Linux's stopped state (`T`) even while its transient systemd unit reported
+  active/running. It was stopped cleanly before re-chunking. A single new
+  resumable worker (PID 1130154 at last check) was started against the new
+  snapshot; it had not committed its first batch yet. The cause of the previous
+  process's repeated stops is not yet identified.
   Resuming the existing worker increased the stored count from 6,752 to 7,072;
   a later 64-row batch brought it to 7,392 before the process stopped again.
   A 256-row batch experiment committed one batch in 5:54 but left the next
