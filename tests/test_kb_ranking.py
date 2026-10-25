@@ -9,6 +9,7 @@ from unittest.mock import patch
 from bb_assistant.kb.ranking import RankedCandidate, rank_candidates, reciprocal_rank_fusion
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
 from bb_assistant.kb.index import KBIndex, _commit_with_busy_retry
+from bb_assistant.project_lock import project_maintenance_read_lock
 
 
 class _FixtureEmbedder:
@@ -58,6 +59,26 @@ class _TransientLockConnection:
 
 
 class RetrievalRankingTests(unittest.TestCase):
+    def test_embedding_inference_releases_project_maintenance_lock(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="alpha.md", title="Alpha",
+                text="alpha authentication flow", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-vector-lock-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "d" * 64, sources=documents)
+
+            class LockCheckingEmbedder(_FixtureEmbedder):
+                def embed_documents_batch(self, texts, *, batch_size=64):
+                    with project_maintenance_read_lock(index.path.parent, timeout=0.1):
+                        return super().embed_documents_batch(texts, batch_size=batch_size)
+
+            self.assertEqual(index.rebuild_embeddings(LockCheckingEmbedder(), batch_size=1), 1)
+            self.assertTrue(index.stats()["vector_ready"])
+
     def test_embedding_batch_commit_retries_transient_sqlite_lock(self) -> None:
         connection = _TransientLockConnection(failures=2)
         with patch("bb_assistant.kb.index.time.sleep"):

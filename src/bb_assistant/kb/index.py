@@ -679,48 +679,49 @@ class KBIndex:
             if total == 0:
                 raise ValueError("KB snapshot contains no content chunks to embed")
             existing_count = int(connection.execute(
-                "SELECT count(*) FROM chunk_embeddings WHERE model_name=?",
-                (model_name,),
+                "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (model_name,),
             ).fetchone()[0])
-            if (
-                meta.get("vector_snapshot_id") == snapshot_id
-                and meta.get("vector_model") == model_name
-                and existing_count == total
-            ):
+            if meta.get("vector_snapshot_id") == snapshot_id and meta.get("vector_model") == model_name and existing_count == total:
                 if progress_callback is not None:
                     progress_callback(total, total)
                 return total
-
             staging_matches = (
                 meta.get("vector_staging_snapshot_id") == snapshot_id
                 and meta.get("vector_staging_model") == model_name
             )
+            dimension_rows = connection.execute(
+                "SELECT DISTINCT dimensions FROM chunk_embeddings WHERE model_name=?", (model_name,),
+            ).fetchall()
+            if len(dimension_rows) > 1:
+                raise ValueError("existing matching vectors have inconsistent dimensions")
+            existing_dimensions = int(dimension_rows[0][0]) if dimension_rows else 0
             if not staging_matches:
                 connection.execute(
                     "DELETE FROM chunk_embeddings WHERE chunk_id NOT IN ("
-                    "SELECT chunk_id FROM chunks WHERE "
-                    "COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content')"
+                    "SELECT chunk_id FROM chunks WHERE COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content')"
                 )
-                connection.execute(
-                    "DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')"
-                )
+                connection.execute("DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')")
                 connection.executemany(
                     "INSERT INTO kb_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (("vector_staging_snapshot_id", snapshot_id), ("vector_staging_model", model_name)),
                 )
                 connection.execute("DELETE FROM kb_meta WHERE key='vector_staging_dimensions'")
-                _commit_with_busy_retry(connection)
-                dimension_rows = connection.execute(
-                    "SELECT DISTINCT dimensions FROM chunk_embeddings WHERE model_name=?",
-                    (model_name,),
-                ).fetchall()
-                if len(dimension_rows) > 1:
-                    raise ValueError("existing matching vectors have inconsistent dimensions")
-                dimensions = int(dimension_rows[0][0]) if dimension_rows else 0
+                dimensions = existing_dimensions
             else:
-                dimensions = int(meta.get("vector_staging_dimensions", "0") or 0)
+                dimensions = int(meta.get("vector_staging_dimensions", str(existing_dimensions)) or 0)
+            _commit_with_busy_retry(connection)
 
-            while True:
+        while True:
+            # Keep only the short SQLite read/write windows under the project
+            # lease. CPU-bound model inference runs outside it; the vector
+            # snapshot stays unpublished until its final complete batch.
+            with project_maintenance_lock(self.path.parent), self.connect(_maintenance_lock_held=True) as connection:
+                meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+                if meta.get("snapshot_id") != snapshot_id or meta.get("rechunk_target_snapshot_id"):
+                    raise ValueError("KB snapshot changed during vector generation")
+                if (meta.get("vector_staging_snapshot_id") != snapshot_id
+                        or meta.get("vector_staging_model") != model_name):
+                    raise ValueError("KB vector staging state changed during generation")
                 rows = connection.execute(
                     """SELECT c.chunk_id,c.text FROM chunks c
                        LEFT JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id AND e.model_name=?
@@ -729,54 +730,64 @@ class KBIndex:
                        ORDER BY length(c.text),c.chunk_id LIMIT ?""",
                     (model_name, batch_size),
                 ).fetchall()
+                staged_dimensions = meta.get("vector_staging_dimensions")
+                if staged_dimensions is not None:
+                    dimensions = int(staged_dimensions)
                 if not rows:
-                    break
-                vectors = batch_encoder([row["text"] for row in rows], batch_size=batch_size)
-                if len(vectors) != len(rows):
-                    raise ValueError("embedder returned a different number of vectors than chunks")
-                encoded_rows = []
-                for row, vector in zip(rows, vectors):
-                    values = [float(value) for value in vector]
-                    if not values or any(not math.isfinite(value) for value in values):
-                        raise ValueError("embedder returned an empty or non-finite vector")
-                    if dimensions == 0:
-                        dimensions = len(values)
-                    elif len(values) != dimensions:
-                        raise ValueError("embedder returned inconsistent vector dimensions")
-                    packed = struct.pack(f"<{len(values)}f", *values)
-                    encoded_rows.append((row["chunk_id"], model_name, len(values), packed))
+                    embedded = int(connection.execute(
+                        "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (model_name,),
+                    ).fetchone()[0])
+                    if dimensions == 0 or embedded != total:
+                        raise ValueError("KB vector generation is incomplete")
+                    connection.executemany(
+                        "INSERT INTO kb_meta(key,value) VALUES(?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (("vector_model", model_name), ("vector_dimensions", str(dimensions)),
+                         ("vector_snapshot_id", snapshot_id)),
+                    )
+                    connection.execute(
+                        "DELETE FROM kb_meta WHERE key IN ('vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
+                    )
+                    return embedded
+                batch = [(row["chunk_id"], row["text"]) for row in rows]
+
+            vectors = batch_encoder([text for _, text in batch], batch_size=batch_size)
+            if len(vectors) != len(batch):
+                raise ValueError("embedder returned a different number of vectors than chunks")
+            encoded_rows = []
+            next_dimensions = dimensions
+            for (chunk_id, _), vector in zip(batch, vectors):
+                values = [float(value) for value in vector]
+                if not values or any(not math.isfinite(value) for value in values):
+                    raise ValueError("embedder returned an empty or non-finite vector")
+                if next_dimensions == 0:
+                    next_dimensions = len(values)
+                elif len(values) != next_dimensions:
+                    raise ValueError("embedder returned inconsistent vector dimensions")
+                encoded_rows.append((chunk_id, model_name, len(values), struct.pack(f"<{len(values)}f", *values)))
+
+            with project_maintenance_lock(self.path.parent), self.connect(_maintenance_lock_held=True) as connection:
+                meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+                if meta.get("snapshot_id") != snapshot_id or meta.get("rechunk_target_snapshot_id"):
+                    raise ValueError("KB snapshot changed during vector generation")
+                if (meta.get("vector_staging_snapshot_id") != snapshot_id
+                        or meta.get("vector_staging_model") != model_name):
+                    raise ValueError("KB vector staging state changed during generation")
                 connection.executemany(
-                    "INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
+                    "INSERT OR IGNORE INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
                     encoded_rows,
                 )
                 connection.execute(
                     "INSERT INTO kb_meta(key,value) VALUES('vector_staging_dimensions',?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (str(dimensions),),
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(next_dimensions,),),
                 )
                 _commit_with_busy_retry(connection)
+                dimensions = next_dimensions
                 embedded = int(connection.execute(
-                    "SELECT count(*) FROM chunk_embeddings WHERE model_name=?",
-                    (model_name,),
+                    "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (model_name,),
                 ).fetchone()[0])
-                if progress_callback is not None:
-                    progress_callback(embedded, total)
-
-            embedded = int(connection.execute(
-                "SELECT count(*) FROM chunk_embeddings WHERE model_name=?",
-                (model_name,),
-            ).fetchone()[0])
-            if dimensions == 0 or embedded != total:
-                raise ValueError("KB vector generation is incomplete")
-            connection.executemany(
-                "INSERT INTO kb_meta(key,value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (("vector_model", model_name), ("vector_dimensions", str(dimensions)), ("vector_snapshot_id", snapshot_id)),
-            )
-            connection.execute(
-                "DELETE FROM kb_meta WHERE key IN ('vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
-            )
-            return embedded
+            if progress_callback is not None:
+                progress_callback(embedded, total)
 
     def _vector_search(
         self, query: str, *, top_k: int, source_names: tuple[str, ...],
