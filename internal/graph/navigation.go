@@ -47,20 +47,24 @@ func AddPageNavigationAssertions(bundles []Record, exchanges []caido.HttpExchang
 			}
 		}
 		requestURL, okURL := exchangeNavigationURL(exchanges[index])
-		if !ok || !okURL || !strings.HasPrefix(observationID, "observation-") {
-			return errors.New("navigation bundle observation or request URL is invalid")
+		if !ok || !strings.HasPrefix(observationID, "observation-") {
+			return errors.New("navigation bundle observation is invalid")
 		}
 		current := pageNavigationItem{bundle: bundle, observationID: observationID, requestURL: requestURL}
-		if value, ok := uniqueHTTPHeader(exchanges[index].RequestRaw, "referer"); ok {
-			current.refererURL, _ = resolveNavigationURL(value, exchanges[index])
+		if okURL {
+			if value, ok := uniqueHTTPHeader(exchanges[index].RequestRaw, "referer"); ok {
+				current.refererURL, _ = resolveNavigationURL(value, exchanges[index])
+			}
 		}
-		if responseStatusIsRedirect(exchanges[index]) {
+		if okURL && responseStatusIsRedirect(exchanges[index]) {
 			if value, ok := uniqueHTTPHeader(exchanges[index].ResponseRaw, "location"); ok {
 				current.redirectURL, _ = resolveNavigationURL(value, exchanges[index])
 			}
 		}
 		items[index] = current
-		requestIDs[requestURL] = append(requestIDs[requestURL], index)
+		if okURL {
+			requestIDs[requestURL] = append(requestIDs[requestURL], index)
+		}
 		if current.redirectURL != "" {
 			redirectIDs[current.redirectURL] = append(redirectIDs[current.redirectURL], index)
 		}

@@ -7,7 +7,8 @@
   exactly matches one request in the same imported page. They add
   `redirects_to` links when a unique 3xx response `Location` exactly matches
   another request in that page. Ambiguous duplicate matches, duplicate
-  headers, malformed URLs, and credential-bearing URLs are skipped.
+  headers, malformed URLs, and credential-bearing URLs are skipped without
+  failing the surrounding capture import.
 - Assertions retain both exchange receipt references and record the exact
   match basis as `referrer_exact_url` or `redirect_exact_url`, with
   `causality=navigation_evidence_only`. The predecessor observation is

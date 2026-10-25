@@ -149,6 +149,30 @@ func TestAddPageNavigationAssertionsSkipsAmbiguousAndMalformedEvidence(t *testin
 	}
 }
 
+func TestAddPageNavigationAssertionsSkipsInvalidRequestURLWithoutFailingImport(t *testing.T) {
+	project := caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"}
+	projectKey, err := project.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := navigationExchange(project, "request-invalid-url", "https://app.invalid/path", "", "200 OK", "")
+	bundle, _, err := BuildHistoricalBundle(exchange, projectKey, Record{
+		"path": "/synthetic/invalid-url.json", "sha256": strings.Repeat("d", 64), "record_locator": "$.records[0]",
+	})
+	if err != nil {
+		t.Fatalf("BuildHistoricalBundle(): %v", err)
+	}
+	exchange.Target = "https://[invalid-host/path"
+	if err := AddPageNavigationAssertions([]Record{bundle}, []caido.HttpExchange{exchange}); err != nil {
+		t.Fatalf("invalid navigation URL should not fail capture import: %v", err)
+	}
+	for _, assertion := range bundle["assertions"].([]Record) {
+		if assertion["predicate"] == "referrer_context_for" || assertion["predicate"] == "redirects_to" {
+			t.Fatal("invalid request URL produced a navigation assertion")
+		}
+	}
+}
+
 func TestResolveNavigationURLRejectsMalformedURLsAndNormalizesSafeOriginParts(t *testing.T) {
 	exchange := navigationExchange(
 		caido.ProjectRef{InstanceID: "fixture-instance", ProjectID: "fixture-project"},
