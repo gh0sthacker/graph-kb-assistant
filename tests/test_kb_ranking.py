@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+import sqlite3
 import tempfile
+from unittest.mock import patch
 
 from bb_assistant.kb.ranking import RankedCandidate, rank_candidates, reciprocal_rank_fusion
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
-from bb_assistant.kb.index import KBIndex
+from bb_assistant.kb.index import KBIndex, _commit_with_busy_retry
 
 
 class _FixtureEmbedder:
@@ -44,7 +46,32 @@ class _FailOnSecondBatchEmbedder(_FixtureEmbedder):
         return super().embed_documents_batch(texts, batch_size=batch_size)
 
 
+class _TransientLockConnection:
+    def __init__(self, failures):
+        self.failures = failures
+        self.attempts = 0
+
+    def commit(self):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise sqlite3.OperationalError("database is locked")
+
+
 class RetrievalRankingTests(unittest.TestCase):
+    def test_embedding_batch_commit_retries_transient_sqlite_lock(self) -> None:
+        connection = _TransientLockConnection(failures=2)
+        with patch("bb_assistant.kb.index.time.sleep"):
+            _commit_with_busy_retry(connection)
+        self.assertEqual(connection.attempts, 3)
+
+    def test_embedding_batch_commit_does_not_retry_non_lock_errors(self) -> None:
+        class BrokenConnection:
+            def commit(self):
+                raise sqlite3.OperationalError("disk I/O error")
+
+        with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+            _commit_with_busy_retry(BrokenConnection())
+
     def test_embedding_queue_batches_shorter_chunks_first(self) -> None:
         documents = (
             SourceDocument.create(

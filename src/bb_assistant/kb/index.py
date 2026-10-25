@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sqlite3
 import struct
+import time
 from typing import Callable, Iterable, Iterator, Mapping
 
 from ..paths import data_root, ensure_private_directory
@@ -26,6 +27,19 @@ from .ranking import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _commit_with_busy_retry(connection: sqlite3.Connection, *, retries: int = 5) -> None:
+    """Retry a durable batch commit when another local reader briefly holds SQLite."""
+    for attempt in range(retries + 1):
+        try:
+            connection.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if attempt >= retries or not ("locked" in message or "busy" in message):
+                raise
+            time.sleep(min(0.1 * (2 ** attempt), 1.6))
 
 
 _SCHEMA = """
@@ -442,7 +456,7 @@ class KBIndex:
                     (("vector_staging_snapshot_id", snapshot_id), ("vector_staging_model", model_name)),
                 )
                 connection.execute("DELETE FROM kb_meta WHERE key='vector_staging_dimensions'")
-                connection.commit()
+                _commit_with_busy_retry(connection)
                 dimensions = 0
             else:
                 dimensions = int(meta.get("vector_staging_dimensions", "0") or 0)
@@ -481,7 +495,7 @@ class KBIndex:
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (str(dimensions),),
                 )
-                connection.commit()
+                _commit_with_busy_retry(connection)
                 embedded = int(connection.execute(
                     "SELECT count(*) FROM chunk_embeddings WHERE model_name=?",
                     (model_name,),
