@@ -57,6 +57,16 @@
   or parity of the selected working database, production queue delivery, or
   project-level coverage.
 
+## Hermes MCP runtime discovery — VERIFIED (2026-10-25)
+
+- `./scripts/run-hermes mcp test bb_assistant` connected to the managed Hermes
+  profile over stdio and discovered exactly the 15 tools in the app's
+  allowlist, including graph, redacted capture summary, and consultation
+  candidate lifecycle handlers.
+- This is a real Hermes runtime/MCP handshake, not a model-backed consultation.
+  The OpenAI Codex/ChatGPT provider login is still waiting for account
+  confirmation; no model request or real capture content was sent.
+
 ## Shared launcher runtime configuration — FIXED IN SOURCE (2026-10-25)
 
 - The default launcher previously searched for `runtime.env` in an extra
