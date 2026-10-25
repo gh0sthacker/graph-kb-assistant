@@ -167,6 +167,64 @@ def test_launcher_loads_runtime_environment_from_canonical_default(
     )
 
 
+def test_launcher_uses_neo4j_configured_data_home_for_runtime_environment(
+    tmp_path: Path,
+) -> None:
+    env, args_file = make_fake_go(tmp_path)
+    user_data = Path(env["XDG_DATA_HOME"])
+    canonical_root = user_data / "bb-graph-assistant"
+    canonical_root.mkdir(parents=True)
+    (canonical_root / "runtime.env").write_text(
+        "BB_ASSISTANT_VAULT_KEY=synthetic-wrong-canonical-key\n"
+    )
+
+    configured_root = tmp_path / "neo4j-selected-data-root"
+    configured_root.mkdir()
+    runtime_env = configured_root / "runtime.env"
+    runtime_env.write_text(
+        "BB_ASSISTANT_VAULT_KEY=synthetic-selected-root-key\n"
+    )
+    runtime_env.chmod(0o600)
+    neo4j_env = canonical_root / "neo4j.env"
+    neo4j_env.write_text(
+        "BB_ASSISTANT_GRAPH_BACKEND=neo4j\n"
+        f"BB_ASSISTANT_DATA_HOME={configured_root}\n"
+    )
+
+    state_file = tmp_path / "runtime-state.txt"
+    go_binary = Path(env["PATH"].split(":", maxsplit=1)[0]) / "go"
+    go_binary.write_text(
+        '#!/bin/sh\n'
+        'printf "%s\\n" "$*" > "$GO_ARGS_FILE"\n'
+        'printf "%s\\n" "$BB_ASSISTANT_DATA_HOME" > "$GO_RUNTIME_STATE_FILE"\n'
+        'if [ "${BB_ASSISTANT_VAULT_KEY:-}" = synthetic-selected-root-key ]; then '
+        'printf selected-root >> "$GO_RUNTIME_STATE_FILE"; '
+        'else printf incorrect-key >> "$GO_RUNTIME_STATE_FILE"; fi\n'
+    )
+    go_binary.chmod(0o700)
+    env.update(
+        {
+            "BB_ASSISTANT_NEO4J_ENV_FILE": str(neo4j_env),
+            "GO_RUNTIME_STATE_FILE": str(state_file),
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant"), "web-ui"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text().strip() == "run ./cmd/bb-assistant web-ui"
+    assert state_file.read_text().splitlines() == [
+        str(configured_root), "selected-root"
+    ]
+
+
 def test_launcher_preserves_explicit_runtime_configuration_precedence(
     tmp_path: Path,
 ) -> None:
