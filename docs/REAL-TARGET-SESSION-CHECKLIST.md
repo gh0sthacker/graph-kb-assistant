@@ -13,11 +13,12 @@ source of truth.
       request budget, test-account rules, allowed time window, and stop
       conditions in the restricted run receipt.
 - [ ] Confirm the pinned Caido project matches the selected program and scope.
-      `caido-tail` supports an exact `--scope-host` / `--scope-port` filter and
-      applies it before fetching request or response details. It does not
-      remove unrelated captures already present in the project, so use a clean
-      dedicated project when possible; if the project contains unrelated rows,
-      inspect them separately and do not treat them as target evidence.
+      `caido-tail` supports an exact `--scope-scheme` / `--scope-host` /
+      `--scope-port` filter and applies it before fetching request or response
+      details. It does not remove unrelated captures already present in the
+      project, so use a clean dedicated project when possible; if the project
+      contains unrelated rows, inspect them separately and do not treat them as
+      target evidence.
 - [ ] Confirm the browser is explicitly routed through that project's Caido
       proxy; if this cannot be verified, do not browse the target.
 - [ ] Confirm the Graph Assistant service, graph backend, encrypted evidence
@@ -31,16 +32,17 @@ source of truth.
    steps with exact request IDs.
 2. Run one bounded live-intake cycle for the dedicated project and exact
    authorized origin:
-   `scripts/bb-assistant caido-tail --project-key <registered-project-key> --scope-host <authorized-host> --scope-port <authorized-port> --max-pages 1`.
-   The host and port are required together for origin scoping. The command uses
-   a recent time window, one page of up to 50 request rows, a 90-second overlap,
-   and a 256 KiB per-side body limit by default. It filters metadata before
-   fetching message details, including during delayed-response refresh, and
-   reports rows excluded by scope. Each exact origin has an independent durable
-   cursor. It reads Caido history and writes the project's local capture/graph
-   inputs; it sends no requests to the target. Review imported/excluded counts,
-   parse/fidelity labels, graph provenance, pending projection jobs, and
-   remaining coverage before enabling repeated `--watch` cycles.
+   `scripts/bb-assistant caido-tail --project-key <registered-project-key> --scope-scheme <http|https> --scope-host <authorized-host> --scope-port <authorized-port> --max-pages 1`.
+   The scheme, host, and port are required together for origin scoping. The
+   command uses a recent time window, one page of up to 50 request rows, a
+   90-second overlap, and a 256 KiB per-side body limit by default. It filters
+   metadata before fetching message details, including during delayed-response
+   refresh, and reports rows excluded by scope. Each exact origin has an
+   independent durable cursor. It reads Caido history and writes the project's
+   local capture/graph inputs; it sends no requests to the target. Review
+   imported/excluded counts, parse/fidelity labels, graph provenance, pending
+   projection jobs, and remaining coverage before enabling repeated `--watch`
+   cycles.
 3. Select an observed operation in the graph. Follow bounded pages and inspect
    the exact request/response evidence locally, including truncation and source
    integrity state.

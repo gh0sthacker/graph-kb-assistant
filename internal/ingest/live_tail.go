@@ -58,6 +58,7 @@ type LiveTailCheckpoint struct {
 
 type LiveTailResult struct {
 	ProjectKey   string `json:"project_key"`
+	ScopeScheme  string `json:"scope_scheme,omitempty"`
 	ScopeHost    string `json:"scope_host,omitempty"`
 	ScopePort    int    `json:"scope_port,omitempty"`
 	State        string `json:"state"`
@@ -131,22 +132,23 @@ type LiveTailWriter struct {
 }
 
 // LiveTailScope restricts capture-detail reads and graph ingestion to one
-// exact HTTP origin. The host and port are also included in the durable
+// exact HTTP origin. The scheme, host, and port are also included in the durable
 // checkpoint key, so a changed scope cannot resume another scope's cursor.
 type LiveTailScope struct {
-	Host string
-	Port int
+	Scheme string
+	Host   string
+	Port   int
 }
 
 func OpenLiveTailWriter(ctx context.Context, selected *store.ProjectStore) (*LiveTailWriter, error) {
 	return openLiveTailWriter(ctx, selected, nil)
 }
 
-// OpenLiveTailWriterForScope opens a live-tail writer with an exact host/port
-// filter. The filter is applied to request metadata before any message detail
+// OpenLiveTailWriterForScope opens a live-tail writer with an exact scheme,
+// host, and port filter. The filter is applied to request metadata before any message detail
 // is fetched.
-func OpenLiveTailWriterForScope(ctx context.Context, selected *store.ProjectStore, host string, port int) (*LiveTailWriter, error) {
-	scope, sourceKey, err := normalizeLiveTailScope(&LiveTailScope{Host: host, Port: port})
+func OpenLiveTailWriterForScope(ctx context.Context, selected *store.ProjectStore, scheme, host string, port int) (*LiveTailWriter, error) {
+	scope, sourceKey, err := normalizeLiveTailScope(&LiveTailScope{Scheme: scheme, Host: host, Port: port})
 	if err != nil {
 		return nil, err
 	}
@@ -165,15 +167,16 @@ func normalizeLiveTailScope(scope *LiveTailScope) (*LiveTailScope, string, error
 	if scope == nil {
 		return nil, liveTailSourceKey, nil
 	}
-	if scope.Host == "" || scope.Port < 1 || scope.Port > 65535 {
+	scheme := strings.ToLower(scope.Scheme)
+	if (scheme != "http" && scheme != "https") || scope.Host == "" || scope.Port < 1 || scope.Port > 65535 {
 		return nil, "", errors.New("live-tail exact origin scope is invalid")
 	}
 	host, err := caido.NormalizeRequestHost(scope.Host)
 	if err != nil {
 		return nil, "", errors.New("live-tail exact origin scope is invalid")
 	}
-	normalized := &LiveTailScope{Host: host, Port: scope.Port}
-	digest := sha256.Sum256([]byte(host + ":" + strconv.Itoa(scope.Port)))
+	normalized := &LiveTailScope{Scheme: scheme, Host: host, Port: scope.Port}
+	digest := sha256.Sum256([]byte(scheme + "://" + host + ":" + strconv.Itoa(scope.Port)))
 	return normalized, liveTailSourceKey + ":origin:" + hex.EncodeToString(digest[:]), nil
 }
 
@@ -669,6 +672,7 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 	}
 	result := LiveTailResult{ProjectKey: projectKey, State: checkpoint.State, Watermark: checkpoint.Watermark, CursorPending: checkpoint.Cursor != nil}
 	if writer.scope != nil {
+		result.ScopeScheme = writer.scope.Scheme
 		result.ScopeHost = writer.scope.Host
 		result.ScopePort = writer.scope.Port
 	}
@@ -1371,7 +1375,7 @@ func metadataMatchesLiveScope(request caido.RequestMetadata, scope LiveTailScope
 		return false
 	}
 	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "http" && scheme != "https" {
+	if (scheme != "http" && scheme != "https") || scheme != scope.Scheme {
 		return false
 	}
 	host, err := caido.NormalizeRequestHost(parsed.Hostname())

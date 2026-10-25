@@ -2326,16 +2326,18 @@ This repository is an early public alpha. The following boundaries are deliberat
 
 ## Exact-origin live-tail preparation (2026-10-25) — PARTIAL
 
-- The Go `caido-tail` command now accepts paired `--scope-host` and
-  `--scope-port` options. It normalizes and validates the exact HTTP origin,
-  filters Caido metadata before fetching message details, applies the same
-  filter during delayed-response refresh, and stores a separate durable cursor
-  for each origin. The receipt reports scope and excluded metadata rows.
+- The Go `caido-tail` command now accepts the exact
+  `--scope-scheme`/`--scope-host`/`--scope-port` triple. It normalizes and
+  validates the exact HTTP origin, filters Caido metadata before fetching
+  message details, applies the same filter during delayed-response refresh, and
+  stores a separate durable cursor for each origin. The receipt reports scope
+  and excluded metadata rows.
 - Existing captures in a selected project are not removed or hidden by this
   intake filter. A clean dedicated Caido project remains recommended; the exact
   origin filter protects only newly read details and graph intake.
-- Focused synthetic Go tests cover in-scope versus out-of-scope hosts/ports,
-  delayed response refresh, cursor isolation, malformed URLs, and invalid scope.
+- Focused synthetic Go tests cover in-scope versus out-of-scope schemes,
+  hosts and ports, delayed response refresh, cursor isolation, malformed URLs,
+  and invalid scope.
   No real target, Caido connection, live database, Neo4j runtime, or Hermes
   request was used for this code slice. Tomorrow's run still requires selecting
   one program and checking its current authorization, exact origin, rate/budget,
