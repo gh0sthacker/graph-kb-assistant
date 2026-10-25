@@ -481,14 +481,6 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		WHERE chunk_search MATCH ?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
 	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, strings.Join(match, " OR ")}
-	if len(sources) != 0 {
-		placeholders := make([]string, len(sources))
-		for n, source := range sources {
-			placeholders[n] = "?"
-			args = append(args, source)
-		}
-		statement += " AND c.source_name IN (" + strings.Join(placeholders, ",") + ")"
-	}
 	candidateLimit := max(options.TopK*6, 30)
 	statement += " ORDER BY 16 LIMIT ?"
 	args = append(args, candidateLimit)
@@ -506,6 +498,10 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if err := rows.Close(); err != nil {
 		return SearchResult{}, errors.New("KB full-text search could not finish")
 	}
+	// RedAmon applies include_sources after Neo4j's global Lucene top-k query.
+	// Applying this predicate inside SQL before LIMIT would fill the pool with
+	// lower-ranked source-specific hits that RedAmon excludes.
+	fulltextHits = filterHitsBySources(fulltextHits, sources)
 	fulltextIDs := hitIDs(fulltextHits)
 	result.Hits = fulltextHits
 	vectorIDs, vectorScores, vectorMode := i.vectorCandidates(ctx, tx, query, sources, candidateLimit)
@@ -789,6 +785,23 @@ func hitIDs(hits []Hit) []string {
 		ids[n] = hit.ChunkID
 	}
 	return ids
+}
+
+func filterHitsBySources(hits []Hit, sources []string) []Hit {
+	if len(sources) == 0 {
+		return hits
+	}
+	allowed := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		allowed[source] = struct{}{}
+	}
+	filtered := make([]Hit, 0, len(hits))
+	for _, hit := range hits {
+		if _, ok := allowed[hit.SourceName]; ok {
+			filtered = append(filtered, hit)
+		}
+	}
+	return filtered
 }
 
 func rankHybridHits(hits []Hit, vectorIDs []string, vectorScores map[string]float64, fulltextIDs []string, rerankScores map[string]float64, limit int) []Hit {

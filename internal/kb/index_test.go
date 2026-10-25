@@ -239,6 +239,53 @@ func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.
 	}
 }
 
+func TestFullTextCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "baseline fixture without the search term"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < 31 && err == nil; n++ {
+		id := digestHex("other-" + string(rune('a'+n)))
+		text := strings.Repeat("needle ", 12)
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "other", "other-"+string(rune('a'+n)), "Other source", 0,
+			len(text), `{}`, digestHex(text), digestHex(text), "bb-kb-chunk-v2", text)
+		if err == nil {
+			_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "other", "Other source", text)
+		}
+	}
+	wantedID := digestHex("wanted")
+	wantedText := "needle"
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, wantedID, "wanted", "wanted-document", "Wanted source", 0,
+			len(wantedText), `{}`, digestHex(wantedText), digestHex(wantedText), "bb-kb-chunk-v2", wantedText)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, wantedID, "wanted", "Wanted source", wantedText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare source-filter FTS fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "needle", SearchOptions{TopK: 1, SourceNames: []string{"wanted"}})
+	if err != nil || len(result.Hits) != 0 {
+		t.Fatalf("source-filtered global fulltext top-30 = %d hits, %v; want empty after higher-ranked sources are excluded", len(result.Hits), err)
+	}
+}
+
 type syntheticRetrievalModels struct {
 	queryVector []float32
 	rerankCalls int
