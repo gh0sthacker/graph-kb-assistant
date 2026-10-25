@@ -19,6 +19,7 @@ from .owasp import RedAmonOWASPProvider
 from .redamon_local import RedAmonLocalToolDocsProvider
 from .redamon_sources import RedAmonSourceAdapter
 from .rebuild import export_redamon_snapshot, import_snapshot
+from .ranking import DEFAULT_TOP_K
 
 
 def build_kb(
@@ -112,7 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     import_command.add_argument("snapshot_dir", type=Path, help="version directory containing manifest.json")
     search = commands.add_parser("search", help="search indexed KB chunks")
     search.add_argument("query")
-    search.add_argument("--top-k", type=int, default=10)
+    search.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     search.add_argument("--source", action="append", default=[])
     args = parser.parse_args(argv)
 
@@ -151,6 +152,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "source_sha256": hit.source_sha256,
             "chunk_sha256": hit.chunk_sha256,
             "span": {"start_char": hit.start_char, "end_char": hit.end_char},
+            "bm25": hit.bm25,
+            "rank_score": hit.rank_score,
         }
         for hit in hits
     ], ensure_ascii=False, indent=2))

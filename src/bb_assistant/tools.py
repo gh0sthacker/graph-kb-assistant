@@ -555,7 +555,7 @@ class ReadOnlyAssistantTools:
     def _kb_search(self, args: dict[str, Any]) -> dict[str, Any]:
         hits = self._kb.search(
             args["query"],
-            top_k=args.get("top_k", 10),
+            top_k=args.get("top_k", 5),
             source_names=tuple(args.get("source_names", ())),
         )
         return {
@@ -577,6 +577,7 @@ class ReadOnlyAssistantTools:
                     "chunk_sha256": hit.chunk_sha256,
                     "span": {"start_char": hit.start_char, "end_char": hit.end_char},
                     "bm25": hit.bm25,
+                    "rank_score": hit.rank_score,
                 }
                 for hit in hits
             ],

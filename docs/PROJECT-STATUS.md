@@ -2380,10 +2380,14 @@ This repository is an early public alpha. The following boundaries are deliberat
   snapshots must be exported again before import. Focused provider and CLI
   tests pass. This matches the upstream strategy while keeping stored text an
   exact source substring for citation integrity.
-- Search is SQLite FTS5 only. RedAmon uses E5-large-v2 vectors and Neo4j
-  full-text candidates, RRF (`k=60`), source boosts, BGE reranking, MMR
-  (`lambda=0.65`), and a default top 5. Local search does not yet provide those
-  stages and defaults to ten results.
+- Search is still SQLite FTS5 only; the active environment has no
+  sentence-transformers, PyTorch or FAISS package. The actual lexical path now
+  overfetches candidates, applies RedAmon's top-5, RRF (`k=60`), per-source
+  boosts and source/title MMR (`lambda=0.65`). The ranking module accepts
+  vector ranks and cross-encoder scores and has deterministic fixtures, but no
+  vector embeddings are stored or produced and BGE reranking is not wired into
+  live search. Therefore these implemented stages do not yet make retrieval
+  parity.
 - A new full-profile build is running in a disposable directory, not against
   the application's private index. It uses the 730-day NVD window without a
   CVSS floor. It began before the chunk-schema update, so it can establish

@@ -1,7 +1,7 @@
 """Local SQLite FTS5 index for canonical KB chunks and verifiable citations."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
@@ -14,6 +14,13 @@ from typing import Iterable, Iterator, Mapping
 from ..paths import data_root, ensure_private_directory
 from ..project_lock import project_maintenance_lock, project_maintenance_read_lock
 from .canonical import CHUNK_SCHEMA, CanonicalChunk, SourceDocument
+from .ranking import (
+    DEFAULT_OVERFETCH_FACTOR,
+    DEFAULT_RERANK_POOL_SIZE,
+    DEFAULT_TOP_K,
+    RankedCandidate,
+    rank_candidates,
+)
 
 
 _SCHEMA = """
@@ -80,6 +87,7 @@ class KBHit:
     start_char: int
     end_char: int
     bm25: float
+    rank_score: float
 
 
 class KBIndex:
@@ -338,7 +346,7 @@ class KBIndex:
             "source_coverage": source_coverage,
         }
 
-    def search(self, query: str, *, top_k: int = 10, source_names: tuple[str, ...] = ()) -> tuple[KBHit, ...]:
+    def search(self, query: str, *, top_k: int = DEFAULT_TOP_K, source_names: tuple[str, ...] = ()) -> tuple[KBHit, ...]:
         if not (1 <= top_k <= 100):
             raise ValueError("top_k must be between 1 and 100")
         if len(query) > 4096:
@@ -358,23 +366,36 @@ class KBIndex:
             sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
             params.extend(source_names)
         sql += " ORDER BY score LIMIT ?"
-        params.append(top_k)
+        params.append(max(top_k * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE))
         with self.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
-        hits = []
+        hits_by_id: dict[str, KBHit] = {}
+        candidates: list[RankedCandidate] = []
         for row in rows:
             text = row["text"]
             excerpt = text[:1200]
-            hits.append(KBHit(
+            hit = KBHit(
                 chunk_id=row["chunk_id"], source_name=row["source_name"], source_id=row["source_id"],
                 title=row["title"], excerpt=excerpt, source_locator=row["source_locator"],
                 source_url=row["source_url"], source_revision=row["source_revision"],
                 license_id=row["license_id"], attribution=row["attribution"],
                 source_sha256=row["source_sha256"], chunk_sha256=row["chunk_sha256"],
                 metadata=json.loads(row["metadata_json"]),
-                start_char=row["start_char"], end_char=row["end_char"], bm25=row["score"],
+                start_char=row["start_char"], end_char=row["end_char"], bm25=row["score"], rank_score=0.0,
+            )
+            hits_by_id[hit.chunk_id] = hit
+            candidates.append(RankedCandidate(
+                chunk_id=hit.chunk_id, source_name=hit.source_name, title=hit.title, lexical_score=hit.bm25,
             ))
-        return tuple(hits)
+        ranked = rank_candidates(
+            candidates,
+            fulltext_ids=[candidate.chunk_id for candidate in candidates],
+            top_k=top_k,
+        )
+        return tuple(
+            replace(hits_by_id[item.chunk_id], rank_score=item.score)
+            for item in ranked
+        )
 
     @staticmethod
     def _validate_chunk(chunk: CanonicalChunk) -> None:
