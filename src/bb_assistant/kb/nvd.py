@@ -32,6 +32,7 @@ _NO_KEY_MIN_INTERVAL_SECONDS = 6.5
 _FETCH_TIMEOUT_SECONDS = 90
 _FETCH_ATTEMPTS = 3
 _CVE_ID = re.compile(r"^CVE-\d{4}-\d{4,}$")
+_REDAMON_NVD_MAX_CHARS = 480 * 4
 _ELIGIBLE_LICENSE_STATUSES = frozenset({"terms_confirmed_with_required_notices"})
 _CVE_TERMS_URL = "https://www.cve.org/legal/termsofuse"
 
@@ -188,6 +189,10 @@ def _redamon_search_text(vulnerability: Mapping[str, Any]) -> tuple[str, dict[st
         content += f"\nCVSS: {cvss_score} ({severity})"
     if products:
         content += f"\nAffected: {', '.join(products[:10])}"
+    # RedAmon's ChunkStrategy.chunk_structured clips atomic CVE chunks at
+    # max_tokens * 4 chars and appends an ellipsis after the last whole word.
+    if len(content) // 4 > 480:
+        content = content[:_REDAMON_NVD_MAX_CHARS].rsplit(" ", 1)[0] + "..."
     published = cve.get("published", "")
     published_date = published[:10] if isinstance(published, str) and published else None
     metadata: dict[str, object] = {

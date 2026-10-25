@@ -6,7 +6,7 @@ import hashlib
 import json
 import unittest
 
-from bb_assistant.kb.nvd import RedAmonNVDProvider, _date_windows
+from bb_assistant.kb.nvd import RedAmonNVDProvider, _date_windows, _redamon_search_text
 from bb_assistant.kb.redamon_sources import (
     RedAmonSourceAdapter,
     SourceBatch,
@@ -62,6 +62,12 @@ def _vuln(cve_id: str, published: str) -> dict[str, object]:
 
 
 class NVDProviderTests(unittest.TestCase):
+    def test_oversized_nvd_content_uses_redamon_atomic_chunk_truncation(self) -> None:
+        source = {"cve": {"descriptions": [{"lang": "en", "value": "word " * 600}]}}
+        content, _metadata = _redamon_search_text(source)
+        expected = ("word " * 600)[:1920].rsplit(" ", 1)[0] + "..."
+        self.assertEqual(content, expected)
+
     def test_nvd_search_text_matches_pinned_redamon_chunk_normalization(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         vulnerability = _vuln("CVE-2026-12345", now.isoformat().replace("+00:00", "Z"))

@@ -9,8 +9,9 @@
   exercised through the Go-to-local-model-worker path.
 - NVD search content now follows RedAmon's exact normalization order: English
   description, optional CVSS 3.1/3.0 score and lower-case severity, and the
-  first ten CPE criteria. Full upstream JSON remains locally preserved with a
-  separate digest; model-facing KB source reads expose only normalized text.
+  first ten CPE criteria, including RedAmon's 480-token atomic-record clipping
+  and ellipsis. Full upstream JSON remains locally preserved with a separate
+  digest; model-facing KB source reads expose only normalized text.
   Offline provider and SQLite snapshot checks cover this split.
 - These code-level matches do **not** make the corpus identical. The approved
   seven-family source manifest still has unresolved source coverage, including
