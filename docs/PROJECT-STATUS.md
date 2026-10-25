@@ -2118,20 +2118,23 @@ This repository is an early public alpha. The following boundaries are deliberat
   one capture-provenance link; the response was not truncated. The request and
   response bodies were not read. This confirms populated graph navigation for
   that seed, not complete UI or graph coverage.
-- Structural status still reports 1,400 captures, 1,369 mapped and 31
-  unmapped. A bounded read-only projection reconciliation scanned all 53
-  pending jobs against the parity-verified snapshots: 0 exact matches, 31
-  missing records, 22 conflicting records, 0 invalid jobs, with no changes
-  applied. Before the next worker run, aggregate queue metadata showed 43
-  untried pending jobs, 10 pending jobs with `neo4j_unavailable`, and two
-  dead-letter jobs (`graph_records_write_failed` and `projection_unavailable`).
-  One bounded `projection-worker --max-jobs 1` run then applied one job without
-  dead-lettering; subsequent status reported 52 pending, 2 dead-letter, and
-  1,346 applied. Historical import reconciliation is still partial; the
+- Structural status now reports all 1,400 captures mapped and 0 unmapped. A
+  bounded read-only projection reconciliation first scanned all 53 pending
+  jobs against the parity-verified snapshots: 0 exact matches, 31 missing
+  records, 22 conflicting records, 0 invalid jobs, with no changes applied.
+  Aggregate queue metadata showed 43 untried pending jobs, 10 pending jobs
+  with `neo4j_unavailable`, and two dead-letter jobs
+  (`graph_records_write_failed` and `projection_unavailable`). Bounded worker
+  batches applied the pending jobs; final status reported 0 pending, 1,398
+  applied, and 2 dead-letter. Both dead-letter revisions have local graph
+  revision mappings, and separate bounded UI graph reads for both mapped seeds
+  returned HTTP 200 with non-truncated graph slices. Their queue states remain
+  dead-letter, so worker acknowledgment/recovery is still unresolved.
+  Historical import reconciliation is still partial; the
   evidence-vault key is missing or invalid, so encrypted evidence access is not
   confirmed. Browser walkthrough, JavaScript endpoint coverage, external
-  access, pending/dead-letter recovery, and full application acceptance remain
-  gaps.
+  access, dead-letter recovery, evidence-body display/comparison, and full
+  application acceptance remain gaps.
 - Caido was not contacted, captured bodies were not read, and no captured
   exchange was sent to Hermes.
 
