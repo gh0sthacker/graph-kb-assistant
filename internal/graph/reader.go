@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -17,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"bb-graph-assistant/internal/publicdata"
 
@@ -280,8 +282,8 @@ func (r *Reader) Snapshot() (Record, error) {
 		"assertions":     assertions,
 		"cards":          cards,
 	}
-	encoded, err := canonicalJSON(snapshot)
-	if err != nil || len(encoded) > maxGraphBytes {
+	size := canonicalSizeLimit{limit: maxGraphBytes}
+	if err := writeCanonicalJSON(&size, snapshot); err != nil {
 		return nil, errors.New("BehaviorGraph snapshot exceeds its safe size limit")
 	}
 	return snapshot, nil
@@ -290,9 +292,12 @@ func (r *Reader) Snapshot() (Record, error) {
 // SnapshotDigest returns a stable digest for a complete snapshot independent
 // of map iteration or backend query order.
 func SnapshotDigest(snapshot Record) (string, error) {
-	copySnapshot := cloneRecord(snapshot)
+	copySnapshot := make(Record, len(snapshot))
+	for key, value := range snapshot {
+		copySnapshot[key] = value
+	}
 	for _, key := range []string{"sources", "entities", "assertions", "cards"} {
-		originals, ok := copySnapshot[key].([]Record)
+		originals, ok := snapshot[key].([]Record)
 		if !ok {
 			return "", errors.New("graph snapshot records are malformed")
 		}
@@ -317,12 +322,11 @@ func SnapshotDigest(snapshot Record) (string, error) {
 		})
 		copySnapshot[key] = records
 	}
-	encoded, err := canonicalJSON(copySnapshot)
-	if err != nil {
+	digest := sha256.New()
+	if err := writeCanonicalJSON(digest, copySnapshot); err != nil {
 		return "", errors.New("graph snapshot digest could not be computed")
 	}
-	digest := sha256.Sum256(encoded)
-	return hex.EncodeToString(digest[:]), nil
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 // ObservationIDsByVariantSignatures finds observations connected to exact
@@ -1305,6 +1309,214 @@ func canonicalJSON(value any) ([]byte, error) {
 		return nil, err
 	}
 	return []byte(unescapeJSONLineSeparators(strings.TrimSuffix(builder.String(), "\n"))), nil
+}
+
+// writeCanonicalJSON streams the same canonical representation as canonicalJSON
+// without materializing a normalized copy of a large graph snapshot.
+func writeCanonicalJSON(writer io.Writer, value any) error {
+	buffered := bufio.NewWriterSize(writer, 32<<10)
+	if err := writeCanonicalJSONValue(buffered, value); err != nil {
+		return err
+	}
+	return buffered.Flush()
+}
+
+func writeCanonicalJSONValue(writer io.Writer, value any) error {
+	switch typed := value.(type) {
+	case nil:
+		return writeCanonicalText(writer, "null")
+	case bool:
+		if typed {
+			return writeCanonicalText(writer, "true")
+		}
+		return writeCanonicalText(writer, "false")
+	case json.Number:
+		number := typed.String()
+		if strings.ContainsAny(number, ".eE") {
+			var err error
+			number, err = canonicalPythonNumber(number)
+			if err != nil {
+				return err
+			}
+		} else if !jsonIntegerPattern.MatchString(number) {
+			return errors.New("invalid canonical integer")
+		} else if number == "-0" {
+			number = "0"
+		}
+		return writeCanonicalText(writer, number)
+	case int:
+		return writeCanonicalText(writer, strconv.Itoa(typed))
+	case int64:
+		return writeCanonicalText(writer, strconv.FormatInt(typed, 10))
+	case int32:
+		return writeCanonicalText(writer, strconv.FormatInt(int64(typed), 10))
+	case uint:
+		return writeCanonicalText(writer, strconv.FormatUint(uint64(typed), 10))
+	case uint64:
+		return writeCanonicalText(writer, strconv.FormatUint(typed, 10))
+	case uint32:
+		return writeCanonicalText(writer, strconv.FormatUint(uint64(typed), 10))
+	case string:
+		return writeCanonicalJSONString(writer, typed)
+	case Record:
+		return writeCanonicalObject(writer, map[string]any(typed))
+	case map[string]any:
+		return writeCanonicalObject(writer, typed)
+	case []Record:
+		return writeCanonicalArray(writer, len(typed), func(index int) any { return typed[index] })
+	case []map[string]any:
+		return writeCanonicalArray(writer, len(typed), func(index int) any { return typed[index] })
+	case []any:
+		return writeCanonicalArray(writer, len(typed), func(index int) any { return typed[index] })
+	default:
+		encoded, err := canonicalJSON(value)
+		if err != nil {
+			return err
+		}
+		_, err = writer.Write(encoded)
+		return err
+	}
+}
+
+func writeCanonicalObject(writer io.Writer, value map[string]any) error {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if err := writeCanonicalText(writer, "{"); err != nil {
+		return err
+	}
+	for index, key := range keys {
+		if index > 0 {
+			if err := writeCanonicalText(writer, ","); err != nil {
+				return err
+			}
+		}
+		if err := writeCanonicalJSONString(writer, key); err != nil {
+			return err
+		}
+		if err := writeCanonicalText(writer, ":"); err != nil {
+			return err
+		}
+		if err := writeCanonicalJSONValue(writer, value[key]); err != nil {
+			return err
+		}
+	}
+	return writeCanonicalText(writer, "}")
+}
+
+func writeCanonicalArray(writer io.Writer, length int, at func(int) any) error {
+	if err := writeCanonicalText(writer, "["); err != nil {
+		return err
+	}
+	for index := 0; index < length; index++ {
+		if index > 0 {
+			if err := writeCanonicalText(writer, ","); err != nil {
+				return err
+			}
+		}
+		if err := writeCanonicalJSONValue(writer, at(index)); err != nil {
+			return err
+		}
+	}
+	return writeCanonicalText(writer, "]")
+}
+
+func writeCanonicalJSONString(writer io.Writer, value string) error {
+	if err := writeCanonicalText(writer, "\""); err != nil {
+		return err
+	}
+	writeEscape := func(prefix, suffix string) error {
+		if err := writeCanonicalText(writer, prefix); err != nil {
+			return err
+		}
+		return writeCanonicalText(writer, suffix)
+	}
+	start := 0
+	for index := 0; index < len(value); {
+		r, size := utf8.DecodeRuneInString(value[index:])
+		escaped := true
+		switch r {
+		case '"':
+			if err := writeEscape(value[start:index], `\"`); err != nil {
+				return err
+			}
+		case '\\':
+			if err := writeEscape(value[start:index], `\\`); err != nil {
+				return err
+			}
+		case '\b':
+			if err := writeEscape(value[start:index], `\b`); err != nil {
+				return err
+			}
+		case '\f':
+			if err := writeEscape(value[start:index], `\f`); err != nil {
+				return err
+			}
+		case '\n':
+			if err := writeEscape(value[start:index], `\n`); err != nil {
+				return err
+			}
+		case '\r':
+			if err := writeEscape(value[start:index], `\r`); err != nil {
+				return err
+			}
+		case '\t':
+			if err := writeEscape(value[start:index], `\t`); err != nil {
+				return err
+			}
+		default:
+			switch {
+			case r == utf8.RuneError && size == 1:
+				if err := writeEscape(value[start:index], "�"); err != nil {
+					return err
+				}
+			case r < 0x20:
+				const hex = "0123456789abcdef"
+				escape := []byte{'\\', 'u', '0', '0', hex[byte(r)>>4], hex[byte(r)&0xf]}
+				if err := writeCanonicalText(writer, value[start:index]); err != nil {
+					return err
+				}
+				if _, err := writer.Write(escape); err != nil {
+					return err
+				}
+			default:
+				escaped = false
+			}
+		}
+		if escaped {
+			index += size
+			start = index
+		} else {
+			index += size
+		}
+	}
+	if err := writeCanonicalText(writer, value[start:]); err != nil {
+		return err
+	}
+	return writeCanonicalText(writer, "\"")
+}
+
+func writeCanonicalText(writer io.Writer, value string) error {
+	written, err := io.WriteString(writer, value)
+	if err == nil && written != len(value) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+type canonicalSizeLimit struct {
+	size  int
+	limit int
+}
+
+func (writer *canonicalSizeLimit) Write(value []byte) (int, error) {
+	if writer.size+len(value) > writer.limit {
+		return 0, errors.New("canonical JSON exceeds size limit")
+	}
+	writer.size += len(value)
+	return len(value), nil
 }
 
 func normalizeCanonicalNumbers(value any) (any, error) {

@@ -1,11 +1,44 @@
 package graph
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestWriteCanonicalJSONMatchesCanonicalJSON(t *testing.T) {
+	value := Record{
+		"z": "<tag>&\u2028line\u2029",
+		"a": []any{
+			json.Number("1.500"),
+			json.Number("-0"),
+			int64(-42),
+			uint32(42),
+			true,
+			false,
+			nil,
+			Record{"nested": "quote: \\\" and slash: \\\\"},
+			string([]byte{'b', 0, '\b', '\f', '\n', '\r', '\t', 0x7f, 0xff}),
+			[]Record{{"name": "alpha"}, {"name": "beta"}},
+			map[string]any{"y": true, "x": json.Number("1e+20")},
+		},
+		"empty_object": Record(nil),
+		"empty_array":  []Record(nil),
+	}
+	want, err := canonicalJSON(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actual bytes.Buffer
+	if err := writeCanonicalJSON(&actual, value); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual.Bytes(), want) {
+		t.Fatalf("streamed canonical JSON differs from canonicalJSON:\n got %q\nwant %q", actual.String(), want)
+	}
+}
 
 func TestSnapshotDigestIgnoresBackendRecordOrder(t *testing.T) {
 	first := Record{

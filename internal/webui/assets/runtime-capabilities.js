@@ -5,7 +5,7 @@
     if (state === "missing_or_invalid") {
       return {
         label: "Evidence locked",
-        title: "The local evidence viewer needs the original vault key. A new key cannot decrypt existing captures.",
+        title: "The local evidence viewer needs the original vault key. Restore BB_ASSISTANT_VAULT_KEY in the private runtime.env file and restart Graph Assistant; a new key cannot decrypt existing captures.",
         state: "locked",
       };
     }

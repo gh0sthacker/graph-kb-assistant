@@ -9,6 +9,9 @@ test("evidence status explains that a missing original key locks saved bytes", (
   assert.equal(view.label, "Evidence locked");
   assert.equal(view.state, "locked");
   assert.match(view.title, /original vault key/i);
+  assert.match(view.title, /BB_ASSISTANT_VAULT_KEY/i);
+  assert.match(view.title, /private runtime\.env/i);
+  assert.match(view.title, /restart Graph Assistant/i);
   assert.match(view.title, /new key cannot decrypt/i);
 });
 
