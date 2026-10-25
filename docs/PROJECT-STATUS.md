@@ -1,23 +1,30 @@
 # Project status and known limitations
 
-## Stage 3 revision-bound query occurrences and equality references — PARTIAL (2026-10-24)
+## Stage 3 revision-bound query and JSON body occurrences — PARTIAL (2026-10-25)
 
 - The Go historical and live projections now emit capture-specific query
-  `field_occurrence` records with occurrence order, request-message byte spans,
-  wire fidelity, source receipt, and capture revision identity. They create
-  project-keyed `value_reference` links only for complete, nonempty,
-  non-sensitive URL-decoded string values whose request-line query exactly
-  matches the Caido target metadata. The separately domain-derived key is
-  versioned; neither that key nor plaintext values enter graph records.
+  `field_occurrence` records and request/response JSON scalar occurrences with
+  occurrence order, message-relative byte spans, wire fidelity, source receipt,
+  and capture revision identity. Body spans are emitted only for complete,
+  byte-preserving JSON messages with explicit non-truncated metadata and a
+  consistent message extent. They
+  create project-keyed `value_reference` links only for non-sensitive strings;
+  query and JSON strings use the same `field-equality-v2` decoded UTF-8
+  normalization so equal strings can link across those locations. Neither the
+  key nor plaintext values enter graph records. Legacy v1 references remain
+  readable; new projections use v2.
 - Equality relations are labeled `keyed_value_equality` / `correlation_only`.
   They establish a same-project keyed value match and do not establish
   causality, object identity, or ownership. If a source span or revision cannot
   be bound, the occurrence and equality link are omitted and the analysis card
   records the gap.
-- Synthetic Go graph-import and traversal tests cover repeated query order,
-  percent-encoded byte spans, same-project correlation across fields and
-  captures, separation by project key, sensitive-name omission, plaintext
-  absence, writer validation, and unbound-span coverage. `GraphNeighborhoodPage`
+- Synthetic Go graph-import tests cover repeated query order, request/response
+  JSON scalar spans (including escaped values), same-project correlation across
+  query/body locations, separation by project key, sensitive-name omission,
+  plaintext absence, writer validation, and omission for truncated or malformed
+  bodies. Historical and live builders use the same projection path.
+  Synthetic traversal tests cover same-project correlation across captures.
+  `GraphNeighborhoodPage`
   now keeps the `has_occurrence`, `occurrence_of`, and `value_used_in` path and
   can expand a bounded observation → field → project-value match → second
   capture slice. The Neo4j writer promotes only the keyed signature into an
@@ -29,10 +36,12 @@
   the overview until their filter is enabled; focused observation traversal
   opens the bounded related path.
 - Stage 3 remains `PARTIAL`: the opt-in ephemeral Neo4j Cypher integration was
-  added but not run, and existing Neo4j snapshots need a full reprojection
-  before the field-value index marker becomes current. Request-body and
-  response-side occurrences, capture-shape coverage, actor/object annotations,
-  and complete application-map coverage remain unfinished.
+  added but not run, and existing graph snapshots need a full reprojection
+  before v2 field-value references and the field-value index marker become
+  current. Form and multipart body occurrences, complete capture-shape
+  coverage, actor/object annotations, and complete application-map coverage
+  remain unfinished. Caido and active working databases were not checked for
+  this code slice.
 
 ## Stage 5 local UI resume after reload — PARTIAL
 

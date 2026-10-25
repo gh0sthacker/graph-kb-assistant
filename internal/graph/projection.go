@@ -285,7 +285,25 @@ func DeriveFieldValueKey(indexKey []byte) ([]byte, error) {
 }
 
 func fieldValueToken(key []byte, value string) string {
-	material := []byte("bb-graph-field-equality-v1\x00urlencoded-string\x00" + value)
+	return fieldValueTokenForNormalization(key, value, "urlencoded_scalar_v1")
+}
+
+func fieldValueTokenForNormalization(key []byte, value, normalization string) string {
+	domain := ""
+	version := "field-equality-v1"
+	switch normalization {
+	case "urlencoded_scalar_v1":
+		domain = "urlencoded-string"
+	case "decoded_utf8_scalar_v2":
+		version = "field-equality-v2"
+		domain = "decoded-utf8-scalar"
+	default:
+		return ""
+	}
+	prefix := "bb-graph-" + version + "\x00" + domain + "\x00"
+	material := make([]byte, 0, len(prefix)+len(value))
+	material = append(material, prefix...)
+	material = append(material, value...)
 	digest := hmacDigest(key, material)
 	clear(material)
 	token := hex.EncodeToString(digest)

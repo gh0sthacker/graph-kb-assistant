@@ -33,10 +33,12 @@ type historicalParameterField struct {
 }
 
 type historicalFieldOccurrence struct {
-	index      int
-	sourceSpan Record
-	valueSpan  Record
-	valueToken string
+	index              int
+	sourceSpan         Record
+	valueSpan          Record
+	valueToken         string
+	valueTokenVersion  string
+	valueNormalization string
 }
 
 type historicalBodyAnalysis struct {
@@ -48,7 +50,7 @@ type historicalBodyAnalysis struct {
 
 var errHistoricalBodyFieldLimit = errors.New("historical body field limit exceeded")
 
-func historicalMessageBodyFields(raw []byte, location string, source Record, remaining int, truncated *bool) historicalBodyAnalysis {
+func historicalMessageBodyFields(raw []byte, location string, source Record, remaining int, truncated *bool, fieldValueKey []byte, revisionBound bool, wireFidelity string) historicalBodyAnalysis {
 	headers, body, boundary, headersComplete := splitMessage(raw)
 	if !boundary {
 		return historicalBodyAnalysis{}
@@ -56,6 +58,11 @@ func historicalMessageBodyFields(raw []byte, location string, source Record, rem
 	if len(body) > maxParsedBodyBytes {
 		return historicalBodyAnalysis{}
 	}
+	bodyOffset, offsetAvailable := historicalMessageBodyOffset(raw)
+	if !offsetAvailable {
+		return historicalBodyAnalysis{}
+	}
+	originalBody := body
 	contentType := historicalContentTypeHeader(headers)
 	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
 	if mediaType != "multipart/form-data" && len(body) > 0 {
@@ -69,9 +76,43 @@ func historicalMessageBodyFields(raw []byte, location string, source Record, rem
 			return historicalBodyAnalysis{}
 		}
 	}
-	analysis := historicalBodyParameterFields(body, contentType, location, source, remaining)
-	analysis.complete = analysis.complete && headersComplete && !historicalConflictingContentType(headers) && isExplicitFalse(truncated)
+	spanAvailable := revisionBound && bodyOffset <= (1<<30)-len(body) && headersComplete && !historicalConflictingContentType(headers) &&
+		historicalBodyExtentComplete(headers, body) && isExplicitFalse(truncated) && bytes.Equal(originalBody, body)
+	analysis := historicalBodyParameterFields(body, contentType, location, source, remaining,
+		bodyOffset, spanAvailable, fieldValueKey, wireFidelity)
+	analysis.complete = analysis.complete && headersComplete && !historicalConflictingContentType(headers) &&
+		historicalBodyExtentComplete(headers, body) && isExplicitFalse(truncated)
 	return analysis
+}
+
+func historicalMessageBodyOffset(raw []byte) (int, bool) {
+	if index := bytes.Index(raw, []byte("\r\n\r\n")); index >= 0 {
+		return index + 4, true
+	}
+	if index := bytes.Index(raw, []byte("\n\n")); index >= 0 {
+		return index + 2, true
+	}
+	return 0, false
+}
+
+func historicalBodyExtentComplete(headers []headerField, body []byte) bool {
+	contentLengthSeen := false
+	for _, header := range headers {
+		switch header.name {
+		case "transfer-encoding":
+			return false
+		case "content-length":
+			if contentLengthSeen {
+				return false
+			}
+			contentLengthSeen = true
+			contentLength, err := strconv.ParseInt(strings.TrimSpace(header.value), 10, 64)
+			if err != nil || contentLength < 0 || contentLength != int64(len(body)) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func historicalConflictingContentType(headers []headerField) bool {
@@ -150,7 +191,7 @@ func historicalDecodeBody(body []byte, charset string) ([]byte, bool) {
 	}
 }
 
-func historicalBodyParameterFields(body []byte, contentType, location string, source Record, remaining int) historicalBodyAnalysis {
+func historicalBodyParameterFields(body []byte, contentType, location string, source Record, remaining, bodyOffset int, sourceSpanAvailable bool, fieldValueKey []byte, wireFidelity string) historicalBodyAnalysis {
 	if remaining < 0 {
 		return historicalBodyAnalysis{}
 	}
@@ -167,7 +208,8 @@ func historicalBodyParameterFields(body []byte, contentType, location string, so
 		fields, complete := historicalFormParameterFields(body, location, source, remaining)
 		return historicalBodyAnalysis{fields: fields, complete: complete}
 	case mediaType == "application/json", strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json"):
-		fields, complete := historicalJSONParameterFields(body, location, source, remaining)
+		fields, complete := historicalJSONParameterFields(body, location, source, remaining,
+			bodyOffset, sourceSpanAvailable, fieldValueKey, wireFidelity)
 		return historicalBodyAnalysis{fields: fields, complete: complete}
 	case mediaType == "text/html", mediaType == "application/xhtml+xml":
 		htmlAnalysis := historicalHTMLBodyFields(body, location, source, remaining)
@@ -438,7 +480,7 @@ func finalizeHistoricalFormOccurrences(fields []historicalParameterField, occurr
 	return fields
 }
 
-func historicalJSONParameterFields(body []byte, location string, source Record, remaining int) ([]historicalParameterField, bool) {
+func historicalJSONParameterFields(body []byte, location string, source Record, remaining, bodyOffset int, sourceSpanAvailable bool, fieldValueKey []byte, wireFidelity string) ([]historicalParameterField, bool) {
 	if !utf8.Valid(body) {
 		return nil, false
 	}
@@ -446,7 +488,7 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 	decoder.UseNumber()
 	fields := make([]historicalParameterField, 0, minInt(remaining, 64))
 	var visit func(path string, depth int) error
-	appendField := func(path, typeName string) error {
+	appendField := func(path, typeName string, occurrence *historicalFieldOccurrence) error {
 		if len(path) > historicalMaxParameterPath {
 			return errors.New("historical parameter path limit exceeded")
 		}
@@ -454,7 +496,7 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 			return errHistoricalBodyFieldLimit
 		}
 		fields = append(fields, historicalParameterField{
-			path: path, typeName: typeName, location: location,
+			path: path, typeName: typeName, location: location, occurrence: occurrence,
 		})
 		return nil
 	}
@@ -462,6 +504,7 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 		if depth > historicalMaxJSONDepth {
 			return errors.New("historical JSON depth limit exceeded")
 		}
+		tokenStartOffset := decoder.InputOffset()
 		token, err := decoder.Token()
 		if err != nil {
 			return err
@@ -469,7 +512,7 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 		if delimiter, ok := token.(json.Delim); ok {
 			switch delimiter {
 			case '{':
-				if err := appendField(path, "object"); err != nil {
+				if err := appendField(path, "object", nil); err != nil {
 					return err
 				}
 				seen := make(map[string]struct{})
@@ -499,7 +542,7 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 					return errors.New("invalid historical JSON object")
 				}
 			case '[':
-				if err := appendField(path, "array"); err != nil {
+				if err := appendField(path, "array", nil); err != nil {
 					return err
 				}
 				for index := 0; decoder.More(); index++ {
@@ -529,7 +572,32 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 		default:
 			return errors.New("invalid historical JSON value")
 		}
-		return appendField(path, typeName)
+		var occurrence *historicalFieldOccurrence
+		if sourceSpanAvailable {
+			start, startOK := historicalJSONTokenStart(body, tokenStartOffset)
+			end := int(decoder.InputOffset())
+			if !startOK || end <= start || end > len(body) {
+				return errors.New("historical JSON scalar span could not be bound")
+			}
+			basis := "request_message"
+			if location == "response.body" {
+				basis = "response_message"
+			} else if location != "request.body" {
+				return errors.New("historical JSON body location is invalid")
+			}
+			span := Record{
+				"start": bodyOffset + start, "end": bodyOffset + end,
+				"unit": "byte", "offset_basis": basis, "wire_fidelity": wireFidelity,
+			}
+			occurrence = &historicalFieldOccurrence{sourceSpan: span, valueSpan: cloneRecord(span)}
+			if value, isString := token.(string); isString && len(fieldValueKey) == 32 &&
+				len(value) > 0 && len(value) <= 4_096 && safeEqualityString(value) && !secretNamePattern.MatchString(path) {
+				occurrence.valueToken = fieldValueTokenForNormalization(fieldValueKey, value, "decoded_utf8_scalar_v2")
+				occurrence.valueTokenVersion = "field-equality-v2"
+				occurrence.valueNormalization = "decoded_utf8_scalar_v2"
+			}
+		}
+		return appendField(path, typeName, occurrence)
 	}
 
 	if err := visit("$", 0); err != nil {
@@ -544,6 +612,23 @@ func historicalJSONParameterFields(body []byte, location string, source Record, 
 	return finalizeHistoricalJSONOccurrences(fields), true
 }
 
+func historicalJSONTokenStart(body []byte, offset int64) (int, bool) {
+	if offset < 0 || offset > int64(len(body)) {
+		return 0, false
+	}
+	for index := int(offset); index < len(body); index++ {
+		switch value := body[index]; value {
+		case ' ', '\t', '\r', '\n', ',', ':':
+			continue
+		case '"', 't', 'f', 'n', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+			return index, true
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
 // finalizeHistoricalJSONOccurrences retains array indices when a templated
 // field occurs more than once and keeps legacy paths for singleton fields.
 func finalizeHistoricalJSONOccurrences(fields []historicalParameterField) []historicalParameterField {
@@ -553,10 +638,18 @@ func finalizeHistoricalJSONOccurrences(fields []historicalParameterField) []hist
 		indicesByTemplate[template] = append(indicesByTemplate[template], index)
 	}
 	for template, indices := range indicesByTemplate {
-		if len(indices) != 1 {
+		if len(indices) == 1 {
+			fields[indices[0]].path = template
+			if fields[indices[0]].occurrence != nil {
+				fields[indices[0]].occurrence.index = 0
+			}
 			continue
 		}
-		fields[indices[0]].path = template
+		for occurrenceIndex, fieldIndex := range indices {
+			if fields[fieldIndex].occurrence != nil {
+				fields[fieldIndex].occurrence.index = occurrenceIndex
+			}
+		}
 	}
 	return fields
 }

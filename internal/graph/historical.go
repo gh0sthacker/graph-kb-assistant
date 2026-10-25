@@ -127,6 +127,7 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	}
 	requestBodyAnalysis := historicalMessageBodyFields(
 		exchange.RequestRaw, "request.body", ref, requestFieldsRemaining, exchange.RequestTruncated,
+		fieldValueKey, graphDigestPattern.MatchString(revisionID), exchange.RequestWireFidelity,
 	)
 	requestBodyFields, requestBodyComplete := requestBodyAnalysis.fields, requestBodyAnalysis.complete
 	var responseBodyFields []historicalParameterField
@@ -135,6 +136,7 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	if exchange.HasResponse {
 		responseBodyAnalysis = historicalMessageBodyFields(
 			exchange.ResponseRaw, "response.body", ref, historicalMaxParameterFields, exchange.ResponseTruncated,
+			fieldValueKey, graphDigestPattern.MatchString(revisionID), exchange.ResponseWireFidelity,
 		)
 		responseBodyFields, responseBodyComplete = responseBodyAnalysis.fields, responseBodyAnalysis.complete
 	}
@@ -328,7 +330,7 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 		}
 		entities = append(entities, parameter)
 		assertions = append(assertions, hasParameter)
-		if candidate.field.occurrence == nil || candidate.field.occurrence.sourceSpan == nil || candidate.side != "request" {
+		if candidate.field.occurrence == nil || candidate.field.occurrence.sourceSpan == nil {
 			continue
 		}
 		fieldOccurrenceData := Record{
@@ -361,8 +363,8 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 			continue
 		}
 		valueData := Record{
-			"program": program, "token_version": "field-equality-v1",
-			"value_type": "string", "normalization": "urlencoded_scalar_v1",
+			"program": program, "token_version": candidate.field.occurrence.valueTokenVersion,
+			"value_type": "string", "normalization": candidate.field.occurrence.valueNormalization,
 			"equality_signature": candidate.field.occurrence.valueToken,
 		}
 		valueReferenceID, valueErr := historicalEntityID("value_reference", valueData)
@@ -783,7 +785,9 @@ func historicalQueryFields(target string, source Record, fieldValueKey []byte, r
 				!secretNamePattern.MatchString(name) && len(value) <= 4_096 {
 				decoded, decodeErr := url.QueryUnescape(value)
 				if decodeErr == nil && len(decoded) > 0 && len(decoded) <= 4_096 && safeEqualityString(decoded) {
-					occurrence.valueToken = fieldValueToken(fieldValueKey, decoded)
+					occurrence.valueToken = fieldValueTokenForNormalization(fieldValueKey, decoded, "decoded_utf8_scalar_v2")
+					occurrence.valueTokenVersion = "field-equality-v2"
+					occurrence.valueNormalization = "decoded_utf8_scalar_v2"
 				}
 			}
 			fieldSet[safeName] = append(fieldSet[safeName], historicalParameterField{

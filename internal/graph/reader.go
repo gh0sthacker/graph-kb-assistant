@@ -752,18 +752,31 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 		location, okLocation := data["location"].(string)
 		path, okPath := data["path"].(string)
 		typeName, okType := data["type"].(string)
+		expectedBasis := "request_message"
+		validSideLocation := side == "request" && (location == "query" || location == "request.body")
+		if side == "response" {
+			expectedBasis = "response_message"
+			validSideLocation = location == "response.body"
+		}
+		validOccurrenceType := typeName == "string"
+		if location == "request.body" || location == "response.body" {
+			validOccurrenceType = validOccurrenceType || typeName == "number" || typeName == "boolean" || typeName == "null"
+		}
 		if !okProgram || selectedProgram != program || !okCapture || !graphDigestPattern.MatchString(captureID) ||
 			!okRevision || !graphDigestPattern.MatchString(revisionID) ||
 			!okObservation || !graphIDPattern.MatchString(observationID) || !okParameter || !strings.HasPrefix(parameterID, "parameter-") || !graphIDPattern.MatchString(parameterID) ||
-			!okSide || side != "request" || !okLocation || location != "query" || !okPath || len(path) == 0 || len(path) > maxRecordBytes ||
-			!okType || typeName != "string" || !validNonnegativeInteger(data["occurrence_index"]) ||
-			!validFieldSourceSpan(data["source_span"]) || !validOptionalFieldValueSpan(data["value_span"], data["source_span"]) {
+			!okSide || !validSideLocation || !okLocation || !okPath || len(path) == 0 || len(path) > maxRecordBytes ||
+			!okType || !validOccurrenceType || !validNonnegativeInteger(data["occurrence_index"]) ||
+			!validFieldSourceSpan(data["source_span"], expectedBasis) || !validOptionalFieldValueSpan(data["value_span"], data["source_span"]) {
 			return errors.New("invalid field occurrence metadata")
 		}
 	case "value_reference":
+		tokenVersion := data["token_version"]
+		normalization := data["normalization"]
+		legacyNormalization := tokenVersion == "field-equality-v1" && normalization == "urlencoded_scalar_v1"
+		currentNormalization := tokenVersion == "field-equality-v2" && normalization == "decoded_utf8_scalar_v2"
 		if !exactKeys(data, "program", "token_version", "value_type", "normalization", "equality_signature") ||
-			data["program"] != program || data["token_version"] != "field-equality-v1" ||
-			data["value_type"] != "string" || data["normalization"] != "urlencoded_scalar_v1" {
+			data["program"] != program || (!legacyNormalization && !currentNormalization) || data["value_type"] != "string" {
 			return errors.New("invalid project-keyed value reference")
 		}
 		token, okToken := data["equality_signature"].(string)
@@ -861,19 +874,22 @@ func validNonnegativeInteger(value any) bool {
 	}
 }
 
-func fieldSpanBounds(value any) (int64, int64, bool) {
+func fieldSpanBounds(value any) (int64, int64, string, bool) {
 	span, ok := value.(map[string]any)
-	if !ok || !exactKeys(span, "start", "end", "unit", "offset_basis", "wire_fidelity") ||
-		span["unit"] != "byte" || span["offset_basis"] != "request_message" {
-		return 0, 0, false
+	if !ok || !exactKeys(span, "start", "end", "unit", "offset_basis", "wire_fidelity") || span["unit"] != "byte" {
+		return 0, 0, "", false
+	}
+	offsetBasis, ok := span["offset_basis"].(string)
+	if !ok || (offsetBasis != "request_message" && offsetBasis != "response_message") {
+		return 0, 0, "", false
 	}
 	wireFidelity, ok := span["wire_fidelity"].(string)
 	if !ok || (wireFidelity != "source_bytes" && wireFidelity != "reconstructed_text" && wireFidelity != "unknown") {
-		return 0, 0, false
+		return 0, 0, "", false
 	}
 	start, startOK := fieldSpanInteger(span["start"])
 	end, endOK := fieldSpanInteger(span["end"])
-	return start, end, startOK && endOK && end >= start && end <= 1<<30
+	return start, end, offsetBasis, startOK && endOK && end >= start && end <= 1<<30
 }
 
 func fieldSpanInteger(value any) (int64, bool) {
@@ -893,18 +909,18 @@ func fieldSpanInteger(value any) (int64, bool) {
 	}
 }
 
-func validFieldSourceSpan(value any) bool {
-	_, _, valid := fieldSpanBounds(value)
-	return valid
+func validFieldSourceSpan(value any, expectedBasis string) bool {
+	_, _, basis, valid := fieldSpanBounds(value)
+	return valid && basis == expectedBasis
 }
 
 func validOptionalFieldValueSpan(value, sourceSpan any) bool {
 	if value == nil {
 		return true
 	}
-	valueStart, valueEnd, valueOK := fieldSpanBounds(value)
-	sourceStart, sourceEnd, sourceOK := fieldSpanBounds(sourceSpan)
-	return valueOK && sourceOK && valueStart >= sourceStart && valueEnd <= sourceEnd
+	valueStart, valueEnd, valueBasis, valueOK := fieldSpanBounds(value)
+	sourceStart, sourceEnd, sourceBasis, sourceOK := fieldSpanBounds(sourceSpan)
+	return valueOK && sourceOK && valueBasis == sourceBasis && valueStart >= sourceStart && valueEnd <= sourceEnd
 }
 
 func validateVariantData(kind string, data map[string]any, program string) error {
