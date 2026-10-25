@@ -80,7 +80,7 @@ func TestOperationBackfillPreviewJSONDoesNotExposeBundles(t *testing.T) {
 func TestOperationBackfillCoverageAllowsCompleteCandidateWithExplicitGaps(t *testing.T) {
 	preview := OperationBackfillPreview{
 		HistoricalCaptures: 1400, Scanned: 1400, EligibleCaptures: 1362,
-		SkippedNoOperation: 7, SkippedEndpointMissing: 31,
+		SkippedNoOperation: 7, SkippedEndpointIdentityMismatch: 31,
 	}
 	finalizeOperationBackfillCoverage(&preview)
 	if preview.State != "ready" || preview.CoverageState != "partial" {

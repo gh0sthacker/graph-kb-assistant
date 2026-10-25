@@ -45,27 +45,27 @@ type OperationBackfillSample struct {
 // historical requests. It never writes graph records, receipt files or queue
 // state; Bundles remain in memory and callers must not serialize them.
 type OperationBackfillPreview struct {
-	ProjectKey             string                    `json:"project_key"`
-	State                  string                    `json:"state"`
-	CoverageState          string                    `json:"coverage_state"`
-	WriteMode              string                    `json:"write_mode"`
-	HistoricalCaptures     int                       `json:"historical_captures"`
-	Scanned                int                       `json:"scanned"`
-	RequestBytes           int64                     `json:"request_bytes"`
-	EligibleCaptures       int                       `json:"eligible_captures"`
-	OperationGroups        int                       `json:"operation_groups"`
-	NewOperationGroups     int                       `json:"new_operation_groups"`
-	AssertionLinks         int                       `json:"assertion_links"`
-	NewAssertionLinks      int                       `json:"new_assertion_links"`
-	NewEndpointEntities    int                       `json:"new_endpoint_entities"`
-	SkippedUnmapped        int                       `json:"skipped_unmapped"`
-	SkippedOversized       int                       `json:"skipped_oversized"`
-	SkippedNoOperation     int                       `json:"skipped_no_operation"`
-	SkippedEndpointMissing int                       `json:"skipped_endpoint_missing"`
-	Truncated              bool                      `json:"truncated"`
-	CandidateSHA256        string                    `json:"candidate_sha256,omitempty"`
-	OperationSamples       []OperationBackfillSample `json:"operation_samples"`
-	Bundles                []behaviorgraph.Record    `json:"-"`
+	ProjectKey                      string                    `json:"project_key"`
+	State                           string                    `json:"state"`
+	CoverageState                   string                    `json:"coverage_state"`
+	WriteMode                       string                    `json:"write_mode"`
+	HistoricalCaptures              int                       `json:"historical_captures"`
+	Scanned                         int                       `json:"scanned"`
+	RequestBytes                    int64                     `json:"request_bytes"`
+	EligibleCaptures                int                       `json:"eligible_captures"`
+	OperationGroups                 int                       `json:"operation_groups"`
+	NewOperationGroups              int                       `json:"new_operation_groups"`
+	AssertionLinks                  int                       `json:"assertion_links"`
+	NewAssertionLinks               int                       `json:"new_assertion_links"`
+	NewEndpointEntities             int                       `json:"new_endpoint_entities"`
+	SkippedUnmapped                 int                       `json:"skipped_unmapped"`
+	SkippedOversized                int                       `json:"skipped_oversized"`
+	SkippedNoOperation              int                       `json:"skipped_no_operation"`
+	SkippedEndpointIdentityMismatch int                       `json:"skipped_endpoint_identity_mismatch"`
+	Truncated                       bool                      `json:"truncated"`
+	CandidateSHA256                 string                    `json:"candidate_sha256,omitempty"`
+	OperationSamples                []OperationBackfillSample `json:"operation_samples"`
+	Bundles                         []behaviorgraph.Record    `json:"-"`
 }
 
 type OperationBackfillApplyResult struct {
@@ -202,7 +202,7 @@ func PreviewHistoricalOperationBackfill(
 		assertionSubject, _ := assertion["subject"].(string)
 		projectedEndpointID, _ := projectedEndpoint["id"].(string)
 		if assertionSubject != endpointID || projectedEndpointID != endpointID {
-			preview.SkippedEndpointMissing++
+			preview.SkippedEndpointIdentityMismatch++
 			continue
 		}
 		operationID, _ := operation["id"].(string)
@@ -282,7 +282,7 @@ func finalizeOperationBackfillCoverage(preview *OperationBackfillPreview) {
 		return
 	}
 	coveragePartial := preview.Truncated || preview.SkippedUnmapped+preview.SkippedOversized+
-		preview.SkippedNoOperation+preview.SkippedEndpointMissing > 0
+		preview.SkippedNoOperation+preview.SkippedEndpointIdentityMismatch > 0
 	if coveragePartial {
 		preview.CoverageState = "partial"
 	} else {

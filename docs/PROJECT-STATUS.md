@@ -42,9 +42,10 @@
   selected project's ordered outbox through each exact imported bundle ID;
   earlier events in the same project may be applied first. If Neo4j sync fails,
   the local graph remains committed and the outbox stays retryable. It does not
-  call Caido or send data to Hermes. The installed web-only systemd unit starts
-  with no `--project-key`, so it starts no continuous projection worker for
-  future intake jobs. This UI reports local commit and Neo4j sync separately.
+  call Caido or send data to Hermes. The checked-in systemd template remains
+  web-only by default; the installed user service has an owner-only drop-in for
+  the selected project and now starts its continuous projection worker. This
+  UI reports local commit and Neo4j sync separately.
   The maintenance operations are web-only and were not added to the MCP tool
   catalog.
 - Synthetic web-handler tests cover bounded input, response redaction,
@@ -53,9 +54,17 @@
   exclusions from a truncated, non-applyable scan.
   Focused Go packages passed: `internal/webui`, `internal/mcpserver`,
   `internal/ingest`, `internal/graphsync`, and `cmd/bb-assistant`; 81 JavaScript
-  tests and the app JavaScript syntax check passed. No backfill preview, graph
-  write, or Neo4j sync was run against the retained project, so operation-node
-  recovery and real-project delivery remain unverified.
+  tests and the app JavaScript syntax check passed. The selected retained
+  project was then previewed through the UI: all 1,400 records were scanned,
+  1,362 were eligible, 7 had no safe operation, and 31 had endpoint identity
+  mismatches. The exact candidate imported two idempotent graph bundles and
+  reported `neo4j_drain=ready`. A follow-up graph API read returned one
+  endpoint, one operation, and one observed `belongs_to_operation` assertion
+  for the selected seed. Coverage remains partial: the 38 excluded captures
+  are not linked, and a broader graph audit is still required.
+- The installed user service now runs with an owner-only, project-scoped
+  systemd drop-in and reported one projection worker in `idle` state after
+  restart. No Caido intake or Hermes call was started during this repair.
 
 ## Current delivery checkpoint (2026-10-25, vault configuration and LAN reachability)
 
