@@ -85,10 +85,9 @@ Hermes is the supported runtime harness for the local assistant. Install it and 
 
 The generated profile is stored outside the checkout with private file permissions. It enables only the local MCP server, skills, and clarification tools, and allowlists 15 named `bb_*` tools for local graph/KB inspection and the reviewed consultation workflow. Running `setup-hermes` or `run-hermes` reconciles the managed tool list to those 15 names: missing approved tools are added and stale names are removed, while the rest of the Hermes profile is preserved. Unmanaged profiles are left untouched. MCP resources and prompts are disabled; terminal, file, browser, web, computer-use, and code-execution toolsets are not enabled for this profile. `mcp test` should discover exactly the 15 allowlisted tools, including no raw-capture body tool. This checks tool discovery only; model-backed analysis still requires a separately selected and reviewed provider.
 
-The harness and model provider are separate choices. Hermes can verify MCP
-connectivity before a provider is selected; configure one with
-`./scripts/run-hermes model` when ready. The current managed profile uses
-ChatGPT/Codex Subscription with `gpt-6-luna`, and a model-backed synthetic
+The harness and model provider are separate choices. The current managed
+profile uses ChatGPT/Codex Subscription with `gpt-6-luna`; inspect or change it
+with `./scripts/run-hermes model`. A model-backed synthetic
 consultation/resume has passed. Review the provider's data handling before
 sending real capture content; the synthetic check does not verify model-backed
 hypothesis impact validation.

@@ -1,0 +1,19 @@
+[Unit]
+Description=Graph KB Assistant web application
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/bb/graph-kb-assistant
+Environment=HOME=%h
+Environment=XDG_DATA_HOME=%h/.local/share
+Environment=BB_ASSISTANT_DATA_HOME=%h/.local/share/bb-graph-assistant
+ExecStart=%h/bb/graph-kb-assistant/scripts/bb-assistant serve --addr 127.0.0.1:8765
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
