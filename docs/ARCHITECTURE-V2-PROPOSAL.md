@@ -352,16 +352,22 @@ KB parity acceptance requires all of the following:
   query-parity item remains incomplete or unverified.
 
 Current verification (2026-10-25): the corrected chunker was compared
-offline with RedAmon's `ChunkStrategy` across the 161,240 documents in the
-current local snapshot and matched all 162,398 generated chunk texts and
-titles. The installed index is still stale: 5,801 chunk texts, 161,084 titles,
-1,507 spans, and six per-document chunk counts differ from the corrected
-output. E5 generation was stopped at 6,560/162,413 vectors pending index
-refresh; no vector snapshot is ready. ExploitDB terms remain unresolved, and
-the active deployed RedAmon profile/snapshot is unknown. These results verify
-the algorithm against the current documents, not KB parity; delivery remains
-`PARTIAL` until the installed corpus, complete vector generation, and
-representative query results pass the acceptance criteria above.
+offline with RedAmon's `ChunkStrategy` across all 161,240 stored source
+documents and matched all 162,398 generated chunk texts and titles. The
+`rechunk` command has since been applied to the installed private index from
+those stored documents, without fetching new sources. Snapshot
+`0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216` has
+162,398 chunk and FTS rows; SQLite `quick_check` returned `ok`. At the latest
+checkpoint, 7,712 of 162,390 eligible content chunks had staged E5 vectors.
+One resumable worker was confirmed running, but the complete vector snapshot
+is not published yet. The index remains `PARTIAL`: ExploitDB terms remain
+unresolved, the active deployed RedAmon profile/snapshot is unknown, and
+representative search-output parity has not been measured. Metadata filters
+for `min_cvss` and `severity` were added to the Go search/MCP contract and
+their focused synthetic tests pass. These results verify chunking and selected
+retrieval behavior, not full KB parity; delivery remains `PARTIAL` until the
+source, vector, deployed-snapshot, and representative query criteria above
+are satisfied.
 
 The `bb-assistant-kb rechunk` command is implemented to refresh the installed
 index from already stored source documents, with no source fetch. It uses
@@ -370,8 +376,10 @@ Go readers refuse to serve a partially refreshed index. Unchanged
 content-bound chunk identities keep their vectors, obsolete vectors are
 removed, and changed chunks remain pending in the resumable embedding process.
 Synthetic tests cover interruption-state reporting, reader fail-closed behavior,
-source-span validation, FTS title replacement, vector reuse, and readiness. It
-has not yet been applied to the installed 2.1 GB index.
+source-span validation, FTS title replacement, vector reuse, and readiness. The
+rechunk was applied to the installed private index; its current partial vector
+state and remaining parity gaps are recorded in the verification immediately
+above and in `docs/PROJECT-STATUS.md`.
 
 ## Review scope and limits
 
