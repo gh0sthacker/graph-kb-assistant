@@ -711,32 +711,25 @@ func (i *Index) vectorCandidates(
 	if queryNorm == 0 {
 		return nil, nil, "lexical_fallback"
 	}
-	statement := `SELECT e.chunk_id,e.vector FROM chunk_embeddings e
+	statement := `SELECT e.chunk_id,e.vector,c.source_name FROM chunk_embeddings e
 		JOIN chunks c ON c.chunk_id=e.chunk_id
 		WHERE e.model_name=? AND e.dimensions=?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
 	args := []any{modelName, dimensions}
-	if len(sources) > 0 {
-		placeholders := make([]string, len(sources))
-		for n, source := range sources {
-			placeholders[n] = "?"
-			args = append(args, source)
-		}
-		statement += " AND c.source_name IN (" + strings.Join(placeholders, ",") + ")"
-	}
 	rows, err := tx.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, nil, "lexical_fallback"
 	}
 	type scored struct {
-		id    string
-		score float64
+		id     string
+		source string
+		score  float64
 	}
 	all := make([]scored, 0)
 	for rows.Next() {
-		var id string
+		var id, source string
 		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil || len(blob) != dimensions*4 {
+		if err := rows.Scan(&id, &blob, &source); err != nil || len(blob) != dimensions*4 {
 			_ = rows.Close()
 			return nil, nil, "lexical_fallback"
 		}
@@ -751,7 +744,7 @@ func (i *Index) vectorCandidates(
 			norm += float64(value) * float64(value)
 		}
 		if norm > 0 {
-			all = append(all, scored{id, dot / (queryNorm * math.Sqrt(norm))})
+			all = append(all, scored{id: id, source: source, score: dot / (queryNorm * math.Sqrt(norm))})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -764,6 +757,23 @@ func (i *Index) vectorCandidates(
 	sort.SliceStable(all, func(a, b int) bool { return all[a].score > all[b].score })
 	if len(all) > limit {
 		all = all[:limit]
+	}
+	// RedAmon asks FAISS for one global candidate pool, then applies the
+	// include_sources filter while fetching the fused candidates from Neo4j.
+	// Filtering before top-k changes which vectors can enter RRF and can fill
+	// the pool with lower-ranked source-specific rows that RedAmon would omit.
+	if len(sources) > 0 {
+		allowed := make(map[string]struct{}, len(sources))
+		for _, source := range sources {
+			allowed[source] = struct{}{}
+		}
+		filtered := all[:0]
+		for _, item := range all {
+			if _, ok := allowed[item.source]; ok {
+				filtered = append(filtered, item)
+			}
+		}
+		all = filtered
 	}
 	ids, scores := make([]string, 0, len(all)), make(map[string]float64, len(all))
 	for _, item := range all {
