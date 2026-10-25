@@ -9,10 +9,10 @@ Start Neo4j using the private configuration described in [deploy/neo4j](deploy/n
 ```sh
 ./scripts/bb-assistant neo4j-check
 ./scripts/bb-assistant neo4j-backfill --project-key <registered-project-sha256>
-./scripts/bb-assistant web-ui
+./scripts/bb-assistant serve
 ```
 
-Open `http://127.0.0.1:8765/`. Use `./scripts/bb-assistant-mcp` to launch the read-only MCP server. Runtime data and credentials stay outside this repository.
+Open `http://127.0.0.1:8765/`. To run the durable projection worker for selected registered projects, pass each project key explicitly with `--project-key <sha256>`. Without project keys, `serve` runs the web UI only. MCP clients launch the separate stdio server with `./scripts/bb-assistant-mcp`; both launchers read the same private runtime configuration. The managed server does not start Caido intake or call a model. Runtime data and credentials stay outside this repository.
 
 In the graph inspector, **Focus on direct relationships** narrows the display to the selected node and its immediate neighbors from the already-loaded graph. **All nodes** restores that graph slice. Focusing changes only the view; it does not reread Caido or change graph coverage.
 
@@ -26,7 +26,7 @@ commands. They preserve accepted projection jobs and require an exact candidate 
 
 Create and restore bounded, private project archives with [`project-backup` and `project-restore`](docs/PROJECT-BACKUP-RESTORE.md). Restore emits a fresh local capability summary; it does not establish Caido-history completeness or Neo4j parity.
 
-See [docs/SETUP.md](docs/SETUP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for setup, data boundaries, and verified coverage.
+See [docs/SETUP.md](docs/SETUP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for setup, data boundaries, and verified coverage. The managed launcher has synthetic lifecycle coverage; Neo4j runtime and model-backed consultation still require separate verification.
 
 ## Development
 

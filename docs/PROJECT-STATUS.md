@@ -9,10 +9,22 @@
   and completion criterion per assignment.
 - The user-facing product is not declared complete. Local code and synthetic
   acceptance do not establish working-data readiness or model-backed analysis.
-- The next delivery work is a common launch/configuration path, followed by one
-  browser evidence → comparison → saved/resumed consultation acceptance. Current
-  runtime Neo4j delivery and existing-vault use remain unverified in this check;
-  model-backed Hermes additionally needs the user's provider/data boundary.
+- Added `bb-assistant serve` as the common managed Go entry point for the web UI
+  and explicitly selected Neo4j projection workers. It validates project keys,
+  acquires the existing per-project lease, drains workers on shutdown, and
+  reports graph connectivity as unchecked. Focused lifecycle/CLI tests passed;
+  no Neo4j container, live project, or Caido process was started.
+- A real browser acceptance against a disposable SQLite project verified graph
+  navigation, exact stored HTTP viewing, a byte comparison across two capture
+  revisions, a four-span redacted packet with synthetic Authorization headers
+  removed, and saving an unaccepted local review session. The session was not
+  accepted for Hermes access and no provider/model call was made. The session
+  auto-expires with the disposable fixture.
+- The next step is operator review/acceptance of that exact test packet and
+  completion of the candidate/save/resume browser path. Hermes ChatGPT OAuth is
+  pending the user's own sign-in in the opened browser; its first login attempt
+  timed out before browser completion. Current runtime Neo4j delivery and
+  existing-vault use remain unverified;
   KB expansion and target recon coverage are outside this delivery criterion.
 
 ## Shared launcher runtime configuration — FIXED IN SOURCE (2026-10-25)

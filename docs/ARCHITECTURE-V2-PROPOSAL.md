@@ -257,6 +257,16 @@ causes and next available action.
 
 ## 8. Application boundaries and operations
 
+The source now includes `bb-assistant serve`, a managed Go entry point that
+owns the loopback web server and projection workers for explicitly supplied
+project keys. Omitting keys starts web-only compatibility mode. Worker loops
+use the existing durable SQLite queue, Neo4j projector and per-project lease;
+shutdown cancels the loops, drains HTTP, and waits for leases to release. This
+is process-lifecycle coverage, not proof of Neo4j connectivity, parity, or a
+working-data launch. The stdio MCP launcher remains client-owned and separate;
+both launchers load the same application configuration. The managed process
+does not start Caido intake or a model/provider.
+
 Use one Go application with internal modules for intake, projection, graph
 queries, evidence, consultation and project state. HTTP, MCP and CLI are thin
 adapters over shared typed use cases. Keep provider and Hermes adapters outside
