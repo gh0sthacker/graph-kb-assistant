@@ -2,24 +2,27 @@
 
 ## KB parity checkpoint (2026-10-25)
 
-- The retrieval runtime now follows the pinned RedAmon stages in the Go
-  application: lexical/vector reciprocal-rank fusion (`k=60`), source boosts,
-  BGE cross-encoder reranking of the top 30, sigmoid score mapping, and MMR
-  selection (`lambda=0.65`). The E5/BGE revisions are pinned and have been
-  exercised through the Go-to-local-model-worker path.
-- NVD search content now follows RedAmon's exact normalization order: English
-  description, optional CVSS 3.1/3.0 score and lower-case severity, and the
-  first ten CPE criteria, including RedAmon's 480-token atomic-record clipping
-  and ellipsis. Full upstream JSON remains locally preserved with a separate
-  digest; model-facing KB source reads expose only normalized text.
-  Offline provider and SQLite snapshot checks cover this split.
-- These code-level matches do **not** make the corpus identical. The approved
-  seven-family source manifest still has unresolved source coverage, including
-  ExploitDB dataset rights. A full NVD snapshot is being fetched; import and
-  vector indexing are pending, so deployed corpus completeness and retrieval
-  quality remain unverified. Keep the overall KB state `PARTIAL` until a
-  completed snapshot, matching source counts, vectors, and retrieval checks are
-  recorded.
+- The local RedAmon checkout is pinned at `cf1b9e92`. Its `full` profile
+  declares seven families: ToolDocs, GTFOBins, LOLBAS, OWASP, ExploitDB, NVD,
+  and Nuclei. The Graph Assistant manifest names the same seven families and
+  uses RedAmon's retrieval constants: hybrid RRF (`k=60`), the same per-source
+  boosts, BGE cross-encoder reranking over 30 candidates, sigmoid score mapping,
+  and MMR (`lambda=0.65`). The E5/BGE model revisions are pinned. This is
+  pipeline/configuration parity, not corpus parity.
+- The active local snapshot is `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`:
+  161,240 source documents and 162,413 chunks. It currently contains six
+  populated families; ExploitDB has no imported rows. Full NVD data is already
+  imported (146,940 records). E5 vector generation is active and resumable;
+  3,648 of 162,413 chunk vectors were present at this checkpoint. Retrieval
+  parity is unverified until vector generation and source-level comparisons
+  finish.
+- ExploitDB remains blocked for this build. The pinned GitLab repository carries
+  a GPL-2.0-or-later license, while the official website Terms restrict
+  reproducing Service content without express written permission. The project
+  manifest records this unresolved dataset-terms review; no license conclusion
+  is inferred from the repository license alone ([pinned repository license](https://gitlab.com/exploit-database/exploitdb/-/blob/6a57361db10b709c4b4f339c09ee250acc2d8aac/LICENSE.md), [official Terms](https://www.exploit-db.com/terms)).
+  Keep the overall KB state `PARTIAL` until this is resolved, the seventh source
+  is imported, vectors are complete, and retrieval checks pass.
 
 ## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 
