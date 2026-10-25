@@ -39,4 +39,12 @@ Backfill replaces only that project's Neo4j graph snapshot in one transaction.
 The current SQLite graph remains available as the recovery copy. This command
 does not update Caido checkpoints or mark Caido history complete.
 
+The Compose profile reserves a 2 GiB initial / 8 GiB maximum heap, 1 GiB
+page cache, and up to 6 GiB for an individual or total transaction. These
+limits support atomic replacement of a large project graph; they are ceilings,
+not preallocated reservations. Allow roughly 12 GiB of host memory for Neo4j
+and keep swap available during a large backfill. If the host has less memory,
+reduce the transaction limits and heap together; a backfill that exceeds the
+transaction cap rolls back and leaves the prior project snapshot intact.
+
 Run the application through `scripts/bb-assistant` (or `scripts/bb-assistant-mcp`) so graph reads and new graph imports use Neo4j and the durable SQLite outbox. `neo4j-sync --project-key <registered-project-sha256>` retries pending outbox events. If Neo4j is unavailable, SQLite keeps the committed events for retry and sync remains `partial`.

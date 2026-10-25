@@ -2,11 +2,33 @@ package neo4jstore
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
+	"github.com/neo4j/neo4j-go-driver/v6/neo4j"
 )
+
+func TestSafeNeo4jErrorCodeExposesOnlyValidatedCode(t *testing.T) {
+	serverError := &neo4j.Neo4jError{Code: "Neo.ClientError.Statement.ParameterMissing", Msg: "private query value"}
+	var converted *neo4j.Neo4jError
+	if !errors.As(serverError, &converted) {
+		t.Fatal("Neo4j error was not recognized by errors.As")
+	}
+	if !neo4jErrorCodePattern.MatchString(serverError.Code) {
+		t.Fatal("test Neo4j error code did not match the safe code pattern")
+	}
+	if got := safeNeo4jErrorCode(serverError); got != serverError.Code {
+		t.Fatalf("safe error code = %q, want %q", got, serverError.Code)
+	}
+	if got := safeNeo4jErrorCode(errors.New("private connection detail")); got != "Neo4j.DriverError.Unknown" {
+		t.Fatalf("unknown error code = %q", got)
+	}
+	if got := safeNeo4jErrorCode(&neo4j.Neo4jError{Code: "unexpected secret value", Msg: "private"}); got != "Neo4j.DriverError.Unknown" {
+		t.Fatalf("untrusted server code was not rejected: %q", got)
+	}
+}
 
 func testSnapshot(projectKey string) behaviorgraph.Record {
 	endpointID := "endpoint-" + strings.Repeat("1", 64)

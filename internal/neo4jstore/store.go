@@ -33,6 +33,7 @@ const (
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var signatureDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var neo4jErrorCodePattern = regexp.MustCompile(`^Neo[.](ClientError|TransientError|DatabaseError)[.][A-Za-z0-9_.]+$`)
 
 var ErrSignatureIndexUnavailable = errors.New("Neo4j project signature index is unavailable")
 var ErrFieldValueIndexUnavailable = errors.New("Neo4j project field-value index is unavailable")
@@ -243,10 +244,10 @@ func (s *Store) ReplaceProjectSnapshot(ctx context.Context, projectKey string, s
 				map[string]any{"project_key": projectKey, "rows": recordRows(prepared.Records[start:end])},
 			)
 			if runErr != nil {
-				return nil, errors.New("Neo4j graph records could not be written")
+				return nil, fmt.Errorf("Neo4j graph records batch %d could not be written (%s)", start/writeBatchSize, safeNeo4jErrorCode(runErr))
 			}
 			if _, runErr = result.Consume(ctx); runErr != nil {
-				return nil, errors.New("Neo4j graph records could not be written")
+				return nil, fmt.Errorf("Neo4j graph records batch %d could not be written (%s)", start/writeBatchSize, safeNeo4jErrorCode(runErr))
 			}
 		}
 		for start := 0; start < len(prepared.Refs); start += writeBatchSize {
@@ -836,10 +837,10 @@ func writePreparedGraph(ctx context.Context, tx neo4j.ManagedTransaction, projec
 			map[string]any{"project_key": projectKey, "rows": recordRows(prepared.Records[start:end])},
 		)
 		if runErr != nil {
-			return errors.New("Neo4j graph records could not be written")
+			return fmt.Errorf("Neo4j graph records batch %d could not be written (%s)", start/writeBatchSize, safeNeo4jErrorCode(runErr))
 		}
 		if _, runErr = result.Consume(ctx); runErr != nil {
-			return errors.New("Neo4j graph records could not be written")
+			return fmt.Errorf("Neo4j graph records batch %d could not be written (%s)", start/writeBatchSize, safeNeo4jErrorCode(runErr))
 		}
 	}
 	for start := 0; start < len(prepared.Refs); start += writeBatchSize {
@@ -879,6 +880,16 @@ func writePreparedGraph(ctx context.Context, tx neo4j.ManagedTransaction, projec
 		}
 	}
 	return nil
+}
+
+// safeNeo4jErrorCode preserves actionable server diagnostics without
+// exposing messages that may contain query parameters or local values.
+func safeNeo4jErrorCode(err error) string {
+	var neo4jErr *neo4j.Neo4jError
+	if errors.As(err, &neo4jErr) && neo4jErr != nil && neo4jErrorCodePattern.MatchString(neo4jErr.Code) {
+		return neo4jErr.Code
+	}
+	return "Neo4j.DriverError.Unknown"
 }
 
 func resultCount(ctx context.Context, result neo4j.ResultWithContext) (int64, error) {

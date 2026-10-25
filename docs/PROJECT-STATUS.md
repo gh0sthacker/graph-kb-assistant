@@ -2102,4 +2102,23 @@ This repository is an early public alpha. The following boundaries are deliberat
   API/Neo4j response, Caido import coverage, queue delivery, KB readiness, and
   Hermes consultation.
 
+## Hermes and local Neo4j runtime (2026-10-25) — PARTIAL
+
+- Hermes is configured for `openai-codex` with `gpt-6-luna`; a synthetic-only
+  smoke completed successfully. No captured exchange was sent to the model.
+- The local web UI returned HTTP 200, and Neo4j connectivity returned `ready`
+  after restart. These checks do not establish populated graph parity or remote
+  accessibility.
+- The selected-project backfill did not reach parity. It first failed because
+  the host root filesystem was full (8 KiB available); Neo4j's transaction log
+  write was rejected. Only the regenerable Go build cache was removed, which
+  restored 8.3 GiB free, later measured at 11 GiB. A second backfill was
+  interrupted before host memory fell below 1 GiB available. Neo4j was
+  restarted and is responsive; both attempts remain unverified/partial.
+- Latest observed capture metadata remains 1,369 graph-mapped and 31 unmapped;
+  projection queue had 53 pending, 2 dead-letter and 1,345 applied. Historical
+  source reconciliation, vault-key recovery, full graph parity, the failed-job
+  recovery path and external access remain gaps. Captured bodies were not read;
+  Caido was not contacted.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.

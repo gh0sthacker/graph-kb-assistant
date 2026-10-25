@@ -4,9 +4,12 @@ services:
     restart: unless-stopped
     environment:
       NEO4J_AUTH: ${NEO4J_AUTH:?set NEO4J_AUTH in the private runtime env file}
-      NEO4J_server_memory_heap_initial__size: 512m
-      NEO4J_server_memory_heap_max__size: 1G
-      NEO4J_server_memory_pagecache_size: 512m
+      NEO4J_server_memory_heap_initial__size: 2G
+      NEO4J_server_memory_heap_max__size: 8G
+      NEO4J_server_memory_pagecache_size: 1G
+      NEO4J_db_memory_transaction_max: 6G
+      NEO4J_db_memory_transaction_total_max: 6G
+      NEO4J_dbms_memory_transaction_total_max: 6G
     ports:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
