@@ -1,5 +1,26 @@
 # Project status and known limitations
 
+## Current delivery checkpoint (2026-10-25, bounded retained-evidence runtime check)
+
+- The local web application served one registered project and its Neo4j-backed
+  operation catalog: 131 operations and 1,400 locally indexed observations.
+  Catalog coverage remains `partial`; its response explicitly excludes
+  unreconciled source history and browser/JavaScript coverage.
+- A bounded graph view for one multi-observation operation returned 69 entities,
+  120 assertions, and provenance for 31 exact capture revisions. One selected
+  revision's request and response were opened through the local evidence API;
+  both were complete reconstructed-text messages (342 and 228 bytes).
+- The exact-revision comparison API returned HTTP 200 for two revisions in the
+  same bounded operation slice. The requests differed (362 compared bytes); the
+  responses were byte-identical (228 compared bytes). Message content, project
+  identity, request IDs, revision IDs, and graph properties are intentionally
+  omitted from this status record.
+- This confirms the retained local path through the web API, vault decryption,
+  Neo4j graph lookup, and exact request/response comparison for the selected
+  sample. It does not establish full project history coverage, business meaning,
+  or Hermes/provider safety for real capture content. No Hermes model call,
+  Caido access, graph write, queue drain, or KB operation was performed.
+
 ## Current delivery checkpoint (2026-10-25, vault configuration and LAN reachability)
 
 - The existing vault key was found in the private file
