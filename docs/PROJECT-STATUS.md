@@ -1,5 +1,32 @@
 # Project status and known limitations
 
+## Current delivery checkpoint (2026-10-25, endpoint-identity repair runtime verification)
+
+- After `dcbfe07`, the local maintenance preview scanned all 1,400 retained
+  historical captures without truncation. It selected 1,393 eligible captures,
+  reconstructed 31 request-derived endpoint entities and 31 operation links,
+  and retained 7 captures with no safe operation as explicit exclusions.
+  Coverage remains `partial`; the 31 legacy endpoint-ID differences are now
+  represented with canonical request-derived endpoints instead of being
+  dropped, while the legacy IDs themselves are not rewritten.
+- Applying the exact preview committed two idempotent graph bundles; the
+  selected project's ordered Neo4j outbox drain returned `ready`. A subsequent
+  operation-seeded graph API read returned two entities (one endpoint and one
+  operation) and one `belongs_to_operation` assertion. The operation catalog
+  returned 131 operations and remains partial. Request/response bodies and
+  opaque IDs were not recorded in this checkpoint.
+- The user service is active. The local UI and the Proxmox LAN-forwarded UI
+  each returned HTTP 200 from the application host. Reachability from a
+  separate client device remains unverified. Its selected-project worker
+  reports `idle`; Caido intake is `not_started`, and model execution was not
+  invoked. Hermes remains configured for `openai-codex` / `gpt-6-luna`; no
+  captured exchange was sent to it during this repair.
+- This supersedes the earlier Stage 3 preview below, which reported 31 legacy
+  endpoint-ID differences as excluded. Remaining gaps include the 7 captures
+  without a safe operation, external-device reachability, and complete
+  browser/JavaScript/application-map coverage. Overall delivery remains
+  `PARTIAL`.
+
 ## Current delivery checkpoint (2026-10-25, bounded retained-evidence runtime check)
 
 - The local web application served one registered project and its Neo4j-backed
