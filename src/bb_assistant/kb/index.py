@@ -296,8 +296,10 @@ class KBIndex:
             self._validate_chunk(chunk)
             source = source_lookup.get((chunk.source_name, chunk.source_id))
             if source is not None:
-                if chunk.source_sha256 != source.content_sha256 or source.text[chunk.start_char:chunk.end_char] != chunk.text:
-                    raise ValueError("KB chunk does not match its source document span")
+                if chunk.source_sha256 != source.content_sha256 or chunk.end_char > len(source.text):
+                    raise ValueError("KB chunk source span does not match its source document")
+                if chunk.metadata.get("source_span_exact", True) and source.text[chunk.start_char:chunk.end_char] != chunk.text:
+                    raise ValueError("Exact KB chunk does not match its source document span")
 
         count = 0
         with self.connect(_maintenance_lock_held=True) as connection:
@@ -691,7 +693,9 @@ class KBIndex:
             not isinstance(chunk.ordinal, int) or isinstance(chunk.ordinal, bool) or chunk.ordinal < 0
             or not isinstance(chunk.start_char, int) or isinstance(chunk.start_char, bool) or chunk.start_char < 0
             or not isinstance(chunk.end_char, int) or isinstance(chunk.end_char, bool)
-            or chunk.end_char - chunk.start_char != len(chunk.text)
+            or chunk.end_char < chunk.start_char
+            or (chunk.metadata.get("source_span_exact", True)
+                and chunk.end_char - chunk.start_char != len(chunk.text))
         ):
             raise ValueError("KB chunk span does not match its text length")
         expected_chunk_sha256 = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()

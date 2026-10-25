@@ -225,7 +225,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "source_revision": hit.source_revision,
             "source_sha256": hit.source_sha256,
             "chunk_sha256": hit.chunk_sha256,
-            "span": {"start_char": hit.start_char, "end_char": hit.end_char},
+            "span": {
+                "start_char": hit.start_char, "end_char": hit.end_char,
+                "exact": hit.metadata.get("source_span_exact", True),
+            },
             "bm25": hit.bm25,
             "rank_score": hit.rank_score,
             "vector_score": hit.vector_score,

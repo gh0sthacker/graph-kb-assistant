@@ -90,8 +90,10 @@ class CanonicalChunk:
     def from_document(
         cls, document: SourceDocument, ordinal: int, start_char: int, end_char: int, text: str,
         *, title: str | None = None, metadata: dict[str, str | int | float | bool | None] | None = None,
+        source_span_exact: bool = True,
     ) -> "CanonicalChunk":
-        if ordinal < 0 or start_char < 0 or end_char < start_char or end_char - start_char != len(text) or not text.strip():
+        if (ordinal < 0 or start_char < 0 or end_char < start_char
+                or (source_span_exact and end_char - start_char != len(text)) or not text.strip()):
             raise ValueError("Chunk ordinal must be nonnegative and text must not be blank")
         chunk_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         identity = {
@@ -118,113 +120,118 @@ class CanonicalChunk:
             source_revision=document.source_revision,
             license_id=document.license_id,
             attribution=document.attribution,
-            metadata=document.metadata if metadata is None else metadata,
+            metadata={**(document.metadata if metadata is None else metadata),
+                      **({} if source_span_exact else {"source_span_exact": False})},
             source_sha256=document.content_sha256,
             chunk_sha256=chunk_hash,
         )
 
 
 def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_chars: int = 0) -> tuple[CanonicalChunk, ...]:
-    """Chunk like RedAmon while keeping exact, non-overlapping source spans.
+    """Match RedAmon chunk content/titles and retain a truthful source span.
 
-    RedAmon estimates tokens as ``len(text) // 4`` and uses a 480-token cap.
-    Markdown playbooks are grouped on H2 boundaries and split on paragraphs;
-    structured feeds stay atomic and oversized records are clipped at the cap.
-    The stored chunk is always an exact substring of its source document so
-    hashes and citations remain independently verifiable.
+    RedAmon trims sections, normalizes merged paragraph separators and appends
+    an ellipsis to clipped records. Non-literal chunks therefore carry a
+    covering source span marked ``source_span_exact=False`` in metadata.
     """
     if max_chars < 256 or overlap_chars != 0:
         raise ValueError("RedAmon-compatible chunks require max_chars >= 256 and zero overlap")
-    text = document.text
-    if not text:
+    if not document.text:
         return ()
-    markdown = document.source_name in {"tool_docs", "owasp"}
-    ranges: list[tuple[int, int, str, bool]] = []
-    if markdown:
-        ranges = _markdown_ranges(text, max_chars)
-    else:
-        ranges = _structured_ranges(text, max_chars)
-    metadata = dict(document.metadata)
+    rendered = (_markdown_chunks(document.text, max_chars)
+                if document.source_name in {"tool_docs", "owasp"}
+                else _structured_chunks(document, max_chars))
     chunks = []
-    for start, end, title, truncated in ranges:
-        chunk_metadata = {**metadata, "chunk_truncated": truncated} if truncated else metadata
+    cursor = 0
+    for content, title, truncated in rendered:
+        start, end, exact = _source_span(document.text, content, cursor)
+        metadata = {**document.metadata, "chunk_truncated": True} if truncated else document.metadata
         chunks.append(CanonicalChunk.from_document(
-            document, len(chunks), start, end, text[start:end], title=title, metadata=chunk_metadata,
+            document, len(chunks), start, end, content, title=title, metadata=metadata,
+            source_span_exact=exact,
         ))
+        cursor = end
     return tuple(chunks)
 
 
 def _estimated_tokens(text: str) -> int:
-    return len(text.strip()) // 4
+    return len(text) // 4
 
 
-def _bounded_end(text: str, start: int, limit: int) -> tuple[int, bool]:
-    end = min(len(text), start + limit)
-    if end < len(text):
-        whitespace = text.rfind(" ", start, end)
-        if whitespace > start + limit // 2:
-            end = whitespace
-        return end, True
-    return end, False
+def _structured_chunks(document: SourceDocument, limit: int) -> list[tuple[str, str, bool]]:
+    content = document.text
+    if _estimated_tokens(content) <= limit // 4:
+        return [(content, document.title, False)]
+    content = content[:limit].rsplit(" ", 1)[0] + "..."
+    return [(content, document.title, True)]
 
 
-def _record_title(text: str, start: int, fallback: str) -> str:
-    first = next((line.strip() for line in text[start:].splitlines() if line.strip()), "")
-    return first.lstrip("#").strip() or fallback
-
-
-def _structured_ranges(text: str, limit: int) -> list[tuple[int, int, str, bool]]:
-    """One chunk per structured record; clip oversized records like RedAmon."""
-    end, clipped = _bounded_end(text, 0, limit)
-    return [(0, end, _record_title(text, 0, "Record"), clipped)]
-
-
-def _markdown_ranges(text: str, limit: int) -> list[tuple[int, int, str, bool]]:
+def _markdown_chunks(text: str, limit: int) -> list[tuple[str, str, bool]]:
     import re
 
-    starts = [match.start() for match in re.finditer(r"(?m)^##\s", text)]
-    starts.insert(0, 0)
-    sections = [(start, starts[index + 1] if index + 1 < len(starts) else len(text))
-                for index, start in enumerate(starts)]
-    sections = [(start, end) for start, end in sections if text[start:end].strip()]
-    grouped: list[tuple[int, int, str]] = []
-    pending: tuple[int, int, str] | None = None
-    for start, end in sections:
-        title = _record_title(text, start, "Markdown section")
-        if pending is not None:
-            if _estimated_tokens(text[pending[0]:end]) <= limit // 4:
-                pending = (pending[0], end, pending[2])
-                continue
-            grouped.append(pending)
-            pending = None
-        if _estimated_tokens(text[start:end]) < 128:
-            pending = (start, end, title)
-        else:
-            grouped.append((start, end, title))
-    if pending is not None:
-        grouped.append(pending)
+    sections = [section.strip() for section in re.split(r"(?m)(?=^##\s)", text) if section.strip()]
+    parsed = []
+    for section in sections:
+        lines = section.split("\n", 1)
+        parsed.append((lines[0].lstrip("#").strip(), section.strip()))
 
-    result: list[tuple[int, int, str, bool]] = []
-    for start, end, title in grouped:
-        cursor = start
-        parts: list[tuple[int, int, bool]] = []
-        while cursor < end:
-            if _estimated_tokens(text[cursor:end]) <= limit // 4:
-                parts.append((cursor, end, False))
-                break
-            hard_end = min(end, cursor + limit)
-            boundary = text.rfind("\n\n", cursor, hard_end)
-            if boundary > cursor:
-                chunk_end = boundary
-                clipped = False
+    merged: list[tuple[str, str]] = []
+    pending: tuple[str, str] | None = None
+    for title, content in parsed:
+        if pending is not None:
+            combined = pending[1] + "\n\n" + content
+            if _estimated_tokens(combined) <= limit // 4:
+                pending = (pending[0], combined)
+                continue
+            merged.append(pending)
+            pending = None
+        if _estimated_tokens(content) < 128:
+            pending = (title, content)
+        else:
+            merged.append((title, content))
+    if pending is not None:
+        merged.append(pending)
+
+    result: list[tuple[str, str, bool]] = []
+    for title, content in merged:
+        if _estimated_tokens(content) <= limit // 4:
+            result.append((content, title, False))
+            continue
+        paragraphs = re.split(r"\n\n+", content)
+        current = ""
+        parts: list[str] = []
+        for paragraph in paragraphs:
+            candidate = (current + "\n\n" + paragraph).strip() if current else paragraph
+            if _estimated_tokens(candidate) > limit // 4 and current:
+                parts.append(current.strip())
+                current = paragraph
             else:
-                chunk_end, clipped = _bounded_end(text, cursor, limit)
-                chunk_end = min(chunk_end, end)
-            parts.append((cursor, chunk_end, clipped))
-            cursor = chunk_end
-            while cursor < end and text[cursor].isspace():
-                cursor += 1
-        for part, (part_start, part_end, clipped) in enumerate(parts, start=1):
-            part_title = f"{title} (part {part})" if len(parts) > 1 else title
-            result.append((part_start, part_end, part_title, clipped))
+                current = candidate
+        if current.strip():
+            parts.append(current.strip())
+        for part, chunk_text in enumerate(parts, start=1):
+            part_title = f"{title} (part {part})" if part > 1 or len(paragraphs) > 1 else title
+            result.append((chunk_text, part_title, False))
     return result
+
+
+def _source_span(source: str, chunk: str, cursor: int) -> tuple[int, int, bool]:
+    exact_start = source.find(chunk, cursor)
+    if exact_start >= 0:
+        return exact_start, exact_start + len(chunk), True
+    searchable = chunk[:-3] if chunk.endswith("...") else chunk
+    literal_start = source.find(searchable, cursor)
+    if literal_start >= 0:
+        return literal_start, literal_start + len(searchable), False
+    prefix = searchable[:min(80, len(searchable))].rstrip()
+    suffix = searchable[-min(80, len(searchable)):].lstrip()
+    start = source.find(prefix, cursor) if prefix else -1
+    if start < 0:
+        first_line = next((line.strip() for line in chunk.splitlines() if line.strip()), "")
+        prefix = first_line[:min(80, len(first_line))]
+        start = source.find(prefix, cursor) if prefix else -1
+    if start < 0:
+        raise ValueError("Cannot map RedAmon-compatible chunk to source text")
+    suffix_start = source.find(suffix, start + len(prefix), min(len(source), start + len(chunk) + 4096)) if suffix else -1
+    end = suffix_start + len(suffix) if suffix_start >= start else min(len(source), start + len(searchable))
+    return start, end, source[start:end] == chunk

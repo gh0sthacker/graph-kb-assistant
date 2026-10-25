@@ -2534,3 +2534,33 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   dataset-specific reuse terms; the KB is therefore not identical to RedAmon
   yet. The pinned source corpus and retrieval settings are the parity target,
   while snapshot schema and index storage remain application-owned.
+
+### Chunking parity correction — 2026-10-25 (PARTIAL)
+
+- A full offline comparison against RedAmon's checked-out `ChunkStrategy`
+  covered all 161,240 documents currently stored in the local snapshot. The
+  corrected Graph Assistant chunker produced 162,398 chunks with zero
+  text/title mismatches against that algorithm. This verifies chunk algorithm
+  parity for the current document set only; it does not establish source-set,
+  active-profile, vector, or query-result parity.
+- The imported SQLite index has not yet been rebuilt from the corrected
+  chunker. Comparing its current rows with the corrected output found 5,801
+  chunk-content mismatches, 161,084 chunk-title mismatches, 1,507 source-span
+  changes, and six documents with a different chunk count. Its current count
+  remains 162,413 chunks. The live index therefore remains non-identical.
+- The embedding process was stopped cleanly at 6,560/162,413 vectors because
+  it was embedding the stale chunk snapshot. Its staging marker is not a ready
+  vector snapshot; vector retrieval is unavailable until the corrected index
+  is installed and embedding completes.
+- Source-set parity remains `PARTIAL`: the index contains six populated
+  families, while ExploitDB remains blocked by unresolved dataset reuse terms.
+  The checked-out RedAmon profile defaults to `lite`; the parity target in the
+  project plan is `full`, and the active deployed RedAmon snapshot has not been
+  identified. No exact KB parity claim is justified yet.
+- Code changes now use RedAmon's actual section trimming/merging, paragraph
+  splitting, structured truncation/title behavior, and explicit exact-vs-
+  covering source-span metadata. Full Python test suite passes (155 tests plus
+  8 subtests). The next
+  step is a safe live-index refresh that preserves valid chunk vectors where
+  content identities match, followed by the missing corpus/terms and retrieval
+  parity gates.

@@ -351,6 +351,18 @@ KB parity acceptance requires all of the following:
   snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
   query-parity item remains incomplete or unverified.
 
+Current verification (2026-10-25): the corrected chunker was compared
+offline with RedAmon's `ChunkStrategy` across the 161,240 documents in the
+current local snapshot and matched all 162,398 generated chunk texts and
+titles. The installed index is still stale: 5,801 chunk texts, 161,084 titles,
+1,507 spans, and six per-document chunk counts differ from the corrected
+output. E5 generation was stopped at 6,560/162,413 vectors pending index
+refresh; no vector snapshot is ready. ExploitDB terms remain unresolved, and
+the active deployed RedAmon profile/snapshot is unknown. These results verify
+the algorithm against the current documents, not KB parity; delivery remains
+`PARTIAL` until the installed corpus, complete vector generation, and
+representative query results pass the acceptance criteria above.
+
 ## Review scope and limits
 
 Reviewed intake, storage, graph writer/readers, Neo4j materialization and

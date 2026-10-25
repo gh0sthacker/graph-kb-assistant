@@ -327,9 +327,12 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         structured_chunks = chunk_document(structured)
         self.assertEqual(len(structured_chunks), 1)
         self.assertTrue(structured_chunks[0].metadata["chunk_truncated"])
+        self.assertEqual(structured_chunks[0].text, structured.text[:len(structured_chunks[0].text) - 3] + "...")
+        self.assertFalse(structured_chunks[0].metadata["source_span_exact"])
+        self.assertEqual(structured_chunks[0].end_char, len(structured_chunks[0].text) - 3)
         self.assertEqual(
-            structured_chunks[0].text,
-            structured.text[:structured_chunks[0].end_char],
+            structured_chunks[0].chunk_sha256,
+            "bd68ce1355d3cf0bd066136d06bda336a76194ca7cd72eda88167f31b4f09efa",
         )
 
         markdown_text = (
@@ -347,7 +350,35 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         self.assertIn("## Second", markdown_chunks[0].text)
         self.assertTrue(all(chunk.chunk_schema == "bb-kb-chunk-v2" for chunk in markdown_chunks))
         for chunk in markdown_chunks:
-            self.assertEqual(markdown.text[chunk.start_char:chunk.end_char], chunk.text)
+            if chunk.metadata.get("source_span_exact", True):
+                self.assertEqual(markdown.text[chunk.start_char:chunk.end_char], chunk.text)
+
+        # Golden outputs captured from RedAmon ChunkStrategy on these fixtures.
+        short_sections = SourceDocument.create(
+            source_name="tool_docs", source_id="short.md", title="ignored",
+            text="# Guide\n\nIntro\n\n## A\n\nShort A.\n\n## B\n\nShort B.\n\n## C\n\nShort C.",
+        )
+        self.assertEqual(
+            [chunk.text for chunk in chunk_document(short_sections)],
+            ["# Guide\n\nIntro\n\n## A\n\nShort A.\n\n## B\n\nShort B.\n\n## C\n\nShort C."],
+        )
+        multiline = SourceDocument.create(
+            source_name="tool_docs", source_id="multiline.md", title="ignored",
+            text="## One\n\nAlpha\n\n\n## Two\n\nBeta",
+        )
+        self.assertEqual([chunk.text for chunk in chunk_document(multiline)], ["## One\n\nAlpha\n\n## Two\n\nBeta"])
+        self.assertFalse(chunk_document(multiline)[0].metadata["source_span_exact"])
+        long_markdown = SourceDocument.create(
+            source_name="tool_docs", source_id="long.md", title="ignored",
+            text="## Large\n\n" + ("Paragraph text. " * 500),
+        )
+        self.assertEqual(
+            [chunk.chunk_sha256 for chunk in chunk_document(long_markdown)],
+            [
+                "e1e8f3715d0a429590807c2fc08d126ce2f49b79c505673c14c5a08ccebe1364",
+                "e2283ccfa3d632ae48252268359c2f68cb0b4d12ce943572d0c653eb0c940259",
+            ],
+        )
 
     def test_pinned_tooldocs_export_import_search_and_partial_coverage(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
