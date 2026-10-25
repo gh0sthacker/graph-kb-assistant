@@ -24,7 +24,7 @@ from .redamon_sources import SourceBatch, SourceRecord, SourceRequest
 
 
 _API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-_PAGE_SIZE = 500
+_PAGE_SIZE = 2000
 _MAX_DATE_SPAN = timedelta(days=120) - timedelta(milliseconds=1)
 _MAX_PAGE_BYTES = 64 * 1024 * 1024
 _MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024

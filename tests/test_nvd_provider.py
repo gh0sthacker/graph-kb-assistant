@@ -97,6 +97,7 @@ class NVDProviderTests(unittest.TestCase):
 
         content = [record for record in batch.records if record.document_role == "content"]
         notices = [record for record in batch.records if record.document_role == "license_notice"]
+        self.assertTrue(all(call["resultsPerPage"] == "2000" for call in calls))
         self.assertEqual(len(calls), len(_date_windows(
             datetime.fromisoformat(calls[0]["pubStartDate"].replace("Z", "+00:00")),
             datetime.fromisoformat(calls[-1]["pubEndDate"].replace("Z", "+00:00")),
