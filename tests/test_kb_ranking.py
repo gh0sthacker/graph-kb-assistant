@@ -217,6 +217,29 @@ class RetrievalRankingTests(unittest.TestCase):
         self.assertAlmostEqual(results[1].score, 0.5 * 1.15)
         self.assertEqual(results[0].rerank_score, 0.0)
 
+    def test_unreranked_tail_stays_after_reranked_pool_when_logits_are_low(self) -> None:
+        pool_ids = [f"pool-{index:02d}" for index in range(30)]
+        tail_ids = ["tail-a", "tail-b"]
+        candidates = tuple(
+            RankedCandidate(chunk_id, "nvd", chunk_id)
+            for chunk_id in (*pool_ids, *tail_ids)
+        )
+        # All pool logits are far below the RRF score of the untouched tail.
+        # RedAmon still keeps the reranked pool first and appends the tail in
+        # its previous fused order.
+        rerank_scores = {chunk_id: -20.0 - index for index, chunk_id in enumerate(pool_ids)}
+
+        results = rank_candidates(
+            candidates,
+            vector_ids=pool_ids + tail_ids,
+            top_k=32,
+            rerank_scores=rerank_scores,
+            mmr_enabled=False,
+        )
+
+        self.assertEqual([item.chunk_id for item in results[:30]], pool_ids)
+        self.assertEqual([item.chunk_id for item in results[30:]], tail_ids)
+
     def test_fulltext_only_ranker_uses_redamon_defaults_and_top_five(self) -> None:
         candidates = tuple(RankedCandidate(str(i), "nvd", f"CVE-{i}") for i in range(8))
         results = rank_candidates(

@@ -77,12 +77,14 @@ def rank_candidates(
         raise ValueError("top_k must be positive and mmr_lambda must be in [0, 1]")
     rrf_scores = reciprocal_rank_fusion(vector_ids, fulltext_ids, rrf_k=rrf_k)
     rescored = []
+    fused_scores: dict[str, float] = {}
     for candidate in candidates:
         if candidate.chunk_id not in rrf_scores:
             continue
         boost = float(source_boosts.get(candidate.source_name, 1.0))
+        fused_scores[candidate.chunk_id] = rrf_scores[candidate.chunk_id] * boost
         if rerank_scores is None or candidate.chunk_id not in rerank_scores:
-            score = rrf_scores[candidate.chunk_id] * boost
+            score = fused_scores[candidate.chunk_id]
             rerank_score = None
         else:
             rerank_score = float(rerank_scores[candidate.chunk_id])
@@ -90,7 +92,17 @@ def rank_candidates(
             probability = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, rerank_score))))
             score = probability * boost
         rescored.append(replace(candidate, rerank_score=rerank_score, score=score))
-    rescored.sort(key=lambda item: item.score, reverse=True)
+    # Establish the fused order before reordering the reranker pool. RedAmon
+    # reranks only the head of this list, then appends the untouched tail in
+    # its original fused order. Do not compare tail RRF scores with the
+    # cross-encoder probabilities: they are different score scales and a low
+    # logit must not promote the tail above the reranked pool.
+    rescored.sort(key=lambda item: fused_scores[item.chunk_id], reverse=True)
+    if rerank_scores is not None:
+        reranked = [item for item in rescored if item.rerank_score is not None]
+        unreranked = [item for item in rescored if item.rerank_score is None]
+        reranked.sort(key=lambda item: item.score, reverse=True)
+        rescored = reranked + unreranked
     if not mmr_enabled or len(rescored) <= top_k:
         return tuple(rescored[:top_k])
 
