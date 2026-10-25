@@ -26,27 +26,29 @@ var (
 )
 
 type historicalHTMLAnalysis struct {
-	fields          []historicalParameterField
-	metadata        Record
-	characteristics Record
-	complete        bool
+	fields              []historicalParameterField
+	metadata            Record
+	characteristics     Record
+	complete            bool
+	occurrencesComplete bool
 }
 
 type historicalHTMLSafeName func(name, location string) (string, error)
 
-func historicalHTMLBodyFields(body []byte, location string, source Record, remaining int) historicalHTMLAnalysis {
+func historicalHTMLBodyFields(body []byte, location string, source Record, remaining, bodyOffset int, sourceSpanAvailable bool, wireFidelity string) historicalHTMLAnalysis {
+	maskedNames := make(map[string]string)
 	return scanHistoricalHTML(body, location, remaining, func(name, path string) (string, error) {
-		return historicalSafeFieldName(name, source, path)
-	}, source)
+		return historicalSafeHTMLFieldName(name, source, path, maskedNames)
+	}, source, bodyOffset, sourceSpanAvailable, wireFidelity)
 }
 
 func historicalHTMLProjectionFields(body []byte, location string, remaining int) historicalHTMLAnalysis {
 	return scanHistoricalHTML(body, location, remaining, func(name, _ string) (string, error) {
 		return safeField(name), nil
-	}, nil)
+	}, nil, 0, false, "")
 }
 
-func scanHistoricalHTML(body []byte, location string, remaining int, safeName historicalHTMLSafeName, source Record) historicalHTMLAnalysis {
+func scanHistoricalHTML(body []byte, location string, remaining int, safeName historicalHTMLSafeName, source Record, bodyOffset int, sourceSpanAvailable bool, wireFidelity string) historicalHTMLAnalysis {
 	result := historicalHTMLAnalysis{
 		fields:          make([]historicalParameterField, 0, minInt(maxInt(remaining, 0), 64)),
 		metadata:        Record{"forms": []any{}, "links": []any{}},
@@ -63,8 +65,9 @@ func scanHistoricalHTML(body []byte, location string, remaining int, safeName hi
 	forms := make([]any, 0)
 	links := make([]any, 0)
 	inputCount := 0
+	inputOccurrenceCounts := make(map[string]int)
 	hasPassword := false
-	appendField := func(path, typeName string) bool {
+	appendField := func(path, typeName string, occurrence *historicalFieldOccurrence) bool {
 		if len(result.fields) >= remaining {
 			result.complete = false
 			return false
@@ -74,13 +77,28 @@ func scanHistoricalHTML(body []byte, location string, remaining int, safeName hi
 			return false
 		}
 		result.fields = append(result.fields, historicalParameterField{
-			path: historicalTemplateParameterPath(path), typeName: typeName, location: location,
+			path: historicalTemplateParameterPath(path), typeName: typeName, location: location, occurrence: occurrence,
 		})
 		return true
 	}
+	fieldOccurrence := func(index int, tokenStart, tokenEnd int64) *historicalFieldOccurrence {
+		if !sourceSpanAvailable || location != "response.body" || tokenStart < 0 || tokenEnd <= tokenStart || tokenEnd > int64(len(body)) {
+			return nil
+		}
+		start, end := bodyOffset+int(tokenStart), bodyOffset+int(tokenEnd)
+		span := Record{
+			"start": start, "end": end, "unit": "byte",
+			"offset_basis": historicalMessageOffsetBasis(location), "wire_fidelity": wireFidelity,
+		}
+		return &historicalFieldOccurrence{index: index, sourceSpan: span}
+	}
 	stop := false
+	tokenOffset := int64(0)
 	for !stop {
 		tokenType := tokenizer.Next()
+		rawLength := int64(len(tokenizer.Raw()))
+		tokenStart, tokenEnd := tokenOffset, tokenOffset+rawLength
+		tokenOffset = tokenEnd
 		switch tokenType {
 		case xhtml.StartTagToken, xhtml.SelfClosingTagToken:
 			token := tokenizer.Token()
@@ -112,7 +130,7 @@ func scanHistoricalHTML(body []byte, location string, remaining int, safeName hi
 				if !httpMethodPattern.MatchString(method) {
 					method = "UNKNOWN"
 				}
-				if !appendField("html.forms["+strconv.Itoa(index)+"]", "form") {
+				if !appendField("html.forms["+strconv.Itoa(index)+"]", "form", nil) {
 					break
 				}
 				forms = append(forms, Record{"action": action, "method": method})
@@ -136,7 +154,15 @@ func scanHistoricalHTML(body []byte, location string, remaining int, safeName hi
 				}
 				hasPassword = hasPassword || inputType == "password"
 				path := "html.inputs[" + strconv.Itoa(index) + "][" + strconv.Quote(safe) + "]"
-				if !appendField(path, "input:"+inputType) {
+				occurrenceKey := safe + "\x00" + inputType
+				occurrenceIndex := inputOccurrenceCounts[occurrenceKey]
+				inputOccurrenceCounts[occurrenceKey] = occurrenceIndex + 1
+				occurrence := fieldOccurrence(occurrenceIndex, tokenStart, tokenEnd)
+				if sourceSpanAvailable && location == "response.body" && occurrence == nil {
+					result.complete = false
+					break
+				}
+				if !appendField(path, "input:"+inputType, occurrence) {
 					break
 				}
 			}
@@ -148,7 +174,7 @@ func scanHistoricalHTML(body []byte, location string, remaining int, safeName hi
 					if !linkComplete {
 						result.complete = false
 					}
-					if !appendField("html.links["+strconv.Itoa(index)+"]", "link") {
+					if !appendField("html.links["+strconv.Itoa(index)+"]", "link", nil) {
 						break
 					}
 					links = append(links, link)
@@ -178,6 +204,9 @@ func scanHistoricalHTML(body []byte, location string, remaining int, safeName hi
 	if tokenizer.Err() != nil && tokenizer.Err() != io.EOF {
 		result.complete = false
 	}
+	if result.complete && tokenOffset != int64(len(body)) {
+		result.complete = false
+	}
 
 	result.metadata["forms"] = forms
 	result.metadata["links"] = links
@@ -189,7 +218,27 @@ func scanHistoricalHTML(body []byte, location string, remaining int, safeName hi
 		"error_page_signal":        historicalHTMLErrorSignal.MatchString(text),
 		"possible_soft_404_signal": historicalHTMLNotFoundSignal.MatchString(text),
 	}
+	result.occurrencesComplete = result.complete && sourceSpanAvailable &&
+		(location == "response.body" || inputCount == 0)
 	return result
+}
+
+func historicalSafeHTMLFieldName(name string, source Record, location string, aliases map[string]string) (string, error) {
+	if secretNamePattern.MatchString(name) {
+		if source == nil {
+			return safeField(name), nil
+		}
+		if alias, exists := aliases[name]; exists {
+			return alias, nil
+		}
+		alias, err := historicalOpaqueLabel(source, location+".masked-field["+strconv.Itoa(len(aliases))+"]", "field")
+		if err != nil {
+			return "", err
+		}
+		aliases[name] = alias
+		return alias, nil
+	}
+	return historicalSafeFieldName(name, source, location)
 }
 
 func historicalHTMLURL(value string, source Record, location string, safeName historicalHTMLSafeName) (Record, bool) {

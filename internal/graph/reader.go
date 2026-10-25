@@ -761,6 +761,11 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 		validOccurrenceType := typeName == "string"
 		if location == "request.body" || location == "response.body" {
 			validOccurrenceType = validOccurrenceType || typeName == "number" || typeName == "boolean" || typeName == "null"
+			if location == "response.body" && strings.HasPrefix(typeName, "input:") {
+				controlType := strings.TrimPrefix(typeName, "input:")
+				_, knownControlType := historicalHTMLInputTypes[controlType]
+				validOccurrenceType = validOccurrenceType || knownControlType || controlType == "other"
+			}
 		}
 		if !okProgram || selectedProgram != program || !okCapture || !graphDigestPattern.MatchString(captureID) ||
 			!okRevision || !graphDigestPattern.MatchString(revisionID) ||

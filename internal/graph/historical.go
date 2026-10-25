@@ -318,23 +318,26 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 		if idErr != nil {
 			return nil, "", errors.New("historical graph parameter identity could not be computed")
 		}
-		if _, exists := parameterIDs[parameterID]; exists {
-			continue
+		if _, exists := parameterIDs[parameterID]; !exists {
+			parameterIDs[parameterID] = struct{}{}
+			parameter := Record{"id": parameterID, "kind": "parameter", "data": parameterData, "source_refs": refs}
+			predicate := "has_parameter"
+			if candidate.side == "response" {
+				predicate = "returns"
+			}
+			hasParameter, assertionErr := historicalAssertion(program, candidate.subject, predicate, parameterID, context, refs)
+			if assertionErr != nil {
+				return nil, "", errors.New("historical graph parameter provenance could not be computed")
+			}
+			entities = append(entities, parameter)
+			assertions = append(assertions, hasParameter)
 		}
-		parameterIDs[parameterID] = struct{}{}
-		parameter := Record{"id": parameterID, "kind": "parameter", "data": parameterData, "source_refs": refs}
-		predicate := "has_parameter"
-		if candidate.side == "response" {
-			predicate = "returns"
-		}
-		hasParameter, assertionErr := historicalAssertion(program, candidate.subject, predicate, parameterID, context, refs)
-		if assertionErr != nil {
-			return nil, "", errors.New("historical graph parameter provenance could not be computed")
-		}
-		entities = append(entities, parameter)
-		assertions = append(assertions, hasParameter)
 		if candidate.field.occurrence == nil || candidate.field.occurrence.sourceSpan == nil {
 			continue
+		}
+		var valueSpan any
+		if candidate.field.occurrence.valueSpan != nil {
+			valueSpan = candidate.field.occurrence.valueSpan
 		}
 		fieldOccurrenceData := Record{
 			"program": program, "capture_id": captureID, "revision_id": revisionID, "observation_id": observationID,
@@ -342,7 +345,7 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 			"location": field.location, "path": field.path,
 			"occurrence_index": candidate.field.occurrence.index, "type": field.typeName,
 			"source_span": candidate.field.occurrence.sourceSpan,
-			"value_span":  candidate.field.occurrence.valueSpan,
+			"value_span":  valueSpan,
 		}
 		fieldOccurrenceID, occurrenceErr := historicalEntityID("field_occurrence", fieldOccurrenceData)
 		if occurrenceErr != nil {

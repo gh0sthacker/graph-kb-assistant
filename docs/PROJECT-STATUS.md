@@ -3,23 +3,30 @@
 ## Stage 3 revision-bound query and body occurrences — PARTIAL (2026-10-25)
 
 - The Go historical and live projections now emit capture-specific query
-  `field_occurrence` records plus request/response JSON scalar,
-  `application/x-www-form-urlencoded`, and simple multipart text-part body
-  occurrences with occurrence order,
-  message-relative byte spans, wire fidelity, source receipt, and capture
-  revision identity. Body spans are emitted only for complete, byte-preserving
-  messages with explicit non-truncated metadata and a consistent message
-  extent. Project-keyed `value_reference` links are created only for
-  non-sensitive strings; query, form, JSON, and supported multipart text
-  strings share the `field-equality-v2` decoded UTF-8 normalization. Neither the
-  key nor plaintext values enter graph records. Legacy v1 references remain
-  readable; new projections use v2.
+  `field_occurrence` records and request/response JSON scalar,
+  URL-encoded-form, and simple multipart text-part body occurrences. Response
+  HTML controls (`input`, `select`, `textarea`, and `button`) also receive
+  occurrences whose source span covers the exact raw start-tag token. HTML
+  control occurrences have no value span and do not index attribute values.
+  All source spans include message-relative byte ranges, wire fidelity, source
+  receipt, and capture revision identity. Body spans are emitted only for
+  complete, byte-preserving messages with explicit non-truncated metadata and
+  a consistent message extent. Project-keyed `value_reference` links are
+  created only for non-sensitive strings; query, form, JSON, and supported
+  multipart text strings share the `field-equality-v2` decoded UTF-8
+  normalization. Neither the key nor plaintext values enter graph records.
+  Legacy v1 references remain readable; new projections use v2.
 - Multipart source spans currently cover only unambiguous top-level
   `form-data` text parts with no filename or transfer encoding. The raw-source
   scanner requires strict CRLF boundaries and exact alignment with parsed
   fields. File, nested, encoded, ambiguous, or unbound parts remain structural
   and add an explicit occurrence-coverage gap. Sensitive field names receive
   opaque aliases and never produce value-equality tokens.
+- HTML response controls remain structural-only beyond their raw start-tag
+  spans: values inside attributes, textarea bodies and selected options are not
+  extracted. Form actions and links remain structural entries without control
+  occurrences. Request-side HTML controls and incomplete/unsupported response
+  bodies leave an explicit occurrence-coverage gap.
 - Equality relations are labeled `keyed_value_equality` / `correlation_only`.
   They establish a same-project keyed value match and do not establish
   causality, object identity, or ownership. If a source span or revision cannot
@@ -27,11 +34,13 @@
   records the gap.
 - Synthetic Go graph-import tests cover repeated query/form/multipart order,
   multipart request/response source spans, safe equality correlation, file and
-  transfer-encoded/nested exclusions, URL-encoded source spans, request/response
+  transfer-encoded/nested exclusions, HTML response control token spans,
+  repeated control order, sensitive-name masking, raw-value absence, and
+  writer validation. They also cover URL-encoded source spans, request/response
   JSON scalar spans (including escaped values), same-project correlation across
   query/form/JSON/multipart locations, separation by project key, sensitive-name
-  omission, plaintext absence, writer validation, and omission of spans for
-  truncated, malformed, or extent-mismatched bodies.
+  omission, and omission of spans for truncated, malformed, or extent-mismatched
+  bodies.
   Historical and live builders use the same projection path.
   Synthetic traversal tests cover same-project correlation across captures.
   `GraphNeighborhoodPage`

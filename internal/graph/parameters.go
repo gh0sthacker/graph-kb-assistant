@@ -231,10 +231,11 @@ func historicalBodyParameterFields(body []byte, contentType, location string, so
 			bodyOffset, sourceSpanAvailable, fieldValueKey, wireFidelity)
 		return historicalBodyAnalysis{fields: fields, complete: complete, occurrencesComplete: complete && sourceSpanAvailable}
 	case mediaType == "text/html", mediaType == "application/xhtml+xml":
-		htmlAnalysis := historicalHTMLBodyFields(body, location, source, remaining)
+		htmlAnalysis := historicalHTMLBodyFields(body, location, source, remaining, bodyOffset, sourceSpanAvailable, wireFidelity)
 		return historicalBodyAnalysis{
 			fields: htmlAnalysis.fields, html: htmlAnalysis.metadata,
 			characteristics: htmlAnalysis.characteristics, complete: htmlAnalysis.complete,
+			occurrencesComplete: htmlAnalysis.occurrencesComplete,
 		}
 	case mediaType == "multipart/form-data":
 		fields, complete, occurrencesComplete := historicalMultipartParameterFields(body, parameters["boundary"], location, source,
