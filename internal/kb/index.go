@@ -729,18 +729,21 @@ func (i *Index) vectorCandidates(
 			_ = rows.Close()
 			return nil, nil, "lexical_fallback"
 		}
-		dot, norm := 0.0, 0.0
+		// RedAmon stores normalized E5 vectors and searches them with FAISS
+		// IndexFlatIP. Match that inner-product ordering rather than recomputing
+		// cosine normalization, which can reorder non-unit or rounding-edge rows.
+		dot, norm := float32(0), 0.0
 		for n, queryValue := range queryVector {
 			value := math.Float32frombits(binary.LittleEndian.Uint32(blob[n*4 : n*4+4]))
 			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 				_ = rows.Close()
 				return nil, nil, "lexical_fallback"
 			}
-			dot += float64(queryValue) * float64(value)
+			dot += queryValue * value
 			norm += float64(value) * float64(value)
 		}
 		if norm > 0 {
-			all = append(all, scored{id: id, source: source, score: dot / (queryNorm * math.Sqrt(norm))})
+			all = append(all, scored{id: id, source: source, score: float64(dot)})
 		}
 	}
 	if err := rows.Err(); err != nil {

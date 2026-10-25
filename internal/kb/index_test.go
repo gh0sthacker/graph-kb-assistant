@@ -254,6 +254,67 @@ func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.
 	}
 }
 
+func TestVectorCandidatesUseFaissInnerProductOrdering(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "first normalized vector candidate"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("c", 64)
+	secondText := "second vector candidate"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "other", "document-2", "Other source", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+		('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(first, second float32) []byte {
+		vector := make([]byte, 1024*4)
+		binary.LittleEndian.PutUint32(vector[0:], math.Float32bits(first))
+		binary.LittleEndian.PutUint32(vector[4:], math.Float32bits(second))
+		return vector
+	}
+	_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+		(?,?,1024,?),(?,?,1024,?)`, strings.Repeat("a", 64), "intfloat/e5-large-v2", encode(0.8, 0.6),
+		secondID, "intfloat/e5-large-v2", encode(0.9, 0.9))
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare FAISS inner-product fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	index.SetRetrievalModels(&syntheticRetrievalModels{queryVector: queryVector})
+	tx, err := index.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ids, scores, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", nil, 1)
+	if mode != "hybrid" || len(ids) != 1 || ids[0] != secondID || math.Abs(scores[secondID]-0.9) > 1e-6 {
+		t.Fatalf("FAISS-style inner-product top-1 = %#v (%s, %v); want second candidate at 0.9", ids, mode, scores)
+	}
+}
+
 func TestFullTextCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
 	content := "baseline fixture without the search term"
