@@ -1,6 +1,6 @@
 # Project status and known limitations
 
-## RedAmon KB parity re-check (2026-10-25 23:00 UTC) — PARTIAL
+## RedAmon KB parity re-check (2026-10-25 23:15 UTC) — PARTIAL
 
 - Compared this checkout with RedAmon upstream master at
   `4585b3442cf3c6e075fca5d3b512a8f47be501b6`. Its pinned source revisions
@@ -16,17 +16,26 @@
   RedAmon installation.
 - The current private index remains partial: snapshot
   `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`,
-  162,398 chunks across six source families, no ExploitDB rows, and 6,944 of
-  162,390 eligible E5 vectors. Coverage is `PARTIAL`; the vector snapshot is
-  unpublished, so semantic retrieval is not ready. The ExploitDB provider is
+  162,398 chunks across six source families, no ExploitDB rows, and 7,392 of
+  162,390 eligible E5 vectors at the latest read-only count. Coverage is
+  `PARTIAL` and the vector snapshot is unpublished, so semantic retrieval is
+  not ready. The ExploitDB provider is
   implemented but the source is still excluded while its dataset reuse terms
   are unresolved.
-- The existing resumable vector process is alive but currently in Linux's
-  stopped state (`T`) even though systemd reports its transient unit active.
-  Resuming that same process increased the stored count from 6,752 to
-  6,944; it stopped again afterward. Do not treat this as active progress or
-  start a duplicate worker. The index remains readable through its available
-  lexical path while vector publication is incomplete.
+- The existing resumable vector process (PID 1121967) had entered Linux's
+  stopped state (`T`) while its transient systemd unit was inactive. It was
+  resumed once and is currently running (`S`/`R` observed); no new worker was
+  started. The count remained 7,392 during a 45-second observation while the
+  next batch was processing.
+  Resuming the existing worker increased the stored count from 6,752 to 7,072;
+  a later 64-row batch brought it to 7,392 before the process stopped again.
+  A 256-row batch experiment committed one batch in 5:54 but left the next
+  batch uncommitted after a further 2:36; the 64-row worker committed 64 in
+  2:12. These samples cover different chunk lengths, so the throughput
+  comparison is inconclusive. The transient unit itself is inactive although
+  the resumed process is running. Monitor that process and the durable vector
+  count; do not start a duplicate worker. The index remains readable through
+  its available lexical path while vector publication is incomplete.
 - No deployed RedAmon instance was found on Proxmox2: its read-only inventory
   showed one Kali VM and no LXC guests; the current VM's Docker inventory
   contains only the Neo4j container. Therefore a byte/content comparison with
