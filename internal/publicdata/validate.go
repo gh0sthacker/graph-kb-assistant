@@ -14,6 +14,7 @@ import (
 )
 
 var (
+	sensitiveValueMarkers             = [...]string{"password", "passwd", "api_key", "api-key", "apikey", "access_token", "access-token", "accesstoken", "refresh_token", "refresh-token", "refreshtoken", "csrf_token", "csrf-token", "csrftoken", "session", "cookie", "secret", "authorization", "token", "jwt", "email", "phone", "mobile", "ssn", "credential", "private_key", "private-key", "privatekey", "private key", "bearer", "eyj", "-----begin", "@"}
 	secretAssignmentPattern           = regexp.MustCompile(`(?i)\b([A-Za-z0-9_-]*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session(?:[_-]?(?:id|cookie|key))?|cookie|secret(?:[_-]?key)?|authorization|token|jwt))\b["']?\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&;,"']+)`)
 	jsonSecretAssignmentPattern       = regexp.MustCompile(`(?i)"([A-Za-z0-9_-]*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session(?:[_-]?(?:id|cookie|key))?|cookie|secret(?:[_-]?key)?|authorization|token|jwt))"\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s}\]]+)`)
 	sensitivePIIAssignmentPattern     = regexp.MustCompile(`(?i)\b[A-Za-z0-9_-]*(email|phone|mobile|ssn|credential|private[_-]?key)\b["']?\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&;,"']+)`)
@@ -181,6 +182,13 @@ func emptyOrRedacted(value any) bool {
 }
 
 func containsSecretLikeValue(value string) bool {
+	// Most graph strings are routes, names, opaque IDs, or bounded shape
+	// metadata. Run the backtracking assignment detectors only when one of
+	// their mandatory ASCII markers is present. This keeps validation linear
+	// for large safe strings without weakening detection of any pattern below.
+	if !hasSensitiveValueMarker(value) {
+		return false
+	}
 	if secretOtherValuePattern.MatchString(value) {
 		return true
 	}
@@ -207,6 +215,24 @@ func containsSecretLikeValue(value string) bool {
 			if !strings.EqualFold(assignmentValue, "[REDACTED]") && !strings.EqualFold(assignmentValue, "<REDACTED>") {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func hasSensitiveValueMarker(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range sensitiveValueMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	// regexp's case-insensitive matching also treats a few non-ASCII runes as
+	// simple folds of ASCII letters. Preserve that conservative behavior when a
+	// string contains non-ASCII bytes instead of using the ASCII marker gate.
+	for index := 0; index < len(value); index++ {
+		if value[index] >= utf8.RuneSelf {
+			return true
 		}
 	}
 	return false

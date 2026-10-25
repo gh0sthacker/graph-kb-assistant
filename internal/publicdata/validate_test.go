@@ -29,6 +29,24 @@ func TestValidateJSONRejectsPrivateAndSecretLikeGraphData(t *testing.T) {
 	}
 }
 
+func TestSecretLikeScanFastPathPreservesLongSafeText(t *testing.T) {
+	value := strings.Repeat("ordinary-route-segment-", 40_000)
+	if containsSecretLikeValue(value) {
+		t.Fatal("long ordinary text was classified as secret-like")
+	}
+	for _, value := range []string{
+		`PassWord="opaque-value"`,
+		`client_api-key=opaque-value`,
+		`{"user_email":"person@example.test"}`,
+		`Authorization: Bearer abcdefghijklmnop`,
+		`-----BEGIN PRIVATE KEY-----`,
+	} {
+		if !containsSecretLikeValue(value) {
+			t.Errorf("sensitive marker was not detected in %q", value)
+		}
+	}
+}
+
 func TestValidateAllowsRedactedValuesAndShapeOnlyUrls(t *testing.T) {
 	input := []byte(`{"token":"[REDACTED]","url":"https://example.test/path?token=%5BREDACTED%5D","fields":[{"name":"id","value":""}]}`)
 	if err := ValidateJSON(input); err != nil {
