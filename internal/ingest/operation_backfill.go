@@ -21,11 +21,29 @@ import (
 )
 
 const (
-	DefaultOperationBackfillMaxCaptures = 5000
-	MaximumOperationBackfillMaxCaptures = 20000
-	DefaultOperationBackfillMaxBytes    = int64(512 << 20)
-	MaximumOperationBackfillMaxBytes    = int64(1 << 30)
-	operationBackfillBundleSources      = 900
+	DefaultOperationBackfillMaxCaptures       = 5000
+	MaximumOperationBackfillMaxCaptures       = 20000
+	DefaultOperationBackfillMaxBytes          = int64(512 << 20)
+	MaximumOperationBackfillMaxBytes          = int64(1 << 30)
+	operationBackfillBundleSources            = 900
+	operationBackfillReasonInvalidLine        = "invalid_request_line"
+	operationBackfillReasonInvalidOrigin      = "invalid_origin"
+	operationBackfillReasonInvalidTarget      = "invalid_request_target"
+	operationBackfillReasonCrossOrigin        = "cross_origin_request_target"
+	operationBackfillReasonUnsupported        = "unsupported_request_target"
+	operationBackfillReasonInvalidEndpoint    = "invalid_resolved_endpoint"
+	operationBackfillReasonIncomplete         = "canonical_projection_incomplete"
+	operationBackfillReasonMissingOperation   = "canonical_operation_missing"
+	operationBackfillReasonMissingEndpoint    = "canonical_endpoint_missing"
+	operationBackfillReasonMissingAssertion   = "canonical_assertion_missing"
+	operationBackfillReasonUnknownOrigin      = "canonical_origin_unknown"
+	operationBackfillReasonUnknownMethod      = "canonical_method_unknown"
+	operationBackfillReasonRouteFamilyMissing = "canonical_route_family_unavailable"
+	operationBackfillReasonRoutePathTooLong   = "canonical_route_path_too_long"
+	operationBackfillReasonRouteOpaque        = "canonical_route_opaque"
+	operationBackfillReasonRouteInvalid       = "canonical_route_invalid"
+	operationBackfillReasonRouteSegments      = "canonical_route_segments_exceeded"
+	operationBackfillReasonRouteUnparseable   = "canonical_route_unparseable"
 )
 
 var ErrOperationBackfillCandidateChanged = errors.New("operation backfill preview changed")
@@ -61,6 +79,7 @@ type OperationBackfillPreview struct {
 	SkippedUnmapped            int                       `json:"skipped_unmapped"`
 	SkippedOversized           int                       `json:"skipped_oversized"`
 	SkippedNoOperation         int                       `json:"skipped_no_operation"`
+	SkippedNoOperationReasons  map[string]int            `json:"skipped_no_operation_reasons"`
 	EndpointIdentityMismatches int                       `json:"endpoint_identity_mismatches"`
 	Truncated                  bool                      `json:"truncated"`
 	CandidateSHA256            string                    `json:"candidate_sha256,omitempty"`
@@ -112,7 +131,7 @@ func PreviewHistoricalOperationBackfill(
 
 	preview := OperationBackfillPreview{
 		ProjectKey: selected.ProjectKey, WriteMode: "preview_only",
-		OperationSamples: []OperationBackfillSample{},
+		OperationSamples: []OperationBackfillSample{}, SkippedNoOperationReasons: map[string]int{},
 	}
 	reader, err := behaviorgraph.OpenReader(ctx, selected.BehaviorGraphPath, selected.ProjectKey, selected.BehaviorReceiptPath)
 	if err != nil {
@@ -174,10 +193,10 @@ func PreviewHistoricalOperationBackfill(
 		}
 		bytesRead += captured.TotalSize
 		preview.RequestBytes = bytesRead
-		method, target, scheme, host, port, validTarget := operationBackfillTarget(captured.Data, origin)
+		method, target, scheme, host, port, skipReason, validTarget := operationBackfillTargetWithReason(captured.Data, origin)
 		if !validTarget {
 			clear(captured.Data)
-			preview.SkippedNoOperation++
+			countOperationBackfillNoOperation(&preview, skipReason)
 			continue
 		}
 		exchange := caido.HttpExchange{
@@ -196,7 +215,9 @@ func PreviewHistoricalOperationBackfill(
 		projectedEndpoint, foundEndpoint := operationBackfillEntity(bundle, "endpoint")
 		assertion, foundAssertion := operationBackfillAssertion(bundle, "belongs_to_operation")
 		if !foundOperation || !foundEndpoint || !foundAssertion {
-			preview.SkippedNoOperation++
+			countOperationBackfillNoOperation(&preview, operationBackfillProjectionReason(
+				foundOperation, projectedEndpoint, foundEndpoint, foundAssertion, target,
+			))
 			continue
 		}
 		assertionSubject, _ := assertion["subject"].(string)
@@ -277,6 +298,60 @@ func PreviewHistoricalOperationBackfill(
 		return preview, err
 	}
 	return preview, nil
+}
+
+func countOperationBackfillNoOperation(preview *OperationBackfillPreview, reason string) {
+	if preview == nil {
+		return
+	}
+	if preview.SkippedNoOperationReasons == nil {
+		preview.SkippedNoOperationReasons = map[string]int{}
+	}
+	if reason == "" {
+		reason = operationBackfillReasonIncomplete
+	}
+	preview.SkippedNoOperation++
+	preview.SkippedNoOperationReasons[reason]++
+}
+
+// operationBackfillProjectionReason returns a fixed code for the first missing
+// canonical record. It never includes exchange content or graph properties.
+func operationBackfillProjectionReason(operation bool, endpointEntity behaviorgraph.Record, endpoint, assertion bool, target string) string {
+	switch {
+	case !endpoint:
+		return operationBackfillReasonMissingEndpoint
+	case !operation:
+		data, _ := endpointEntity["data"].(behaviorgraph.Record)
+		origin, _ := data["origin"].(string)
+		if origin == "" || origin == "unknown" {
+			return operationBackfillReasonUnknownOrigin
+		}
+		method, _ := data["method"].(string)
+		if method == "" || method == "UNKNOWN" {
+			return operationBackfillReasonUnknownMethod
+		}
+		if _, routeReason := behaviorgraph.RouteFamilyV1WithReason(target); routeReason != "" {
+			switch routeReason {
+			case "path_too_long":
+				return operationBackfillReasonRoutePathTooLong
+			case "opaque_target":
+				return operationBackfillReasonRouteOpaque
+			case "invalid_target":
+				return operationBackfillReasonRouteInvalid
+			case "too_many_path_segments":
+				return operationBackfillReasonRouteSegments
+			case "unparseable_target":
+				return operationBackfillReasonRouteUnparseable
+			default:
+				return operationBackfillReasonRouteFamilyMissing
+			}
+		}
+		return operationBackfillReasonMissingOperation
+	case !assertion:
+		return operationBackfillReasonMissingAssertion
+	default:
+		return operationBackfillReasonIncomplete
+	}
 }
 
 func finalizeOperationBackfillCoverage(preview *OperationBackfillPreview) {
@@ -449,6 +524,13 @@ func indexOperationBackfillSnapshot(snapshot behaviorgraph.Record) (map[string]b
 }
 
 func operationBackfillTarget(raw []byte, origin string) (method, target, scheme, host string, port int, ok bool) {
+	method, target, scheme, host, port, _, ok = operationBackfillTargetWithReason(raw, origin)
+	return method, target, scheme, host, port, ok
+}
+
+// operationBackfillTargetWithReason returns only a fixed, non-sensitive code
+// for an unsupported request. It never includes the request line or origin.
+func operationBackfillTargetWithReason(raw []byte, origin string) (method, target, scheme, host string, port int, reason string, ok bool) {
 	lineEnd := bytes.IndexByte(raw, '\n')
 	line := raw
 	if lineEnd >= 0 {
@@ -456,37 +538,37 @@ func operationBackfillTarget(raw []byte, origin string) (method, target, scheme,
 	}
 	line = bytes.TrimSpace(bytes.TrimSuffix(line, []byte("\r")))
 	if len(line) > 4096 {
-		return "", "", "", "", 0, false
+		return "", "", "", "", 0, operationBackfillReasonInvalidLine, false
 	}
 	parts := strings.Fields(string(line))
 	if len(parts) != 3 || !validOperationBackfillMethod(parts[0]) {
-		return "", "", "", "", 0, false
+		return "", "", "", "", 0, operationBackfillReasonInvalidLine, false
 	}
 	base, err := url.Parse(origin)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" ||
 		base.User != nil || base.Path != "" || base.RawQuery != "" || base.Fragment != "" {
-		return "", "", "", "", 0, false
+		return "", "", "", "", 0, operationBackfillReasonInvalidOrigin, false
 	}
 	requestTarget, err := url.Parse(parts[1])
 	if err != nil || requestTarget.Fragment != "" || requestTarget.User != nil {
-		return "", "", "", "", 0, false
+		return "", "", "", "", 0, operationBackfillReasonInvalidTarget, false
 	}
 	if requestTarget.IsAbs() {
 		if (requestTarget.Scheme != "http" && requestTarget.Scheme != "https") || requestTarget.Hostname() == "" {
-			return "", "", "", "", 0, false
+			return "", "", "", "", 0, operationBackfillReasonInvalidTarget, false
 		}
 		if !sameOperationBackfillOrigin(base, requestTarget) {
-			return "", "", "", "", 0, false
+			return "", "", "", "", 0, operationBackfillReasonCrossOrigin, false
 		}
 		base = requestTarget
 	} else {
 		if requestTarget.Host != "" || !strings.HasPrefix(parts[1], "/") {
-			return "", "", "", "", 0, false
+			return "", "", "", "", 0, operationBackfillReasonUnsupported, false
 		}
 		base = base.ResolveReference(requestTarget)
 	}
 	if base.Opaque != "" || base.Hostname() == "" || base.Path == "" && base.RawPath == "" && parts[1] != "/" {
-		return "", "", "", "", 0, false
+		return "", "", "", "", 0, operationBackfillReasonInvalidEndpoint, false
 	}
 	if base.Path == "" && base.RawPath == "" {
 		base.Path = "/"
@@ -495,14 +577,14 @@ func operationBackfillTarget(raw []byte, origin string) (method, target, scheme,
 	if portText != "" {
 		port, err = strconv.Atoi(portText)
 		if err != nil || port < 1 || port > 65535 {
-			return "", "", "", "", 0, false
+			return "", "", "", "", 0, operationBackfillReasonInvalidEndpoint, false
 		}
 	} else if base.Scheme == "https" {
 		port = 443
 	} else {
 		port = 80
 	}
-	return strings.ToUpper(parts[0]), base.String(), strings.ToLower(base.Scheme), strings.ToLower(base.Hostname()), port, true
+	return strings.ToUpper(parts[0]), base.String(), strings.ToLower(base.Scheme), strings.ToLower(base.Hostname()), port, "", true
 }
 
 func sameOperationBackfillOrigin(left, right *url.URL) bool {

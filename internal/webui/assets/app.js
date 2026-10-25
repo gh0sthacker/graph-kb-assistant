@@ -230,6 +230,33 @@ function operationBackfillOptions() {
   return { max_captures: maxCaptures, max_request_bytes: maxRequestBytes };
 }
 
+function operationBackfillSkipReasonDetails(reasons) {
+  const labels = {
+    invalid_request_line: "Malformed or unsupported HTTP request line",
+    invalid_origin: "Capture origin is not a valid HTTP origin",
+    invalid_request_target: "Request target is malformed or unsupported",
+    cross_origin_request_target: "Absolute request target does not match the captured origin",
+    unsupported_request_target: "Request target form is not supported for safe grouping",
+    invalid_resolved_endpoint: "Request target could not form a valid endpoint",
+    canonical_projection_incomplete: "Canonical operation projection was incomplete",
+    canonical_operation_missing: "Canonical operation record was not produced",
+    canonical_endpoint_missing: "Canonical endpoint record was not produced",
+    canonical_assertion_missing: "Canonical operation link was not produced",
+    canonical_origin_unknown: "Operation origin could not be normalized",
+    canonical_method_unknown: "Operation method could not be parsed",
+    canonical_route_family_unavailable: "Route could not be safely grouped",
+    canonical_route_path_too_long: "Route exceeds the safe grouping length",
+    canonical_route_opaque: "Opaque URI targets cannot be grouped as HTTP routes",
+    canonical_route_invalid: "Route target is invalid for grouping",
+    canonical_route_segments_exceeded: "Route has too many path segments to group",
+    canonical_route_unparseable: "Route target could not be parsed for grouping",
+  };
+  if (!reasons || typeof reasons !== "object" || Array.isArray(reasons)) return [];
+  return Object.entries(labels)
+    .map(([code, label]) => [label, Number(reasons[code] || 0)])
+    .filter(([, count]) => Number.isSafeInteger(count) && count > 0);
+}
+
 function renderOperationBackfillPreview(result) {
   const details = [
     ["State", result.state], ["Coverage", result.coverage_state || "unknown"],
@@ -242,6 +269,9 @@ function renderOperationBackfillPreview(result) {
   ];
   const list = el("ul");
   for (const [label, value] of details) list.append(el("li", "", `${label}: ${value ?? "—"}`));
+  for (const [label, count] of operationBackfillSkipReasonDetails(result.skipped_no_operation_reasons)) {
+    list.append(el("li", "", `No safe operation · ${label}: ${count}`));
+  }
   if (Array.isArray(result.operation_samples) && result.operation_samples.length) {
     list.append(el("li", "", `Samples: ${result.operation_samples.map(sample => `${sample.method || "?"} ${sample.route_family || "/"}`).join(" · ")}`));
   }

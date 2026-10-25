@@ -27,17 +27,66 @@ func TestOperationBackfillTargetPinsOriginAndKeepsRequestTarget(t *testing.T) {
 
 func TestOperationBackfillTargetRejectsInvalidOriginAndAsteriskRoute(t *testing.T) {
 	for _, test := range []struct {
-		name, line, origin string
+		name, line, origin, wantReason string
 	}{
-		{name: "userinfo", line: "GET /api HTTP/1.1", origin: "http://user:pass@example.invalid"},
-		{name: "asterisk", line: "OPTIONS * HTTP/1.1", origin: "http://example.invalid"},
-		{name: "network path", line: "GET //other.invalid/api HTTP/1.1", origin: "http://example.invalid"},
-		{name: "cross-origin absolute target", line: "GET https://other.invalid/api HTTP/1.1", origin: "http://example.invalid"},
-		{name: "bad request line", line: "not-http", origin: "http://example.invalid"},
+		{name: "userinfo", line: "GET /api HTTP/1.1", origin: "http://user:pass@example.invalid", wantReason: operationBackfillReasonInvalidOrigin},
+		{name: "asterisk", line: "OPTIONS * HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonUnsupported},
+		{name: "network path", line: "GET //other.invalid/api HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonUnsupported},
+		{name: "cross-origin absolute target", line: "GET https://other.invalid/api HTTP/1.1", origin: "http://example.invalid", wantReason: operationBackfillReasonCrossOrigin},
+		{name: "bad request line", line: "not-http", origin: "http://example.invalid", wantReason: operationBackfillReasonInvalidLine},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, _, _, _, _, ok := operationBackfillTarget([]byte(test.line+"\r\n\r\n"), test.origin); ok {
+			_, _, _, _, _, reason, ok := operationBackfillTargetWithReason([]byte(test.line+"\r\n\r\n"), test.origin)
+			if ok {
 				t.Fatal("operationBackfillTarget() accepted an unsupported route")
+			}
+			if reason != test.wantReason {
+				t.Fatalf("operationBackfillTargetWithReason() reason=%q, want %q", reason, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestOperationBackfillNoOperationReasonCountsStayRedactedAndAdditive(t *testing.T) {
+	preview := OperationBackfillPreview{}
+	countOperationBackfillNoOperation(&preview, operationBackfillReasonInvalidLine)
+	countOperationBackfillNoOperation(&preview, operationBackfillReasonInvalidLine)
+	countOperationBackfillNoOperation(&preview, operationBackfillReasonCrossOrigin)
+	if preview.SkippedNoOperation != 3 || preview.SkippedNoOperationReasons[operationBackfillReasonInvalidLine] != 2 ||
+		preview.SkippedNoOperationReasons[operationBackfillReasonCrossOrigin] != 1 {
+		t.Fatalf("unexpected no-operation breakdown: %+v", preview)
+	}
+	encoded, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatalf("json.Marshal(preview) error = %v", err)
+	}
+	if strings.Contains(string(encoded), "GET /") || strings.Contains(string(encoded), "example.invalid") {
+		t.Fatalf("preview reason counts exposed request data: %s", encoded)
+	}
+}
+
+func TestOperationBackfillProjectionReasonIsSpecificAndFixed(t *testing.T) {
+	endpoint := behaviorgraph.Record{"data": behaviorgraph.Record{"origin": "https://example.invalid", "method": "GET"}}
+	longTarget := "https://example.invalid/" + strings.Repeat("a", 4096)
+	for _, test := range []struct {
+		name                              string
+		operation, hasEndpoint, assertion bool
+		endpointEntity                    behaviorgraph.Record
+		target                            string
+		want                              string
+	}{
+		{name: "endpoint missing", assertion: true, want: operationBackfillReasonMissingEndpoint},
+		{name: "assertion missing", operation: true, hasEndpoint: true, endpointEntity: endpoint, want: operationBackfillReasonMissingAssertion},
+		{name: "unknown origin", hasEndpoint: true, endpointEntity: behaviorgraph.Record{"data": behaviorgraph.Record{"origin": "unknown", "method": "GET"}}, target: "https://example.invalid/api", want: operationBackfillReasonUnknownOrigin},
+		{name: "unknown method", hasEndpoint: true, endpointEntity: behaviorgraph.Record{"data": behaviorgraph.Record{"origin": "https://example.invalid", "method": "UNKNOWN"}}, target: "https://example.invalid/api", want: operationBackfillReasonUnknownMethod},
+		{name: "opaque route", hasEndpoint: true, endpointEntity: endpoint, target: "mailto:unclassified", want: operationBackfillReasonRouteOpaque},
+		{name: "route length limit", hasEndpoint: true, endpointEntity: endpoint, target: longTarget, want: operationBackfillReasonRoutePathTooLong},
+		{name: "operation missing after inputs are valid", hasEndpoint: true, endpointEntity: endpoint, target: "https://example.invalid/api", want: operationBackfillReasonMissingOperation},
+		{name: "all present fallback", operation: true, hasEndpoint: true, assertion: true, endpointEntity: endpoint, target: "https://example.invalid/api", want: operationBackfillReasonIncomplete},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := operationBackfillProjectionReason(test.operation, test.endpointEntity, test.hasEndpoint, test.assertion, test.target); got != test.want {
+				t.Fatalf("operationBackfillProjectionReason() = %q, want %q", got, test.want)
 			}
 		})
 	}

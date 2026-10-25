@@ -1,6 +1,6 @@
 # Project status and known limitations
 
-## Current delivery checkpoint (2026-10-25, endpoint-identity repair runtime verification)
+## Current delivery checkpoint (2026-10-25, bounded route grouping and graph repair)
 
 - After `dcbfe07`, the local maintenance preview scanned all 1,400 retained
   historical captures without truncation. It selected 1,393 eligible captures,
@@ -18,14 +18,37 @@
 - The user service is active. The local UI and the Proxmox LAN-forwarded UI
   each returned HTTP 200 from the application host. Reachability from a
   separate client device remains unverified. Its selected-project worker
-  reports `idle`; Caido intake is `not_started`, and model execution was not
-  invoked. Hermes remains configured for `openai-codex` / `gpt-6-luna`; no
-  captured exchange was sent to it during this repair.
+  reports `idle`; Caido intake is `not_started`. Hermes remains configured
+  for `openai-codex` / `gpt-6-luna`. No captured exchange was sent to Hermes
+  during this graph repair; the metadata-only model call is recorded below.
+- `./scripts/run-hermes mcp test bb_assistant` connected to the local stdio
+  server and discovered all 15 configured tools. The allowlist includes the
+  redacted `bb_get_capture` summary and excludes the sensitive
+  `bb_get_capture_raw` body-range tool. This verifies tool discovery only; the
+  separate synthetic model-backed consultation/resume is recorded below.
+- The configured `gpt-6-luna` profile also completed a one-shot Hermes model
+  call to `bb_list_projects` and returned only the registered-project count.
+  The session trace confirms that MCP tool invocation followed Hermes'
+  dynamic tool-search/description steps. No graph, capture, or message body
+  was read; model-backed analysis remains verified only on synthetic evidence.
+- Route-family grouping now accepts paths up to 4,096 bytes, matching the
+  already enforced request-line input cap while remaining bounded. The former
+  2,048-byte cap excluded two otherwise valid historical operations. Both were
+  imported through the exact preview/apply digest flow: two bundles, two
+  `belongs_to_operation` links, and one new operation group; Neo4j drain
+  returned `ready`. A fresh post-apply read-only preview scanned all 1,400
+  captures, selected 1,395, and found zero new groups, endpoints, or links.
+- The preview now breaks down `skipped_no_operation` with fixed, non-sensitive
+  reason codes. The UI displays only known codes and ignores unknown input; it
+  never echoes a request line or origin. Five captures still have invalid
+  request lines and remain an explicit coverage gap. The default 2,000-route
+  catalog page and graph coverage remain partial.
 - This supersedes the earlier Stage 3 preview below, which reported 31 legacy
-  endpoint-ID differences as excluded. Remaining gaps include the 7 captures
-  without a safe operation, external-device reachability, and complete
-  browser/JavaScript/application-map coverage. Overall delivery remains
-  `PARTIAL`.
+  endpoint-ID differences as excluded. Remaining gaps include the five invalid
+  request lines, external-device reachability, and complete browser/
+  JavaScript/application-map coverage. A browser smoke-test could not start
+  because the available Chrome DevTools connector has no Chrome binary; no UI
+  click-path result is claimed. Overall delivery remains `PARTIAL`.
 
 ## Current delivery checkpoint (2026-10-25, bounded retained-evidence runtime check)
 

@@ -21,7 +21,10 @@ import (
 	"bb-graph-assistant/internal/caido"
 )
 
-const maxParsedBodyBytes = 2 << 20
+const (
+	maxParsedBodyBytes      = 2 << 20
+	maxRouteFamilyPathBytes = 4096
+)
 
 const RouteFamilyV1Version = "route-family-v1"
 
@@ -214,21 +217,34 @@ func RouteTemplate(target string) string {
 // grouping. It intentionally uses the existing static route vocabulary so
 // endpoint identity and historic route labels remain unchanged.
 func RouteFamilyV1(target string) (string, bool) {
+	family, reason := RouteFamilyV1WithReason(target)
+	return family, reason == ""
+}
+
+// RouteFamilyV1WithReason returns a versioned, value-free route family and a
+// fixed reason code when the target cannot be grouped safely.
+func RouteFamilyV1WithReason(target string) (family, reason string) {
 	if target == "" || !historicalTargetValid(target) {
-		return "", false
+		return "", "invalid_target"
 	}
 	parsed, err := historicalParseURL(target)
-	if err != nil || parsed.Opaque != "" {
-		return "", false
+	if err != nil {
+		return "", "unparseable_target"
+	}
+	if parsed.Opaque != "" {
+		return "", "opaque_target"
 	}
 	path := parsed.EscapedPath()
 	if path == "" {
 		path = "/"
 	}
-	if len(path) > 2048 || len(strings.Split(path, "/")) > 4096 {
-		return "", false
+	if len(path) > maxRouteFamilyPathBytes {
+		return "", "path_too_long"
 	}
-	return routeFamilyFromEscapedPath(path), true
+	if len(strings.Split(path, "/")) > 4096 {
+		return "", "too_many_path_segments"
+	}
+	return routeFamilyFromEscapedPath(path), ""
 }
 
 func routeFamilyFromEscapedPath(path string) string {

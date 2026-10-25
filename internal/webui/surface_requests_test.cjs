@@ -73,7 +73,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, saveContextAnnotation, updateContextAnnotationControl, moveContextEvidence, selectedContextEvidenceReferenceIDs, orderedContextEvidenceReferenceIDs, resumeConsultationByID, acceptConsultationReview, saveConsultationCandidate, continueConsultationCandidateProposal, updateCandidateControl, renderConsultationCandidate, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, saveContextAnnotation, updateContextAnnotationControl, moveContextEvidence, selectedContextEvidenceReferenceIDs, orderedContextEvidenceReferenceIDs, resumeConsultationByID, acceptConsultationReview, saveConsultationCandidate, continueConsultationCandidateProposal, updateCandidateControl, renderConsultationCandidate, operationBackfillSkipReasonDetails, renderOperationBackfillPreview, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -95,6 +95,39 @@ function snapshot(value) { return JSON.parse(JSON.stringify(value)); }
 function renderedText(root) {
   return [root.textContent || "", ...(root.children || []).map(renderedText)].join(" ");
 }
+
+test("operation backfill preview explains safe skip categories without echoing unknown input", () => {
+  const app = createApp();
+  const detail = app.operationBackfillSkipReasonDetails({
+    invalid_request_line: 2,
+    cross_origin_request_target: 1,
+    canonical_assertion_missing: 2,
+    canonical_origin_unknown: 1,
+    canonical_route_path_too_long: 2,
+    attacker_supplied_reason: 99,
+    invalid_origin: -1,
+  });
+  assert.deepEqual(snapshot(detail), [
+    ["Malformed or unsupported HTTP request line", 2],
+    ["Absolute request target does not match the captured origin", 1],
+    ["Canonical operation link was not produced", 2],
+    ["Operation origin could not be normalized", 1],
+    ["Route exceeds the safe grouping length", 2],
+  ]);
+
+  app.renderOperationBackfillPreview({
+    state: "ready", coverage_state: "partial", scanned: 3, eligible_captures: 0,
+    skipped_no_operation: 3,
+    skipped_no_operation_reasons: { invalid_request_line: 2, cross_origin_request_target: 1, canonical_assertion_missing: 2, canonical_origin_unknown: 1, canonical_route_path_too_long: 2, attacker_supplied_reason: 99 },
+  });
+  const text = renderedText(app.elements.operationBackfillResult);
+  assert.ok(text.includes("No safe operation · Malformed or unsupported HTTP request line: 2"));
+  assert.ok(text.includes("No safe operation · Absolute request target does not match the captured origin: 1"));
+  assert.ok(text.includes("No safe operation · Canonical operation link was not produced: 2"));
+  assert.ok(text.includes("No safe operation · Operation origin could not be normalized: 1"));
+  assert.ok(text.includes("No safe operation · Route exceeds the safe grouping length: 2"));
+  assert.equal(text.includes("attacker_supplied_reason"), false);
+});
 
 test("navigation assertions have readable graph relationship labels", () => {
   const app = createApp();

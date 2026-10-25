@@ -26,7 +26,7 @@ commands. They preserve accepted projection jobs and require an exact candidate 
 
 Create and restore bounded, private project archives with [`project-backup` and `project-restore`](docs/PROJECT-BACKUP-RESTORE.md). Restore emits a fresh local capability summary; it does not establish Caido-history completeness or Neo4j parity.
 
-See [docs/SETUP.md](docs/SETUP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for setup, data boundaries, and verified coverage. The managed launcher has synthetic lifecycle coverage; Neo4j runtime and model-backed consultation still require separate verification.
+See [docs/SETUP.md](docs/SETUP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [docs/PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for setup, data boundaries, and the current verified coverage. The checked local runtime has served the selected project's operation graph and exact evidence/comparison APIs through Neo4j; Hermes MCP discovery and a model-backed synthetic consultation/resume are also verified. Real capture content remains outside the model boundary pending a separate retention/data-boundary review, and full source/browser/JavaScript coverage is still partial.
 
 ## Development
 

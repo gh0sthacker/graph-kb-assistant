@@ -2,10 +2,36 @@ package graph
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"bb-graph-assistant/internal/caido"
 )
+
+func TestRouteFamilyV1WithReasonUsesFixedCodes(t *testing.T) {
+	for _, test := range []struct {
+		name, target, wantFamily, wantReason string
+	}{
+		{name: "valid route", target: "https://fixture.invalid/api/items/42", wantFamily: "/api/items/{value}"},
+		{name: "request-line-sized path", target: "https://fixture.invalid/" + strings.Repeat("a", 4095), wantFamily: "/{value}"},
+		{name: "opaque URI", target: "mailto:person@example.invalid", wantReason: "opaque_target"},
+		{name: "invalid target", target: "https://fixture.invalid/\x01", wantReason: "invalid_target"},
+		{name: "overlong route", target: "https://fixture.invalid/" + strings.Repeat("a", 4096), wantReason: "path_too_long"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			family, reason := RouteFamilyV1WithReason(test.target)
+			if reason != test.wantReason {
+				t.Fatalf("RouteFamilyV1WithReason() reason = %q, want %q", reason, test.wantReason)
+			}
+			if (family != "") != (test.wantReason == "") {
+				t.Fatalf("RouteFamilyV1WithReason() family = %q for reason %q", family, reason)
+			}
+			if family != test.wantFamily {
+				t.Fatalf("RouteFamilyV1WithReason() family = %q, want %q", family, test.wantFamily)
+			}
+		})
+	}
+}
 
 func TestSplitMessagePreservesHTTP2PseudoHeaders(t *testing.T) {
 	raw := []byte("GET /items?id=1 HTTP/2\r\n:method: GET\r\n:scheme: https\r\n:authority: fixture.invalid\r\n:path: /items?id=1\r\naccept: application/json\r\n\r\n")
