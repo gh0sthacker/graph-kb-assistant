@@ -25,26 +25,33 @@
   Keep parity `PARTIAL` until source coverage, vectors, and retrieval behavior
   are matched and the RedAmon comparison snapshot is identified.
 
-## Current KB/runtime state (2026-10-25 22:36 UTC)
+## Current KB/runtime state (2026-10-25 22:41 UTC)
 
 - Read-only inspection of the active index reports snapshot
   `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`,
-  161,240 source documents, 162,398 chunks, and 6,688 vectors. All vectors are
+  161,240 source documents, 162,398 chunks, and 6,752 vectors. All vectors are
   staged for `intfloat/e5-large-v2`; no ready snapshot marker is published.
   Source families are GTFOBins (479), LOLBAS (244), Nuclei (13,403), NVD
   (146,940), OWASP (130), and ToolDocs (44). ExploitDB has no imported rows.
   SQLite `quick_check` passed and coverage is `PARTIAL`.
-- The local HTTP UI returned HTTP 200 on loopback. The running Go server and
-  Hermes MCP process have the active checkout as their working directory, but
-  their binaries predate the just-merged RedAmon parity changes and have not
-  yet been rebuilt/restarted.
-- The embedding process is not currently running. Full E5 generation and an
+- The web service was restarted from the merged checkout and returned HTTP 200
+  on loopback. Hermes `mcp test bb_assistant` initially timed out while the
+  background embedder saturated CPU; with hook approval explicitly enabled, the
+  configured stdio server connected in 2.4 seconds and exposed all 15 selected
+  tools. Hermes status confirms the requested `gpt-6-luna` model and ChatGPT or
+  Codex Subscription provider. The already-running gateway process still has
+  its earlier MCP child in memory and needs a reconnect/restart before that
+  process uses the updated binary.
+- A resumable E5 job is active as a low-priority user service. It has added 64
+  vectors since its launch, reaching 6,752/162,390 eligible content chunks;
+  complete vector generation and an
   end-to-end retrieval comparison remain outstanding. The exact deployed
   RedAmon corpus snapshot is also unknown, so corpus and result identity cannot
   yet be established.
 - On this checkout, the focused KB tests passed (25 tests, 3 subtests), the
   complete Python suite passed (159 tests, 8 subtests), and Go
   `internal/kb`, `internal/mcpserver`, and `cmd/bb-assistant` tests passed.
+  The integration was committed and pushed as merge commit `a0fbfce`.
 
 ## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 
