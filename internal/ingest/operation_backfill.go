@@ -28,6 +28,8 @@ const (
 	operationBackfillBundleSources      = 900
 )
 
+var ErrOperationBackfillCandidateChanged = errors.New("operation backfill preview changed")
+
 type OperationBackfillOptions struct {
 	MaxCaptures int
 	MaxBytes    int64

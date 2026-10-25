@@ -18,6 +18,7 @@ const state = {
   evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
   evidencePacketPreview: null, consultation: null,
+  operationBackfillPreview: null, operationBackfillRequestId: 0,
   consultationCreateKey: "", contextAnnotationKey: "", consultationResumeRequestId: 0,
   contextEvidenceReferences: [], contextEvidenceAccepted: false, contextFlowOrder: [],
 };
@@ -25,6 +26,11 @@ const state = {
 const elements = {
   project: $("#project-select"), endpointList: $("#endpoint-list"), endpointCount: $("#endpoint-count"),
   filter: $("#endpoint-filter"), loadMore: $("#load-more"), surfaceFoot: $("#surface-foot-text"),
+  operationBackfillOpen: $("#operation-backfill-open"), operationBackfillDialog: $("#operation-backfill-dialog"),
+  operationBackfillClose: $("#operation-backfill-close"), operationBackfillMaxCaptures: $("#operation-backfill-max-captures"),
+  operationBackfillMaxBytes: $("#operation-backfill-max-bytes"), operationBackfillPreview: $("#operation-backfill-preview"),
+  operationBackfillApply: $("#operation-backfill-apply"), operationBackfillStatus: $("#operation-backfill-status"),
+  operationBackfillResult: $("#operation-backfill-result"),
   graphCanvas: $("#graph-canvas"), graphScene: $("#graph-scene"), canvasEmpty: $("#canvas-empty"),
   emptyTitle: $("#canvas-empty-title"), emptyCopy: $("#canvas-empty-copy"), graphState: $("#graph-state"),
   fieldValueStatus: $("#field-value-status"),
@@ -202,6 +208,107 @@ async function postJSON(path, body) {
     throw error;
   }
   return payload;
+}
+
+function clearOperationBackfillPreview(message = "Select a project, then request an explicit preview.") {
+  state.operationBackfillRequestId++;
+  state.operationBackfillPreview = null;
+  elements.operationBackfillPreview.disabled = !state.projectKey;
+  elements.operationBackfillApply.disabled = true;
+  elements.operationBackfillStatus.textContent = message;
+  elements.operationBackfillResult.replaceChildren();
+  elements.operationBackfillResult.hidden = true;
+}
+
+function operationBackfillOptions() {
+  const maxCaptures = Number(elements.operationBackfillMaxCaptures.value);
+  const maxRequestBytes = Number(elements.operationBackfillMaxBytes.value);
+  if (!Number.isInteger(maxCaptures) || maxCaptures < 1 || maxCaptures > 20000 ||
+      !Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1048576 || maxRequestBytes > 1073741824) {
+    throw new Error("Choose limits within 1–20,000 captures and 1 MiB–1 GiB.");
+  }
+  return { max_captures: maxCaptures, max_request_bytes: maxRequestBytes };
+}
+
+function renderOperationBackfillPreview(result) {
+  const details = [
+    ["State", result.state], ["Scanned", result.scanned], ["Eligible captures", result.eligible_captures],
+    ["New operations", result.new_operation_groups], ["New links", result.new_assertion_links],
+    ["Skipped", Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0) + Number(result.skipped_endpoint_missing || 0)],
+    ["Request bytes inspected", formatBytes(result.request_bytes)],
+  ];
+  const list = el("ul");
+  for (const [label, value] of details) list.append(el("li", "", `${label}: ${value ?? "—"}`));
+  if (Array.isArray(result.operation_samples) && result.operation_samples.length) {
+    list.append(el("li", "", `Samples: ${result.operation_samples.map(sample => `${sample.method || "?"} ${sample.route_family || "/"}`).join(" · ")}`));
+  }
+  if (result.candidate_sha256) list.append(el("li", "", `Preview digest: ${String(result.candidate_sha256).slice(0, 12)}…`));
+  elements.operationBackfillResult.replaceChildren(list);
+  elements.operationBackfillResult.hidden = false;
+}
+
+async function previewOperationBackfill() {
+  if (!state.projectKey) return;
+  const projectKey = state.projectKey;
+  const requestId = ++state.operationBackfillRequestId;
+  let options;
+  try { options = operationBackfillOptions(); } catch (error) {
+    elements.operationBackfillStatus.textContent = error.message;
+    return;
+  }
+  state.operationBackfillPreview = null;
+  elements.operationBackfillPreview.disabled = true;
+  elements.operationBackfillApply.disabled = true;
+  elements.operationBackfillStatus.textContent = "Inspecting bounded historical request metadata locally…";
+  elements.operationBackfillResult.replaceChildren();
+  elements.operationBackfillResult.hidden = true;
+  try {
+    const result = await postJSON("/api/maintenance/operation-backfill/preview", { project_key: projectKey, ...options });
+    if (requestId !== state.operationBackfillRequestId || state.projectKey !== projectKey) return;
+    state.operationBackfillPreview = { projectKey, options, result };
+    renderOperationBackfillPreview(result);
+    const ready = result.state === "ready" && !!result.candidate_sha256 && Number(result.eligible_captures) > 0;
+    elements.operationBackfillApply.disabled = !ready;
+    elements.operationBackfillStatus.textContent = ready
+      ? "Ready. Review the counts, then explicitly apply this exact preview."
+      : result.state === "partial"
+        ? "Preview is partial; it cannot be applied. Reduce the limits or resolve the reported coverage gaps."
+        : "No operation changes are ready to apply.";
+  } catch (error) {
+    if (requestId !== state.operationBackfillRequestId || state.projectKey !== projectKey) return;
+    elements.operationBackfillStatus.textContent = `Preview failed: ${error.message}`;
+  } finally {
+    if (requestId === state.operationBackfillRequestId && state.projectKey === projectKey) elements.operationBackfillPreview.disabled = false;
+  }
+}
+
+async function applyOperationBackfill() {
+  const preview = state.operationBackfillPreview;
+  if (!preview || preview.projectKey !== state.projectKey || !preview.result.candidate_sha256 || preview.result.state !== "ready") return;
+  const result = preview.result;
+  const message = `Apply this exact preview to the selected local graph?\n\n${result.eligible_captures} captures · ${result.new_operation_groups} operations · ${result.new_assertion_links} links\n\nThis writes the local graph and retryable Neo4j outbox. It does not contact Caido or send data to Hermes.`;
+  if (!window.confirm(message)) return;
+  const requestId = ++state.operationBackfillRequestId;
+  elements.operationBackfillPreview.disabled = true;
+  elements.operationBackfillApply.disabled = true;
+  elements.operationBackfillStatus.textContent = "Rechecking the exact preview and applying its bounded graph update…";
+  try {
+    const applied = await postJSON("/api/maintenance/operation-backfill/apply", {
+      project_key: preview.projectKey, ...preview.options, candidate_sha256: result.candidate_sha256,
+    });
+    if (requestId !== state.operationBackfillRequestId || state.projectKey !== preview.projectKey) return;
+    state.operationBackfillPreview = null;
+    elements.operationBackfillStatus.textContent = `Applied ${applied.bundles_imported} new bundles; ${applied.bundles_replayed} replayed. Neo4j outbox sync remains pending.`;
+    renderOperationBackfillPreview(result);
+    elements.operationBackfillApply.disabled = true;
+    await loadSurface(false);
+  } catch (error) {
+    if (requestId !== state.operationBackfillRequestId || state.projectKey !== preview.projectKey) return;
+    elements.operationBackfillStatus.textContent = error.status === 409
+      ? "The preview is stale or incomplete. Request a new preview before applying."
+      : `Apply failed: ${error.message}`;
+    elements.operationBackfillPreview.disabled = false;
+  }
 }
 
 function clearEvidence(closeDialog = true, preserveAcceptedConsultation = false) {
@@ -1559,6 +1666,8 @@ function clearProjectView() {
   state.surfaceFilter = elements.filter.value.trim();
   state.totalOperations = 0;
   state.surfaceGaps = [];
+  clearOperationBackfillPreview("Select a project, then request an explicit preview.");
+  elements.operationBackfillOpen.disabled = true;
   state.graph = null;
   clearFieldValueTraversalStatus();
   state.selectedEndpoint = null;
@@ -1590,6 +1699,8 @@ async function selectProject(projectKey) {
   resetSurfaceRequest();
   resetGraphNavigation();
   state.projectKey = projectKey;
+  clearOperationBackfillPreview("Preview cleared because the selected project changed.");
+  elements.operationBackfillOpen.disabled = false;
   updateConsultationResumeControl();
   state.operationAliasRequestId++;
   state.operationAliases = new Map();
@@ -2628,6 +2739,17 @@ elements.project.addEventListener("change", () => {
   }
   void selectProject(elements.project.value);
 });
+elements.operationBackfillOpen.addEventListener("click", () => {
+  if (!state.projectKey) return;
+  elements.operationBackfillDialog.showModal();
+  clearOperationBackfillPreview();
+});
+elements.operationBackfillClose.addEventListener("click", () => elements.operationBackfillDialog.close());
+elements.operationBackfillDialog.addEventListener("close", () => elements.operationBackfillOpen.focus());
+elements.operationBackfillPreview.addEventListener("click", () => { void previewOperationBackfill(); });
+elements.operationBackfillApply.addEventListener("click", () => { void applyOperationBackfill(); });
+elements.operationBackfillMaxCaptures.addEventListener("input", () => clearOperationBackfillPreview("Limits changed; request a new preview before applying."));
+elements.operationBackfillMaxBytes.addEventListener("input", () => clearOperationBackfillPreview("Limits changed; request a new preview before applying."));
 elements.filter.addEventListener("input", () => {
   const filter = elements.filter.value.trim();
   if (filter === state.surfaceFilter) return;

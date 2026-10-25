@@ -25,10 +25,12 @@ import (
 )
 
 const (
-	maxGraphSeeds    = 20
-	maxGraphResponse = 8 << 20
-	requestTimeout   = 30 * time.Second
-	graphTimeout     = 3 * time.Minute
+	maxGraphSeeds        = 20
+	maxGraphResponse     = 8 << 20
+	maxMaintenanceResult = 256 << 10
+	requestTimeout       = 30 * time.Second
+	graphTimeout         = 3 * time.Minute
+	maintenanceTimeout   = 30 * time.Minute
 )
 
 var (
@@ -40,7 +42,9 @@ var (
 		"/api/consultation/context-annotation": {},
 		"/api/consultation/operation-alias":    {},
 		"/api/consultation/proposal":           {}, "/api/consultation/validate": {},
-		"/api/consultation/candidate": {},
+		"/api/consultation/candidate":                 {},
+		"/api/maintenance/operation-backfill/preview": {},
+		"/api/maintenance/operation-backfill/apply":   {},
 	}
 )
 
@@ -68,6 +72,11 @@ type consultationAPI interface {
 	RecordProposal(context.Context, consultation.RecordProposalRequest) (consultation.ProposalRecord, error)
 	ValidateProposal(context.Context, consultation.ValidateProposalRequest) (consultation.ValidationReceipt, error)
 	SaveCandidate(context.Context, consultation.SaveCandidateRequest) (consultation.CandidateVersion, error)
+}
+
+type operationBackfillAPI interface {
+	PreviewOperationBackfill(context.Context, string, ingest.OperationBackfillOptions) (ingest.OperationBackfillPreview, error)
+	ApplyOperationBackfill(context.Context, string, string, ingest.OperationBackfillOptions) (ingest.OperationBackfillApplyResult, error)
 }
 
 // NewHandler constructs the local UI and its narrowly scoped API.
@@ -106,6 +115,10 @@ func NewHandler(api readAPI) (http.Handler, error) {
 		mux.HandleFunc("POST /api/consultation/proposal", consultationProposalHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/validate", consultationValidateHandler(consultations))
 		mux.HandleFunc("POST /api/consultation/candidate", consultationCandidateHandler(consultations))
+	}
+	if maintenance, ok := api.(operationBackfillAPI); ok {
+		mux.HandleFunc("POST /api/maintenance/operation-backfill/preview", operationBackfillPreviewHandler(maintenance))
+		mux.HandleFunc("POST /api/maintenance/operation-backfill/apply", operationBackfillApplyHandler(maintenance))
 	}
 	return securityHeaders(localRequestGate(mux)), nil
 }
@@ -396,6 +409,97 @@ func evidencePacketPreviewHandler(api readAPI) http.HandlerFunc {
 		result, err := api.BuildEvidencePacket(ctx, request)
 		writeEvidencePacketResult(w, result, err)
 	}
+}
+
+type operationBackfillRequest struct {
+	ProjectKey      string `json:"project_key"`
+	MaxCaptures     int    `json:"max_captures,omitempty"`
+	MaxRequestBytes int64  `json:"max_request_bytes,omitempty"`
+	CandidateSHA256 string `json:"candidate_sha256,omitempty"`
+}
+
+func decodeOperationBackfillRequest(w http.ResponseWriter, r *http.Request, applying bool) (operationBackfillRequest, ingest.OperationBackfillOptions, bool) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		writeError(w, http.StatusUnsupportedMediaType, "operation backfill requires application/json")
+		return operationBackfillRequest{}, ingest.OperationBackfillOptions{}, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var request operationBackfillRequest
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "operation backfill request is malformed or too large")
+		return operationBackfillRequest{}, ingest.OperationBackfillOptions{}, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "operation backfill request must contain one JSON object")
+		return operationBackfillRequest{}, ingest.OperationBackfillOptions{}, false
+	}
+	if !projectKeyPattern.MatchString(request.ProjectKey) ||
+		request.MaxCaptures < 0 || request.MaxCaptures > ingest.MaximumOperationBackfillMaxCaptures ||
+		request.MaxRequestBytes < 0 || request.MaxRequestBytes > ingest.MaximumOperationBackfillMaxBytes ||
+		(request.MaxRequestBytes != 0 && request.MaxRequestBytes < 1<<20) ||
+		(applying && !captureRevisionRegex.MatchString(request.CandidateSHA256)) ||
+		(!applying && request.CandidateSHA256 != "") {
+		writeError(w, http.StatusBadRequest, "operation backfill project, limits, or candidate digest are invalid")
+		return operationBackfillRequest{}, ingest.OperationBackfillOptions{}, false
+	}
+	options := ingest.OperationBackfillOptions{MaxCaptures: request.MaxCaptures, MaxBytes: request.MaxRequestBytes}
+	return request, options, true
+}
+
+func operationBackfillPreviewHandler(api operationBackfillAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		request, options, ok := decodeOperationBackfillRequest(w, r, false)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), maintenanceTimeout)
+		defer cancel()
+		result, err := api.PreviewOperationBackfill(ctx, request.ProjectKey, options)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "bounded operation preview could not be completed; project data was not changed")
+			return
+		}
+		writeMaintenanceResult(w, result)
+	}
+}
+
+func operationBackfillApplyHandler(api operationBackfillAPI) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		request, options, ok := decodeOperationBackfillRequest(w, r, true)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), maintenanceTimeout)
+		defer cancel()
+		result, err := api.ApplyOperationBackfill(ctx, request.ProjectKey, request.CandidateSHA256, options)
+		if errors.Is(err, ingest.ErrOperationBackfillCandidateChanged) {
+			writeError(w, http.StatusConflict, "preview is partial, stale, or does not match the confirmed candidate; preview again")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "confirmed operation update could not be completed; retryable graph work remains local")
+			return
+		}
+		writeMaintenanceResult(w, result)
+	}
+}
+
+func writeMaintenanceResult(w http.ResponseWriter, result any) {
+	encoded, err := json.Marshal(result)
+	if err != nil || len(encoded) > maxMaintenanceResult {
+		writeError(w, http.StatusRequestEntityTooLarge, "operation backfill result exceeds the local UI limit")
+		return
+	}
+	defer clear(encoded)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, bytes.NewReader(encoded))
 }
 
 func optionalNonnegativeInt64(value string) (int64, bool, error) {

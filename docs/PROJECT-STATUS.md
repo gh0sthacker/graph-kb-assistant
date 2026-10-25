@@ -21,6 +21,36 @@
   or Hermes/provider safety for real capture content. No Hermes model call,
   Caido access, graph write, queue drain, or KB operation was performed.
 
+## Stage 3 operation graph repair from the local UI — PARTIAL (2026-10-25)
+
+- The retained-data graph query above contained no `operation` entity, even
+  though the structural catalog grouped 1,400 locally indexed observations
+  into 131 operations. Added a deliberate maintenance control to the local UI
+  so an operator can preview and repair this legacy graph projection without
+  running a separate command-line workflow.
+- Preview is user-triggered, project-scoped, read-only, and bounded to the
+  existing 5,000-capture/512 MiB defaults (with the existing 20,000-capture/
+  1 GiB hard limits). It reports counts, masked route-family samples, and a
+  candidate digest; it does not return the request bytes or candidate bundles.
+- Apply requires the exact digest from a complete preview, reacquires the
+  project maintenance lease, recomputes the candidate, and writes idempotent
+  BehaviorGraph bundles plus the durable Neo4j outbox. It does not call Caido,
+  send data to Hermes, or drain unrelated queued jobs. The UI explains that
+  Neo4j delivery remains pending until a projection worker handles the outbox.
+  The installed web-only systemd unit starts with no `--project-key`, so it
+  starts no projection worker; entries created through this UI remain pending
+  until an operator separately configures a selected-project worker or runs an
+  explicit sync. This UI does not claim Neo4j repair is complete.
+  The maintenance operations are web-only and were not added to the MCP tool
+  catalog.
+- Synthetic web-handler tests cover bounded input, response redaction,
+  same-origin enforcement, exact-digest conflict handling, and project scope.
+  Focused Go packages passed: `internal/webui`, `internal/mcpserver`,
+  `internal/ingest`, and `cmd/bb-assistant`; 81 JavaScript tests and the app
+  JavaScript syntax check passed. No backfill preview or graph write was run
+  against the retained project, so operation-node recovery and Neo4j delivery
+  remain unverified.
+
 ## Current delivery checkpoint (2026-10-25, vault configuration and LAN reachability)
 
 - The existing vault key was found in the private file
