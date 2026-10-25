@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/connect-chatgpt [--browser] [--no-browser] [--timeout SECONDS]
+
+Create a fresh ChatGPT subscription login in this project's external Hermes
+profile. Complete the OpenAI authorization in your browser when prompted.
+The default flow prints a device code. --browser selects the loopback PKCE
+flow; --no-browser prints its URL without opening it. --timeout applies to
+the browser callback (the upstream device flow uses its own timeout).
+
+This selects the openai-codex provider; choose a compatible model separately.
+Each successful run adds a new login. Run this once for initial connection.
+USAGE
+}
+
+oauth_args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --browser|--no-browser) oauth_args+=("$1"); shift ;;
+    --timeout|--timeout=*)
+      if [ "$1" = --timeout ]; then
+        if [ "$#" -lt 2 ]; then
+          printf '%s\n' '--timeout requires a positive number of seconds.' >&2
+          exit 2
+        fi
+        timeout_value="$2"
+        shift 2
+      else
+        timeout_value="${1#--timeout=}"
+        shift
+      fi
+      if ! python3 - "$timeout_value" <<'PY'
+import math
+import sys
+try:
+    seconds = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(seconds) and seconds > 0 else 1)
+PY
+      then
+        printf '%s\n' '--timeout requires a positive number of seconds.' >&2
+        exit 2
+      fi
+      oauth_args+=(--timeout "$timeout_value")
+      ;;
+    *) printf 'Unsupported option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+# Discard inherited model/API routes before Hermes initializes. The wrapper
+# resolves HERMES_HOME itself; do not inspect or import any other CLI's login.
+unset OPENAI_API_KEY OPENAI_BASE_URL OPENROUTER_API_KEY OPENROUTER_BASE_URL
+unset ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+unset HERMES_INFERENCE_MODEL HERMES_CODEX_BASE_URL
+export HERMES_INFERENCE_PROVIDER=openai-codex
+
+# auth add loads the pool before starting OAuth. Disable borrowed CLI logins
+# first, then persist the selected route using Hermes' supported config CLI.
+"$script_dir/run-hermes" config set auth.adopt_external_logins false
+"$script_dir/run-hermes" config set model.provider openai-codex
+"$script_dir/run-hermes" config set model.base_url https://chatgpt.com/backend-api/codex
+exec "$script_dir/run-hermes" auth add openai-codex --type oauth "${oauth_args[@]}"
