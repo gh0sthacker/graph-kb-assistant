@@ -3215,3 +3215,23 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
 - CT108 has not been redeployed with this Go change. Runtime verification of
   the new fields and source-manifest freshness remains outstanding; KB vector
   coverage and exact RedAmon corpus/query parity remain `PARTIAL`.
+
+## Commit-pinned runtime artifact and deployed MCP smoke — 2026-10-26 — PARTIAL
+
+- Commit `b8f9281` adds a Linux amd64 runtime artifact and `SHA256SUMS` to the
+  successful Go CI job; CI run `40325178532` passed Go tests, `go vet`, Python
+  tests, Gitleaks, version stamping, and artifact upload. Downloaded the
+  pull-request artifact, verified its checksum, and ran its binary: it reports
+  `0.1.0-go-dev+b1887f20c910`, matching the tested synthetic PR merge revision.
+  Setup documentation distinguishes PR merge artifacts from exact `main`
+  push artifacts. Documentation correction is commit `f3b9015`.
+- `./scripts/run-hermes mcp test bb_assistant` connected to deployed CT108 over
+  the configured restricted SSH stdio transport and discovered all 15
+  allowlisted tools. This only verifies MCP initialization and tool discovery;
+  no project data, KB tool, capture content, or model was queried.
+- The new Go binary has not been installed on CT108. Direct HTTP to
+  `192.168.2.154` reaches the Basic Auth boundary (`401` without credentials);
+  the configured hostname did not resolve from this shell. Authenticated UI
+  browser flow and post-deployment runtime version remain unverified. KB
+  indexing/parity is being handled separately and was not changed by this
+  check; delivery remains `PARTIAL`.
