@@ -152,6 +152,18 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
         self.assertEqual(chunk.title, "commented — Commented")
         self.assertEqual(chunk.text, "Commented (info)")
 
+    def test_nuclei_literal_wildcards_are_not_counted_as_yaml_aliases(self) -> None:
+        wildcards = "*" * 1375
+        document = SourceDocument.create(
+            source_name="nuclei", source_id="http/wildcards.yaml", title="wildcards",
+            text=("id: wildcards\ninfo:\n  name: Wildcard payload\nhttp:\n  - method: GET\n"
+                  f"    path: [\"{{{{BaseURL}}}}/{wildcards}\"]\n"),
+            metadata={"template_id": "wildcards"},
+        )
+        chunk = chunk_document(document)[0]
+        self.assertEqual(chunk.title, "wildcards — Wildcard payload")
+        self.assertEqual(chunk.text.count("*"), len(wildcards))
+
     def test_redamon_duplicate_native_ids_keep_last_loader_value(self) -> None:
         spec = {
             "id": "gtfobins", "kind": "github_archive", "url": GTFO_URL,

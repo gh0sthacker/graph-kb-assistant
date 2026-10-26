@@ -237,24 +237,33 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
     raw = document.text
     if len(raw.encode("utf-8")) > 1024 * 1024:
         raise ValueError(f"{document.source_name} source document exceeds YAML size limit")
-    max_indent = max_flow_depth = anchors = aliases = 0
-    flow_depth = 0
+    max_indent = 0
     for line in raw.splitlines():
         stripped = line.lstrip(" ")
         if stripped and not stripped.startswith("#"):
             max_indent = max(max_indent, len(line) - len(stripped))
-        # Match RedAmon's bounded YAML pre-scan: comment bodies are not YAML
-        # tokens and must not inflate alias/anchor/flow limits.
-        for char in (() if not stripped or stripped.startswith("#") else line):
-            if char in "{[":
+    # Count parsed YAML tokens, not punctuation in comments, quoted regexes,
+    # or Nuclei payloads. The RedAmon char scan rejects valid templates with
+    # thousands of literal wildcard characters; PyYAML's scanner preserves
+    # the same hard alias/anchor/depth bounds without that false positive.
+    from yaml.tokens import (
+        AliasToken, AnchorToken, FlowMappingEndToken, FlowMappingStartToken,
+        FlowSequenceEndToken, FlowSequenceStartToken,
+    )
+    max_flow_depth = flow_depth = anchors = aliases = 0
+    try:
+        for token in yaml.scan(raw, Loader=yaml.SafeLoader):
+            if isinstance(token, (FlowMappingStartToken, FlowSequenceStartToken)):
                 flow_depth += 1
                 max_flow_depth = max(max_flow_depth, flow_depth)
-            elif char in "}]" and flow_depth:
-                flow_depth -= 1
-            elif char == "&":
+            elif isinstance(token, (FlowMappingEndToken, FlowSequenceEndToken)):
+                flow_depth = max(0, flow_depth - 1)
+            elif isinstance(token, AnchorToken):
                 anchors += 1
-            elif char == "*":
+            elif isinstance(token, AliasToken):
                 aliases += 1
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid {document.source_name} YAML source document") from exc
     if max_indent > 256 or max_flow_depth > 64 or anchors > 100 or aliases > 1000:
         raise ValueError(f"{document.source_name} source document exceeds YAML complexity limits")
     try:
