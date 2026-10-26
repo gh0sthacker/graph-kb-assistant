@@ -3258,3 +3258,23 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   captures, 1,398 applied projection jobs and two dead-letter jobs. Historical
   source completeness and active-target behavior remain unverified. KB vectors
   and exact RedAmon corpus/query parity remain outside this deployment change.
+
+## CT108 runtime secret-path fix — 2026-10-26 — PARTIAL
+
+- Fixed the tracked systemd unit by removing a stale explicit runtime-env path.
+  The launcher now reads `runtime.env` from the configured data home, where the
+  existing mode-0600 vault file is present. Deployed the corrected unit to CT
+  108, retained a private rollback copy, daemon-reloaded and restarted the
+  service; it is active with zero restarts.
+- Authenticated, read-only LAN checks after restart returned HTTP 200 for
+  `/api/health`, `/api/surface` (131 operations, partial coverage), `/api/graph`
+  (3 entities, 2 edges, 1 card; incomplete), `/api/evidence` (source integrity
+  verified; 446-byte encrypted request; parse partial), and
+  `/api/compare` (two exact references compared; request available and unequal;
+  response unavailable). Runtime capabilities report the vault key as
+  verified. Capture bodies were not printed or sent to a model.
+- `projection-reconcile --dry-run --include-dead-letter` found matching local
+  and Neo4j snapshot hashes, zero missing records, and two conflicting
+  dead-letter records. No reconciliation writes were made. Those conflicts and
+  the unavailable response evidence remain data-quality gaps; overall delivery
+  stays `PARTIAL`.
