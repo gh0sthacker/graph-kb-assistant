@@ -1,5 +1,26 @@
 # Project status and known limitations
 
+## KB maximum-coverage candidate — 2026-10-26 20:24 UTC — IN PROGRESS
+
+- The isolated `full`-profile candidate is at snapshot
+  `098d8605cfefa503ad9d226d617d74b5b37dd16a781855283ad733e929a43b39`:
+  seven source families are `DONE`, with 207,878 source documents and 208,950
+  content chunks (208,960 stored rows including 10 notice rows). Its current
+  E5-large-v2 vector count is 38,882/208,950 (18.6%); the vector staging marker
+  is still present, so semantic readiness is false. The active application index
+  remains unchanged.
+- Candidate embedding runs only on CT108. Its single-thread worker remains
+  active behind the 70 C / ten-minute cool-dwell gate. At 20:23 UTC, CT108's
+  `coretemp Package id 0` sensor read 89 C; no inference is allowed to start
+  under that reading. VM112 remains paused and the Kali embedding unit remains
+  disabled.
+- These seven-family counts are the selected RedAmon `full`-profile target,
+  not proof that the candidate equals the installed RedAmon corpus. The
+  installed VM112 profile is `cpu-lite`; exact corpus and query parity remain
+  open. Keep the candidate isolated until vectors finish, integrity checks and
+  fixed-query comparisons pass, and the active RedAmon snapshot reference is
+  available.
+
 ## KB max-fill work resumed on Proxmox — 2026-10-26 19:34 UTC — IN PROGRESS
 
 - The selected completeness target is RedAmon's pinned seven-family `full`

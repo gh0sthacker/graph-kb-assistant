@@ -9,11 +9,13 @@ identical to RedAmon.
 
 The requested target is the pinned RedAmon `full` source profile, not the
 smaller `cpu-lite` profile most recently ingested by the installed VM112
-instance. The Graph Assistant already has the seven full-profile families and
-the 730-day NVD window. Its current snapshot holds 207,878 source documents,
-209,036 stored chunks (209,026 content chunks), and 38,888 content vectors;
-the vector snapshot is not ready. Thus the immediate completeness gap is
-semantic coverage, not missing source families.
+instance. The isolated Graph Assistant candidate has the seven full-profile
+families and the 730-day NVD window: 207,878 source documents and 208,950
+content chunks (208,960 stored rows including 10 notice rows). It has 38,882
+E5-large vectors (18.6%) and 170,068 content chunks still missing vectors.
+The active application index remains unchanged; candidate vector readiness is
+false. Thus the immediate completeness gap is semantic coverage, not a missing
+RedAmon full-profile family.
 
 The current CT108 full-profile index was inspected read-only before work was
 resumed. All seven stored source revisions match their current pinned source
@@ -25,14 +27,16 @@ recompute per-source document/chunk counts from the resulting SQLite tables;
 its 17 provider/rechunk tests pass. It does not silently change the active
 source manifest or claim RedAmon parity.
 
-At 2026-10-26 19:34 UTC the resumable worker was started on Proxmox CT108,
-against the existing full-profile index. Its unit is bounded to one thread,
-batch size 2, 20% CPU and 3 GiB memory. It waits for a continuous 10-minute
-period below 70 C before loading the model; at the first post-start check it
-used 13.7 MiB and 88 ms CPU, so vector generation had not started yet. The
-worker preserves progress and only publishes vector readiness after all
-content chunks are embedded. Kali is not running this work and VM112 remains
-paused.
+At 2026-10-26 20:04 UTC a candidate-only resumable worker was started on
+Proxmox CT108. Its unit is bounded to one thread, batch size 2, 20% CPU and
+3 GiB memory. It waits for a continuous 10-minute period below 70 C before
+loading the model and checks temperature before every durable batch. At
+20:23 UTC `coretemp Package id 0` inside CT108 read 89 C; the worker remained
+active in its thermal gate with under one second CPU and had added no vectors.
+No inference should run while the package is this hot. The candidate worker
+preserves completed batches and only publishes vector readiness after all
+content chunks are embedded. The original Kali embed unit is disabled and
+VM112 remains paused.
 
 Current parity is still `PARTIAL`: the active RedAmon installation is `cpu-lite`
 with E5-base-v2 while this max-fill job uses the Assistant's pinned E5-large-v2
