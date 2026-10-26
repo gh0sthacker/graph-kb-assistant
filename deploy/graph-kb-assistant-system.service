@@ -7,17 +7,17 @@ Wants=network-online.target
 Type=simple
 User=max
 Group=max
-WorkingDirectory=%h/bb/graph-kb-assistant
-Environment=HOME=%h
-Environment=XDG_DATA_HOME=%h/.local/share
+WorkingDirectory=/home/max/bb/graph-kb-assistant
+Environment=HOME=/home/max
+Environment=XDG_DATA_HOME=/home/max/.local/share
 Environment=BB_ASSISTANT_BINARY=/usr/local/bin/bb-assistant
-Environment=BB_ASSISTANT_NEO4J_ENV_FILE=%h/.local/share/bb-graph-assistant/neo4j.env
-Environment=BB_ASSISTANT_RUNTIME_ENV_FILE=%h/.local/share/bb-graph-assistant/runtime.env
-Environment=BB_ASSISTANT_KB_INDEX=%h/.local/share/bb-graph-assistant/kb/index.sqlite3
+Environment=BB_ASSISTANT_NEO4J_ENV_FILE=/home/max/.local/share/bb-graph-assistant/neo4j.env
+Environment=BB_ASSISTANT_RUNTIME_ENV_FILE=/home/max/.local/share/bb-graph-assistant/runtime.env
+Environment=BB_ASSISTANT_KB_INDEX=/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3
 Environment=BB_ASSISTANT_KB_MODELS=1
-Environment=PYTHONPATH=%h/bb/graph-kb-assistant/src
-EnvironmentFile=%h/.local/share/bb-graph-assistant/service.env
-ExecStart=%h/bb/graph-kb-assistant/scripts/bb-assistant serve --addr 127.0.0.1:8765 --project-key=${BB_ASSISTANT_PROJECT_KEY}
+Environment=PYTHONPATH=/home/max/bb/graph-kb-assistant/src
+EnvironmentFile=/home/max/.local/share/bb-graph-assistant/service.env
+ExecStart=/home/max/bb/graph-kb-assistant/scripts/bb-assistant serve --addr 127.0.0.1:8765 --project-key=${BB_ASSISTANT_PROJECT_KEY}
 Restart=on-failure
 RestartSec=5
 CPUQuota=150%
