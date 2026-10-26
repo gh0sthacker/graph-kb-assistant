@@ -3124,3 +3124,26 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   Python and Gitleaks jobs. Existing project data has not been validated with
   live target traffic or a live Hermes model request. Exact content/query
   equality with the active RedAmon deployment remains unproven.
+
+## Direct DHCP access check — 2026-10-26 10:45 UTC — PARTIAL
+
+- CT 108 `net0` is bridged to `vmbr0` with DHCP and no VLAN tag. It receives
+  `192.168.2.154/24` from DHCP server `192.168.2.1`. Proxmox `pve` itself has
+  `192.168.1.147/24` with gateway `192.168.1.1`. A captured natural renewal
+  showed the DHCP reply from the same source MAC returned by ARP for
+  `192.168.1.1`; the lease is valid, though it is in a different private
+  subnet. CT 103/114 have recent leases from `192.168.1.1`.
+- `bb-graph-assistant.myzone.su` resolves to `192.168.2.154`. Direct HTTP to
+  the UI returns 200. Direct `/api/health` from CT 114 (`192.168.1.132`) and
+  from `pve` reaches Nginx and returns 401 without Basic Auth; the same health
+  endpoint returns 200 from the app's loopback listener inside CT 108. This
+  confirms routed direct access from the `192.168.1.x` network without DNAT.
+- Disabled and stopped `graph-kb-assistant-nat.service` on `pve`; its
+  application-specific iptables rules were removed. The direct CT URL still
+  responds, while the old `192.168.1.147:8765` endpoint no longer accepts
+  connections. The DHCP lease was not altered. HTTPS on port 443 is not
+  listening; the current deployment is private-LAN HTTP plus authenticated
+  API, not a public HTTPS service.
+- The app, Nginx and Neo4j remain active. At the time of this check, semantic
+  vectors are incomplete and RedAmon snapshot/query parity is unverified, so
+  the overall delivery remains `PARTIAL`.
