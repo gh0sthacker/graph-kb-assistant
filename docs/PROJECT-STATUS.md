@@ -2880,3 +2880,13 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   same deployed source snapshot/content and same ordered query results/score
   components are required; differing search backends must pass the fixture or
   be replaced/adapted. Delivery remains `PARTIAL`.
+
+### KB vector generation resumed — 2026-10-25 21:45 EDT
+
+- The masked user unit had no surviving unit file after its `/dev/null` mask
+  was removed. Recreated it with the verified local CLI/index path, pinned
+  venv, 8-thread CPU settings, batch size 64, and failure restart policy; the
+  user service is enabled and active with zero restarts.
+- A read-only follow-up confirmed progress from 11,296 to 11,488 of 209,026
+  content vectors. `vector_ready` remains false. The caller for the prior stop
+  is still unknown; this service checkpoint does not establish KB parity.
