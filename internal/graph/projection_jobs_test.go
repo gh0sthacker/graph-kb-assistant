@@ -831,12 +831,15 @@ func TestProjectionJobTimestampsSortChronologically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registerProjectionRevision(t, ctx, tx, laterRevision, "observation-4", base)
-	registerProjectionRevision(t, ctx, tx, earlierRevision, "observation-5", base)
-	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, laterRevision, "observation-4", minimalProjectionPayload(projectionTestProjectKey, "observation-4"), base.Add(110*time.Millisecond)); err != nil {
+	laterCapture, earlierCapture := "observation-4", "observation-5"
+	registerProjectionRevision(t, ctx, tx, laterRevision, laterCapture, base)
+	registerProjectionRevision(t, ctx, tx, earlierRevision, earlierCapture, base)
+	laterPayload := minimalProjectionPayload(projectionTestProjectKey, laterCapture)
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, laterRevision, laterCapture, laterPayload, base.Add(110*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, earlierRevision, "observation-5", minimalProjectionPayload(projectionTestProjectKey, "observation-5"), base.Add(100*time.Millisecond)); err != nil {
+	earlierPayload := minimalProjectionPayload(projectionTestProjectKey, earlierCapture)
+	if _, _, err := EnqueueProjectionJob(ctx, tx, projectionTestProjectKey, earlierRevision, earlierCapture, earlierPayload, base.Add(100*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
