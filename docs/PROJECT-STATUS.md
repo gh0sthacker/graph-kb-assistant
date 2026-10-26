@@ -3200,3 +3200,18 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
 - The app, Nginx and Neo4j remain active. At the time of this check, semantic
   vectors are incomplete and RedAmon snapshot/query parity is unverified, so
   the overall delivery remains `PARTIAL`.
+
+## Go MCP KB manifest-freshness reporting — 2026-10-26 — PARTIAL
+
+- The production Go `bb_kb_stats` response now reports the pinned source
+  manifest SHA-256, the current `sources.yaml` SHA-256, and whether they match.
+  Older indexes fall back to the immutable snapshot manifest; an unavailable
+  hash remains unknown (`null`). The systemd service templates configure the
+  current manifest path. This signal does not prove source coverage validity,
+  vector completeness, or RedAmon parity.
+- Commit `bf7b26b` is pushed to
+  `codex/consultation-empty-comparisons`. Local `go test ./...`, `go vet ./...`,
+  focused KB/MCP tests, and the full GitHub CI run passed.
+- CT108 has not been redeployed with this Go change. Runtime verification of
+  the new fields and source-manifest freshness remains outstanding; KB vector
+  coverage and exact RedAmon corpus/query parity remain `PARTIAL`.
