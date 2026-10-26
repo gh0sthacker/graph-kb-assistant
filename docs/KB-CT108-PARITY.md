@@ -618,3 +618,12 @@ consistent with waiting before model load. A single 60 C PVE temperature
 sample is not proof that the worker's ten-minute cool-dwell gate has passed.
 Do not bypass that gate. VM112 stays paused, and exact corpus-text and retrieval
 parity remain `PARTIAL`.
+
+After CI run `40417806079` passed Go, Python, and secret-scan jobs, commit
+`6d9277f`'s `gtfobins.py` was installed in CT108 at the source path with the
+previous file backed up under
+`/home/max/.local/share/bb-graph-assistant/deploy-backups/python-pre-6d9277f/`.
+The installed file SHA-256 matches the checked-in file. No application or
+embedding service was restarted and no candidate/active KB data was changed;
+the correction will be used by the next controlled source refresh after the
+current embedding worker releases the candidate.
