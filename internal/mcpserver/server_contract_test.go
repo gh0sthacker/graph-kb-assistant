@@ -297,6 +297,74 @@ func TestKBSearchMCPArgumentsForwardMetadataFilters(t *testing.T) {
 	}
 }
 
+func TestKBStatsMCPExposesStagedVectorProgress(t *testing.T) {
+	root := t.TempDir()
+	indexPath := filepath.Join(root, "kb-index.sqlite3")
+	createKBFilterIndex(t, indexPath)
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector)
+			VALUES(?,?,1024,zeroblob(4096))`, strings.Repeat("a", 64), "intfloat/e5-large-v2")
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+			('vector_staging_model','intfloat/e5-large-v2'),
+			('vector_staging_dimensions','1024'),
+			('vector_staging_snapshot_id',?)`, strings.Repeat("1", 64))
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare staged KB stats fixture: %v", err)
+	}
+
+	tools, err := NewTools(root, indexPath)
+	if err != nil {
+		t.Fatalf("NewTools() error = %v", err)
+	}
+	defer tools.Close()
+	server, err := NewServer(tools)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	responses := serveFixtureRequests(t, server,
+		map[string]any{
+			"jsonrpc": "2.0", "id": 1, "method": "initialize",
+			"params": map[string]any{
+				"protocolVersion": "2025-06-18",
+				"capabilities":    map[string]any{},
+				"clientInfo":      map[string]any{"name": "fixture", "version": "1"},
+			},
+		},
+		map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized", "params": map[string]any{}},
+		map[string]any{
+			"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+			"params": map[string]any{"name": "bb_kb_stats", "arguments": map[string]any{}},
+		},
+	)
+	call := responseForID(t, responses, "2").Result.(map[string]any)
+	if call["isError"] == true {
+		t.Fatalf("bb_kb_stats call failed: %#v", call)
+	}
+	stats, ok := call["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("bb_kb_stats structured result has type %T", call["structuredContent"])
+	}
+	if stats["total_content_chunks"] != float64(2) || stats["embedded_content_chunks"] != float64(1) || stats["vector_ready"] != false {
+		t.Fatalf("bb_kb_stats progress = %#v; want 1/2 content chunks and not ready", stats)
+	}
+	if stats["embedding_target_model"] != "intfloat/e5-large-v2" ||
+		stats["embedding_target_snapshot_id"] != strings.Repeat("1", 64) || stats["embedding_target_dimensions"] != float64(1024) {
+		t.Fatalf("bb_kb_stats target = model:%#v snapshot:%#v dimensions:%#v", stats["embedding_target_model"], stats["embedding_target_snapshot_id"], stats["embedding_target_dimensions"])
+	}
+}
+
 func createKBFilterIndex(t *testing.T, path string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

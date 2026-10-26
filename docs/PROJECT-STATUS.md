@@ -3034,8 +3034,9 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   207,878 source documents, 209,036 chunks and source coverage `DONE`. It had
   34,272 of 209,026 content vectors at 06:49 UTC; `vector_ready` remains false.
   The existing embedding process (PID 1229966 at this check) was live, so no
-  duplicate job was started. The user-systemd D-Bus was unavailable in this
-  shell, so unit enablement/restart policy was not verified.
+  duplicate job was started. The systemd user bus was unavailable in the
+  default shell environment; connecting through `/run/user/1000/bus` showed
+  the app and embedding units enabled and active.
 - KB delivery remains `PARTIAL`: a deployed RedAmon snapshot and its fixed
   query-result receipt are still unavailable, and the local SQLite FTS5
   backend is not demonstrated equivalent to RedAmon's Neo4j Lucene backend.
@@ -3044,3 +3045,8 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   vector for every content chunk. Synthetic partial/staging/readiness checks
   and `go test ./internal/kb ./internal/mcpserver -count=1` passed; the code
   change did not mutate the live KB or invoke a model.
+- Restarted the app service from this checkout after commit `066a1b5`. The
+  local UI and projects API returned HTTP 200; the projection worker reported
+  `idle`, while startup explicitly left Neo4j connectivity `not_checked`. A
+  separate MCP protocol fixture now verifies that `bb_kb_stats` exposes the
+  staging counters and target metadata to the harness.
