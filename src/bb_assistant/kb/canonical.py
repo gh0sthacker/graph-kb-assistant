@@ -152,8 +152,12 @@ def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_c
         return ()
     if document.source_name in {"gtfobins", "lolbas", "nuclei"}:
         rendered = _redamon_yaml_chunks(document, max_chars=max_chars)
-        return tuple(_canonical_redamon_chunk(document, i, title, text, key, truncated=truncated)
-                     for i, (title, text, key, truncated) in enumerate(rendered))
+        return tuple(
+            _canonical_redamon_chunk(
+                document, i, title, text, key, truncated=truncated, fallback_reason=fallback,
+            )
+            for i, (title, text, key, truncated, fallback) in enumerate(rendered)
+        )
     if document.source_name == "tool_docs" and document.metadata.get("category_dir") == "tooling":
         # RedAmon indexes each tooling file as one compact summary card and
         # keeps the tool name as its title; the summary's first line is not a
@@ -187,14 +191,18 @@ def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_c
 
 
 def _canonical_redamon_chunk(
-    document: SourceDocument, ordinal: int, title: str, text: str, unique_key: str, *, truncated: bool = False,
+    document: SourceDocument, ordinal: int, title: str, text: str, unique_key: str, *,
+    truncated: bool = False, fallback_reason: str | None = None,
 ) -> CanonicalChunk:
     # These records are rendered from structured source fields, so they do not
     # claim a literal span in the original YAML/Markdown document.
     return CanonicalChunk.from_document(
         document, ordinal, 0, len(document.text), text, title=title,
-        metadata={**document.metadata, **({"chunk_truncated": True} if truncated else {})}
-        if truncated else None,
+        metadata={
+            **document.metadata,
+            **({"chunk_truncated": True} if truncated else {}),
+            **({"canonicalization_fallback": fallback_reason} if fallback_reason else {}),
+        },
         source_span_exact=False, redamon_unique_key=unique_key,
     )
 
@@ -225,7 +233,9 @@ def _owasp_test_id(document: SourceDocument) -> str:
     return match.group(0) if match else ""
 
 
-def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tuple[str, str, str, bool]]:
+def _redamon_yaml_chunks(
+    document: SourceDocument, *, max_chars: int,
+) -> list[tuple[str, str, str, bool, str | None]]:
     """Render the RedAmon GTFOBins, LOLBAS, and Nuclei cards from pinned YAML.
 
     The input is third-party data: size and alias limits are checked before
@@ -236,6 +246,8 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
 
     raw = document.text
     if len(raw.encode("utf-8")) > 1024 * 1024:
+        if document.source_name == "nuclei":
+            return _nuclei_raw_fallback(document, max_chars, "yaml_size_limit")
         raise ValueError(f"{document.source_name} source document exceeds YAML size limit")
     max_indent = 0
     for line in raw.splitlines():
@@ -263,8 +275,12 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
             elif isinstance(token, AliasToken):
                 aliases += 1
     except yaml.YAMLError as exc:
+        if document.source_name == "nuclei":
+            return _nuclei_raw_fallback(document, max_chars, "yaml_scan_failed")
         raise ValueError(f"Invalid {document.source_name} YAML source document") from exc
     if max_indent > 256 or max_flow_depth > 64 or anchors > 100 or aliases > 1000:
+        if document.source_name == "nuclei":
+            return _nuclei_raw_fallback(document, max_chars, "yaml_complexity_limit")
         raise ValueError(f"{document.source_name} source document exceeds YAML complexity limits")
     try:
         if document.source_name == "gtfobins":
@@ -272,7 +288,7 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
             value = yaml.safe_load(match.group(1) if match else raw.strip().removeprefix("---").strip())
             binary = str(document.metadata.get("binary_name") or document.title)
             functions = value.get("functions", {}) if isinstance(value, dict) else {}
-            output: list[tuple[str, str, str, bool]] = []
+            output: list[tuple[str, str, str, bool, str | None]] = []
             if not isinstance(functions, dict):
                 raise ValueError("GTFOBins functions is not a mapping")
             for function_type, rows in functions.items():
@@ -303,19 +319,23 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
                     if comment:
                         text += f"\nNote: {comment}"
                     text, truncated = _truncate_redamon_structured(text, max_chars)
-                    output.append((f"{binary} — {function_type}", text, f"{binary}:{function_type}", truncated))
+                    output.append((f"{binary} — {function_type}", text, f"{binary}:{function_type}", truncated, None))
             return output
 
         value = yaml.safe_load(raw)
         if document.source_name == "nuclei":
             if not isinstance(value, dict):
                 raise ValueError("Nuclei YAML is not a mapping")
-            template_id = value.get("id") or value.get("template-id") or value.get("ID")
+            template_id = (
+                value.get("id") or value.get("template-id") or value.get("ID")
+                or document.metadata.get("template_id")
+                or document.source_id.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            )
             if not template_id:
                 raise ValueError("Nuclei template has no ID")
             info = value.get("info", value)
             info = info if isinstance(info, dict) else {}
-            name = info.get("name", "")
+            name = info.get("name", "") or str(template_id)
             severity = info.get("severity", "info")
             description = _as_text(info.get("description"))
             variables_raw = value.get("variables")
@@ -377,7 +397,8 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
                 if block["payloads"]:
                     content += f"\nPayloads: {block['payloads']}"
             content, truncated = _truncate_redamon_structured(content, max_chars)
-            return [(f"{template_id} — {name}", content, str(template_id), truncated)]
+            title = f"{template_id} — {name}" if name != str(template_id) else str(template_id)
+            return [(title, content, str(template_id), truncated, None)]
 
         if not isinstance(value, dict) or "Name" not in value:
             raise ValueError("LOLBAS YAML has no Name")
@@ -423,10 +444,48 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
                 parts.append(f"Full Path: {'; '.join(paths)}")
             unique = f"{name}:{category}:{str(command)[:50]}"
             content, truncated = _truncate_redamon_structured("\n".join(parts), max_chars)
-            output.append((title, content, unique, truncated))
+            output.append((title, content, unique, truncated, None))
         return output
     except (yaml.YAMLError, UnicodeError) as exc:
+        if document.source_name == "nuclei":
+            return _nuclei_raw_fallback(document, max_chars, "yaml_parse_failed")
         raise ValueError(f"Invalid {document.source_name} YAML source document") from exc
+
+
+def _nuclei_raw_fallback(
+    document: SourceDocument, max_chars: int, reason: str,
+) -> list[tuple[str, str, str, bool, str | None]]:
+    """Keep every bounded Nuclei source searchable when structure is unusable."""
+    template_id = str(
+        document.metadata.get("template_id")
+        or document.source_id.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    )
+    remaining = document.text
+    parts: list[str] = []
+    while remaining:
+        if len(remaining) <= max_chars:
+            parts.append(remaining)
+            break
+        boundary = remaining.rfind("\n", 0, max_chars + 1)
+        if boundary <= 0:
+            boundary = remaining.rfind(" ", 0, max_chars + 1)
+        if boundary <= 0:
+            boundary = max_chars
+        parts.append(remaining[:boundary])
+        remaining = remaining[boundary:]
+    if not parts:
+        return []
+    total = len(parts)
+    return [
+        (
+            f"{template_id} — Raw template" + (f" (part {i + 1})" if total > 1 else ""),
+            text,
+            template_id if i == 0 else f"{template_id}:raw:{i + 1}",
+            False,
+            reason,
+        )
+        for i, text in enumerate(parts)
+    ]
 
 
 def _as_text(value: object) -> str:

@@ -164,6 +164,28 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
         self.assertEqual(chunk.title, "wildcards — Wildcard payload")
         self.assertEqual(chunk.text.count("*"), len(wildcards))
 
+    def test_nuclei_missing_yaml_id_uses_pinned_filename_identity(self) -> None:
+        document = SourceDocument.create(
+            source_name="nuclei", source_id="http/missing-id.yaml", title="missing-id",
+            text="info:\n  name: Unidentified template\n  severity: medium\n",
+            metadata={"template_id": "missing-id"},
+        )
+        chunk = chunk_document(document)[0]
+        self.assertEqual(chunk.title, "missing-id — Unidentified template")
+        self.assertEqual(chunk.chunk_id, hashlib.sha256(b"nuclei:missing-id").hexdigest()[:16])
+
+    def test_nuclei_invalid_yaml_remains_searchable_in_bounded_source_parts(self) -> None:
+        raw = "id: broken\ninfo: [\n" + ("payload detail " * 180)
+        document = SourceDocument.create(
+            source_name="nuclei", source_id="http/broken.yaml", title="broken",
+            text=raw, metadata={"template_id": "broken"},
+        )
+        chunks = chunk_document(document, max_chars=256)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunk.text for chunk in chunks), raw)
+        self.assertEqual({chunk.metadata["canonicalization_fallback"] for chunk in chunks}, {"yaml_parse_failed"})
+        self.assertEqual(len({chunk.chunk_id for chunk in chunks}), len(chunks))
+
     def test_redamon_duplicate_native_ids_keep_last_loader_value(self) -> None:
         spec = {
             "id": "gtfobins", "kind": "github_archive", "url": GTFO_URL,
