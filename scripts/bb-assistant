@@ -88,4 +88,7 @@ if [[ -n "${BB_ASSISTANT_BINARY:-}" ]]; then
   fi
   exec "$BB_ASSISTANT_BINARY" "$@"
 fi
+if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  exec go run -buildvcs=true ./cmd/bb-assistant "$@"
+fi
 exec go run ./cmd/bb-assistant "$@"

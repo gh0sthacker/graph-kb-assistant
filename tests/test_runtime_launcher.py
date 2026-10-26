@@ -49,7 +49,26 @@ def test_status_can_report_missing_neo4j_configuration(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert args_file.read_text().strip() == "run ./cmd/bb-assistant status"
+    assert args_file.read_text().strip() == "run -buildvcs=true ./cmd/bb-assistant status"
+
+
+def test_launcher_allows_source_archives_without_git_metadata(tmp_path: Path) -> None:
+    env, args_file = make_fake_go(tmp_path)
+    git_binary = Path(env["PATH"].split(":", maxsplit=1)[0]) / "git"
+    git_binary.write_text("#!/bin/sh\nexit 1\n")
+    git_binary.chmod(0o700)
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant"), "version"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text().strip() == "run ./cmd/bb-assistant version"
 
 
 def test_neo4j_web_startup_requires_private_runtime_configuration(tmp_path: Path) -> None:
@@ -81,7 +100,7 @@ def test_sqlite_compatibility_mode_does_not_require_neo4j_file(tmp_path: Path) -
     )
 
     assert result.returncode == 0, result.stderr
-    assert args_file.read_text().strip() == "run ./cmd/bb-assistant web-ui"
+    assert args_file.read_text().strip() == "run -buildvcs=true ./cmd/bb-assistant web-ui"
 
 
 def test_launcher_loads_private_application_runtime_environment(tmp_path: Path) -> None:
@@ -114,7 +133,7 @@ def test_launcher_loads_private_application_runtime_environment(tmp_path: Path) 
     )
 
     assert result.returncode == 0, result.stderr
-    assert args_file.read_text().strip() == "run ./cmd/bb-assistant web-ui"
+    assert args_file.read_text().strip() == "run -buildvcs=true ./cmd/bb-assistant web-ui"
     assert key_state_file.read_text() == "present"
 
 
@@ -161,7 +180,7 @@ def test_launcher_loads_runtime_environment_from_canonical_default(
     )
 
     assert result.returncode == 0, result.stderr
-    assert args_file.read_text().strip() == "run ./cmd/bb-assistant web-ui"
+    assert args_file.read_text().strip() == "run -buildvcs=true ./cmd/bb-assistant web-ui"
     assert key_state_file.read_text() == "canonical"
     assert (obsolete_directory / "runtime.env").read_text() == (
         "BB_ASSISTANT_VAULT_KEY=synthetic-obsolete-key\n"
@@ -220,7 +239,7 @@ def test_launcher_uses_neo4j_configured_data_home_for_runtime_environment(
     )
 
     assert result.returncode == 0, result.stderr
-    assert args_file.read_text().strip() == "run ./cmd/bb-assistant web-ui"
+    assert args_file.read_text().strip() == "run -buildvcs=true ./cmd/bb-assistant web-ui"
     assert state_file.read_text().splitlines() == [
         str(configured_root), "selected-root"
     ]
