@@ -896,7 +896,7 @@ class KBIndex:
                 progress_callback(embedded, total)
 
     def _vector_search(
-        self, query: str, *, top_k: int,
+        self, query: str, *, top_k: int, include_supplemental: bool = False,
     ) -> tuple[list[str], dict[str, float]]:
         with self.connect() as connection:
             meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
@@ -931,6 +931,8 @@ class KBIndex:
                      JOIN chunks c ON c.chunk_id=e.chunk_id
                      WHERE e.model_name=? AND e.dimensions=?
                        AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
+            if not include_supplemental:
+                sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
             params: list[object] = [model_name, dimensions]
             with self.connect() as connection:
                 rows = connection.execute(sql, params).fetchall()
@@ -959,9 +961,14 @@ class KBIndex:
             logger.info("KB cross-encoder reranking unavailable: %s", type(exc).__name__)
             return None
 
-    def search(self, query: str, *, top_k: int = DEFAULT_TOP_K, source_names: tuple[str, ...] = ()) -> tuple[KBHit, ...]:
+    def search(
+        self, query: str, *, top_k: int = DEFAULT_TOP_K,
+        source_names: tuple[str, ...] = (), include_supplemental: bool = False,
+    ) -> tuple[KBHit, ...]:
         if not (1 <= top_k <= 100):
             raise ValueError("top_k must be between 1 and 100")
+        if type(include_supplemental) is not bool:
+            raise ValueError("include_supplemental must be a boolean")
         if len(query) > 4096:
             raise ValueError("KB query exceeds the 4096-character limit")
         match_query = _redamon_fulltext_expression(query)
@@ -973,6 +980,8 @@ class KBIndex:
                  FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
                  WHERE chunk_search MATCH ?
                    AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content') = 'content'"""
+        if not include_supplemental:
+            sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
         params: list[object] = [match_query]
         candidate_limit = max(top_k * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE)
         sql += " ORDER BY score LIMIT ?"
@@ -990,7 +999,7 @@ class KBIndex:
         fulltext_ids = [row["chunk_id"] for row in rows]
         fulltext_scores = {row["chunk_id"]: float(row["score"]) for row in rows}
         vector_ids, vector_scores = self._vector_search(
-            query, top_k=candidate_limit,
+            query, top_k=candidate_limit, include_supplemental=include_supplemental,
         )
         candidate_ids = list(dict.fromkeys([*fulltext_ids, *vector_ids]))
         if not candidate_ids:
@@ -1001,6 +1010,8 @@ class KBIndex:
                         FROM chunks c WHERE c.chunk_id IN (""" + ",".join("?" for _ in candidate_ids) + ")"
         metadata_params: list[object] = list(candidate_ids)
         metadata_sql += " AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
+        if not include_supplemental:
+            metadata_sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
         if requested_sources:
             metadata_sql += " AND c.source_name IN (" + ",".join("?" for _ in requested_sources) + ")"
             metadata_params.extend(requested_sources)

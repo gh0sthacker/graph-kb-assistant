@@ -571,7 +571,7 @@ func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	ids, _, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1)
+	ids, _, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1, false)
 	if mode != "hybrid" || len(ids) != 1 || ids[0] != strings.Repeat("a", 64) {
 		t.Fatalf("unfiltered global top-1 candidates = %#v (%s); want the highest-ranked source before metadata filtering", ids, mode)
 	}
@@ -632,7 +632,7 @@ func TestVectorCandidatesUseFaissInnerProductOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	ids, scores, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1)
+	ids, scores, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1, false)
 	if mode != "hybrid" || len(ids) != 1 || ids[0] != secondID || math.Abs(scores[secondID]-0.9) > 1e-6 {
 		t.Fatalf("FAISS-style inner-product top-1 = %#v (%s, %v); want second candidate at 0.9", ids, mode, scores)
 	}
@@ -682,6 +682,45 @@ func TestFullTextCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testin
 	result, err := index.Search(context.Background(), "needle", SearchOptions{TopK: 1, SourceNames: []string{"wanted"}})
 	if err != nil || len(result.Hits) != 0 {
 		t.Fatalf("source-filtered global fulltext top-30 = %d hits, %v; want empty after higher-ranked sources are excluded", len(result.Hits), err)
+	}
+}
+
+func TestSupplementalChunksAreOptInAndRemainSearchable(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	baseText := "baseline content without the supplemental query"
+	createPythonCompatibleIndex(t, indexPath, baseText, digestHex(baseText), digestHex(baseText))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := "WordPress plugin version detection synthetic template"
+	id := digestHex("supplemental")
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "nuclei", "wordpress-plugin-detect.yaml", "Raw template fallback", 0,
+		len(text), `{"canonicalization_fallback":"yaml_size_limit"}`, digestHex(text), digestHex(text), "bb-kb-chunk-v2", text)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "nuclei", "Raw template fallback", text)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare supplemental fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	defaultResult, err := index.Search(context.Background(), "WordPress plugin version detection", SearchOptions{TopK: 5})
+	if err != nil || len(defaultResult.Hits) != 0 || defaultResult.SupplementalIncluded {
+		t.Fatalf("default search = %d hits, supplemental:%v, err:%v; want no fallback hits", len(defaultResult.Hits), defaultResult.SupplementalIncluded, err)
+	}
+	supplementalResult, err := index.Search(context.Background(), "WordPress plugin version detection", SearchOptions{TopK: 5, IncludeSupplemental: true})
+	if err != nil || len(supplementalResult.Hits) != 1 || supplementalResult.Hits[0].SourceID != "wordpress-plugin-detect.yaml" || !supplementalResult.SupplementalIncluded {
+		t.Fatalf("supplemental search = %+v, err:%v; want the opt-in fallback chunk", supplementalResult, err)
 	}
 }
 

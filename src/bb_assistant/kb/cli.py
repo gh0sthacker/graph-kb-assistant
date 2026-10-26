@@ -172,6 +172,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     search.add_argument("query")
     search.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     search.add_argument("--source", action="append", default=[])
+    search.add_argument(
+        "--include-supplemental", action="store_true",
+        help="include bounded raw Nuclei templates that RedAmon skips",
+    )
     parity = commands.add_parser(
         "parity-check",
         help="fail-closed comparison of RedAmon and local KB evidence receipts",
@@ -332,7 +336,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"embedded_chunks": count, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
     index = KBIndex(_configured_index_path(args.index_path))
-    hits = index.search(args.query, top_k=args.top_k, source_names=tuple(args.source))
+    hits = index.search(
+        args.query, top_k=args.top_k, source_names=tuple(args.source),
+        include_supplemental=args.include_supplemental,
+    )
     print(json.dumps([
         {
             "chunk_id": hit.chunk_id,

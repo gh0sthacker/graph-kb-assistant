@@ -71,6 +71,30 @@ class _TransientLockConnection:
 
 
 class RetrievalRankingTests(unittest.TestCase):
+    def test_supplemental_chunks_are_opt_in_and_remain_searchable(self) -> None:
+        canonical_document = SourceDocument.create(
+            source_name="fixture", source_id="canonical.yaml", title="Canonical template",
+            text="Nuclei template describes a safe synthetic test.", metadata={"document_role": "content"},
+        )
+        supplemental_document = SourceDocument.create(
+            source_name="fixture", source_id="wordpress-plugin-detect.yaml", title="Raw template fallback",
+            text="WordPress plugin version detection synthetic template.",
+            metadata={"document_role": "content", "canonicalization_fallback": "yaml_size_limit"},
+        )
+        documents = (canonical_document, supplemental_document)
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-supplemental-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3", reranker=_FixtureReranker())
+            index.replace_snapshot(chunks, "a" * 64, sources=documents)
+
+            default_hits = index.search("WordPress plugin version detection", top_k=5)
+            supplemental_hits = index.search(
+                "WordPress plugin version detection", top_k=5, include_supplemental=True,
+            )
+
+        self.assertEqual(default_hits, ())
+        self.assertEqual([hit.source_id for hit in supplemental_hits], ["wordpress-plugin-detect.yaml"])
+
     def test_lexical_query_terms_match_redamon_without_prefix_expansion(self) -> None:
         self.assertEqual(
             _redamon_fulltext_expression("auth sql-injection"),

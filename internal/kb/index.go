@@ -79,21 +79,23 @@ func (i *Index) SetRetrievalModels(models RetrievalModels) {
 // SearchOptions bounds one lexical query. SourceNames, when provided, are
 // exact source-family names and are combined with OR semantics.
 type SearchOptions struct {
-	TopK        int
-	SourceNames []string
-	MinCVSS     *float64
-	Severity    string
+	TopK                int
+	SourceNames         []string
+	MinCVSS             *float64
+	Severity            string
+	IncludeSupplemental bool
 }
 
 // SearchResult includes snapshot coverage so a partial corpus is visible to
 // the caller alongside its citations.
 type SearchResult struct {
-	SnapshotID         string `json:"snapshot_id"`
-	CoverageState      string `json:"coverage_state"`
-	CoverageReportHash string `json:"coverage_report_sha256,omitempty"`
-	MaintenanceState   string `json:"maintenance_state,omitempty"`
-	RetrievalMode      string `json:"retrieval_mode"`
-	Hits               []Hit  `json:"hits"`
+	SnapshotID           string `json:"snapshot_id"`
+	CoverageState        string `json:"coverage_state"`
+	CoverageReportHash   string `json:"coverage_report_sha256,omitempty"`
+	MaintenanceState     string `json:"maintenance_state,omitempty"`
+	RetrievalMode        string `json:"retrieval_mode"`
+	SupplementalIncluded bool   `json:"supplemental_included"`
+	Hits                 []Hit  `json:"hits"`
 }
 
 // StatsResult reports bounded counts and source coverage for the active KB
@@ -616,6 +618,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	}
 	result.Hits = []Hit{}
 	result.RetrievalMode = "fulltext"
+	result.SupplementalIncluded = options.IncludeSupplemental
 	if matchExpression == "" {
 		if err := tx.Commit(); err != nil {
 			return SearchResult{}, errors.New("KB read transaction could not finish")
@@ -632,6 +635,9 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
 		WHERE chunk_search MATCH ?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
+	if !options.IncludeSupplemental {
+		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+	}
 	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, matchExpression}
 	candidateLimit := max(options.TopK*6, 30)
 	statement += " ORDER BY 16 LIMIT ?"
@@ -656,7 +662,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	fulltextHits = filterHitsBySources(fulltextHits, sources)
 	fulltextIDs := hitIDs(fulltextHits)
 	result.Hits = fulltextHits
-	vectorIDs, vectorScores, vectorMode := i.vectorCandidates(ctx, tx, query, candidateLimit)
+	vectorIDs, vectorScores, vectorMode := i.vectorCandidates(ctx, tx, query, candidateLimit, options.IncludeSupplemental)
 	if vectorMode != "" {
 		result.RetrievalMode = vectorMode
 	}
@@ -672,7 +678,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 			}
 		}
 		if len(missingIDs) > 0 {
-			vectorHits, err := readHitsByID(ctx, tx, missingIDs)
+			vectorHits, err := readHitsByID(ctx, tx, missingIDs, options.IncludeSupplemental)
 			if err != nil {
 				return SearchResult{}, err
 			}
@@ -754,7 +760,7 @@ func scanSearchHits(rows *sql.Rows) ([]Hit, error) {
 	return hits, nil
 }
 
-func readHitsByID(ctx context.Context, tx *sql.Tx, ids []string) ([]Hit, error) {
+func readHitsByID(ctx context.Context, tx *sql.Tx, ids []string, includeSupplemental bool) ([]Hit, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -767,6 +773,9 @@ func readHitsByID(ctx context.Context, tx *sql.Tx, ids []string) ([]Hit, error) 
 		CASE WHEN length(CAST(c.metadata_json AS BLOB))<=? THEN c.metadata_json END,c.start_char,c.end_char,0.0
 		FROM chunks c WHERE c.chunk_id IN (` + placeholders + `)
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
+	if !includeSupplemental {
+		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+	}
 	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes}
 	for _, id := range ids {
 		args = append(args, id)
@@ -830,7 +839,7 @@ func stringArgs(values []string) []any {
 }
 
 func (i *Index) vectorCandidates(
-	ctx context.Context, tx *sql.Tx, query string, limit int,
+	ctx context.Context, tx *sql.Tx, query string, limit int, includeSupplemental bool,
 ) ([]string, map[string]float64, string) {
 	if i.models == nil {
 		return nil, nil, "lexical_model_unavailable"
@@ -869,6 +878,9 @@ func (i *Index) vectorCandidates(
 		JOIN chunks c ON c.chunk_id=e.chunk_id
 		WHERE e.model_name=? AND e.dimensions=?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
+	if !includeSupplemental {
+		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+	}
 	args := []any{modelName, dimensions}
 	rows, err := tx.QueryContext(ctx, statement, args...)
 	if err != nil {
