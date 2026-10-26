@@ -191,10 +191,96 @@ def export_redamon_snapshot(
     )
 
 
+def _refresh_pinned_local_sources(index: object, *, project_root: Path, manifest: Mapping[str, object], manifest_sha256: str) -> None:
+    """Replace local-source rows from their pinned, hash-verified source bundle."""
+    from .index import KBIndex
+    from .redamon_local import RedAmonLocalToolDocsProvider
+    from .redamon_sources import RedAmonSourceAdapter
+
+    if not isinstance(index, KBIndex):
+        raise TypeError("index must be a KBIndex")
+    specs = manifest.get("sources")
+    if not isinstance(specs, list):
+        raise ValueError("KB source manifest is malformed")
+    local_families = {
+        spec["id"] for spec in specs
+        if isinstance(spec, dict) and spec.get("kind") == "local_markdown" and isinstance(spec.get("id"), str)
+    }
+    if not local_families:
+        raise ValueError("KB source manifest has no pinned local Markdown sources")
+
+    snapshot = RedAmonSourceAdapter(
+        manifest,
+        {family: RedAmonLocalToolDocsProvider(project_root=project_root) for family in local_families},
+        source_manifest_sha256=manifest_sha256,
+    ).build()
+    documents_by_family: dict[str, list[SourceDocument]] = {family: [] for family in local_families}
+    for document in snapshot.documents:
+        if document.source_name in documents_by_family:
+            documents_by_family[document.source_name].append(document)
+    fresh_coverage = {
+        str(row["source_name"]): dict(row)
+        for row in snapshot.source_coverage
+        if isinstance(row, Mapping) and isinstance(row.get("source_name"), str)
+    }
+    if snapshot.coverage_state != "DONE" and not all(
+        fresh_coverage.get(family, {}).get("state") == "done" and documents_by_family[family]
+        for family in local_families
+    ):
+        raise ValueError("pinned local sources did not pass their completeness checks")
+    if any(fresh_coverage.get(family, {}).get("state") != "done" or not documents_by_family[family]
+           for family in local_families):
+        raise ValueError("pinned local source is incomplete")
+
+    from .project_lock import project_maintenance_lock
+
+    with project_maintenance_lock(index.path.parent):
+        with index.connect(_maintenance_lock_held=True) as connection:
+            meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+            coverage_rows = json.loads(meta.get("source_coverage", "[]"))
+            if not isinstance(coverage_rows, list) or any(not isinstance(row, dict) for row in coverage_rows):
+                raise ValueError("stored source coverage rows are malformed")
+            coverage_by_family = {
+                row.get("source_name"): row for row in coverage_rows
+                if isinstance(row.get("source_name"), str)
+            }
+            if meta.get("coverage_state") == "DONE" and not local_families.issubset(coverage_by_family):
+                raise ValueError("DONE source coverage is missing a local source family")
+
+            insert_sql = """INSERT INTO source_documents(
+                source_name,source_id,title,source_url,source_locator,source_revision,license_id,attribution,
+                metadata_json,content_sha256,text,raw_source_sha256,raw_source_text
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+            for family in sorted(local_families):
+                connection.execute("DELETE FROM source_documents WHERE source_name=?", (family,))
+                for document in documents_by_family[family]:
+                    connection.execute(insert_sql, (
+                        document.source_name, document.source_id, document.title, document.source_url,
+                        document.source_locator, document.source_revision, document.license_id,
+                        document.attribution,
+                        json.dumps(document.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                        document.content_sha256, document.text, document.raw_source_sha256, document.raw_source_text,
+                    ))
+                coverage_by_family[family] = fresh_coverage[family]
+            source_order = {
+                spec["id"]: position for position, spec in enumerate(specs)
+                if isinstance(spec, dict) and isinstance(spec.get("id"), str)
+            }
+            coverage_rows = sorted(coverage_by_family.values(), key=lambda row: source_order.get(row["source_name"], 10**9))
+            connection.execute(
+                "INSERT INTO kb_meta(key,value) VALUES('source_coverage',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (json.dumps(coverage_rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False),),
+            )
+            connection.commit()
+
+
 def rechunk_index(
     index: object,
     *,
     project_root: Path,
+    snapshot_root: Path | None = None,
+    refresh_local_sources: bool = False,
     max_chars: int = 1920,
     overlap_chars: int = 0,
     batch_documents: int = 1000,
@@ -225,6 +311,11 @@ def rechunk_index(
         for position, row in enumerate(manifest["sources"])
         if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
+    if refresh_local_sources:
+        _refresh_pinned_local_sources(
+            index, project_root=root, manifest=manifest,
+            manifest_sha256=hashlib.sha256(raw_manifest).hexdigest(),
+        )
 
     chunk_columns = (
         "chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,"
@@ -253,6 +344,21 @@ def rechunk_index(
             old_snapshot_id = meta.get("snapshot_id")
             if not old_snapshot_id:
                 raise ValueError("Cannot re-chunk an index without an installed snapshot")
+            source_manifest_sha256 = meta.get("source_manifest_sha256")
+            if not _is_sha256(source_manifest_sha256):
+                manifest_root = (
+                    snapshot_root.expanduser().resolve()
+                    if snapshot_root is not None else index.path.parent / "snapshots"
+                )
+                try:
+                    old_manifest = json.loads(
+                        (manifest_root / old_snapshot_id / "manifest.json").read_text("utf-8")
+                    )
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    old_manifest = None
+                candidate = old_manifest.get("source_manifest_sha256") if isinstance(old_manifest, dict) else None
+                if _is_sha256(candidate):
+                    source_manifest_sha256 = candidate
             if any(name not in family_order for name in {
                 row[0] for row in connection.execute("SELECT DISTINCT source_name FROM source_documents")
             }):
@@ -412,6 +518,7 @@ def rechunk_index(
             connection.execute("DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')")
             for key, value in (
                 ("snapshot_id", target_snapshot_id), ("chunk_count", str(chunk_count)),
+                ("source_manifest_sha256", source_manifest_sha256 or ""),
                 ("vector_staging_snapshot_id", target_snapshot_id), ("coverage_state", coverage_state),
                 ("coverage_report_sha256", coverage_sha or ""),
                 ("source_coverage", json.dumps(coverage_rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False)),

@@ -473,20 +473,29 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         ).hexdigest()
 
         with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-rechunk-coverage-") as temporary:
-            index = KBIndex(Path(temporary) / "index.sqlite3")
+            root = Path(temporary)
+            index = KBIndex(root / "candidate" / "index.sqlite3")
+            snapshot_root = root / "snapshots"
+            old_snapshot_dir = snapshot_root / ("3" * 64)
+            old_snapshot_dir.mkdir(parents=True)
+            (old_snapshot_dir / "manifest.json").write_text(
+                json.dumps({"source_manifest_sha256": "4" * 64}), encoding="utf-8",
+            )
             index.replace_snapshot(
                 chunks, "3" * 64, sources=documents,
-                source_manifest_sha256="4" * 64,
                 source_coverage_state="DONE",
                 source_coverage_report_sha256=report_sha,
                 source_coverage_report=report,
             )
 
-            result = rechunk_index(index, project_root=Path(__file__).resolve().parents[1])
+            result = rechunk_index(
+                index, project_root=Path(__file__).resolve().parents[1], snapshot_root=snapshot_root,
+            )
             stats = index.stats()
 
         self.assertEqual(result["coverage_state"], "DONE")
         self.assertEqual(stats["coverage_state"], "DONE")
+        self.assertEqual(stats["source_manifest_sha256"], "4" * 64)
         self.assertTrue(stats["source_coverage"])
         for row in stats["source_coverage"]:
             name = row["source_name"]
