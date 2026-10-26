@@ -157,15 +157,18 @@ reranker pool, MMR lambda, and source boosts also match the declared RedAmon
 settings. This is configuration parity only; it does not prove the active
 RedAmon snapshot's contents or exact search ordering.
 
-The vendored ToolDocs source was then compared file-by-file with the checked
-out RedAmon `agentic/skills` tree at commit
+The vendored ToolDocs source was compared file-by-file with the checked-out
+RedAmon `agentic/skills` tree at commit
 `cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`: both contain 46 Markdown files,
-with identical relative paths and SHA-256 hashes. This proves parity for that
-pinned source tree, not for RedAmon's deployed corpus or its other six source
-families. It also narrows the active ToolDocs discrepancy: the deployed local
-snapshot still has 434 chunks while reprocessing the current pinned source is
-expected to produce 355. The candidate rebuild must be checked before import
-to identify whether old chunking or stale content accounts for the difference.
+with identical relative paths and SHA-256 hashes. A deterministic local
+comparison of RedAmon's ToolDocs client and the assistant adapter produced the
+same 355 searchable chunks, with exact title and content hashes. The assistant
+also retains one separate MIT license notice, which is deliberately excluded
+from search chunks and embeddings. This proves ToolDocs source and searchable
+content parity at that pin, not parity with RedAmon's deployed corpus or its
+other six families. The active assistant snapshot's 434 ToolDocs chunks are
+stale; a candidate rebuild should replace them with the verified 355 content
+chunks plus the separate notice after full-profile coverage passes.
 
 Before a source rebuild, the two CT108 Python files that write/report snapshot
 manifest hashes were updated from the CI-passing branch files with backups.
