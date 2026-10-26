@@ -146,3 +146,19 @@ this is not the required continuous ten-minute below-70 C window. No source
 rebuild or embedding was started, and the vector count is unchanged. The
 current blockers are the stale active snapshot, incomplete vectors, absent
 RedAmon query receipts, and the unverified thermal dwell.
+
+The pinned RedAmon source checkout was checked directly before deciding the
+rebuild filters. Its `full` profile includes the same seven families; its
+`kb-build-full`/`kb-rebuild-full` targets set NVD lookback to 730 days, and the
+RedAmon NVD client deliberately ignores the CVSS cutoff for the `full`
+profile. The local manifest's 730-day, 0.0 CVSS filter is therefore correct
+for that profile. The pinned E5/BGE model revisions, top-k, overfetch, RRF,
+reranker pool, MMR lambda, and source boosts also match the declared RedAmon
+settings. This is configuration parity only; it does not prove the active
+RedAmon snapshot's contents or exact search ordering.
+
+Before a source rebuild, the two CT108 Python files that write/report snapshot
+manifest hashes were updated from the CI-passing branch files with backups.
+Hashes now match for all 21 tracked `src/bb_assistant/kb` files. This ensures
+the next imported snapshot records the current source-manifest hash instead of
+leaving it null.
