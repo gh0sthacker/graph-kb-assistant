@@ -19,7 +19,7 @@ from .owasp import RedAmonOWASPProvider
 from .redamon_local import RedAmonLocalToolDocsProvider
 from .redamon_sources import RedAmonSourceAdapter
 from .rebuild import export_redamon_snapshot, import_snapshot, rechunk_index
-from .parity import compare_receipts, load_query_fixture, load_receipt
+from .parity import compare_receipts, export_assistant_receipt, load_query_fixture, load_receipt
 from .ranking import DEFAULT_TOP_K
 
 
@@ -139,6 +139,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parity.add_argument("--assistant", type=Path, required=True, help="Graph Assistant JSON parity receipt")
     parity.add_argument("--fixture", type=Path, required=True, help="pinned JSON query fixture")
     parity.add_argument("--score-tolerance", type=float, default=0.0, help="absolute score tolerance (default: exact)")
+    parity_export = commands.add_parser(
+        "parity-export",
+        help="write a fail-closed local receipt from a complete, read-only KB snapshot",
+    )
+    parity_export.add_argument("--snapshot-dir", type=Path, required=True, help="version directory containing manifest.json")
+    parity_export.add_argument("--profile", required=True, help="explicit selected profile, e.g. full")
+    parity_export.add_argument("--fixture", type=Path, required=True, help="pinned JSON query fixture")
+    parity_export.add_argument("--output", type=Path, required=True, help="private local JSON receipt output path")
     args = parser.parse_args(argv)
 
     if args.data_home is not None:
@@ -163,6 +171,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = compare_receipts(redamon, assistant, fixture, score_tolerance=args.score_tolerance)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if result["status"] == "PASS" else 3
+    if args.command == "parity-export":
+        index = KBIndex(_configured_index_path(args.index_path), read_only=True)
+        receipt = export_assistant_receipt(
+            index=index, snapshot_dir=args.snapshot_dir, fixture_path=args.fixture,
+            output_path=args.output, profile=args.profile,
+        )
+        print(json.dumps({
+            "status": "EXPORTED", "producer": receipt["producer"], "profile": receipt["profile"],
+            "snapshot_id": receipt["corpus"]["snapshot_id"], "receipt_path": str(args.output.expanduser().resolve()),
+            "query_count": len(receipt["queries"]), "source_count": len(receipt["sources"]),
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if args.command == "rechunk":
         index = KBIndex(_configured_index_path(args.index_path))
         last_progress = 0

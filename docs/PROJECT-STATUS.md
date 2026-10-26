@@ -1,5 +1,19 @@
 # Project status and known limitations
 
+## Local KB parity receipt export — 2026-10-26 — PARTIAL
+
+- Added `bb-assistant-kb parity-export`, which validates a completed snapshot,
+  confirms that a read-only index points at the same snapshot, requires fully
+  published E5 vectors, and runs the pinned public query fixture before
+  writing a private local receipt. Snapshot family digests and counts are
+  verified against the canonical exported records; the command refuses an
+  active SQLite WAL rather than reading around the writer.
+- The synthetic exporter path passes, including refusal while vectors are
+  incomplete. No active KB index, model, RedAmon deployment, or external query
+  was used. This makes local evidence exportable; it does not close exact KB
+  identity: the deployed RedAmon snapshot and its query receipt are still
+  unavailable, and local SQLite backends may produce different rankings.
+
 ## Current read-only runtime check (2026-10-26 01:53 EDT) — PARTIAL
 
 - The configured KB index was read through SQLite's standard read-only mode

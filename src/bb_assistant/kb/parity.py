@@ -8,14 +8,256 @@ the same versioned evidence.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
+import os
 from pathlib import Path
+import tempfile
 from typing import Any, Mapping
 
 
 _HASH_LENGTH = 64
 _MAX_RECEIPT_BYTES = 64 << 20
 _COVERAGE_STATES = {"DONE", "PARTIAL", "BLOCKED"}
+
+
+def export_assistant_receipt(
+    *, index: object, snapshot_dir: Path, fixture_path: Path, output_path: Path, profile: str,
+) -> dict[str, Any]:
+    """Create a local parity receipt from a completed immutable KB snapshot.
+
+    The index is opened read-only by the CLI. This deliberately refuses an
+    active SQLite WAL, partial vectors, a stale snapshot, or incomplete query
+    tiers so an export can never turn partial state into parity evidence.
+    """
+    from .embeddings import BGE_RERANKER_MODEL, BGE_RERANKER_REVISION, E5_MODEL, E5_REVISION
+    from .index import KBIndex
+    from .ranking import DEFAULT_MMR_LAMBDA, DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE, DEFAULT_RRF_K, DEFAULT_TOP_K
+    from .rebuild import _validate_coverage_report
+
+    if not isinstance(index, KBIndex) or not index.read_only:
+        raise ValueError("parity export requires a read-only KBIndex")
+    if not isinstance(profile, str) or not profile.strip() or profile.strip() != profile:
+        raise ValueError("parity export requires an explicit profile")
+    fixture = load_query_fixture(fixture_path)
+    root = Path(snapshot_dir).expanduser()
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("snapshot path must be a regular version directory")
+    root = root.resolve(strict=True)
+    manifest_path = root / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("snapshot manifest is missing or not a regular file")
+    try:
+        manifest = json.loads(manifest_path.read_text("utf-8"), object_pairs_hook=_unique_object_pairs,
+                              parse_constant=_reject_constant)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("snapshot manifest is unreadable") from exc
+    _require(isinstance(manifest, dict), "snapshot manifest must be an object")
+    assert isinstance(manifest, dict)
+    snapshot_id = manifest.get("snapshot_id")
+    _require(_is_hash(snapshot_id) and snapshot_id == root.name, "snapshot identity does not match its directory")
+    _require(manifest.get("snapshot_dir") == snapshot_id, "snapshot directory marker is invalid")
+    _require(manifest.get("export_complete") is True, "snapshot export is incomplete")
+    coverage_state, coverage_hash, coverage = _validate_coverage_report(manifest)
+    _require(coverage_state == "DONE" and isinstance(coverage, Mapping), "snapshot source coverage must be DONE")
+    _require(manifest.get("chunk_schema") == "bb-kb-chunk-v2", "snapshot chunk schema is unsupported")
+    identity_payload = {
+        "source_manifest_sha256": manifest.get("source_manifest_sha256"),
+        "source_documents_sha256": manifest.get("source_documents_sha256"),
+        "chunks_sha256": manifest.get("chunks_sha256"),
+        "source_coverage_report_sha256": coverage_hash,
+        "chunk_schema": manifest.get("chunk_schema"),
+        "max_chars": manifest.get("max_chars"),
+        "overlap_chars": manifest.get("overlap_chars"),
+    }
+    expected_id = hashlib.sha256(json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    _require(expected_id == snapshot_id, "snapshot ID does not bind the manifest evidence")
+
+    stats = index.stats()
+    _require(stats.get("snapshot_id") == snapshot_id, "index and snapshot IDs differ")
+    _require(stats.get("coverage_state") == "DONE", "index source coverage must be DONE")
+    _require(stats.get("maintenance_state") is None, "index maintenance is in progress")
+    with index.connect() as connection:
+        meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+        total_content_chunks = int(connection.execute(
+            "SELECT count(*) FROM chunks WHERE COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content'"
+        ).fetchone()[0])
+        embedded_chunks = int(connection.execute(
+            "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (E5_MODEL,)
+        ).fetchone()[0])
+        missing_vectors = int(connection.execute(
+            "SELECT count(*) FROM chunks c LEFT JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id AND e.model_name=? "
+            "WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content' AND e.chunk_id IS NULL",
+            (E5_MODEL,),
+        ).fetchone()[0])
+        dimensions = connection.execute(
+            "SELECT DISTINCT dimensions FROM chunk_embeddings WHERE model_name=?", (E5_MODEL,)
+        ).fetchall()
+    _require(not meta.get("vector_staging_snapshot_id"), "vector generation is still in progress")
+    _require(meta.get("vector_model") == E5_MODEL and meta.get("vector_snapshot_id") == snapshot_id,
+             "complete E5 vectors for this snapshot are not published")
+    _require(total_content_chunks > 0 and embedded_chunks == total_content_chunks and missing_vectors == 0,
+             "vector coverage is incomplete")
+    _require(len(dimensions) == 1 and int(dimensions[0][0]) == 1024, "E5 vector dimensions are incomplete or inconsistent")
+
+    source_rows = coverage.get("sources")
+    _require(isinstance(source_rows, list) and bool(source_rows), "snapshot source coverage rows are missing")
+    families: dict[str, dict[str, Any]] = {}
+    for row in source_rows:
+        _require(isinstance(row, dict) and row.get("state") == "done", "every source family must be complete")
+        assert isinstance(row, dict)
+        name = row.get("source_name")
+        revision = row.get("source_revision")
+        _require(isinstance(name, str) and name and name not in families, "source family names must be unique")
+        _require(isinstance(revision, str) and revision, f"source family {name} revision is unavailable")
+        requested = row.get("requested_filters")
+        applied = row.get("applied_filters")
+        _require(isinstance(requested, dict) and isinstance(applied, dict), f"source family {name} filters are unavailable")
+        families[name] = {
+            "name": name, "revision": revision, "filters": {"requested": requested, "applied": applied},
+            "document_count": 0, "chunk_count": 0, "content_sha256": hashlib.sha256(),
+            "chunk_sha256": hashlib.sha256(), "complete": True,
+        }
+
+    def digest_families(filename: str, expected_hash: object, expected_count: object, field: str) -> None:
+        _require(_is_hash(expected_hash) and _is_nonnegative_int(expected_count), f"snapshot {filename} manifest fields are invalid")
+        path = root / filename
+        _require(not path.is_symlink() and path.is_file(), f"snapshot {filename} is not a regular file")
+        _require(path.stat().st_size == manifest.get("source_documents_bytes" if field == "content_sha256" else "chunks_bytes"),
+                 f"snapshot {filename} byte count mismatch")
+        file_digest = hashlib.sha256()
+        row_count = 0
+        previous_by_family: dict[str, tuple[str, int] | tuple[str]] = {}
+        with path.open("rb") as stream:
+            for line_number, raw_line in enumerate(stream, start=1):
+                file_digest.update(raw_line)
+                _require(raw_line.endswith(b"\n"), f"snapshot {filename} has an unterminated row")
+                try:
+                    record = json.loads(raw_line[:-1].decode("utf-8"), object_pairs_hook=_unique_object_pairs,
+                                        parse_constant=_reject_constant)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"snapshot {filename} has invalid JSON at line {line_number}") from exc
+                _require(isinstance(record, dict), f"snapshot {filename} rows must be objects")
+                assert isinstance(record, dict)
+                encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+                _require(encoded == raw_line, f"snapshot {filename} row is not canonical JSON")
+                name, source_id = record.get("source_name"), record.get("source_id")
+                _require(isinstance(name, str) and name in families and isinstance(source_id, str),
+                         f"snapshot {filename} contains an unknown source family or invalid identity")
+                if field == "content_sha256":
+                    key: tuple[str, int] | tuple[str] = (source_id,)
+                    metadata = record.get("metadata")
+                    _require(isinstance(metadata, dict) and metadata.get("profile") == profile,
+                             f"snapshot source profile differs from requested profile for {name}")
+                    _require(record.get("source_revision") == families[name]["revision"],
+                             f"snapshot source revision differs from coverage for {name}")
+                    count_field = "document_count"
+                else:
+                    ordinal = record.get("ordinal")
+                    _require(isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 0,
+                             f"snapshot {filename} has an invalid chunk ordinal")
+                    key = (source_id, ordinal)
+                    count_field = "chunk_count"
+                previous = previous_by_family.get(name)
+                _require(previous is None or key >= previous, f"snapshot {filename} is not in canonical order")
+                previous_by_family[name] = key
+                families[name][field].update(encoded)
+                families[name][count_field] += 1
+                row_count += 1
+        _require(row_count == expected_count and file_digest.hexdigest() == expected_hash,
+                 f"snapshot {filename} digest or row count mismatch")
+
+    digest_families("source-documents.jsonl", manifest.get("source_documents_sha256"), manifest.get("document_count"), "content_sha256")
+    digest_families("chunks.jsonl", manifest.get("chunks_sha256"), manifest.get("chunk_count"), "chunk_sha256")
+    source_receipts = []
+    for name in sorted(families):
+        row = families[name]
+        coverage_row = next(item for item in source_rows if isinstance(item, dict) and item.get("source_name") == name)
+        _require(row["document_count"] == coverage_row.get("document_count"), f"source family {name} document count mismatch")
+        _require(row["chunk_count"] == coverage_row.get("chunk_count"), f"source family {name} chunk count mismatch")
+        source_receipts.append({
+            key: value for key, value in row.items()
+            if key not in {"content_sha256", "chunk_sha256"}
+        } | {
+            "content_sha256": row["content_sha256"].hexdigest(),
+            "chunk_sha256": row["chunk_sha256"].hexdigest(),
+        })
+    _require(len(source_receipts) == manifest.get("source_count"), "snapshot source family count mismatch")
+    _require(sum(row["document_count"] for row in source_receipts) == manifest.get("document_count"), "snapshot document count mismatch")
+    _require(sum(row["chunk_count"] for row in source_receipts) == manifest.get("chunk_count"), "snapshot chunk count mismatch")
+
+    queries = []
+    for spec in fixture["queries"]:
+        hits = index.search(spec["query"], top_k=spec["top_k"], source_names=tuple(spec["filters"].get("source_names", ())))
+        _require(bool(hits), f"pinned query {spec['id']} returned no results")
+        result_rows = []
+        for hit in hits:
+            _require(hit.vector_score is not None, f"pinned query {spec['id']} did not use the vector tier")
+            _require(hit.rerank_score is not None, f"pinned query {spec['id']} did not use the reranker")
+            result_rows.append({"chunk_id": hit.chunk_id, "score_components": {
+                "lexical_bm25": hit.bm25, "vector_cosine": hit.vector_score,
+                "reranker_logit": hit.rerank_score, "combined_rank": hit.rank_score,
+            }})
+        queries.append({**spec, "results": result_rows})
+
+    receipt = {
+        "schema_version": 1, "producer": "graph-kb-assistant", "profile": profile,
+        "corpus": {
+            key: manifest[key] for key in (
+                "snapshot_id", "source_manifest_sha256", "source_documents_sha256", "chunks_sha256",
+                "source_count", "document_count", "chunk_count",
+            )
+        } | {
+            "coverage_state": coverage_state,
+            "vectors": {"model": E5_MODEL, "revision": E5_REVISION, "dimensions": 1024,
+                        "embedded_chunks": embedded_chunks, "total_content_chunks": total_content_chunks, "complete": True},
+            "reranker": {"model": BGE_RERANKER_MODEL, "revision": BGE_RERANKER_REVISION},
+            "retrieval": {
+                "lexical_engine": "sqlite-fts5", "vector_engine": "sqlite-cosine",
+                "candidate_pool": max(DEFAULT_TOP_K * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE),
+                "rrf_k": DEFAULT_RRF_K, "rerank_pool_size": DEFAULT_RERANK_POOL_SIZE,
+                "mmr_lambda": DEFAULT_MMR_LAMBDA,
+            },
+        },
+        "sources": source_receipts, "queries": queries,
+        "evidence": {"source_coverage_report_sha256": coverage_hash, "snapshot_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()},
+    }
+    load_receipt_from_value(receipt, expected_producer="graph-kb-assistant")
+    destination = Path(output_path).expanduser()
+    if destination.is_symlink():
+        raise ValueError("receipt output must not be a symbolic link")
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write((json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return receipt
+
+
+def load_receipt_from_value(value: Mapping[str, Any], *, expected_producer: str) -> dict[str, Any]:
+    """Apply the on-disk receipt validator to an in-memory export result."""
+    import tempfile
+
+    fd, temporary = tempfile.mkstemp(prefix="kb-parity-receipt-", suffix=".json")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False)
+        return load_receipt(Path(temporary), expected_producer=expected_producer)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:

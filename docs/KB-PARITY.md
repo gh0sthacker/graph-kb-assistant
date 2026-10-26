@@ -5,6 +5,26 @@ is an offline gate: it does not fetch RedAmon data, inspect a deployed RedAmon
 instance, rebuild the local KB, or authenticate who produced the receipts.
 `PASS` means the supplied claims match; it is not proof of deployment identity.
 
+Create the Graph Assistant side directly from a completed local snapshot and
+read-only index:
+
+```sh
+bb-assistant-kb --index-path /private/kb/index.sqlite3 parity-export \
+  --snapshot-dir /private/kb/snapshots/<snapshot-id> \
+  --profile full \
+  --fixture references/kb-parity-queries.json \
+  --output /private/kb/graph-assistant-receipt.json
+```
+
+The exporter refuses an active SQLite WAL, maintenance marker, snapshot/index
+mismatch, incomplete source coverage, unpublished or incomplete E5 vectors,
+missing pinned-query results, or unavailable vector/reranker score components.
+It never fetches sources or writes to the index. The output file is atomically
+written with owner-only permissions. It records the actual SQLite FTS5/cosine
+backend and score components, so a receipt can expose a mismatch instead of
+claiming that the local backend is RedAmon. It is still a local assertion and
+does not authenticate the deployed RedAmon reference.
+
 ```sh
 bb-assistant-kb parity-check \
   --redamon /restricted/path/redamon-kb-receipt.json \

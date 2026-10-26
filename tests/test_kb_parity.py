@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from bb_assistant.kb.cli import main
-from bb_assistant.kb.parity import compare_receipts, load_query_fixture, load_receipt
+from bb_assistant.kb.canonical import SourceDocument, chunk_document
+from bb_assistant.kb.index import KBIndex
+from bb_assistant.kb.parity import compare_receipts, export_assistant_receipt, load_query_fixture, load_receipt
+from bb_assistant.kb.redamon_sources import RedAmonSnapshot
+from bb_assistant.kb.rebuild import export_redamon_snapshot, import_snapshot
 
 
 _HASH_A = "a" * 64
@@ -169,3 +173,60 @@ def test_load_query_fixture_rejects_duplicate_ids(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="duplicate fixture query id"):
         load_query_fixture(path)
+
+
+def test_local_parity_export_requires_complete_vectors_and_emits_receipt(tmp_path: Path) -> None:
+    class FakeEmbedder:
+        model_name = "intfloat/e5-large-v2"
+
+        def embed_documents_batch(self, texts: list[str], *, batch_size: int) -> list[list[float]]:
+            return [[1.0] + [0.0] * 1023 for _ in texts]
+
+        def embed_query(self, query: str) -> list[float]:
+            return [1.0] + [0.0] * 1023
+
+    class FakeReranker:
+        def score(self, query: str, texts: list[str]) -> list[float]:
+            return [0.5] * len(texts)
+
+    docs = tuple(SourceDocument.create(
+        source_name="owasp", source_id=f"guide-{index}", title=f"Synthetic guide {index}",
+        text=f"Synthetic authorization-boundary evidence record {index}.", source_revision="pinned-revision",
+        metadata={"document_role": "content", "profile": "full"},
+    ) for index in range(2))
+    chunks = tuple(chunk for doc in docs for chunk in chunk_document(doc))
+    source_coverage = ({
+        "source_name": "owasp", "state": "done", "source_revision": "pinned-revision",
+        "requested_filters": {"profile": "full"}, "applied_filters": {"profile": "full"},
+        "document_count": len(docs), "chunk_count": len(chunks),
+    },)
+    snapshot = RedAmonSnapshot("c" * 64, "DONE", docs, chunks, source_coverage)
+    snapshot_root = tmp_path / "snapshots"
+    exported = export_redamon_snapshot(snapshot, snapshot_root)
+    snapshot_dir = snapshot_root / str(exported["snapshot_id"])
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(json.dumps({"schema_version": 1, "queries": [{
+        "id": "authorization-boundary", "query": "authorization boundary", "top_k": 1,
+        "filters": {"source_names": []},
+    }]}), encoding="utf-8")
+    index = KBIndex(tmp_path / "index.sqlite3", embedder=FakeEmbedder(), reranker=FakeReranker())
+    import_snapshot(snapshot_dir, index)
+    output = tmp_path / "receipt.json"
+
+    with pytest.raises(ValueError, match="complete E5 vectors"):
+        export_assistant_receipt(
+            index=KBIndex(index.path, read_only=True), snapshot_dir=snapshot_dir,
+            fixture_path=fixture, output_path=output, profile="full",
+        )
+    index.rebuild_embeddings(FakeEmbedder())
+    receipt = export_assistant_receipt(
+        index=KBIndex(index.path, read_only=True, embedder=FakeEmbedder(), reranker=FakeReranker()),
+        snapshot_dir=snapshot_dir, fixture_path=fixture, output_path=output, profile="full",
+    )
+
+    loaded = load_receipt(output, expected_producer="graph-kb-assistant")
+    assert receipt == loaded
+    assert receipt["corpus"]["vectors"]["complete"] is True
+    assert receipt["sources"][0]["document_count"] == 2
+    assert receipt["queries"][0]["results"][0]["score_components"]["vector_cosine"] == 1.0
+    assert output.stat().st_mode & 0o077 == 0
