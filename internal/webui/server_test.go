@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/consultation"
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/project"
@@ -267,7 +268,7 @@ func TestHealthHandlerReportsLivenessWithoutReadingApplicationData(t *testing.T)
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
-	if payload["status"] != "ok" {
+	if payload["status"] != "ok" || payload["version"] != buildinfo.String() {
 		t.Fatalf("health payload=%#v", payload)
 	}
 	if api.direct != 0 || api.full != 0 {

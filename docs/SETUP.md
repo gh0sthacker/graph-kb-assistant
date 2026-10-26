@@ -56,7 +56,8 @@ sha256sum --check SHA256SUMS
 The artifact is a build output, not a signed release; restrict deployment to a
 trusted successful workflow run. Use a `main` push artifact for a normal
 deployment, or explicitly review the tested PR merge result before using its
-artifact.
+artifact. The authenticated `/api/health` response includes the same version
+string so an operator can verify which binary serves the UI.
 
 For a persistent per-user service on systemd, install the unit from the
 checkout. The user's systemd manager must be enabled at login (lingering is

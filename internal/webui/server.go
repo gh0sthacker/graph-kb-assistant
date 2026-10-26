@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/consultation"
 	"bb-graph-assistant/internal/ingest"
 )
@@ -131,7 +132,10 @@ func runtimeCapabilitiesHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
-	writeResult(w, map[string]any{"status": "ok"}, nil)
+	writeResult(w, map[string]any{
+		"status":  "ok",
+		"version": buildinfo.String(),
+	}, nil)
 }
 
 // ValidateLoopbackAddress rejects wildcard and non-loopback listeners.
