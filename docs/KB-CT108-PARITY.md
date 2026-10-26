@@ -308,3 +308,37 @@ readiness remains false. Search is preserved. No snapshot rebuild or embedding
 was started, and VM112 remains paused. The existing coverage rows still need
 reconciliation from stored source documents before an immutable replacement
 snapshot can be built; RedAmon corpus and query parity remain `PARTIAL`.
+
+## Candidate source refresh and vector continuation — 2026-10-26 19:52–20:05 UTC
+
+Code commits `017343e`, `511b426`, and `0b67b91` were pushed to the active
+development branch; the focused KB provider/rechunk suite passed (18 tests),
+and CI run `40391962579` passed. The deployed Python files on CT108 have
+SHA-256 hashes matching their pushed revisions.
+
+The active application index was left unchanged. An isolated candidate at
+`kb/candidates/full-20261026-1936/index.sqlite3` was refreshed from the pinned
+vendored ToolDocs source and re-chunked under 20% CPU / 2 GiB memory limits.
+All 44 ToolDocs source hashes now match the current local provider. Coverage
+reports 44 documents and 356 chunks (43 source documents plus the retained
+notice). The candidate contains seven `DONE` source families, 207,878
+documents, and 208,960 stored chunks (208,950 content chunks). Per-family
+counts: ToolDocs 356, GTFOBins 479, LOLBAS 244, OWASP 900, ExploitDB 46,638,
+NVD 146,940, and Nuclei 13,403.
+
+Six embeddings for chunk IDs removed by the ToolDocs refresh were pruned, so
+all 38,882 remaining vectors join to current chunks. A regression now makes
+future re-chunk operations prune orphan vectors automatically. The candidate
+records the original snapshot source-manifest digest `931151ff…`, which differs
+from the current manifest `95336ab4…`; source-definition freshness is false
+and parity remains `PARTIAL`. This preserves provenance honestly and does not
+claim equality with the installed RedAmon or its full-profile corpus.
+
+A candidate-only E5 worker is running on CT108 with one model thread, batch
+size 2, 20% CPU quota, 3 GiB memory cap, and a 70 C stop / ten-minute cool
+dwell gate. At the last check the package sensor read 75 C; the worker was
+waiting before model load (about 16 MiB resident, under one second CPU), with
+no new vectors reported. The worker targets the candidate, not the active
+application index. Promotion remains pending until embeddings finish and the
+candidate passes final integrity and retrieval checks. Graph API and Neo4j
+remain active; VM112 remains paused.
