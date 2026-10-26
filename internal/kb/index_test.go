@@ -46,6 +46,9 @@ func TestOpenIndexReadsPythonCompatibleFTSIndexReadOnly(t *testing.T) {
 	if stats.SourceFamilies != 1 || stats.SourceDocuments != 1 || stats.Chunks != 1 {
 		t.Fatalf("Stats() counts = %d families, %d documents, %d chunks; want 1/1/1", stats.SourceFamilies, stats.SourceDocuments, stats.Chunks)
 	}
+	if stats.TotalContentChunks != 1 || stats.EmbeddedContentChunks != 0 || stats.VectorReady {
+		t.Fatalf("Stats() vector progress = %d/%d ready:%v; want 0/1 not ready", stats.EmbeddedContentChunks, stats.TotalContentChunks, stats.VectorReady)
+	}
 	if stats.CoverageReportHash == nil || *stats.CoverageReportHash != strings.Repeat("2", 64) || !stats.ReferenceMaterialIsUntrusted {
 		t.Fatalf("Stats() lost coverage provenance or untrusted-reference marker: %+v", stats)
 	}
@@ -117,6 +120,68 @@ func TestOpenIndexReadsPythonCompatibleFTSIndexReadOnly(t *testing.T) {
 		if strings.HasSuffix(entry.Name(), "-wal") || strings.HasSuffix(entry.Name(), "-shm") || strings.HasSuffix(entry.Name(), "-journal") {
 			t.Fatalf("read-only KB operations left a SQLite sidecar file: %s", entry.Name())
 		}
+	}
+}
+
+func TestStatsReportsStagedVectorProgressAndFailsClosed(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic second chunk for embedding progress"
+	firstContent := "synthetic source content"
+	createPythonCompatibleIndex(t, indexPath, firstContent, digestHex(firstContent), digestHex(firstContent))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("b", 64)
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "synthetic", "document-1", "Second chunk", 0,
+		len(content), `{}`, digestHex(content), digestHex(content), "bb-kb-chunk-v1", content)
+	if err == nil {
+		_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+			chunk_id TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+			model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+			(?,?,1024,zeroblob(4096)),(?,?,512,zeroblob(2048))`,
+			strings.Repeat("a", 64), "intfloat/e5-large-v2", secondID, "intfloat/e5-large-v2")
+	}
+	const snapshotID = "1111111111111111111111111111111111111111111111111111111111111111"
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+			('vector_model','intfloat/e5-large-v2'),
+			('vector_dimensions','1024'),
+			('vector_snapshot_id',?),
+			('vector_staging_model','intfloat/e5-large-v2'),
+			('vector_staging_dimensions','1024'),
+			('vector_staging_snapshot_id',?)`, snapshotID, snapshotID)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare partial vector fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.TotalContentChunks != 2 || stats.EmbeddedContentChunks != 1 || stats.EmbeddedChunks != 2 {
+		t.Fatalf("Stats() staged vector counts = %+v; want 1/2 compatible content vectors and 2 stored vectors", stats)
+	}
+	if stats.EmbeddingTargetModel == nil || *stats.EmbeddingTargetModel != "intfloat/e5-large-v2" ||
+		stats.EmbeddingTargetSnapshotID == nil || *stats.EmbeddingTargetSnapshotID != snapshotID || stats.EmbeddingTargetDimensions != 1024 {
+		t.Fatalf("Stats() staged target = model:%v snapshot:%v dimensions:%d", stats.EmbeddingTargetModel, stats.EmbeddingTargetSnapshotID, stats.EmbeddingTargetDimensions)
+	}
+	if stats.VectorReady {
+		t.Fatal("Stats() marked an incomplete vector snapshot ready")
 	}
 }
 
@@ -641,7 +706,7 @@ func TestSearchUsesPythonCompatibleVectorCandidatesAndReranker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats() error = %v", err)
 	}
-	if stats.EmbeddedChunks != 2 || stats.EmbeddingModel == nil || !stats.VectorReady {
+	if stats.EmbeddedChunks != 2 || stats.TotalContentChunks != 2 || stats.EmbeddedContentChunks != 2 || stats.EmbeddingModel == nil || !stats.VectorReady {
 		t.Fatalf("embedding status = %+v", stats)
 	}
 }

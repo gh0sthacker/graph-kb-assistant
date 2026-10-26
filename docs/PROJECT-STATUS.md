@@ -3032,10 +3032,15 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
 - A read-only KB stats query reported the active full snapshot
   `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, with
   207,878 source documents, 209,036 chunks and source coverage `DONE`. It had
-  34,016 of 209,026 content vectors; `vector_ready` remains false. The existing
-  embedding process (PID 1229966 at this check) was live, so no duplicate job
-  was started. The user-systemd D-Bus was unavailable in this shell, so unit
-  enablement/restart policy was not verified.
+  34,272 of 209,026 content vectors at 06:49 UTC; `vector_ready` remains false.
+  The existing embedding process (PID 1229966 at this check) was live, so no
+  duplicate job was started. The user-systemd D-Bus was unavailable in this
+  shell, so unit enablement/restart policy was not verified.
 - KB delivery remains `PARTIAL`: a deployed RedAmon snapshot and its fixed
   query-result receipt are still unavailable, and the local SQLite FTS5
   backend is not demonstrated equivalent to RedAmon's Neo4j Lucene backend.
+- `bb_kb_stats` now reports total and embedded content chunks plus the staging
+  model, snapshot and dimensions. `vector_ready` also requires a compatible
+  vector for every content chunk. Synthetic partial/staging/readiness checks
+  and `go test ./internal/kb ./internal/mcpserver -count=1` passed; the code
+  change did not mutate the live KB or invoke a model.

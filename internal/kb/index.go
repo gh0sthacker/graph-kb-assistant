@@ -102,7 +102,12 @@ type StatsResult struct {
 	SourceDocuments              int64            `json:"source_documents"`
 	Chunks                       int64            `json:"chunks"`
 	EmbeddedChunks               int64            `json:"embedded_chunks"`
+	TotalContentChunks           int64            `json:"total_content_chunks"`
+	EmbeddedContentChunks        int64            `json:"embedded_content_chunks"`
 	EmbeddingModel               *string          `json:"embedding_model,omitempty"`
+	EmbeddingTargetModel         *string          `json:"embedding_target_model,omitempty"`
+	EmbeddingTargetSnapshotID    *string          `json:"embedding_target_snapshot_id,omitempty"`
+	EmbeddingTargetDimensions    int64            `json:"embedding_target_dimensions,omitempty"`
 	VectorReady                  bool             `json:"vector_ready"`
 	CoverageState                string           `json:"coverage_state"`
 	CoverageReportHash           *string          `json:"coverage_report_sha256"`
@@ -249,25 +254,60 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM chunks").Scan(&result.Chunks); err != nil {
 		return StatsResult{}, errors.New("KB chunk count could not be read")
 	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM chunks
+		WHERE coalesce(json_extract(metadata_json,'$.document_role'),'content')='content'`).Scan(&result.TotalContentChunks); err != nil {
+		return StatsResult{}, errors.New("KB content chunk count could not be read")
+	}
 	var embeddingTable int
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunk_embeddings'").Scan(&embeddingTable); err != nil {
 		return StatsResult{}, errors.New("KB embedding table state could not be read")
 	}
 	if embeddingTable == 1 {
-		var vectorModel, vectorSnapshot string
-		var dimensions int
+		var vectorModel, vectorSnapshot, stagingModel, stagingSnapshot string
+		var dimensions, stagingDimensions int
 		if err := tx.QueryRowContext(ctx, `SELECT
 			coalesce(max(CASE WHEN key='vector_model' THEN substr(value,1,256) END),''),
 			coalesce(max(CASE WHEN key='vector_snapshot_id' THEN substr(value,1,65) END),''),
-			coalesce(max(CASE WHEN key='vector_dimensions' THEN CAST(value AS INTEGER) END),0)
-			FROM kb_meta`).Scan(&vectorModel, &vectorSnapshot, &dimensions); err != nil {
-			return StatsResult{}, errors.New("KB embedding model metadata could not be read")
+			coalesce(max(CASE WHEN key='vector_dimensions' THEN CAST(value AS INTEGER) END),0),
+			coalesce(max(CASE WHEN key='vector_staging_model' THEN substr(value,1,256) END),''),
+			coalesce(max(CASE WHEN key='vector_staging_snapshot_id' THEN substr(value,1,65) END),''),
+			coalesce(max(CASE WHEN key='vector_staging_dimensions' THEN CAST(value AS INTEGER) END),0)
+			FROM kb_meta`).Scan(&vectorModel, &vectorSnapshot, &dimensions, &stagingModel, &stagingSnapshot, &stagingDimensions); err != nil {
+			return StatsResult{}, errors.New("KB embedding model and staging metadata could not be read")
 		}
+		// Staging metadata describes the resumable build currently being
+		// produced. Keep the published model separately so callers can display
+		// progress without treating staged vectors as retrieval-ready.
 		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM chunk_embeddings").Scan(&result.EmbeddedChunks); err != nil {
 			return StatsResult{}, errors.New("KB embedding count could not be read")
 		}
+		targetModel, targetSnapshot, targetDimensions := vectorModel, vectorSnapshot, dimensions
+		if stagingModel != "" || stagingSnapshot != "" {
+			targetModel, targetSnapshot, targetDimensions = stagingModel, stagingSnapshot, stagingDimensions
+		}
+		result.EmbeddingTargetModel = optionalString(targetModel)
+		result.EmbeddingTargetSnapshotID = optionalString(targetSnapshot)
+		result.EmbeddingTargetDimensions = int64(targetDimensions)
+		if targetSnapshot != "" && targetSnapshot != info.SnapshotID {
+			// Never count vectors staged for a different corpus as progress on
+			// the active snapshot.
+			result.EmbeddedContentChunks = 0
+		} else if targetModel == "" {
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM chunks c
+				JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id
+				WHERE coalesce(json_extract(c.metadata_json,'$.document_role'),'content')='content'`).Scan(&result.EmbeddedContentChunks); err != nil {
+				return StatsResult{}, errors.New("KB content embedding count could not be read")
+			}
+		} else if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM chunks c
+			JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id
+			WHERE coalesce(json_extract(c.metadata_json,'$.document_role'),'content')='content'
+			AND e.model_name=? AND (?=0 OR e.dimensions=?)`, targetModel, targetDimensions, targetDimensions).Scan(&result.EmbeddedContentChunks); err != nil {
+			return StatsResult{}, errors.New("KB content embedding count could not be read")
+		}
 		result.EmbeddingModel = optionalString(vectorModel)
-		result.VectorReady = result.EmbeddedChunks > 0 && vectorSnapshot == info.SnapshotID && dimensions == 1024 && vectorModel == "intfloat/e5-large-v2"
+		result.VectorReady = result.TotalContentChunks > 0 &&
+			result.EmbeddedContentChunks == result.TotalContentChunks &&
+			vectorSnapshot == info.SnapshotID && dimensions == 1024 && vectorModel == "intfloat/e5-large-v2"
 	}
 	var sourceCoverage []byte
 	err = tx.QueryRowContext(ctx,
