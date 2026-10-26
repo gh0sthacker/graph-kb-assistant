@@ -351,11 +351,12 @@ KB parity acceptance requires all of the following:
   if the current FTS/vector backends diverge, replace or adapt them until the
   fixture passes rather than weakening the parity criterion.
 - Every source has recorded license/terms evidence and required attribution.
-  ExploitDB dataset redistribution terms remain unresolved; repository GPL
-  evidence alone is insufficient. The existing full snapshot was built before
-  this gate was tightened, so ExploitDB records may already be present. New
-  source builds must omit the family, and the application search layer must
-  suppress its records until authoritative terms are resolved.
+  ExploitDB is limited to the pinned repository's allowlisted descriptions and
+  metadata CSV; the upstream pinned README and GPLv2 license notice are retained,
+  and PoC/source files are never fetched or copied. This feed is for private
+  self-hosted use only; do not redistribute the assembled corpus without a
+  separate rights review. Both the Go service and Python KB interface must
+  expose the same eligible local snapshot records.
 - A live retrieval check confirms the running application uses that completed
   snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
   query-parity item remains incomplete or unverified.

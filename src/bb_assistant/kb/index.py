@@ -28,7 +28,6 @@ from .ranking import (
 )
 
 logger = logging.getLogger(__name__)
-_RIGHTS_BLOCKED_SOURCES = frozenset({"exploitdb"})
 
 _MAX_SEARCH_TERMS = 32
 
@@ -926,9 +925,8 @@ class KBIndex:
             sql = """SELECT e.chunk_id,e.vector FROM chunk_embeddings e
                      JOIN chunks c ON c.chunk_id=e.chunk_id
                      WHERE e.model_name=? AND e.dimensions=?
-                       AND c.source_name NOT IN (""" + ",".join("?" for _ in _RIGHTS_BLOCKED_SOURCES) + """)
                        AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
-            params: list[object] = [model_name, dimensions, *_RIGHTS_BLOCKED_SOURCES]
+            params: list[object] = [model_name, dimensions]
             with self.connect() as connection:
                 rows = connection.execute(sql, params).fetchall()
             if not rows:
@@ -961,8 +959,6 @@ class KBIndex:
             raise ValueError("top_k must be between 1 and 100")
         if len(query) > 4096:
             raise ValueError("KB query exceeds the 4096-character limit")
-        if source_names and not (set(source_names) - _RIGHTS_BLOCKED_SOURCES):
-            return ()
         match_query = _redamon_fulltext_expression(query)
         if not match_query:
             return ()
@@ -983,8 +979,7 @@ class KBIndex:
         # RedAmon applies source allowlists after asking Lucene for its global
         # top-k pool. Filtering in SQL before LIMIT would backfill lower-ranked
         # family-specific rows and change the RRF candidates.
-        requested_sources = set(source_names) - _RIGHTS_BLOCKED_SOURCES
-        rows = [row for row in rows if row["source_name"] not in _RIGHTS_BLOCKED_SOURCES]
+        requested_sources = set(source_names)
         if requested_sources:
             rows = [row for row in rows if row["source_name"] in requested_sources]
         fulltext_ids = [row["chunk_id"] for row in rows]
@@ -1001,8 +996,6 @@ class KBIndex:
                         FROM chunks c WHERE c.chunk_id IN (""" + ",".join("?" for _ in candidate_ids) + ")"
         metadata_params: list[object] = list(candidate_ids)
         metadata_sql += " AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
-        metadata_sql += " AND c.source_name NOT IN (" + ",".join("?" for _ in _RIGHTS_BLOCKED_SOURCES) + ")"
-        metadata_params.extend(_RIGHTS_BLOCKED_SOURCES)
         if requested_sources:
             metadata_sql += " AND c.source_name IN (" + ",".join("?" for _ in requested_sources) + ")"
             metadata_params.extend(requested_sources)

@@ -152,7 +152,7 @@ class ThermalMonitorTests(unittest.TestCase):
                     with embedding_worker_lock(root):
                         self.fail("a second worker acquired the lock")
 
-    def test_rights_blocked_exploitdb_chunks_never_appear_in_search(self) -> None:
+    def test_metadata_only_exploitdb_chunks_are_searchable_for_self_hosted_kb(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             document = SourceDocument.create(
                 source_name="exploitdb", source_id="metadata.csv:1", title="SQL injection",
@@ -162,8 +162,10 @@ class ThermalMonitorTests(unittest.TestCase):
             index.replace_snapshot(
                 tuple(chunk_document(document)), "e" * 64, sources=(document,),
             )
-            self.assertEqual(index.search("SQL injection"), ())
-            self.assertEqual(index.search("SQL injection", source_names=("exploitdb",)), ())
+            hits = index.search("SQL injection")
+            self.assertEqual([hit.source_name for hit in hits], ["exploitdb"])
+            filtered_hits = index.search("SQL injection", source_names=("exploitdb",))
+            self.assertEqual([hit.source_name for hit in filtered_hits], ["exploitdb"])
 
 
 if __name__ == "__main__":
