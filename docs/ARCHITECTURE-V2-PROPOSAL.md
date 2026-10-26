@@ -389,6 +389,48 @@ rechunk was applied to the installed private index; its current partial vector
 state and remaining parity gaps are recorded in the verification immediately
 above and in `docs/PROJECT-STATUS.md`.
 
+### Candidate KB update — 2026-10-26 21:13 UTC
+
+The preceding counts describe the active index and earlier checks. Commits
+`2c86ced` through `5eb90f4` are now pushed, CI-passed, and the latest tested
+Nuclei canonicalizer is deployed to CT108. A separate full-profile candidate
+was re-chunked to 207,878 source documents and 215,382 content chunks. It has
+38,775 E5 vectors and 176,607 chunks without vectors; `vector_ready=false`.
+The active index remains unchanged at 209,036 stored chunks, 209,026 content
+chunks, and 38,888 vectors. Candidate source-manifest freshness and candidate
+`quick_check` are still unresolved, so no promotion or exact RedAmon parity is
+claimed.
+
+The manifest-hash difference was traced to one change between stored-manifest
+revision `274c622` and current `sources.yaml`: a stricter clarification of the
+ExploitDB terms-basis wording. Source families, URLs, revisions, and filters
+are unchanged in that diff. The candidate retains the historical hash; it is
+not rewritten manually.
+
+The CT108 candidate-only embedding service is active and enabled, but its
+thermal gate is holding work: at the latest CT-visible reading the sensor was
+82 C and the process was sleeping at 0.0% CPU. It must observe the configured
+continuous ten-minute interval below 70 C before loading the model/resuming.
+VM112 remains paused. This current candidate state supersedes earlier notes
+that described the candidate worker as inactive or disabled.
+
+A CT-visible sample at 2026-10-26 21:16 UTC read 93 C; the candidate process
+remained sleeping at 0.0% CPU and the thermal gate continued to hold.
+
+At a later PVE check, VM112 was found running; its KVM process's `ps` value
+was 58.2% lifetime-average CPU, not an instantaneous measurement. Following
+the user's existing instruction to pause VM112 temporarily, it was suspended
+and `qm status 112` confirmed `paused`. Subsequent CT-visible temperatures
+were 87 C and 82 C. Cooling below 70 C for ten continuous minutes is still
+required before vector work resumes.
+
+At 21:22 UTC the CT sensor read 84 C while VM112 remained paused. PVE `top`
+showed 93.2% CPU idle, 940 MiB free RAM, and 8,182/8,192 MiB swap used, so
+the separate Neo4j parity clone was deferred.
+
+At 21:28 UTC the CT-visible sensor read 85 C with VM112 still paused; the
+ten-minute cool dwell remains unestablished.
+
 ## Review scope and limits
 
 Reviewed intake, storage, graph writer/readers, Neo4j materialization and

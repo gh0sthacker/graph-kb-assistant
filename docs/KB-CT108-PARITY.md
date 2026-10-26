@@ -5,6 +5,68 @@ operator-provided read-only stats; service and single-sample temperature state
 come from the operator's PVE check. No claim below means the installed KB is
 identical to RedAmon.
 
+## Latest candidate state — 2026-10-26 21:13 UTC (supersedes older counts below)
+
+- Commits `2c86ced`, `d6340ba`, `6f1ea2e`, and `5eb90f4` implement
+  RedAmon-compatible source chunk identities, parser-token YAML limits, and a
+  bounded raw-text fallback for Nuclei templates that cannot be parsed. The
+  latest GitHub CI run (`40400476932`) passed. Local focused KB verification
+  passed: 65 tests and 3 subtests, plus compileall and `git diff --check`.
+- The tested `canonical.py` from `5eb90f4` is deployed to CT108. The isolated
+  candidate `kb/candidates/full-20261026-1936/index.sqlite3` completed its
+  re-chunk: 207,878 source documents from seven families and 215,382 content
+  chunks. Its metadata reports `coverage_state=DONE`, but
+  `source_manifest_matches_current=false`; this is not a parity or publication
+  receipt. Comparing stored-manifest revision `274c622` with current
+  `sources.yaml` found exactly one change: a stricter clarification of the
+  ExploitDB `dataset_terms_basis` wording. Source families, URLs, revisions,
+  and filters are unchanged in that diff; the historical digest is retained.
+  A read-only aggregate found 38,775 E5 vectors and 176,607 content
+  chunks without vectors. Candidate `vector_ready=false`. The active index was
+  not changed; its last observed count remains 209,036 stored chunks (209,026
+  content chunks) and 38,888 E5 vectors.
+- The bounded Nuclei fallback marked 5,960 chunks with
+  `canonicalization_fallback=yaml_size_limit`; oversized source text is
+  retained in bounded chunks instead of aborting the family rebuild. This
+  preserves source material but is not proof that these records have the same
+  normalized text/chunk boundaries as RedAmon.
+- A read-only `PRAGMA quick_check` was started on the candidate, but no result
+  returned within the check window. Candidate database integrity therefore
+  remains unverified; no success is claimed. The
+  candidate-only embed service in CT108 is active and enabled. Its process is
+  sleeping at 0.0% CPU, and the CT-visible thermal sensor read 82 C. The
+  service's 70 C / ten-minute cool-dwell gate is holding model loading and
+  embedding; no duplicate worker was started. VM112 remains paused.
+- Next: keep the candidate isolated, let its existing thermal-gated worker
+  resume only after its configured cool dwell, then verify database integrity,
+  complete vectors, source-manifest provenance, and fixed-query receipts
+  before considering promotion. Exact RedAmon corpus and ranking parity remain
+  `PARTIAL`.
+
+At 2026-10-26 21:16 UTC a fresh CT108 sample read 93 C. The candidate unit
+remains active/running, while its process is sleeping at 0.0% CPU. The
+thermal gate continues to prevent model loading; the earlier 82 C sample
+above is superseded by this reading.
+
+## VM112 thermal follow-up — 2026-10-26 21:18 UTC
+
+A fresh PVE check found VM112 running, contrary to the earlier recorded state.
+Its `ps` CPU percentage was a lifetime average, not an instantaneous sample.
+Following the user's existing instruction to pause VM112 temporarily, `qm
+suspend 112` completed and `qm status 112` confirmed `paused`. CT108's sensor
+then read 87 C and 82 C on subsequent samples. These readings are trending
+down but do not establish a cool dwell below 70 C. The candidate embed service
+remains active behind its thermal gate; its process is at 0.0% CPU. No data
+disks or KB indexes were changed by the pause.
+
+At 21:22 UTC the CT-visible sensor read 84 C and `qm status 112` still
+reported `paused`. A brief PVE `top` sample showed 93.2% CPU idle, 940 MiB
+free RAM, and 8,182/8,192 MiB swap in use. Do not start the separate Neo4j
+parity clone or another embedder under this thermal/memory state.
+
+At 21:28 UTC, with VM112 still paused and the candidate service still gated,
+the CT-visible sensor read 85 C. The required dwell below 70 C has not begun.
+
 ## User goal: maximum RedAmon full-profile coverage — 2026-10-26
 
 The requested target is the pinned RedAmon `full` source profile, not the

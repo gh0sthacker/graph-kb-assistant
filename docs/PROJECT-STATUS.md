@@ -3386,3 +3386,49 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   dead-letter records. No reconciliation writes were made. Those conflicts and
   the unavailable response evidence remain data-quality gaps; overall delivery
   stays `PARTIAL`.
+
+## KB candidate re-chunk and thermal-gated continuation — 2026-10-26 21:13 UTC — PARTIAL
+
+- Commits `2c86ced`, `d6340ba`, `6f1ea2e`, and `5eb90f4` are pushed; CI run
+  `40400476932` passed. Focused local KB verification passed 65 tests and 3
+  subtests, plus `compileall` and `git diff --check`. Commit `5eb90f4`'s tested
+  Nuclei canonicalizer is deployed to CT108.
+- The isolated candidate at
+  `kb/candidates/full-20261026-1936/index.sqlite3` completed re-chunking:
+  207,878 documents, seven source families, and 215,382 content chunks.
+  Coverage reports `DONE`, but current source-manifest match is false. It has
+  38,775 E5 vectors and 176,607 missing vectors; `vector_ready=false`. A raw
+  bounded fallback was used for 5,960 Nuclei chunks whose YAML exceeded the
+  configured parser size limit. The active index is unchanged (209,036 stored
+  chunks, 209,026 content chunks, 38,888 vectors).
+- Comparing the stored-manifest revision `274c622` with current
+  `sources.yaml` found one change only: a stricter clarification of the
+  ExploitDB terms-basis wording. Source families, URLs, revisions, and filters
+  are unchanged in that diff. The historical digest is retained, not manually
+  overwritten.
+- The candidate-only CT108 embed service is active and enabled, but its
+  thermal gate is waiting. At the latest CT-visible sample the sensor read
+  82 C and the process used 0.0% CPU. It will only load the model after a
+  continuous ten-minute dwell below 70 C. VM112 remains paused; no duplicate
+  worker was started.
+- A later CT-visible sample at 21:16 UTC read 93 C. The candidate unit remains
+  active/running and its process remains at 0.0% CPU; the thermal gate is still
+  holding model loading. This supersedes the 82 C sample above.
+- A PVE check then found VM112 running; `ps` showed 58.2% lifetime-average CPU
+  for its KVM process (not an instantaneous utilization reading). Per the
+  user's existing instruction to pause VM112 temporarily, `qm suspend 112`
+  completed and `qm status 112` confirmed `paused`. Subsequent CT-visible
+  samples fell to 87 C and 82 C. A ten-minute dwell below 70 C is not yet
+  established. The candidate service remains active behind its thermal gate;
+  the KB index and VM disks were not modified.
+- At 21:22 UTC the CT sensor read 84 C while VM112 remained paused. A brief
+  PVE `top` sample showed 93.2% CPU idle, 940 MiB free RAM, and 8,182/8,192
+  MiB swap in use. The separate Neo4j parity clone was not started under this
+  thermal/memory state.
+- At 21:28 UTC the CT-visible sensor read 85 C with VM112 still paused; the
+  ten-minute dwell below 70 C had not begun.
+- A read-only candidate `PRAGMA quick_check` did not return within the check
+  window, so database integrity is not yet confirmed.
+  Candidate source-manifest freshness, vector completion, query receipts, and
+  exact RedAmon corpus parity remain open. Keep the candidate unpromoted until
+  these checks pass.
