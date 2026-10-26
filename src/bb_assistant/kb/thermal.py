@@ -17,7 +17,8 @@ class ThermalMonitor:
 
     def check(self) -> float:
         try:
-            raw = self.sensor_path.read_text(encoding="ascii").strip()
+            sensor = self._resolve_sensor() if self.sensor_path.is_dir() else self.sensor_path
+            raw = sensor.read_text(encoding="ascii").strip()
             value = float(raw)
         except (OSError, UnicodeError, ValueError) as exc:
             raise RuntimeError("thermal sensor is unavailable; stopping embedding") from exc
@@ -29,3 +30,18 @@ class ThermalMonitor:
                 f"thermal stop reached ({celsius:.1f} C >= {self.stop_celsius:.1f} C)"
             )
         return celsius
+
+    def _resolve_sensor(self) -> Path:
+        matches: list[Path] = []
+        try:
+            for name_path in self.sensor_path.glob("hwmon*/name"):
+                if name_path.read_text(encoding="ascii").strip() != "coretemp":
+                    continue
+                for label_path in name_path.parent.glob("temp*_label"):
+                    if label_path.read_text(encoding="ascii").strip() == "Package id 0":
+                        matches.append(label_path.with_name(label_path.name.removesuffix("_label") + "_input"))
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError("thermal sensor labels are unavailable; stopping embedding") from exc
+        if len(matches) != 1 or not matches[0].is_file():
+            raise RuntimeError("unique coretemp Package id 0 sensor was not found; stopping embedding")
+        return matches[0]

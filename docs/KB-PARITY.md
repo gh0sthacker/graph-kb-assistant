@@ -133,13 +133,16 @@ search layer excludes already-present ExploitDB records while that gate is
 unresolved.
 
 Long E5 builds run only on Proxmox, never on Kali. `bb-assistant-kb embed`
-requires a host-identified, read-only thermal sensor path; it checks before
+requires a host-identified, read-only thermal sensor source; the hwmon
+directory mode resolves the uniquely labelled `coretemp` `Package id 0`
+sensor on each check. It checks before
 each durable batch, fails closed on unreadable sensor data, and stops at 80 C.
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
-Run the worker with a systemd CPU quota of at most 20%. Start only below 75 C,
-and resume only below 70 C after readings remain stable. The numeric sysfs path
-must be selected from the actual sensor labels; do not guess the sensor.
+The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
+and caps CPU at 20%, disables automatic restarts, and leaves boot activation
+disabled. Start only below 75 C,
+and resume only below 70 C after readings remain stable.
 Thermal stops preserve completed batches but do not publish the vector-ready
 marker. Readiness remains false until every content chunk has its pinned E5
 vector and the completion marker is written.

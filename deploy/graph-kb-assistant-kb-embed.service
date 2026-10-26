@@ -1,0 +1,34 @@
+[Unit]
+Description=Graph KB Assistant E5 embedding build
+After=network-online.target
+ConditionPathExists=/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=max
+Group=max
+WorkingDirectory=/home/max/bb/graph-kb-assistant
+Environment=HOME=/home/max
+Environment=XDG_DATA_HOME=/home/max/.local/share
+Environment=PYTHONPATH=/home/max/bb/graph-kb-assistant/src
+Environment=BB_ASSISTANT_KB_INDEX=/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=OMP_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=TOKENIZERS_PARALLELISM=false
+ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli --index-path /home/max/.local/share/bb-graph-assistant/kb/index.sqlite3 embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 80
+Restart=no
+CPUQuota=20%
+MemoryMax=3G
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+UMask=0077
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
