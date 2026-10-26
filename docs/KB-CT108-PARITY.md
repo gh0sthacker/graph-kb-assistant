@@ -52,7 +52,7 @@ fresh, consistent ten-minute series is observed. The same operator supplied
 the fresh read-only Hermes stats summarized in the matrix; no RedAmon receipt
 was available.
 
-## Coordinator read attempt — 2026-10-26
+## Earlier coordinator read attempt — 2026-10-26
 
 This run could not authenticate to Proxmox/CT108 over SSH (public-key access
 was denied for both configured host aliases). The workspace `kb_stats` tool
@@ -60,9 +60,12 @@ also did not return within the bounded wait and was cancelled in this
 coordinator session. No remote unit, database, or snapshot files were read or changed by this coordinator, and no
 embedding, source fetch, database runtime, or target operation was started.
 The separate operator stats now establish the active snapshot ID and vector
-counts. Obtain a new continuous temperature observation before any worker
-restart. Reconcile the ExploitDB source-coverage metadata with the checked-in
-manifest and its rights gate before promoting source coverage as policy-valid.
+counts. A later live PVE session deployed the thermal-safe CLI and unit; the
+unit is confirmed inactive and disabled, and a point sensor reading matched
+between PVE and CT108. A fresh ten-minute cool dwell is still required before
+starting the worker. Reconcile the ExploitDB source-coverage metadata with the
+checked-in manifest and its rights gate before promoting source coverage as
+policy-valid.
 
 ## Evidence required to close parity
 
