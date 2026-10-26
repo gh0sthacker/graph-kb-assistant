@@ -125,12 +125,15 @@ profile export and matching query receipt exist, KB parity remains unproven.
 
 ## Operational and rights gates
 
-The local source manifest deliberately leaves ExploitDB dataset terms unresolved.
-The repository license alone does not establish redistribution rights for the
-dataset. New builds therefore report partial coverage and must not fetch or
-import ExploitDB records until authoritative dataset terms are reviewed. The
-search layer excludes already-present ExploitDB records while that gate is
-unresolved.
+The pinned official ExploitDB GitLab README states that the repository project
+and SearchSploit are released under GPLv2. The local manifest therefore permits
+the self-hosted provider's allowlisted `files_exploits.csv` descriptions and
+metadata at that pinned revision, while retaining the pinned README and
+LICENSE notices. It never downloads or copies PoC/source files. This scoped
+decision does not claim separate licensing for third-party PoCs or authorize
+redistribution of the assembled corpus; any public distribution needs its own
+rights review. The provider fails closed if its URL, pinned revision, file
+allowlist, or metadata-only filter changes.
 
 Long E5 builds run only on Proxmox, never on Kali. `bb-assistant-kb embed`
 requires a host-identified, read-only thermal sensor source; the hwmon
