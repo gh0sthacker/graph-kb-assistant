@@ -353,25 +353,9 @@ KB parity acceptance requires all of the following:
   snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
   query-parity item remains incomplete or unverified.
 
-Current verification (2026-10-25): the corrected chunker was compared
-offline with RedAmon's `ChunkStrategy` across all 161,240 stored source
-documents and matched all 162,398 generated chunk texts and titles. The
-`rechunk` command has since been applied to the installed private index from
-those stored documents, without fetching new sources. Snapshot
-`0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216` has
-162,398 chunk and FTS rows; SQLite `quick_check` returned `ok`. At the latest
-checkpoint, 8,416 of 162,398 content chunks had staged E5 vectors.
-One resumable worker was confirmed running, but the complete vector snapshot
-is not published yet. The index remains `PARTIAL`: ExploitDB terms remain
-unverified in the installed source snapshot because its CSV has not been
-imported; the active deployed RedAmon profile/snapshot is unknown, and
-representative search-output parity has not been measured. Metadata filters
-for `min_cvss` and `severity` were added to the Go search/MCP contract and
-their focused synthetic tests pass. These results verify chunking and selected
-retrieval behavior, not full KB parity; delivery remains `PARTIAL` until the
-source, vector, deployed-snapshot, and representative query criteria above
-are satisfied.
-
+Current verification (2026-10-25): the corrected chunker matched RedAmon's
+`ChunkStrategy` over the original 161,240 source documents. The expanded pinned
+`full` snapshot has since been installed as `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`: seven families report `done`, with 207,878 source documents and 209,036 chunks. SQLite `quick_check` returned `ok`. E5 vector generation has resumed for this snapshot; the latest checkpoint showed 8,608 embeddings, while the completion marker remains unpublished and vector search is not ready. The installed source set now matches the seven family names selected by RedAmon's `full` profile, with pinned revisions and recorded fetch filters/counts. The live deployed RedAmon profile/snapshot is not available in this checkout, so exact source-content equality against that deployment and representative result/rank parity remain unverified. Metadata filters for `min_cvss` and `severity` were added to the Go search/MCP contract and their focused synthetic tests pass. These results verify source-provider coverage, import, and selected retrieval behavior, not full deployed KB parity; delivery remains `PARTIAL` until vector readiness and same-snapshot query comparisons are verified.
 The `bb-assistant-kb rechunk` command is implemented to refresh the installed
 index from already stored source documents, with no source fetch. It uses
 bounded, resumable transactions and a durable maintenance marker; Python and
