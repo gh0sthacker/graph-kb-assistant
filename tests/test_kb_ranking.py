@@ -112,6 +112,10 @@ class RetrievalRankingTests(unittest.TestCase):
             _redamon_fulltext_expression("needle AND body"),
             '"needle" AND "body"',
         )
+        long_query = " ".join(f"term{index}" for index in range(40)) + " AND final"
+        expression = _redamon_fulltext_expression(long_query)
+        self.assertIn('"term39"', expression)
+        self.assertTrue(expression.endswith('AND "final"'))
 
         documents = (
             SourceDocument.create(

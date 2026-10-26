@@ -29,26 +29,17 @@ from .ranking import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_SEARCH_TERMS = 32
-
-
 def _redamon_fulltext_expression(query: str) -> str:
     """Build the same unprefixed OR/Lucene-operator query RedAmon sends to Neo4j."""
     sanitized = re.sub(r'[+\-!(){}\[\]^"~*?:\\/]', " ", query)
     sanitized = sanitized.replace("&&", " ").replace("||", " ").strip()
     items: list[str] = []
-    term_count = 0
     for word in sanitized.split():
         if word in {"AND", "OR", "NOT"}:
             items.append(word)
             continue
         for term in re.findall(r"[\w-]{1,64}", word, flags=re.UNICODE):
-            if term_count >= _MAX_SEARCH_TERMS:
-                break
             items.append('"' + term.replace('"', '""') + '"')
-            term_count += 1
-        if term_count >= _MAX_SEARCH_TERMS:
-            break
     if not items:
         return ""
 
