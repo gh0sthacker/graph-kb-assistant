@@ -30,7 +30,9 @@
   documents, 209,026 content chunks), but only 38,888/209,026 chunks have E5
   vectors and `vector_ready=false`. This live status supersedes older vector
   counts below; it does not prove equality with an identified deployed RedAmon
-  snapshot or query results.
+  snapshot or query results. A read-only live `bb_kb_search` query returned
+  three cited hits with source hashes and rank scores from that snapshot; this
+  verifies the current lexical retrieval path, not semantic-vector parity.
 
 ## Current loopback runtime check — 2026-10-26 07:22 UTC — PARTIAL
 

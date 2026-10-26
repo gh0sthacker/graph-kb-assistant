@@ -136,16 +136,20 @@ Long E5 builds run only on Proxmox, never on Kali. `bb-assistant-kb embed`
 requires a host-identified, read-only thermal sensor source; the hwmon
 directory mode resolves the uniquely labelled `coretemp` `Package id 0`
 sensor on each check. It checks before
-each durable batch, fails closed on unreadable sensor data, and stops at 80 C.
+each durable batch, fails closed on unreadable sensor data, and stops at 70 C.
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
 The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
 and caps CPU at 20%, disables automatic restarts, and leaves boot activation
-disabled. Start only below 75 C,
-and resume only below 70 C after readings remain stable.
+disabled. Do not start or resume until the package temperature has remained
+below 70 C for at least 10 continuous minutes. A single cool reading does not
+satisfy this precondition.
 Thermal stops preserve completed batches but do not publish the vector-ready
 marker. `vector_ready` requires both complete snapshot-bound vectors and an
 available NumPy search backend; `vector_storage_complete` reports the durable
 generation state separately. Readiness remains false until every content
 chunk has its pinned E5 vector, the completion marker is written, and the
 runtime backend is available.
+The embed CLI waits for a sampled ten-minute dwell below 70 C before starting
+and after a `ThermalLimitReached` batch stop, then resumes the same staged job.
+Unreadable sensors and all non-thermal errors fail closed without retry.

@@ -122,12 +122,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--batch-size", type=int, default=2, choices=(1, 2),
         help="CPU embedding batch size (1-2)",
     )
-    embed.add_argument("--threads", type=int, default=1, choices=(1, 2),
-                       help="maximum PyTorch CPU threads (1-2)")
+    embed.add_argument("--threads", type=int, default=1, choices=(1,),
+                       help="PyTorch CPU threads (fixed at 1 for thermal safety)")
     embed.add_argument("--thermal-sensor", type=Path, required=True,
                        help="read-only sysfs sensor file; accepts Celsius or millidegrees Celsius")
-    embed.add_argument("--stop-temperature-c", type=float, default=80.0,
-                       help="stop before the next batch at this temperature (65-85 C; default 80)")
+    embed.add_argument("--stop-temperature-c", type=float, default=70.0,
+                       help="stop before the next batch at this temperature (65-70 C; default 70)")
     models = commands.add_parser("models", help="prepare pinned local RedAmon retrieval models")
     models.add_argument(
         "--download", action="store_true",
@@ -251,10 +251,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "embed":
         from .embeddings import RedAmonEmbedder
-        from .thermal import ThermalMonitor
+        from .thermal import ThermalLimitReached, ThermalMonitor
         index = KBIndex(_configured_index_path(args.index_path))
         thermal = ThermalMonitor(args.thermal_sensor, stop_celsius=args.stop_temperature_c)
-        embedder = RedAmonEmbedder(local_files_only=not args.download_model, cpu_threads=args.threads)
+        embedder = None
 
         last_progress = 0
 
@@ -264,12 +264,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"embedded {done}/{total} KB chunks", file=sys.stderr, flush=True)
                 last_progress = done
 
-        count = index.rebuild_embeddings(
-            embedder, batch_size=args.batch_size, progress_callback=report_progress,
-            before_batch_callback=thermal.check,
-        )
-        print(json.dumps({"embedded_chunks": count, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
+        while True:
+            thermal.wait_for_cool_dwell()
+            if embedder is None:
+                embedder = RedAmonEmbedder(
+                    local_files_only=not args.download_model,
+                    cpu_threads=args.threads,
+                )
+            try:
+                count = index.rebuild_embeddings(
+                    embedder, batch_size=args.batch_size, progress_callback=report_progress,
+                    before_batch_callback=thermal.check,
+                )
+            except ThermalLimitReached as exc:
+                print(
+                    f"{exc}; durable embedding batches are preserved; waiting for a 10-minute cool dwell",
+                    file=sys.stderr, flush=True,
+                )
+                continue
+            print(json.dumps({"embedded_chunks": count, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
     index = KBIndex(_configured_index_path(args.index_path))
     hits = index.search(args.query, top_k=args.top_k, source_names=tuple(args.source))
     print(json.dumps([
