@@ -37,14 +37,20 @@ dwell. If the sensor cannot be read or another non-thermal error occurs, the
 service exits nonzero and does not retry. This report does not establish that
 the host currently meets the temperature condition.
 
-## Latest operator check — 2026-10-26
+## Latest operator check — 2026-10-26 11:51–12:02 UTC
 
 The operator reports from an active root session on PVE that CT108's app
 service is active, `/api/health` returned 200, and the embed service is
-inactive. One PVE temperature sample was 62 C. This is a single reading and
-does not establish the required ten continuous minutes below 70 C. The same
-operator supplied the fresh read-only Hermes stats summarized in the matrix;
-no RedAmon receipt was available.
+inactive. One-minute PVE package readings from 11:51:36 through 12:00:36 UTC
+were 61, 62, 62, 62, 61, 65, 91, 62, 65, and 63 C. A subsequent check at
+12:01:42 was 64 C. The 91 C reading breaks the required below-70 C dwell, so
+no embedding service was started. The package sensor is visible inside CT108
+and readable by its `max` service user. One CT read returned 84 C while a
+PVE-side read shortly afterward returned 63 C; immediate reads of the same
+sysfs path then matched at 61 C. Treat thermal dwell as unverified until a
+fresh, consistent ten-minute series is observed. The same operator supplied
+the fresh read-only Hermes stats summarized in the matrix; no RedAmon receipt
+was available.
 
 ## Coordinator read attempt — 2026-10-26
 

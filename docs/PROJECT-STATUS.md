@@ -20,10 +20,12 @@
   `bb_kb_stats` call returned structured content. No model request or capture
   body was used. The app domain resolves from Kali to `192.168.2.154`; both UI
   and `/mcp` correctly return HTTP 401 without Nginx credentials.
-- The KB embed service remains inactive. PVE temperature was 62°C in one
-  sample only; the required 10-minute below-70°C dwell is not established, so
-  no embedding job was started. Full RedAmon data/vector/query parity and live
-  Caido intake/runtime remain unverified; overall delivery is still `PARTIAL`.
+- The KB embed service remains inactive. PVE package samples ranged from 61°C
+  to 91°C during one-minute observations, including 91°C at 11:57:36 UTC; the
+  required 10-minute below-70°C dwell is not established, so no embedding job
+  was started. A brief CT/PVE sensor mismatch also needs a fresh consistent
+  dwell check. Full RedAmon data/vector/query parity and live Caido
+  intake/runtime remain unverified; overall delivery is still `PARTIAL`.
 - A fresh read-only `bb_kb_stats` call over Hermes' SSH MCP route identifies
   snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`:
   source coverage is `DONE` across seven configured families (207,878
