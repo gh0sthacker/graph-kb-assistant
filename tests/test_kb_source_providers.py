@@ -534,8 +534,18 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         ).build(max_chars=1200, overlap_chars=0)
         coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "tool_docs")
         self.assertEqual(coverage["state"], "done")
-        self.assertEqual(coverage["fetched_count"], 43)
-        self.assertEqual(len(snapshot.documents), 44)  # 43 documents plus the MIT notice.
+        self.assertEqual(coverage["fetched_count"], 46)
+        self.assertEqual(len(snapshot.documents), 47)  # All 46 documents plus the MIT notice.
+        tool_doc_ids = {
+            document.source_id for document in snapshot.documents
+            if document.source_name == "tool_docs" and document.metadata.get("document_role") != "license_notice"
+        }
+        self.assertEqual(tool_doc_ids, {row["path"] for row in bundle_manifest["documents"]})
+        self.assertTrue({
+            "post_exploitation/docker_escape.md",
+            "post_exploitation/linux_privesc.md",
+            "post_exploitation/windows_privesc.md",
+        }.issubset(tool_doc_ids))
         self.assertEqual(snapshot.coverage_state, "PARTIAL")  # Other six source families are not in this fixture.
 
         with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-test-") as temporary:
@@ -547,7 +557,7 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             with patch("bb_assistant.kb.rebuild._read_jsonl", side_effect=AssertionError("bulk JSONL materializer used")):
                 stats = import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
             self.assertEqual(stats["coverage_state"], "PARTIAL")
-            self.assertEqual(stats["source_documents"], 44)
+            self.assertEqual(stats["source_documents"], 47)
             self.assertEqual(stats["source_manifest_sha256"], hashlib.sha256(raw_manifest).hexdigest())
             self.assertTrue(stats["source_manifest_matches_current"])
             hits = index.search("PKINIT", top_k=10, source_names=("tool_docs",))
