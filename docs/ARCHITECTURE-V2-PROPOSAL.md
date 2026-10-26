@@ -345,8 +345,10 @@ KB parity acceptance requires all of the following:
   the selected corpus. Compare representative retrieval outputs against the
   same RedAmon snapshot; matching configuration constants alone is insufficient.
 - Every source has recorded license/terms evidence and required attribution.
-  ExploitDB remains excluded from the parity claim until its dataset-terms
-  status is resolved; do not bypass the provider's rights gate.
+  The metadata-only ExploitDB GitLab feed now records the pinned README and
+  LICENSE as its terms evidence and excludes PoC/source files. Its data has
+  not yet been imported into the active snapshot, so source-set parity is
+  still incomplete.
 - A live retrieval check confirms the running application uses that completed
   snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
   query-parity item remains incomplete or unverified.
@@ -358,10 +360,11 @@ documents and matched all 162,398 generated chunk texts and titles. The
 those stored documents, without fetching new sources. Snapshot
 `0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216` has
 162,398 chunk and FTS rows; SQLite `quick_check` returned `ok`. At the latest
-checkpoint, 7,712 of 162,390 eligible content chunks had staged E5 vectors.
+checkpoint, 8,416 of 162,398 content chunks had staged E5 vectors.
 One resumable worker was confirmed running, but the complete vector snapshot
 is not published yet. The index remains `PARTIAL`: ExploitDB terms remain
-unresolved, the active deployed RedAmon profile/snapshot is unknown, and
+unverified in the installed source snapshot because its CSV has not been
+imported; the active deployed RedAmon profile/snapshot is unknown, and
 representative search-output parity has not been measured. Metadata filters
 for `min_cvss` and `severity` were added to the Go search/MCP contract and
 their focused synthetic tests pass. These results verify chunking and selected

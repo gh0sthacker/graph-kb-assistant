@@ -2724,7 +2724,28 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   vector search is not ready. The service has one automatic restart after a
   SIGKILL; its current cgroup has no memory limit and reports no OOM kills, so
   the cause of that exit is not established. No duplicate embedder was started.
-- Exact source-set parity remains blocked on obtaining the missing ExploitDB
-  material with confirmed reuse rights. The live RedAmon profile/snapshot and
-  comparative retrieval-result evidence remain unverified. KB parity is
-  `PARTIAL`; do not describe it as identical.
+- Exact source-set parity is being installed from a validated seven-family
+  staging snapshot. The pinned ExploitDB CSV was fetched and staged; import into
+  the active index is in progress. The live RedAmon data snapshot and
+  comparative retrieval-result evidence remain unverified. KB parity is still
+  `PARTIAL`; do not describe it as identical until the active-index check and
+  query-result comparison pass.
+
+### ExploitDB metadata-feed parity correction — 2026-10-25 20:08 EDT
+
+- Rechecked the pinned official GitLab README and LICENSE at revision
+  `6a57361db10b709c4b4f339c09ee250acc2d8aac`. The README states that the
+  repository project is GPLv2. The source manifest now records that pinned
+  evidence for the metadata-only `files_exploits.csv` import; the provider
+  stores the pinned README and LICENSE notice records and never fetches PoC
+  files. The corpus is runtime data and remains outside Git.
+- The upstream RedAmon client emits ExploitDB search text as description plus
+  its optional platform, type, publication date, and normalized codes. The
+  Graph Assistant provider now uses that same rendering instead of indexing
+  its internal JSON representation. The existing CSV fixture also verifies
+  duplicate-row behavior, allowlisted fields, and the resulting RedAmon text.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p
+  test_kb_source_providers.py -v` passed (15 tests). This verifies the local
+  provider behavior only. The pinned ExploitDB feed is staged in the validated
+  seven-family snapshot; active-index replacement and exact RedAmon snapshot
+  and retrieval parity are still pending.

@@ -183,11 +183,14 @@ class ExploitDBProviderFixtureTests(unittest.TestCase):
             "123,new description,2021-01-01,Linux,remote,443,CVE-2021-2,SECRET_SYNTHETIC_POC\n"
             "124,,2022-01-01,Linux,remote,80,,BAD_SYNTHETIC_POC\n"
         ).encode()
+        readme_data = b"This project (and SearchSploit) is released under GPL v2.0.\n"
         license_data = b"GPL-2.0-or-later fixture license\n"
 
         def fetcher(url: str, _max_bytes: int) -> bytes:
             if url.endswith("/files_exploits.csv"):
                 return csv_data
+            if url.endswith("/README.md"):
+                return readme_data
             if url.endswith("/LICENSE.md"):
                 return license_data
             raise AssertionError(f"unexpected fixture URL: {url}")
@@ -201,6 +204,10 @@ class ExploitDBProviderFixtureTests(unittest.TestCase):
         self.assertEqual(content[0].source_id, "123")
         self.assertEqual(content[0].metadata["description"], "new description")
         self.assertEqual(content[0].metadata["row_number"], 2)
+        self.assertEqual(
+            content[0].search_text,
+            "new description | Platform: Linux | Type: remote | Published: 2021-01-01 | Codes: CVE-2021-2",
+        )
         self.assertNotIn("file", content[0].metadata)
         self.assertNotIn("SECRET_SYNTHETIC_POC", content[0].original_text)
         self.assertNotIn("OLD_SYNTHETIC_POC", content[0].original_text)
@@ -209,6 +216,7 @@ class ExploitDBProviderFixtureTests(unittest.TestCase):
         self.assertEqual(batch.rejected_count, 1)
         self.assertFalse(batch.complete)
         self.assertTrue(batch.notices_complete)
+        self.assertTrue(any(record.source_id == "NOTICE:README.md" for record in batch.records))
         self.assertTrue(any(record.source_id == "NOTICE:license.md" for record in batch.records))
 
 
@@ -248,6 +256,49 @@ class SourceRightsAndCoverageGateTests(unittest.TestCase):
                 row = next(item for item in snapshot.source_coverage if item["source_name"] == spec["id"])
                 self.assertEqual(row["state"], "blocked")
                 self.assertEqual(calls, [])
+
+    def test_pinned_exploitdb_repository_license_allows_metadata_only_feed(self) -> None:
+        spec = {
+            "id": "exploitdb", "kind": "gitlab_raw_feed", "url": EXPLOITDB_URL,
+            "revision": REVISION, "repository_license_id": "GPL-2.0-or-later",
+            "license_evidence": "pinned LICENSE.md", "license_status": "confirmed_at_pinned_revision",
+            "dataset_terms": "confirmed_at_pinned_revision",
+            "dataset_terms_evidence": "pinned README.md",
+            "dataset_terms_basis": "Metadata-only feed from the officially licensed pinned repository.",
+            "content_scope": "descriptions_and_metadata_only",
+        }
+
+        def provider(request: SourceRequest) -> SourceBatch:
+            records = (
+                SourceRecord(
+                    source_id="123", title="EDB-123: Fixture", original_text='{"description":"Fixture"}',
+                    source_locator="files_exploits.csv#row=2", source_revision=REVISION,
+                    metadata={"description": "Fixture"},
+                ),
+                SourceRecord(
+                    source_id="NOTICE:README.md", title="README", original_text="GPL v2 project notice",
+                    source_locator="README.md", source_revision=REVISION, document_role="license_notice",
+                ),
+                SourceRecord(
+                    source_id="NOTICE:license.md", title="LICENSE", original_text="GPL license text",
+                    source_locator="LICENSE.md", source_revision=REVISION, document_role="license_notice",
+                ),
+            )
+            return SourceBatch(
+                source_revision=REVISION, records=records, expected_count=1, fetched_count=1,
+                parsed_count=1, rejected_count=0, complete=True, artifact_sha256="f" * 64,
+                fetched_at="2026-10-25T00:00:00+00:00", applied_filters=dict(request.filters),
+                notices_complete=True,
+            )
+
+        snapshot = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [spec]}, {"exploitdb": provider},
+            source_manifest_sha256="a" * 64,
+        ).build()
+        row = next(item for item in snapshot.source_coverage if item["source_name"] == "exploitdb")
+        self.assertEqual(row["state"], "done")
+        self.assertIn("dataset_terms_evidence", row["source_metadata"])
+        self.assertIn("NOTICE:README.md", {doc.source_id for doc in snapshot.documents})
 
     def test_mismatched_counts_keep_an_otherwise_eligible_family_partial(self) -> None:
         spec = {

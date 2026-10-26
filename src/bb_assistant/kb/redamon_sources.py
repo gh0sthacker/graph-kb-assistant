@@ -388,7 +388,8 @@ class RedAmonSourceAdapter:
         keys = (
             "id", "kind", "url", "revision", "revision_date", "revision_source", "license_id",
             "repository_license_id", "license_status", "license_evidence",
-            "dataset_terms", "content_scope", "attribution", "embedded_content_review", "filter",
+            "dataset_terms", "dataset_terms_evidence", "dataset_terms_basis",
+            "content_scope", "attribution", "embedded_content_review", "filter",
             "local_root", "include_categories", "exclude",
         )
         return {key: spec[key] for key in keys if key in spec}
