@@ -1,5 +1,24 @@
 # Project status and known limitations
 
+## KB source-coverage integrity fix deployed to CT108 — 2026-10-26 18:46 UTC — PARTIAL
+
+- CI run [40380086566](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40380086566)
+  passed Go tests, `go vet`, Python tests, and secret scanning for PR head
+  `8251a859d519806afe710944b45e97521bf1564b`. The verified Linux amd64
+  artifact was the tested PR merge build `44c6468fd07fcac54693de7c786094c456345184`,
+  version `0.1.0-go-dev+44c6468fd07f`, SHA-256
+  `8861baa0366d888f603048d9c27d49f1edf49e470edf1b8b0dd45c82cb7dd065`.
+- Installed the binary atomically at `/usr/local/bin/bb-assistant` in CT108;
+  retained the previous executable as
+  `/usr/local/bin/bb-assistant.before-8251a85`. Restarted only
+  `graph-kb-assistant.service`. The service is active, `/api/health` reports
+  `ok` and the new version, and a read-only MCP `bb_kb_stats` call succeeds.
+- The integrity guard now reports the active KB snapshot as `PARTIAL` instead
+  of trusting its invalid `DONE` coverage summary. It preserves KB search.
+  Stats still show 207,878 documents, 209,026 content chunks, 38,888 vectors,
+  and `vector_ready=false`; no source rebuild or embedding ran. VM112 remains
+  paused. RedAmon corpus and same-query result parity remain unproven.
+
 ## Selected dead-letter replay — 2026-10-26 14:17 UTC — IMPLEMENTED, RUNTIME APPLY PENDING
 
 - Added `projection-replay`: dry-run by default; apply requires explicit

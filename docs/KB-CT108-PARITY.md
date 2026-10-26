@@ -203,8 +203,23 @@ valid parity receipt.
 The parity exporter and snapshot importer now reject `DONE` coverage whose
 per-source document or chunk counts disagree with the snapshot records. Go KB
 stats and search also downgrade such a snapshot to `PARTIAL` while preserving
-search results. These code changes are not yet deployed to CT108; the installed
-Go binary above still reports its prior behavior. The new checks passed their
-focused local Go and Python tests. The next safe data action is to reconcile the
-coverage rows from already stored documents, then produce a new immutable
-snapshot before any vector work.
+search results. At the time of this integrity check, these code changes were
+not yet deployed. The new checks passed their focused local Go and Python
+tests. The next safe data action is to reconcile the coverage rows from already
+stored documents, then produce a new immutable snapshot before any vector work.
+
+## Coverage integrity fix deployed — 2026-10-26 18:46 UTC
+
+CI run `40380086566` passed all jobs for PR head
+`8251a859d519806afe710944b45e97521bf1564b`. The tested PR-merge Linux amd64
+artifact reports version `0.1.0-go-dev+44c6468fd07f` and SHA-256
+`8861baa0366d888f603048d9c27d49f1edf49e470edf1b8b0dd45c82cb7dd065`. It is
+installed on CT108 as `/usr/local/bin/bb-assistant`; the prior binary is backed
+up as `/usr/local/bin/bb-assistant.before-8251a85`. The application service is
+active after restart, loopback `/api/health` returns `ok`, and a live read-only
+MCP `bb_kb_stats` call reports the existing snapshot as `PARTIAL`. It still has
+207,878 documents, 209,026 content chunks, and 38,888 E5 vectors; vector
+readiness remains false. Search is preserved. No snapshot rebuild or embedding
+was started, and VM112 remains paused. The existing coverage rows still need
+reconciliation from stored source documents before an immutable replacement
+snapshot can be built; RedAmon corpus and query parity remain `PARTIAL`.
