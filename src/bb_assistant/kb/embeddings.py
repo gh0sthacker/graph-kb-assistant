@@ -17,8 +17,11 @@ class RedAmonEmbedder:
     model_name = E5_MODEL
     dimensions = 1024
 
-    def __init__(self, *, local_files_only: bool = True) -> None:
+    def __init__(self, *, local_files_only: bool = True, cpu_threads: int = 1) -> None:
+        if type(cpu_threads) is not int or not 1 <= cpu_threads <= 2:
+            raise ValueError("cpu_threads must be between 1 and 2")
         self.local_files_only = local_files_only
+        self.cpu_threads = cpu_threads
         self._model: Any = None
 
     def _load(self) -> Any:
@@ -29,6 +32,11 @@ class RedAmonEmbedder:
                 raise RuntimeError(
                     "Install the optional KB model dependencies with `pip install -e '.[kb-ml]'`."
                 ) from exc
+            import torch
+
+            torch.set_num_threads(self.cpu_threads)
+            # Inter-op parallelism must be configured before model inference.
+            torch.set_num_interop_threads(1)
             self._model = SentenceTransformer(
                 self.model_name,
                 revision=E5_REVISION,
@@ -48,9 +56,11 @@ class RedAmonEmbedder:
         )
         return [float(value) for value in vector]
 
-    def embed_documents_batch(self, texts: Sequence[str], *, batch_size: int = 64) -> list[list[float]]:
+    def embed_documents_batch(self, texts: Sequence[str], *, batch_size: int = 2) -> list[list[float]]:
         if not texts:
             return []
+        if type(batch_size) is not int or not 1 <= batch_size <= 2:
+            raise ValueError("batch_size must be between 1 and 2 for CPU embedding")
         vectors = self._load().encode(
             [f"passage: {text}" for text in texts],
             normalize_embeddings=True,

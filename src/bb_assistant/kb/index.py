@@ -27,6 +27,7 @@ from .ranking import (
 )
 
 logger = logging.getLogger(__name__)
+_RIGHTS_BLOCKED_SOURCES = frozenset({"exploitdb"})
 
 _MAX_SEARCH_TERMS = 32
 
@@ -684,8 +685,29 @@ class KBIndex:
         self,
         embedder: object,
         *,
-        batch_size: int = 64,
+        batch_size: int = 2,
         progress_callback: Callable[[int, int], None] | None = None,
+        before_batch_callback: Callable[[], object] | None = None,
+    ) -> int:
+        from .worker_lock import embedding_worker_lock
+
+        if self.read_only:
+            raise ValueError("KB index is read-only")
+        with embedding_worker_lock(self.path.parent):
+            return self._rebuild_embeddings_locked(
+                embedder,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+                before_batch_callback=before_batch_callback,
+            )
+
+    def _rebuild_embeddings_locked(
+        self,
+        embedder: object,
+        *,
+        batch_size: int = 2,
+        progress_callback: Callable[[int, int], None] | None = None,
+        before_batch_callback: Callable[[], object] | None = None,
     ) -> int:
         """Build snapshot-bound vectors in durable batches and publish when complete.
 
@@ -697,8 +719,8 @@ class KBIndex:
         batch_encoder = getattr(embedder, "embed_documents_batch", None)
         if not isinstance(model_name, str) or not model_name or not callable(batch_encoder):
             raise TypeError("embedder must expose model_name and embed_documents_batch")
-        if not 1 <= batch_size <= 256:
-            raise ValueError("embedding batch_size must be between 1 and 256")
+        if not 1 <= batch_size <= 2:
+            raise ValueError("embedding batch_size must be between 1 and 2 for CPU safety")
         if self.read_only:
             raise ValueError("KB index is read-only")
 
@@ -787,6 +809,8 @@ class KBIndex:
                     return embedded
                 batch = [(row["chunk_id"], row["text"]) for row in rows]
 
+            if before_batch_callback is not None:
+                before_batch_callback()
             vectors = batch_encoder([text for _, text in batch], batch_size=batch_size)
             if len(vectors) != len(batch):
                 raise ValueError("embedder returned a different number of vectors than chunks")
@@ -860,8 +884,9 @@ class KBIndex:
             sql = """SELECT e.chunk_id,e.vector FROM chunk_embeddings e
                      JOIN chunks c ON c.chunk_id=e.chunk_id
                      WHERE e.model_name=? AND e.dimensions=?
+                       AND c.source_name NOT IN (""" + ",".join("?" for _ in _RIGHTS_BLOCKED_SOURCES) + """)
                        AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
-            params: list[object] = [model_name, dimensions]
+            params: list[object] = [model_name, dimensions, *_RIGHTS_BLOCKED_SOURCES]
             with self.connect() as connection:
                 rows = connection.execute(sql, params).fetchall()
             if not rows:
@@ -894,6 +919,8 @@ class KBIndex:
             raise ValueError("top_k must be between 1 and 100")
         if len(query) > 4096:
             raise ValueError("KB query exceeds the 4096-character limit")
+        if source_names and not (set(source_names) - _RIGHTS_BLOCKED_SOURCES):
+            return ()
         match_query = _redamon_fulltext_expression(query)
         if not match_query:
             return ()
@@ -914,9 +941,10 @@ class KBIndex:
         # RedAmon applies source allowlists after asking Lucene for its global
         # top-k pool. Filtering in SQL before LIMIT would backfill lower-ranked
         # family-specific rows and change the RRF candidates.
-        if source_names:
-            allowed_sources = set(source_names)
-            rows = [row for row in rows if row["source_name"] in allowed_sources]
+        requested_sources = set(source_names) - _RIGHTS_BLOCKED_SOURCES
+        rows = [row for row in rows if row["source_name"] not in _RIGHTS_BLOCKED_SOURCES]
+        if requested_sources:
+            rows = [row for row in rows if row["source_name"] in requested_sources]
         fulltext_ids = [row["chunk_id"] for row in rows]
         fulltext_scores = {row["chunk_id"]: float(row["score"]) for row in rows}
         vector_ids, vector_scores = self._vector_search(
@@ -931,9 +959,11 @@ class KBIndex:
                         FROM chunks c WHERE c.chunk_id IN (""" + ",".join("?" for _ in candidate_ids) + ")"
         metadata_params: list[object] = list(candidate_ids)
         metadata_sql += " AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
-        if source_names:
-            metadata_sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
-            metadata_params.extend(source_names)
+        metadata_sql += " AND c.source_name NOT IN (" + ",".join("?" for _ in _RIGHTS_BLOCKED_SOURCES) + ")"
+        metadata_params.extend(_RIGHTS_BLOCKED_SOURCES)
+        if requested_sources:
+            metadata_sql += " AND c.source_name IN (" + ",".join("?" for _ in requested_sources) + ")"
+            metadata_params.extend(requested_sources)
         with self.connect() as connection:
             candidate_rows = connection.execute(metadata_sql, metadata_params).fetchall()
         hits_by_id: dict[str, KBHit] = {}

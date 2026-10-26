@@ -351,22 +351,24 @@ KB parity acceptance requires all of the following:
   if the current FTS/vector backends diverge, replace or adapt them until the
   fixture passes rather than weakening the parity criterion.
 - Every source has recorded license/terms evidence and required attribution.
-  The metadata-only ExploitDB GitLab feed now records the pinned README and
-  LICENSE as its terms evidence and excludes PoC/source files. Its data has
-  not yet been imported into the active snapshot, so source-set parity is
-  still incomplete.
+  ExploitDB dataset redistribution terms remain unresolved; repository GPL
+  evidence alone is insufficient. The existing full snapshot was built before
+  this gate was tightened, so ExploitDB records may already be present. New
+  source builds must omit the family, and the application search layer must
+  suppress its records until authoritative terms are resolved.
 - A live retrieval check confirms the running application uses that completed
   snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
   query-parity item remains incomplete or unverified.
 
-Current verification (2026-10-25 21:36 EDT): the corrected chunker matched RedAmon's
+Historical verification (2026-10-25 21:36 EDT): the corrected chunker matched RedAmon's
 `ChunkStrategy` over the original 161,240 source documents. The installed pinned
 `full` snapshot is `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`:
 seven source families report `done`, with 207,878 documents and 209,036 chunks.
 The active Graph Assistant service selects this index through
 `BB_ASSISTANT_KB_INDEX`; SQLite `quick_check` previously returned `ok`. The
-resumable E5 service is active with zero restarts and currently has 11,296 of
-209,026 content vectors; `vector_ready` is false. All seven configured source
+the latest provided deployment stats on 2026-10-26 report 38,888 of 209,026
+content vectors; `vector_ready` is false. The E5 embed service is currently
+inactive/disabled, and no worker is active on Kali. All seven configured source
 families, including the metadata-only ExploitDB feed, are installed, but their
 counts and hashes have not been compared with the active RedAmon deployment.
 The RedAmon deployment profile, exact corpus snapshot, and same-query reference

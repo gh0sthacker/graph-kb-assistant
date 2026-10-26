@@ -65,7 +65,7 @@ Both files use schema version 1 and the same shape; `producer` is respectively
       "total_content_chunks": 456,
       "complete": true
     },
-    "reranker": {"model": "BAAI/bge-reranker-v2-m3", "revision": "<pinned-revision>"},
+    "reranker": {"model": "BAAI/bge-reranker-base", "revision": "2cfc18c9415c912f9d8155881c133215df768a70"},
     "retrieval": {
       "lexical_engine": "neo4j-lucene",
       "vector_engine": "faiss",
@@ -122,3 +122,24 @@ different ranking, or changed score fails closed.
 Do not put credentials, raw traffic, or target data in receipts. Use public KB
 corpus metadata and fixed public technique queries. Until a deployed RedAmon
 profile export and matching query receipt exist, KB parity remains unproven.
+
+## Operational and rights gates
+
+The local source manifest deliberately leaves ExploitDB dataset terms unresolved.
+The repository license alone does not establish redistribution rights for the
+dataset. New builds therefore report partial coverage and must not fetch or
+import ExploitDB records until authoritative dataset terms are reviewed. The
+search layer excludes already-present ExploitDB records while that gate is
+unresolved.
+
+Long E5 builds run only on Proxmox, never on Kali. `bb-assistant-kb embed`
+requires a host-identified, read-only thermal sensor path; it checks before
+each durable batch, fails closed on unreadable sensor data, and stops at 80 C.
+The conservative invocation is `--batch-size 2 --threads 1`; the worker also
+takes an exclusive process lock so a second embedding process cannot overlap.
+Run the worker with a systemd CPU quota of at most 20%. Start only below 75 C,
+and resume only below 70 C after readings remain stable. The numeric sysfs path
+must be selected from the actual sensor labels; do not guess the sensor.
+Thermal stops preserve completed batches but do not publish the vector-ready
+marker. Readiness remains false until every content chunk has its pinned E5
+vector and the completion marker is written.

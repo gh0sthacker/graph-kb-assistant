@@ -149,7 +149,7 @@ class RetrievalRankingTests(unittest.TestCase):
             index = KBIndex(Path(temporary) / "index.sqlite3")
             index.replace_snapshot(chunks, "c" * 64, sources=documents)
             embedder = _RecordingEmbedder()
-            self.assertEqual(index.rebuild_embeddings(embedder, batch_size=3), 3)
+            self.assertEqual(index.rebuild_embeddings(embedder, batch_size=2), 3)
         self.assertEqual(embedder.texts, sorted((chunk.text for chunk in chunks), key=len))
 
     def test_embedding_inference_releases_project_maintenance_lock(self) -> None:

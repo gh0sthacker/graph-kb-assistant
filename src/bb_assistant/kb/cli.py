@@ -119,9 +119,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="allow downloading the pinned E5 model; otherwise use local model files only",
     )
     embed.add_argument(
-        "--batch-size", type=int, default=64, choices=range(1, 257),
-        help="embedding batch size (1-256); shorter chunks are batched together to reduce padding",
+        "--batch-size", type=int, default=2, choices=(1, 2),
+        help="CPU embedding batch size (1-2)",
     )
+    embed.add_argument("--threads", type=int, default=1, choices=(1, 2),
+                       help="maximum PyTorch CPU threads (1-2)")
+    embed.add_argument("--thermal-sensor", type=Path, required=True,
+                       help="read-only sysfs sensor file; accepts Celsius or millidegrees Celsius")
+    embed.add_argument("--stop-temperature-c", type=float, default=80.0,
+                       help="stop before the next batch at this temperature (65-85 C; default 80)")
     models = commands.add_parser("models", help="prepare pinned local RedAmon retrieval models")
     models.add_argument(
         "--download", action="store_true",
@@ -245,8 +251,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "embed":
         from .embeddings import RedAmonEmbedder
+        from .thermal import ThermalMonitor
         index = KBIndex(_configured_index_path(args.index_path))
-        embedder = RedAmonEmbedder(local_files_only=not args.download_model)
+        thermal = ThermalMonitor(args.thermal_sensor, stop_celsius=args.stop_temperature_c)
+        embedder = RedAmonEmbedder(local_files_only=not args.download_model, cpu_threads=args.threads)
 
         last_progress = 0
 
@@ -258,6 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         count = index.rebuild_embeddings(
             embedder, batch_size=args.batch_size, progress_callback=report_progress,
+            before_batch_callback=thermal.check,
         )
         print(json.dumps({"embedded_chunks": count, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
