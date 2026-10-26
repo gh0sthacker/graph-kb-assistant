@@ -16,6 +16,11 @@
 - The current shell has no user-systemd D-Bus session, so unit enablement and
   restart policy were not verified in this check. Runtime coverage and exact
   RedAmon snapshot/query parity remain `PARTIAL`.
+- From the application host, the configured Proxmox2 LAN route at
+  `http://192.168.1.148:8765/` returned HTTP 401 without credentials for both
+  the UI and `/api/projects`, confirming that the authenticated proxy is
+  reachable through the hairpin route. A separate client device is still
+  needed to verify the user-to-app path end-to-end.
 
 ## Current synthetic app acceptance and KB status (2026-10-25 20:03 EDT)
 
