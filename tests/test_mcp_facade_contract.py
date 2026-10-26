@@ -128,6 +128,18 @@ class ReadOnlyMCPFacadeContractTests(unittest.TestCase):
             license_id="CC0-1.0",
             attribution="Synthetic fixture",
         )
+        supplemental_document = SourceDocument.create(
+            source_name="fixture_kb",
+            source_id="nuclei/oversized-template.yaml",
+            title="Supplemental oversized Nuclei template",
+            text="Supplemental oversized Nuclei template contains a distinctive marker.",
+            source_url="https://kb.invalid/fixture/nuclei",
+            source_locator="nuclei/oversized-template.yaml",
+            source_revision="fixture-1",
+            license_id="MIT",
+            attribution="Synthetic fixture",
+            metadata={"canonicalization_fallback": "yaml_size_limit"},
+        )
         report = {
             "coverage_state": "PARTIAL",
             "source_count": 1,
@@ -139,9 +151,9 @@ class ReadOnlyMCPFacadeContractTests(unittest.TestCase):
             json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
         ).hexdigest()
         self.kb.replace_snapshot(
-            chunk_document(document),
+            (*chunk_document(document), *chunk_document(supplemental_document)),
             "a" * 64,
-            sources=[document],
+            sources=[document, supplemental_document],
             source_coverage_state="PARTIAL",
             source_coverage_report_sha256=report_hash,
             source_coverage_report=report,
@@ -196,13 +208,26 @@ class ReadOnlyMCPFacadeContractTests(unittest.TestCase):
         self.assertRegex(hit["source_sha256"], r"^[a-f0-9]{64}$")
         self.assertRegex(hit["chunk_sha256"], r"^[a-f0-9]{64}$")
         self.assertLess(hit["span"]["start_char"], hit["span"]["end_char"])
+        self.assertEqual(
+            self.tools.call("bb_kb_search", {"query": "distinctive marker"})["hits"],
+            [],
+        )
+        supplemental_search = self.tools.call(
+            "bb_kb_search", {"query": "distinctive marker", "include_supplemental": True},
+        )
+        self.assertEqual(len(supplemental_search["hits"]), 1)
+        self.assertEqual(
+            supplemental_search["hits"][0]["source_id"], "nuclei/oversized-template.yaml",
+        )
         source = self.tools.call(
             "bb_kb_get_source",
             {"source_name": "fixture_kb", "source_id": "authz/object-boundary"},
         )
         self.assertTrue(source["reference_material_is_untrusted"])
 
-        visible_result = json.dumps([projects, search, capture, graph, kb_stats, kb_search, source])
+        visible_result = json.dumps([
+            projects, search, capture, graph, kb_stats, kb_search, supplemental_search, source,
+        ])
         for marker in self.markers:
             self.assertNotIn(marker, visible_result)
         self.assertNotIn("request-2", visible_result)
