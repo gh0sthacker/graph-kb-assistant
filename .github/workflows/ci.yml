@@ -24,6 +24,17 @@ jobs:
           cache: true
       - run: go test -count=1 ./...
       - run: go vet ./...
+      - name: Build and identify Linux runtime binary
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: amd64
+          GOOS: linux
+        run: |
+          binary="${RUNNER_TEMP}/bb-assistant-linux-amd64"
+          go build -trimpath -buildvcs=true -o "$binary" ./cmd/bb-assistant
+          version="$($binary version)"
+          expected="0.1.0-go-dev+${GITHUB_SHA:0:12}"
+          test "$version" = "$expected"
 
   python:
     name: Python

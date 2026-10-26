@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/consultation"
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/ingest"
@@ -29,7 +30,6 @@ import (
 
 const (
 	serverName             = "bb-graph-assistant"
-	serverVersion          = "0.1.0-go-dev"
 	latestProtocolVersion  = "2025-06-18"
 	maxRequestLineBytes    = 1 << 20
 	maxToolResultBytes     = 3 << 20
@@ -39,6 +39,8 @@ const (
 	maxGraphSeedIDBytes    = 512
 	maxMCPRequestDuration  = 3 * time.Minute
 )
+
+var serverVersion = buildinfo.String()
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var graphNeighborhoodSeedPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)

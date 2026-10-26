@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
@@ -33,8 +34,6 @@ import (
 	"bb-graph-assistant/internal/store"
 	"bb-graph-assistant/internal/webui"
 )
-
-const version = "0.1.0-go-dev"
 
 const (
 	maxCaidoReconcilePages    = 10000
@@ -115,7 +114,7 @@ func run(args []string) error {
 	case "serve":
 		return serveApplication(args[1:])
 	case "version":
-		fmt.Println(version)
+		fmt.Println(buildinfo.String())
 		return nil
 	case "status":
 		return runtimeStatus(args[1:])

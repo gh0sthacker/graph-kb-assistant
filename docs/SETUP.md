@@ -35,6 +35,13 @@ contacting Caido, Neo4j, or a model provider. Its overall state remains
 See [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) for what the report
 measures and how to read its limits.
 
+`./scripts/bb-assistant version` prints the application version plus the
+embedded short Git revision (`.dirty` when the build included tracked or
+untracked changes). CI builds the Linux amd64 runtime binary with VCS stamping
+and checks that the reported revision equals the tested commit. Builds without
+Git metadata retain the base development version and must not be used as proof
+of which source revision is deployed.
+
 For a persistent per-user service on systemd, install the unit from the
 checkout. The user's systemd manager must be enabled at login (lingering is
 needed to keep it running after logout):
