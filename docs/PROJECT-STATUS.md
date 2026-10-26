@@ -1,6 +1,38 @@
 # Project status and known limitations
 
-## Current KB parity update (2026-10-25 19:28 EDT) — still PARTIAL
+## Current synthetic app acceptance and KB status (2026-10-25 19:59 EDT)
+
+- `go test ./internal/webui -run '^TestBrowserAcceptanceFixture$' -count=1 -v
+  -timeout=45m` passed in 961.72s. The fixture exercised two exact synthetic
+  HTTP captures through graph navigation and comparison, redacted evidence
+  selection, operator acceptance, consultation resume, and Hermes candidate
+  persistence. The fixture was stopped by its coordinator marker and its
+  temporary project data was cleaned up by Go's test harness.
+- Hermes `gpt-6-luna` via `openai-codex` completed the consultation through an
+  isolated temporary profile with only the five consultation tools enabled.
+  The final read-only resume confirmed comparison
+  `KWo6ChfttQG-OKwIJHTsS7kHijC-jddIBtY2LAS4gew`, proposal
+  `iwAqxy1DuEUBECeKf95LzgI3BdGo0FqYRC4H45YGuwQ`, validation receipt
+  `P0iyzbUV3Zf4wdi3ppB8k0PHaBR67JsC5HeWDaxGYg8`, and candidate
+  `sWAxrq6nWMa24P1YkTvTozEyvAiOCyvWdI2Ub43y5r4` version 1 in `candidate`
+  state. All four redacted, integrity-verified evidence references and the
+  exact comparison were cited. The candidate describes only synthetic
+  differences; it is not reproduced or verified and makes no claim of
+  vulnerability, impact, causality, ownership, tenant isolation, or actor
+  context.
+- The managed Hermes profile now uses `trust: full` only for its local
+  `bb_assistant` MCP server, with the existing 15-tool allowlist preserved.
+  The app's accepted-consultation review and reference-validation gates remain
+  in force. `scripts/setup-hermes` now upgrades its own marked profile to this
+  setting; a temporary managed-profile check and `git diff --check` passed.
+- Read-only KB status at this check: 162,398 chunks across six source
+  families, 8,224/162,390 eligible E5 vectors, `coverage_state=PARTIAL`, and
+  no published vector-ready snapshot. The single active resumable embedder is
+  PID 1143696; do not start a duplicate. ExploitDB is absent and the exact
+  deployed RedAmon snapshot/profile is still unknown. KB parity remains
+  `PARTIAL`.
+
+## KB parity update (2026-10-25 19:28 EDT) — PARTIAL at that check
 
 - Committed and pushed `fe6a290` (`feat(kb): add RedAmon metadata search filters`).
   The live KB search/MCP contract now accepts validated `min_cvss` and
