@@ -2891,6 +2891,20 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   content vectors. `vector_ready` remains false. The caller for the prior stop
   is still unknown; this service checkpoint does not establish KB parity.
 
+### KB vector progress — 2026-10-25 21:56 EDT — PARTIAL
+
+- Read the installed index through a read-only SQLite snapshot while the
+  resumable embedding unit was active (`ActiveState=active`, `SubState=running`,
+  `NRestarts=0`). The snapshot contains 207,878 documents, 209,036 chunks, and
+  12,512 vectors from `intfloat/e5-large-v2` at 1,024 dimensions; only 12,512
+  of 209,026 content chunks are embedded. Semantic readiness is incomplete.
+- The seven source-family counts are stable at tool_docs 44, gtfobins 479,
+  lolbas 244, OWASP 130, ExploitDB 46,638, NVD 146,940, and nuclei 13,403.
+  These are counts for the installed snapshot, not proof that its source text
+  equals the active RedAmon deployment. No deployed RedAmon snapshot or fixed
+  query fixture has been made available, so exact content and retrieval parity
+  remain `PARTIAL`.
+
 ### Synthetic browser acceptance — 2026-10-25 21:55 EDT — PARTIAL
 
 - Ran `TestBrowserAcceptanceFixture` with its temporary SQLite graph backend
