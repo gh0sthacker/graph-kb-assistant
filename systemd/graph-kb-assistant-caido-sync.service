@@ -1,0 +1,37 @@
+[Unit]
+Description=Graph KB Assistant continuous Caido-to-graph synchronization
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=4
+
+[Service]
+Type=simple
+User=bbassist
+Group=bbassist
+EnvironmentFile=/etc/bb-graph-assistant/runtime.env
+EnvironmentFile=/etc/bb-graph-assistant/caido-sync.env
+WorkingDirectory=/opt/bb-graph-assistant
+ExecStart=/opt/bb-graph-assistant/bin/bb-assistant caido-sync --data-root /var/lib/bb-graph-assistant/data --instance-id ${BB_ASSISTANT_CAIDO_INSTANCE_ID} --mcp-command ${BB_ASSISTANT_CAIDO_MCP_COMMAND} --mcp-sha256 ${BB_ASSISTANT_CAIDO_MCP_SHA256} --token-file ${BB_ASSISTANT_CAIDO_TOKEN_FILE} --poll-interval 30s --missing-confirmations 3 --backfill-page-size 50 --backfill-pages 5 --backfill-delay 250ms --tail-pages 1 --page-size 50 --body-limit 262144 --require-scope
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+UMask=0077
+MemoryMax=2G
+CPUQuota=200%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/bb-graph-assistant/data
+ReadOnlyPaths=/etc/bb-graph-assistant /usr/local/bin/caido-mcp-server
+
+[Install]
+WantedBy=multi-user.target

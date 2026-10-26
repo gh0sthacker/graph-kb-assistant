@@ -48,3 +48,66 @@ func TestRegisterProjectWaitsForCatalogLease(t *testing.T) {
 		t.Fatalf("registered project refs = %+v, err=%v", refs, err)
 	}
 }
+
+func TestObserveProjectInventoryRequiresRepeatedSuccessfulOmissions(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	removed := CaidoProjectRef{InstanceID: "caido", ProjectID: "removed"}
+	other := CaidoProjectRef{InstanceID: "other-instance", ProjectID: "keep"}
+	if err := RegisterProject(removed, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterProject(other, root); err != nil {
+		t.Fatal(err)
+	}
+
+	for confirmation := 1; confirmation < 3; confirmation++ {
+		missing, err := ObserveProjectInventory(context.Background(), root, "caido", nil, 3)
+		if err != nil || len(missing) != 0 {
+			t.Fatalf("confirmation %d: missing=%v err=%v", confirmation, missing, err)
+		}
+	}
+	missing, err := ObserveProjectInventory(context.Background(), root, "caido", nil, 3)
+	if err != nil || len(missing) != 1 || !missing[0].SameProject(removed) {
+		t.Fatalf("third omission: missing=%v err=%v", missing, err)
+	}
+
+	if err := UnregisterProject(context.Background(), removed, root); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := LoadProjectRefs(root)
+	if err != nil || len(refs) != 1 || !refs[0].SameProject(other) {
+		t.Fatalf("registry after purge: refs=%v err=%v", refs, err)
+	}
+}
+
+func TestObserveProjectInventoryResetsWhenProjectReturnsAndRejectsIncompleteRows(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ref := CaidoProjectRef{InstanceID: "caido", ProjectID: "flapping"}
+	if err := RegisterProject(ref, root); err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := ObserveProjectInventory(context.Background(), root, "caido", nil, 3); err != nil || len(missing) != 0 {
+		t.Fatalf("first omission: missing=%v err=%v", missing, err)
+	}
+	if _, err := ObserveProjectInventory(context.Background(), root, "caido", []CaidoProjectRef{{InstanceID: "wrong", ProjectID: "x"}}, 3); err == nil {
+		t.Fatal("inventory from a different instance was accepted")
+	}
+	if missing, err := ObserveProjectInventory(context.Background(), root, "caido", []CaidoProjectRef{ref}, 3); err != nil || len(missing) != 0 {
+		t.Fatalf("project return: missing=%v err=%v", missing, err)
+	}
+	for i := 0; i < 2; i++ {
+		if missing, err := ObserveProjectInventory(context.Background(), root, "caido", nil, 3); err != nil || len(missing) != 0 {
+			t.Fatalf("post-return omission %d: missing=%v err=%v", i+1, missing, err)
+		}
+	}
+	missing, err := ObserveProjectInventory(context.Background(), root, "caido", nil, 3)
+	if err != nil || len(missing) != 1 || !missing[0].SameProject(ref) {
+		t.Fatalf("post-return third omission: missing=%v err=%v", missing, err)
+	}
+}

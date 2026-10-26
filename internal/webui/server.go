@@ -80,6 +80,10 @@ type operationBackfillAPI interface {
 	ApplyOperationBackfill(context.Context, string, string, ingest.OperationBackfillOptions) (ingest.OperationBackfillApplyResult, error)
 }
 
+type projectCatalogRefresher interface {
+	RefreshProjectCatalog() error
+}
+
 // NewHandler constructs the local UI and its narrowly scoped API.
 func NewHandler(api readAPI) (http.Handler, error) {
 	if api == nil {
@@ -122,7 +126,19 @@ func NewHandler(api readAPI) (http.Handler, error) {
 		mux.HandleFunc("POST /api/maintenance/operation-backfill/preview", operationBackfillPreviewHandler(maintenance))
 		mux.HandleFunc("POST /api/maintenance/operation-backfill/apply", operationBackfillApplyHandler(maintenance))
 	}
-	return securityHeaders(localRequestGate(mux)), nil
+	var handler http.Handler = mux
+	if refresher, ok := api.(projectCatalogRefresher); ok {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				if err := refresher.RefreshProjectCatalog(); err != nil {
+					writeError(w, http.StatusServiceUnavailable, "project catalog is temporarily unavailable")
+					return
+				}
+			}
+			mux.ServeHTTP(w, r)
+		})
+	}
+	return securityHeaders(localRequestGate(handler)), nil
 }
 
 func runtimeCapabilitiesHandler(w http.ResponseWriter, _ *http.Request) {

@@ -273,6 +273,52 @@ func NewService(dataRoot string, refs []project.CaidoProjectRef, evidence Eviden
 	return &Service{dataRoot: dataRoot, projects: projects, evidence: evidence, comparisons: comparisons, dbs: make(map[string]*sessionDB)}, nil
 }
 
+// SetProjectRefs replaces the project catalog for long-running API processes.
+// Removed project DB handles are closed so later re-addition opens fresh data.
+func (s *Service) SetProjectRefs(refs []project.CaidoProjectRef) error {
+	projects := make(map[string]project.CaidoProjectRef, len(refs))
+	for _, ref := range refs {
+		key, err := ref.StorageKey()
+		if err != nil {
+			return errors.New("consultation project catalog contains an invalid identity")
+		}
+		if _, exists := projects[key]; exists {
+			return errors.New("consultation project catalog contains duplicate identities")
+		}
+		projects[key] = ref
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrStoreUnavailable
+	}
+	for key, db := range s.dbs {
+		if _, retained := projects[key]; retained {
+			continue
+		}
+		if err := db.close(); err != nil {
+			return errors.Join(ErrStoreUnavailable, err)
+		}
+		delete(s.dbs, key)
+	}
+	s.projects = projects
+	return nil
+}
+
+func (s *Service) projectRegistered(projectKey string) bool {
+	s.mu.Lock()
+	_, ok := s.projects[projectKey]
+	s.mu.Unlock()
+	return ok
+}
+
+func (s *Service) projectRef(projectKey string) (project.CaidoProjectRef, bool) {
+	s.mu.Lock()
+	ref, ok := s.projects[projectKey]
+	s.mu.Unlock()
+	return ref, ok
+}
+
 func (s *Service) Close() error {
 	if s == nil {
 		return nil
@@ -300,7 +346,7 @@ func (s *Service) Close() error {
 // supported project lease retain the existing consultation behavior; any
 // maintenance operation must fail closed when its exclusive lease is absent.
 func (s *Service) acquireProjectReadLease(ctx context.Context, projectKey string) (*projectlock.Lock, error) {
-	ref, ok := s.projects[projectKey]
+	ref, ok := s.projectRef(projectKey)
 	if !ok {
 		return nil, ErrProjectNotRegistered
 	}
@@ -324,7 +370,7 @@ func (s *Service) CreateSession(ctx context.Context, request appquery.EvidencePa
 	if s == nil || ctx == nil || !projectKeyPattern.MatchString(request.ProjectKey) || strings.TrimSpace(request.Question) == "" || !validIdempotencyKey(idempotencyKey) {
 		return Session{}, ErrInvalidInput
 	}
-	if _, ok := s.projects[request.ProjectKey]; !ok {
+	if !s.projectRegistered(request.ProjectKey) {
 		return Session{}, ErrProjectNotRegistered
 	}
 	if !utf8.ValidString(request.Question) || len(request.Question) > appquery.MaximumEvidencePacketQuestion {
@@ -419,7 +465,7 @@ func (s *Service) loadSession(ctx context.Context, projectKey, sessionID string)
 	if s == nil || ctx == nil || !projectKeyPattern.MatchString(projectKey) || !sessionIDPattern.MatchString(sessionID) {
 		return Session{}, ErrInvalidInput
 	}
-	if _, ok := s.projects[projectKey]; !ok {
+	if !s.projectRegistered(projectKey) {
 		return Session{}, ErrProjectNotRegistered
 	}
 	db, err := s.database(projectKey, false)

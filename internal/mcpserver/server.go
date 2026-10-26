@@ -14,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -45,18 +46,67 @@ var serverVersion = buildinfo.String()
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var graphNeighborhoodSeedPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
 
-// Tools is an immutable snapshot of the local project catalog and the optional
+// Tools is a refreshable snapshot of the local project catalog and the optional
 // read-only KB index used by MCP calls in this server process.
 type Tools struct {
-	root          string
-	projects      []project.CaidoProjectRef
-	projectsByKey map[string]project.CaidoProjectRef
-	graphService  *graphaccess.Service
-	graphQueries  *appquery.Service
-	consultations *consultation.Service
-	kbIndex       *kb.Index
-	kbModels      *kb.PythonRetrievalModels
-	allowRawReads bool
+	projectsMu     sync.RWMutex
+	refreshCatalog bool
+	root           string
+	projects       []project.CaidoProjectRef
+	projectsByKey  map[string]project.CaidoProjectRef
+	graphService   *graphaccess.Service
+	graphQueries   *appquery.Service
+	consultations  *consultation.Service
+	kbIndex        *kb.Index
+	kbModels       *kb.PythonRetrievalModels
+	allowRawReads  bool
+}
+
+// RefreshProjectCatalog picks up registry additions, renames, and removals
+// made by the continuous Caido synchronizer while this process is running.
+func (t *Tools) RefreshProjectCatalog() error {
+	if t == nil {
+		return errors.New("project catalog is unavailable")
+	}
+	if !t.refreshCatalog {
+		return nil
+	}
+	refs, err := project.LoadProjectRefsReadOnly(t.root)
+	if err != nil {
+		return errors.New("local project catalog could not be read")
+	}
+	byKey := make(map[string]project.CaidoProjectRef, len(refs))
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("local project catalog contains an invalid identity")
+		}
+		byKey[key] = ref
+	}
+	if err := t.graphQueries.SetProjectRefs(refs); err != nil {
+		return errors.New("graph project catalog could not be refreshed")
+	}
+	if err := t.consultations.SetProjectRefs(refs); err != nil {
+		return errors.New("consultation project catalog could not be refreshed")
+	}
+	t.projectsMu.Lock()
+	t.projects, t.projectsByKey = refs, byKey
+	t.projectsMu.Unlock()
+	return nil
+}
+
+func (t *Tools) projectRefs() []project.CaidoProjectRef {
+	t.projectsMu.RLock()
+	refs := append([]project.CaidoProjectRef(nil), t.projects...)
+	t.projectsMu.RUnlock()
+	return refs
+}
+
+func (t *Tools) projectRef(key string) (project.CaidoProjectRef, bool) {
+	t.projectsMu.RLock()
+	ref, ok := t.projectsByKey[key]
+	t.projectsMu.RUnlock()
+	return ref, ok
 }
 
 type toolSpec struct {
@@ -111,7 +161,8 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 	tools := &Tools{
 		root: root, projects: projects, projectsByKey: byKey,
 		graphService: graphService, graphQueries: graphQueries, consultations: consultations,
-		allowRawReads: os.Getenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1",
+		refreshCatalog: true,
+		allowRawReads:  os.Getenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1",
 	}
 	index, indexErr := kb.OpenIndex(kbIndexPath)
 	if indexErr == nil {
@@ -147,7 +198,7 @@ func (t *Tools) Close() error {
 }
 
 func NewServer(tools *Tools) (*Server, error) {
-	if tools == nil || tools.projectsByKey == nil {
+	if tools == nil {
 		return nil, errors.New("MCP tools are unavailable")
 	}
 	return &Server{Tools: tools}, nil
@@ -189,7 +240,12 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			s.handleNotification(request)
 			continue
 		}
-		response := s.handleRequest(ctx, request)
+		response := rpcResponse{JSONRPC: "2.0", ID: request.ID}
+		if err := s.Tools.RefreshProjectCatalog(); err != nil {
+			response.Error = &rpcError{Code: -32000, Message: "project catalog is unavailable"}
+		} else {
+			response = s.handleRequest(ctx, request)
+		}
 		if err := writeRPCResponse(out, response); err != nil {
 			return err
 		}
@@ -456,7 +512,7 @@ func (t *Tools) getCapture(ctx context.Context, args getCaptureArgs) (map[string
 	if !projectKeyPattern.MatchString(args.ProjectKey) || args.RequestID == "" || len(args.RequestID) > 512 {
 		return nil, errors.New("capture identity is invalid")
 	}
-	ref, ok := t.projectsByKey[args.ProjectKey]
+	ref, ok := t.projectRef(args.ProjectKey)
 	if !ok {
 		return nil, errors.New("selected project is not in the local project catalog")
 	}
@@ -500,7 +556,7 @@ func (t *Tools) getCaptureRaw(ctx context.Context, args getCaptureRawArgs) (map[
 	if maximum < 1 || maximum > 16<<10 || offset < 0 || offset > 128<<20 {
 		return nil, errors.New("raw capture range is outside its allowed bounds")
 	}
-	ref, ok := t.projectsByKey[args.ProjectKey]
+	ref, ok := t.projectRef(args.ProjectKey)
 	if !ok {
 		return nil, errors.New("selected project is not in the local project catalog")
 	}
@@ -549,13 +605,14 @@ func (t *Tools) listProjects(ctx context.Context, args listProjectsArgs) (map[st
 	if limit < 1 || limit > maxProjectPageSize {
 		return nil, errors.New("project page limit must be between 1 and 200")
 	}
+	projects := t.projectRefs()
 	start := 0
 	if args.AfterProjectKey != "" {
 		if !projectKeyPattern.MatchString(args.AfterProjectKey) {
 			return nil, errors.New("project cursor has an invalid format")
 		}
 		found := false
-		for index, ref := range t.projects {
+		for index, ref := range projects {
 			key, _ := ref.StorageKey()
 			if key == args.AfterProjectKey {
 				start, found = index+1, true
@@ -566,9 +623,9 @@ func (t *Tools) listProjects(ctx context.Context, args listProjectsArgs) (map[st
 			return nil, errors.New("project cursor is not in the local catalog")
 		}
 	}
-	end := min(start+limit, len(t.projects))
+	end := min(start+limit, len(projects))
 	rows := make([]map[string]any, 0, end-start)
-	for _, ref := range t.projects[start:end] {
+	for _, ref := range projects[start:end] {
 		key, err := ref.StorageKey()
 		if err != nil {
 			return nil, errors.New("local project identity is invalid")
@@ -597,11 +654,11 @@ func (t *Tools) listProjects(ctx context.Context, args listProjectsArgs) (map[st
 		})
 	}
 	var next any
-	if end < len(t.projects) && end > start {
-		next, _ = t.projects[end-1].StorageKey()
+	if end < len(projects) && end > start {
+		next, _ = projects[end-1].StorageKey()
 	}
 	return map[string]any{
-		"projects": rows, "project_count": len(rows), "total_project_count": len(t.projects),
+		"projects": rows, "project_count": len(rows), "total_project_count": len(projects),
 		"next_after_project_key": next, "scope": "registered local projects only",
 	}, nil
 }
@@ -642,7 +699,7 @@ func (t *Tools) searchCaptures(ctx context.Context, args searchCapturesArgs) (ma
 			return nil, errors.New("a project may appear only once in the selection")
 		}
 		seen[key] = struct{}{}
-		ref, ok := t.projectsByKey[key]
+		ref, ok := t.projectRef(key)
 		if !ok {
 			return nil, errors.New("a selected project is not in the local project catalog")
 		}

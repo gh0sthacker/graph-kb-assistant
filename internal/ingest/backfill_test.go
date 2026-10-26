@@ -487,6 +487,7 @@ type backfillSourceFixture struct {
 	project    project.CaidoProjectRef
 	metadata   caido.RequestMetadataPage
 	history    caido.HistoryPage
+	fetched    caido.RequestMetadataPage
 	pageErr    error
 	fetchErr   error
 	pageCalls  int
@@ -509,14 +510,54 @@ func (s *backfillSourceFixture) ListRequestPage(selected project.CaidoProjectRef
 }
 
 func (s *backfillSourceFixture) FetchHistoryPage(selected project.CaidoProjectRef, page caido.RequestMetadataPage, _ map[string]struct{}, _ int) (caido.HistoryPage, error) {
-	if !selected.SameProject(s.project) || s.fetchCalls != 0 || len(page.Requests) != len(s.metadata.Requests) {
+	if !selected.SameProject(s.project) || s.fetchCalls != 0 || len(page.Requests) > len(s.metadata.Requests) {
 		return caido.HistoryPage{}, errors.New("fixture received an unexpected history detail request")
 	}
 	s.fetchCalls++
+	s.fetched = page
 	if s.fetchErr != nil {
 		return caido.HistoryPage{}, s.fetchErr
 	}
 	return s.history, nil
+}
+
+func TestRunBackfillAppliesExactOriginScopeBeforeFetchingDetails(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pageWriter.Close)
+	insideID, outsideID := "in-scope-history", "out-of-scope-history"
+	metadata := caido.RequestMetadataPage{Requests: []caido.RequestMetadata{
+		{RequestID: insideID, Method: "GET", URL: "https://demo.fixture.invalid/api"},
+		{RequestID: outsideID, Method: "GET", URL: "https://other.fixture.invalid/api"},
+	}}
+	history := caido.HistoryPage{Exchanges: []caido.HttpExchange{{
+		Ref:        caido.ExchangeRef{Project: selected, RequestID: insideID},
+		RequestRaw: []byte("GET /api HTTP/1.1\r\nHost: demo.fixture.invalid\r\n\r\n"),
+		Method:     "GET", Scheme: "https", Host: "demo.fixture.invalid", Port: 443,
+		Target: "https://demo.fixture.invalid/api", RequestWireFidelity: "source_bytes", ResponseWireFidelity: "unknown",
+	}}}
+	source := &backfillSourceFixture{project: selected, metadata: metadata, history: history}
+	result, err := RunBackfill(ctx, source, pageWriter, selected, BackfillOptions{
+		PageSize: 2, MaxBodyBytes: 64 << 10,
+		Scope: &LiveTailScope{Scheme: "https", Host: "demo.fixture.invalid", Port: 443},
+	})
+	if err != nil {
+		t.Fatalf("scoped backfill: %v", err)
+	}
+	if result.RequestsExcludedByScope != 1 || len(source.fetched.Requests) != 1 || source.fetched.Requests[0].RequestID != insideID {
+		t.Fatalf("scope filtering did not happen before detail fetch: result=%+v fetched=%+v", result, source.fetched.Requests)
+	}
+	var captures int
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM captures").Scan(&captures); err != nil {
+		t.Fatal(err)
+	}
+	if captures != 1 {
+		t.Fatalf("stored captures=%d, want only the in-scope request", captures)
+	}
 }
 
 func (s *backfillSourceFixture) GetExchange(caido.ExchangeRef) (*caido.HttpExchange, error) {
