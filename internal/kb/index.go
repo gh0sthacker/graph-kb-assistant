@@ -47,7 +47,6 @@ const (
 	maximumExcerptRunes        = 1200
 	defaultSourceChars         = 12000
 	maximumSourceChars         = 30000
-	maximumSearchTerms         = 32
 	maximumSearchResultBytes   = 4 << 20
 	defaultRerankPoolSize      = 30
 )
@@ -1296,10 +1295,10 @@ func coverageCount(value any) (int64, bool) {
 }
 
 func queryTerms(input string) []string {
-	terms := make([]string, 0, maximumSearchTerms)
+	terms := make([]string, 0)
 	current := make([]rune, 0, 64)
 	flush := func() {
-		if len(current) > 0 && len(terms) < maximumSearchTerms {
+		if len(current) > 0 {
 			terms = append(terms, string(current))
 		}
 		current = current[:0]
@@ -1312,14 +1311,9 @@ func queryTerms(input string) []string {
 			}
 		} else {
 			flush()
-			if len(terms) == maximumSearchTerms {
-				break
-			}
 		}
 	}
-	if len(terms) < maximumSearchTerms {
-		flush()
-	}
+	flush()
 	return terms
 }
 
@@ -1338,22 +1332,14 @@ func redAmonFullTextExpression(input string) string {
 	}
 	query := strings.ReplaceAll(sanitized.String(), "&&", " ")
 	query = strings.ReplaceAll(query, "||", " ")
-	items := make([]string, 0, maximumSearchTerms+4)
-	termCount := 0
+	items := make([]string, 0)
 	for _, word := range strings.Fields(query) {
 		if word == "AND" || word == "OR" || word == "NOT" {
 			items = append(items, word)
 			continue
 		}
 		for _, term := range queryTerms(word) {
-			if termCount == maximumSearchTerms {
-				break
-			}
 			items = append(items, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
-			termCount++
-		}
-		if termCount == maximumSearchTerms {
-			break
 		}
 	}
 	if len(items) == 0 {

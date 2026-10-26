@@ -437,7 +437,7 @@ func TestKBReadsFailClosedWhileRechunkMarkerIsPresent(t *testing.T) {
 
 func TestSearchUsesCompleteTermsLikeRedAmonFullText(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
-	content := "authentication guidance for the synthetic application"
+	content := "authentication guidance for the synthetic application needle"
 	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
 	index, err := OpenIndex(indexPath)
 	if err != nil {
@@ -451,6 +451,7 @@ func TestSearchUsesCompleteTermsLikeRedAmonFullText(t *testing.T) {
 	}{
 		{query: "auth", want: 0},
 		{query: "authentication", want: 1},
+		{query: strings.Repeat("absent ", 39) + "needle", want: 1},
 	} {
 		result, err := index.Search(context.Background(), test.query, SearchOptions{TopK: 5})
 		if err != nil || len(result.Hits) != test.want {
