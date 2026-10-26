@@ -2953,3 +2953,21 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   comparison path only. Accepted Hermes access, model execution, candidate
   save/recovery, production service state, and full project coverage remain
   unverified. KB identity remains `PARTIAL` as recorded above.
+
+### Neo4j browser after full snapshot rebuild — 2026-10-26 — PARTIAL
+
+- Extended the opt-in browser fixture so its Neo4j mode now runs the same
+  locked `RebuildProjectSnapshot` maintenance path used by the production
+  backfill command after the two synthetic projection jobs complete.
+- Re-ran the embedded-browser acceptance fixture against a disposable local
+  Neo4j instance (`TestBrowserAcceptanceFixture`, 150.54s, PASS). In the UI,
+  the selected route reported `Value correlation expanded · 6 path nodes`; the
+  bounded slice showed 15 nodes / 14 edges and described the full traversal as
+  31 nodes / 36 edges. The app rendered two linked captures and field
+  occurrences after full rebuild. The separate storage integration test also
+  verified cross-project isolation and the published generation.
+- This closes the synthetic browser coverage gap for Neo4j full-rebuild value
+  correlation. It does not establish real-project coverage, accepted Hermes
+  access/model execution, candidate save/recovery through Hermes, production
+  service readiness, or RedAmon KB identity; the overall project and KB remain
+  `PARTIAL`.
