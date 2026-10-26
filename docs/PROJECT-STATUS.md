@@ -1,5 +1,21 @@
 # Project status and known limitations
 
+## KB embed destination safety correction — 2026-10-26 21:36 UTC — PARTIAL
+
+- A fresh PVE check confirmed VM112 paused. In CT108, the embed unit is
+  inactive and disabled with no process; the package sensor read 75 C.
+- The installed unit's expanded command targeted the live
+  `kb/index.sqlite3`, contrary to older status notes that called it a
+  candidate-only worker. The isolated full-profile candidate exists, but the
+  incorrect unit was not started and the active database was not changed.
+- Local CLI now rejects embedding unless an existing
+  `kb/candidates/<id>/index.sqlite3` is selected before any writable index is
+  opened. The unit now reads its candidate path from a protected environment
+  file. Focused CLI tests pass; this safety correction is not yet deployed.
+- The 75 C reading exceeds the 70 C gate. Embedding remains stopped until the
+  corrected candidate-only unit is deployed and the thermal worker observes
+  its full ten-minute cool dwell.
+
 ## KB maximum-coverage candidate — 2026-10-26 20:24 UTC — IN PROGRESS
 
 - The isolated `full`-profile candidate is at snapshot

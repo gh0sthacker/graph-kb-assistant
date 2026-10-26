@@ -431,6 +431,19 @@ the separate Neo4j parity clone was deferred.
 At 21:28 UTC the CT-visible sensor read 85 C with VM112 still paused; the
 ten-minute cool dwell remains unestablished.
 
+### Embedding unit destination correction — 2026-10-26 21:36 UTC
+
+The latest direct CT108 inspection supersedes the earlier claim that the
+installed embedding unit was candidate-only and active. It is currently
+inactive and disabled (`MainPID=0`), and its expanded `ExecStart` explicitly
+targets the live `kb/index.sqlite3`. The full-profile candidate path exists,
+but this unit must not be started as installed. The local CLI now rejects
+embedding any path outside an existing `kb/candidates/<id>/index.sqlite3`,
+and the deployment unit reads the destination from a protected environment
+file. That correction still needs deployment; no embedding was running during
+the 21:36 UTC check. The CT108 package sensor read 75 C, above the 70 C stop
+limit, and VM112 was confirmed paused.
+
 ## Review scope and limits
 
 Reviewed intake, storage, graph writer/readers, Neo4j materialization and

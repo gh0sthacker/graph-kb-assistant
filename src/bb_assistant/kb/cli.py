@@ -94,6 +94,37 @@ def _configured_index_path(explicit_path: Path | None) -> Path | None:
     return Path(configured).expanduser().resolve() if configured else None
 
 
+def _embedding_candidate_index_path(explicit_path: Path | None) -> Path:
+    """Require embedding to target an existing isolated candidate index.
+
+    Embedding is a long-running, mutating operation. Requiring the canonical
+    ``kb/candidates/<id>/index.sqlite3`` layout prevents a deployment unit that
+    accidentally points at the live application index from filling it in
+    place.
+    """
+    configured = explicit_path
+    if configured is None:
+        raw_configured = os.environ.get("BB_ASSISTANT_KB_INDEX")
+        configured = Path(raw_configured) if raw_configured else None
+    if configured is None:
+        raise ValueError("embedding requires --index-path or BB_ASSISTANT_KB_INDEX for an isolated candidate")
+    requested = configured.expanduser()
+    if requested.is_symlink():
+        raise ValueError("embedding candidate index must not be a symbolic link")
+    try:
+        resolved = requested.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("embedding candidate index must already exist") from exc
+    if (
+        not resolved.is_file()
+        or resolved.name != "index.sqlite3"
+        or resolved.parent.parent.name != "candidates"
+        or resolved.parent.parent.parent.name != "kb"
+    ):
+        raise ValueError("embedding is restricted to kb/candidates/<id>/index.sqlite3")
+    return resolved
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bb-assistant-kb")
     parser.add_argument(
@@ -262,9 +293,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         }, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "embed":
+        # Validate the destination before constructing KBIndex: its writable
+        # constructor initializes a missing database, so the live-index guard
+        # must run first.
+        candidate_path = _embedding_candidate_index_path(args.index_path)
         from .embeddings import RedAmonEmbedder
         from .thermal import ThermalLimitReached, ThermalMonitor
-        index = KBIndex(_configured_index_path(args.index_path))
+        index = KBIndex(candidate_path)
         thermal = ThermalMonitor(args.thermal_sensor, stop_celsius=args.stop_temperature_c)
         embedder = None
 

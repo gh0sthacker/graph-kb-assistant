@@ -147,6 +147,12 @@ and caps CPU at 20%, disables automatic restarts, and leaves boot activation
 disabled. Do not start or resume until the package temperature has remained
 below 70 C for at least 10 continuous minutes. A single cool reading does not
 satisfy this precondition.
+Before enabling the unit, create the root-owned
+`/etc/graph-kb-assistant/kb-embed.env` with
+`BB_ASSISTANT_KB_INDEX=/home/max/.local/share/bb-graph-assistant/kb/candidates/<candidate-id>/index.sqlite3`.
+The CLI refuses missing indexes, symlink targets, and any index outside that
+candidate layout before opening a writable database; the live application
+index is not an embedding destination.
 Thermal stops preserve completed batches but do not publish the vector-ready
 marker. `vector_ready` requires both complete snapshot-bound vectors and an
 available NumPy search backend; `vector_storage_complete` reports the durable

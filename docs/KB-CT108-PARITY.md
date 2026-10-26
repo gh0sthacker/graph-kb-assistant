@@ -5,6 +5,24 @@ operator-provided read-only stats; service and single-sample temperature state
 come from the operator's PVE check. No claim below means the installed KB is
 identical to RedAmon.
 
+## Embedding destination correction — 2026-10-26 21:36 UTC
+
+A fresh read-only PVE check confirmed VM112 is paused. In CT108,
+`graph-kb-assistant-kb-embed.service` is inactive and disabled with `MainPID=0`;
+the package sensor read 75 C. The candidate index path recorded below exists.
+Inspection of the installed unit's expanded `ExecStart` showed it targets the
+live `kb/index.sqlite3`, not `kb/candidates/full-20261026-1936/index.sqlite3`.
+Therefore the earlier entries describing this installed unit as a running
+candidate-only worker were incorrect; no worker was running at this check, and
+the live index was not modified by the inactive unit.
+
+The checked-in CLI now fails closed unless embedding points to an existing
+`kb/candidates/<id>/index.sqlite3`; the systemd unit reads that path from
+`/etc/graph-kb-assistant/kb-embed.env` instead of hard-coding the live index.
+The focused CLI tests pass locally. This correction has not yet been deployed
+to CT108 or started there. The 75 C sample is above the 70 C threshold; the
+worker must still observe the ten-minute cool dwell before model loading.
+
 ## Latest candidate state — 2026-10-26 21:13 UTC (supersedes older counts below)
 
 - Commits `2c86ced`, `d6340ba`, `6f1ea2e`, and `5eb90f4` implement

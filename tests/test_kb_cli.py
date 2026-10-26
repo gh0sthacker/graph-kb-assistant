@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from bb_assistant.kb.cli import main
+from bb_assistant.kb.cli import _embedding_candidate_index_path, main
 from bb_assistant.kb.redamon_sources import RedAmonSourceAdapter, SourceBatch, SourceRecord, SourceRequest
 from bb_assistant.kb.rebuild import export_redamon_snapshot
 
@@ -81,3 +81,26 @@ class ImportSnapshotCLITests(unittest.TestCase):
         self.assertEqual(result["coverage_state"], "PARTIAL")
         self.assertEqual(result["source_documents"], 2)  # Content plus retained license provenance.
         self.assertGreater(result["chunks"], 0)
+
+
+class EmbeddingDestinationGuardTests(unittest.TestCase):
+    def test_embedding_only_accepts_existing_candidate_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "data" / "kb"
+            candidate = root / "candidates" / "full-test" / "index.sqlite3"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate fixture")
+            self.assertEqual(_embedding_candidate_index_path(candidate), candidate.resolve())
+
+            active = root / "index.sqlite3"
+            active.parent.mkdir(parents=True, exist_ok=True)
+            active.write_bytes(b"active fixture")
+            with self.assertRaisesRegex(ValueError, "restricted to kb/candidates"):
+                _embedding_candidate_index_path(active)
+
+    def test_embedding_refuses_missing_candidate_before_database_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "data" / "kb" / "candidates" / "run" / "index.sqlite3"
+            with self.assertRaisesRegex(ValueError, "must already exist"):
+                _embedding_candidate_index_path(missing)
+            self.assertFalse(missing.exists())

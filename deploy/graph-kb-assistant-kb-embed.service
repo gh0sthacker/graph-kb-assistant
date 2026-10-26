@@ -1,7 +1,7 @@
 [Unit]
 Description=Graph KB Assistant E5 embedding build
 After=network-online.target
-ConditionPathExists=/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3
+ConditionPathExists=/etc/graph-kb-assistant/kb-embed.env
 StartLimitIntervalSec=10min
 StartLimitBurst=3
 
@@ -13,7 +13,7 @@ WorkingDirectory=/home/max/bb/graph-kb-assistant
 Environment=HOME=/home/max
 Environment=XDG_DATA_HOME=/home/max/.local/share
 Environment=PYTHONPATH=/home/max/bb/graph-kb-assistant/src
-Environment=BB_ASSISTANT_KB_INDEX=/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3
+EnvironmentFile=/etc/graph-kb-assistant/kb-embed.env
 Environment=HF_HUB_OFFLINE=1
 Environment=TRANSFORMERS_OFFLINE=1
 Environment=OMP_NUM_THREADS=1
@@ -22,7 +22,7 @@ Environment=OPENBLAS_NUM_THREADS=1
 Environment=TOKENIZERS_PARALLELISM=false
 # Previous CT108 runs approached 90 C despite a 50% CPU quota. Stop before
 # 70 C; resume only after a separate 10-minute stable-below-70 C observation.
-ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli --index-path /home/max/.local/share/bb-graph-assistant/kb/index.sqlite3 embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 70
+ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 70
 Restart=no
 CPUQuota=20%
 MemoryMax=3G
