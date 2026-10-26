@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from contextlib import contextmanager, nullcontext
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -666,6 +667,13 @@ class KBIndex:
             source_coverage = json.loads(meta.get("source_coverage", "[]"))
         except json.JSONDecodeError:
             source_coverage = []
+        vector_storage_complete = (
+            vector_count > 0 and meta.get("vector_snapshot_id") == meta.get("snapshot_id")
+        )
+        try:
+            vector_backend_available = importlib.util.find_spec("numpy") is not None
+        except (ImportError, ValueError):
+            vector_backend_available = False
         return {
             "source_families": source_count,
             "source_documents": document_count,
@@ -677,7 +685,9 @@ class KBIndex:
             "embedded_chunks": vector_count,
             "embedding_model": meta.get("vector_model") or None,
             "embedding_snapshot_id": meta.get("vector_snapshot_id") or None,
-            "vector_ready": vector_count > 0 and meta.get("vector_snapshot_id") == meta.get("snapshot_id"),
+            "vector_storage_complete": vector_storage_complete,
+            "vector_backend_available": vector_backend_available,
+            "vector_ready": vector_storage_complete and vector_backend_available,
             "maintenance_state": "rechunking" if meta.get("rechunk_target_snapshot_id") else None,
         }
 

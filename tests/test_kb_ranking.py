@@ -229,6 +229,22 @@ class RetrievalRankingTests(unittest.TestCase):
             self.assertEqual({hit.source_id for hit in hits}, {"alpha.md", "bravo.md"})
             self.assertIsNotNone(next(hit for hit in hits if hit.source_id == "alpha.md").rerank_score)
 
+    def test_vector_ready_requires_the_runtime_vector_backend(self) -> None:
+        document = SourceDocument.create(
+            source_name="tool_docs", source_id="alpha.md", title="Alpha",
+            text="alpha authentication flow", metadata={"document_role": "content"},
+        )
+        chunks = tuple(chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-vector-backend-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "f" * 64, sources=(document,))
+            index.rebuild_embeddings(_FixtureEmbedder(), batch_size=1)
+            with patch("bb_assistant.kb.index.importlib.util.find_spec", return_value=None):
+                stats = index.stats()
+        self.assertTrue(stats["vector_storage_complete"])
+        self.assertFalse(stats["vector_backend_available"])
+        self.assertFalse(stats["vector_ready"])
+
     def test_embedding_batches_resume_after_interruption_without_publishing_partial_vectors(self) -> None:
         documents = (
             SourceDocument.create(

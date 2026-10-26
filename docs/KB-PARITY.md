@@ -144,5 +144,8 @@ and caps CPU at 20%, disables automatic restarts, and leaves boot activation
 disabled. Start only below 75 C,
 and resume only below 70 C after readings remain stable.
 Thermal stops preserve completed batches but do not publish the vector-ready
-marker. Readiness remains false until every content chunk has its pinned E5
-vector and the completion marker is written.
+marker. `vector_ready` requires both complete snapshot-bound vectors and an
+available NumPy search backend; `vector_storage_complete` reports the durable
+generation state separately. Readiness remains false until every content
+chunk has its pinned E5 vector, the completion marker is written, and the
+runtime backend is available.
