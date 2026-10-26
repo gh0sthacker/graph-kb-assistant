@@ -96,6 +96,7 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	mux.HandleFunc("GET /assets/graph-focus.js", serveAsset("assets/graph-focus.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /assets/runtime-capabilities.js", serveAsset("assets/runtime-capabilities.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /assets/style.css", serveAsset("assets/style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /api/health", healthHandler)
 	mux.HandleFunc("GET /api/projects", projectsHandler(api))
 	mux.HandleFunc("GET /api/runtime-capabilities", runtimeCapabilitiesHandler)
 	mux.HandleFunc("GET /api/surface", surfaceHandler(api))
@@ -127,6 +128,10 @@ func runtimeCapabilitiesHandler(w http.ResponseWriter, _ *http.Request) {
 	writeResult(w, map[string]any{
 		"evidence_vault_key_state": ingest.VaultKeyConfigurationState(),
 	}, nil)
+}
+
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	writeResult(w, map[string]any{"status": "ok"}, nil)
 }
 
 // ValidateLoopbackAddress rejects wildcard and non-loopback listeners.

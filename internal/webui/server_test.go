@@ -252,6 +252,29 @@ func TestRuntimeCapabilitiesReportVaultKeyStateWithoutExposingKey(t *testing.T) 
 	}
 }
 
+func TestHealthHandlerReportsLivenessWithoutReadingApplicationData(t *testing.T) {
+	api := &explorerAPIFixture{}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/health", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("health response status=%d cache=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if payload["status"] != "ok" {
+		t.Fatalf("health payload=%#v", payload)
+	}
+	if api.direct != 0 || api.full != 0 {
+		t.Fatalf("liveness handler queried graph data: direct=%d full=%d", api.direct, api.full)
+	}
+}
+
 func TestComparisonHandlerReadsExactLocalRevisionsWithoutCaching(t *testing.T) {
 	projectKey := strings.Repeat("a", 64)
 	leftRevision := strings.Repeat("b", 64)

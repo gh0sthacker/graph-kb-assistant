@@ -10,16 +10,20 @@
   graph/evidence interaction, or the Hermes gateway's current MCP handshake.
   Overall runtime coverage remains `PARTIAL`.
 
-## Fresh Hermes MCP discovery check — 2026-10-26 07:27 UTC — PARTIAL
+## Fresh Hermes gateway and MCP check — 2026-10-26 07:30 UTC — PARTIAL
 
 - `./scripts/run-hermes mcp test bb_assistant` connected to the current
   checkout's stdio launcher in 5.9 seconds and discovered the expected 15
   allowlisted tools, including consultation resume. This starts a fresh local
   MCP child; it made no model request and read no capture body.
-- The already-running Hermes gateway and its MCP child predate this checkout's
-  recent build. The fresh CLI discovery check does not reload or verify that
-  gateway child, so its loaded code remains unconfirmed; no gateway restart was
-  performed. Overall Hermes runtime coverage remains `PARTIAL`.
+- The older Hermes gateway was then restarted with
+  `./scripts/run-hermes gateway restart --detach` without `--yes`; Hermes
+  stopped it cleanly and started a fresh background gateway. A subsequent
+  `gateway status --deep --full` confirmed it running. Hermes reports that it
+  is manually running, not installed as a system service. No MCP child had yet
+  spawned inside the new gateway at the process check; the separate discovery
+  above verifies the current checkout launcher. No model request or capture
+  body read occurred. Overall Hermes runtime coverage remains `PARTIAL`.
 
 ## Local KB parity receipt export — 2026-10-26 — PARTIAL
 
@@ -3090,3 +3094,33 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   worker is live with 35,296 of 209,026 content vectors. `vector_ready=false`.
   RedAmon deployed snapshot and query-result parity remain unavailable, so KB
   identity and overall delivery remain `PARTIAL`.
+
+## Proxmox CT 108 deployment recheck — 2026-10-26 10:06 UTC — PARTIAL
+
+- The application, Nginx and Neo4j are enabled and active in existing LXC
+  container 108 on Proxmox `pve`. `/api/health` returned `{"status":"ok"}`;
+  `neo4j-check` returned `state=ready`; one project is registered. CT 108 has
+  a 128 GiB root disk and starts with Proxmox.
+- Proxmox `vmbr0` is `192.168.1.147/24` with gateway `192.168.1.1`; CT 108
+  receives `192.168.2.154/24` by DHCP. Both are private addresses, not a
+  directly assigned public IP. The current `192.168.1.147:8765` forward is
+  restricted to source `192.168.1.0/24`; a separate client from that LAN has
+  not completed an end-to-end check. A public IP requires an address and route
+  from the router/ISP; this host's current bridge configuration does not have
+  one to assign to CT 108.
+- The copied KB index contains 209,036 chunks from seven completed source
+  families and 38,880 E5 vectors for 209,026 eligible content chunks.
+  `vector_ready=false`, so semantic KB retrieval is still partial. The
+  previously failing relocated Python venv and embedding unit were repaired;
+  Torch and Sentence Transformers import successfully. A single worker
+  advanced the durable count but reached 90–91 C at a 50% CPU quota. It was
+  stopped and disabled; app and Neo4j remain running. Do not resume indexing
+  until a lower safe thermal limit is established.
+- The local Kali app service and KB worker are disabled, and its Neo4j
+  container is exited; the source data and migration archive remain available
+  for rollback. Neo4j's copied data passed its offline consistency check.
+- Current local checkout verification: `go test ./...`, `go vet ./...` and
+  `git diff --check` passed. GitHub's latest `main` CI run passed its Go,
+  Python and Gitleaks jobs. Existing project data has not been validated with
+  live target traffic or a live Hermes model request. Exact content/query
+  equality with the active RedAmon deployment remains unproven.
