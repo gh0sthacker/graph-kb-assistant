@@ -5,18 +5,52 @@ operator-provided read-only stats; service and single-sample temperature state
 come from the operator's PVE check. No claim below means the installed KB is
 identical to RedAmon.
 
+## User goal: maximum RedAmon full-profile coverage — 2026-10-26
+
+The requested target is the pinned RedAmon `full` source profile, not the
+smaller `cpu-lite` profile most recently ingested by the installed VM112
+instance. The Graph Assistant already has the seven full-profile families and
+the 730-day NVD window. Its current snapshot holds 207,878 source documents,
+209,036 stored chunks (209,026 content chunks), and 38,888 content vectors;
+the vector snapshot is not ready. Thus the immediate completeness gap is
+semantic coverage, not missing source families.
+
+The current CT108 full-profile index was inspected read-only before work was
+resumed. All seven stored source revisions match their current pinned source
+revisions. The source-manifest digest is stale because the present manifest
+contains later legal/notice metadata, and its `DONE` report has inaccurate
+chunk counts for ToolDocs (434 reported versus 432 stored) and OWASP (913
+reported versus 900 stored). A focused code change now makes `rechunk_index`
+recompute per-source document/chunk counts from the resulting SQLite tables;
+its 17 provider/rechunk tests pass. It does not silently change the active
+source manifest or claim RedAmon parity.
+
+At 2026-10-26 19:34 UTC the resumable worker was started on Proxmox CT108,
+against the existing full-profile index. Its unit is bounded to one thread,
+batch size 2, 20% CPU and 3 GiB memory. It waits for a continuous 10-minute
+period below 70 C before loading the model; at the first post-start check it
+used 13.7 MiB and 88 ms CPU, so vector generation had not started yet. The
+worker preserves progress and only publishes vector readiness after all
+content chunks are embedded. Kali is not running this work and VM112 remains
+paused.
+
+Current parity is still `PARTIAL`: the active RedAmon installation is `cpu-lite`
+with E5-base-v2 while this max-fill job uses the Assistant's pinned E5-large-v2
+on `full`. The target remains broad full-profile coverage first; exact
+installed-RedAmon equality requires separate source and query receipts.
+
 ## Parity matrix
 
 | Area | Last recorded local evidence | RedAmon comparison | State / gap |
 |---|---|---|---|
-| Sources | Read-only CT108 `bb_kb_stats` at 2026-10-26 16:17 UTC reports snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, source coverage `DONE`, seven families, 207,878 documents, and 209,026 content chunks. Snapshot `source_manifest_sha256` is null; current manifest SHA-256 is `95336ab4a4f6109d93f515d9b465740e035b3bc277197926edbd167d617a0b10`. The source-manifest match is unknown until a new snapshot is built. | Family names and filters match RedAmon’s configured seven-family `full` profile, but no deployed RedAmon corpus receipt was supplied. | Prior local snapshot is present; current-source validity and cross-system corpus parity PARTIAL. |
-| Rights and notices | Runtime snapshot contains ExploitDB coverage from its prior build. The current manifest now permits only the pinned GitLab repository’s allowlisted descriptions/metadata and preserves README/LICENSE; PoC files are never fetched. The active snapshot has no manifest digest and predates this policy record. | No deployed RedAmon corpus or rights receipt was supplied. | PARTIAL; current local source gate is scoped and enabled, but active snapshot provenance is stale/unknown. |
+| Sources | Read-only CT108 `bb_kb_stats` at 2026-10-26 16:17 UTC reports snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, seven families, 207,878 documents, and 209,026 content chunks; its snapshot digest was null. Direct Python stats at 19:35 UTC found stored digest `931151ff9d5abd47ba1c75db7cb97fff662163ca678cb8e1f22d8b47ccb3e084`, not matching current manifest SHA-256 `95336ab4a4f6109d93f515d9b465740e035b3bc277197926edbd167d617a0b10`. | Read-only inspection of VM112's installed RedAmon tree and index found `.last_ingest` profile `cpu-lite` (2026-10-19), configured as `tool_docs`, `gtfobins`, and `lolbas`. Its FAISS index has 2,449 IDs. The VM's repository is dirty, so this identifies the installed reference state, not a reproducible clean checkout. | **Known profile mismatch.** The seven-family Assistant snapshot is not the installed RedAmon `cpu-lite` corpus. Exact document/chunk equality remains unmeasured. |
+| Rights and notices | Runtime snapshot contains ExploitDB coverage from its prior build. The current manifest permits only the pinned GitLab repository’s allowlisted descriptions/metadata and preserves README/LICENSE; PoC files are never fetched. The stored manifest digest predates current legal/notice metadata. | No deployed RedAmon corpus or rights receipt was supplied. | PARTIAL; current local source gate is scoped and enabled, but active snapshot provenance is stale. |
 | Extraction and canonicalization | Snapshot exporter/importer validates manifest, content hashes, provenance, deterministic chunks and spans. Source providers include fixed archive/API adapters and explicit coverage states. | No same-revision source document export to compare. | PARTIAL; extraction equivalence is unproven. |
 | Chunking | Current code has deterministic canonical chunk IDs and span validation; latest stats report 209,026 content chunks for the active snapshot. | RedAmon source/chunk fixture and canonical digests unavailable. | PARTIAL; boundary/hash parity is unproven. |
 | Lexical search | Local index uses SQLite FTS5 with RedAmon-inspired query cleanup, title/body BM25 weighting and candidate filtering. | RedAmon uses Neo4j Lucene; analyzer and score parity are not established. | PARTIAL; engines are not interchangeable. |
-| Embedding model | Configured E5 model is `intfloat/e5-large-v2`, 1,024 dimensions. | Same model family is declared in the parity contract; deployed model revision receipt unavailable. | PARTIAL; exact model revision and runtime equivalence need receipts. |
-| Vector coverage | Read-only `bb_kb_stats` reports 38,888 E5 vectors of 209,026 content chunks; `vector_ready=false`, leaving 170,138 content chunks without vectors. The embed unit is inactive. | No deployed RedAmon vector-generation receipt to compare. | PARTIAL; vector coverage is incomplete and RedAmon vector parity is unproven. |
-| Query behavior | Local retrieval combines lexical/vector candidates, reciprocal-rank fusion, BGE reranking and MMR; fixed query fixtures are checked in at `references/kb-parity-queries.json`. | No RedAmon query-result receipt for those fixture queries is present. | PARTIAL; no ranking or score parity claim. |
+| Embedding model | The Assistant snapshot uses `intfloat/e5-large-v2`, 1,024 dimensions. | The installed RedAmon config has an uncommitted change to `intfloat/e5-base-v2`; its pinned revision is `f52bf8ec8c7124536f0efb74aca902b2995e5bcd`. The installed FAISS artifact's size and ID count are consistent with 2,449 768-d float vectors. | **Known model/dimension mismatch.** A model rebuild is required for parity. |
+| Vector coverage | Latest count before the 19:34 UTC worker start was 38,888 E5 vectors of 209,026 content chunks; `vector_ready=false`, leaving 170,138 content chunks without vectors. The CT108 unit is now active in its thermal-gated wait; a new count has not yet been recorded. | The installed RedAmon FAISS index and `chunk_ids.json` each contain 2,449 entries; index manifest SHA-256 is `20fa1849164b537a6b5068b19b90d7a58370f73ab868f6fd0df3aaf0752ea030`. | Both stores have vector data, but they cover different profiles/models. No same-corpus vector comparison has been made. |
+| Query behavior | Local retrieval combines lexical/vector candidates, reciprocal-rank fusion, BGE reranking and MMR; fixed query fixtures are checked in at `references/kb-parity-queries.json`. | Installed RedAmon source config sets top-k 5, overfetch 6, score threshold 0.80, RRF k 60, reranker pool 30, and MMR lambda 0.65. RedAmon uses Neo4j Lucene plus FAISS; no same-query result receipt has been produced. | PARTIAL; some settings are comparable, but corpus, embedding model, and backend differ; output/rank parity is untested. |
 | Hermes API integration | The latest read-only `bb_kb_stats` call over Hermes SSH MCP succeeded. | No fixed-query search receipt or live model-inference check was supplied with this stats call. | PARTIAL; stats integration is observed, query and model paths remain unverified. |
 
 ## Safe embed configuration
@@ -83,6 +117,57 @@ feed; rebuild the active snapshot before treating its source coverage as current
 
 Until all four are available and matching, report the corpus and retrieval
 parity as `PARTIAL`.
+
+## Read-only RedAmon reference found on VM112 — 2026-10-26
+
+The earlier statement that no RedAmon deployment was available is superseded:
+the Proxmox host contains VM112 with the installed RedAmon checkout and its
+Neo4j volume. At the user's request, VM112 remains **paused**. Its qcow2 disk
+was attached read-only (`qemu-nbd`, ext4 `ro,noload`) for inspection and was
+unmounted/disconnected afterward; no VM process or original database was
+started or changed.
+
+The installed source checkout is at `e1dfdff671b7e76d3a002eeba37b01d92cb949e1`
+on `master`, with four local modifications. In particular, its active
+embedder config is changed to `intfloat/e5-base-v2`, and its local pin file
+contains revision `f52bf8ec8c7124536f0efb74aca902b2995e5bcd`. The on-disk
+`.last_ingest` records `cpu-lite` at `2026-10-19T18:32:53.497301+00:00`;
+that profile explicitly contains `tool_docs`, `gtfobins`, and `lolbas`. Other
+source caches present on disk are not evidence that those sources were
+ingested into this active profile.
+
+Inspection of the installed `ToolDocsClient.SKILL_CATEGORIES` confirms that
+its importer enumerates 15 categories and omits `post_exploitation`, even
+though that directory has three files in the repository manifest. The local
+provider's same 15-category allowlist and its 43-document/355-chunk golden
+fixture therefore match the installed client behavior. Do not add those three
+files merely because they exist in the checkout; parity follows the deployed
+client's category filter.
+
+The installed FAISS index is `IndexFlatIP`; its ID list has 2,449 entries and
+the index file is 7,523,373 bytes, consistent with 2,449 normalized 768-d
+float vectors. The sidecar manifest SHA-256
+`20fa1849164b537a6b5068b19b90d7a58370f73ab868f6fd0df3aaf0752ea030` matches
+the index file. The source config also records top-k 5, overfetch 6, score
+threshold 0.80, RRF k 60, reranker pool 30, and MMR lambda 0.65. These are
+reference configuration/artifact facts, not equivalent search-result evidence.
+
+A byte-verified copy of the RedAmon Neo4j data directory was made on the PVE
+host (source/copy tree SHA-256
+`fec02bf190ecc773db7e49331454bcbeed1fd42d38fcf98272420aa5f8d08823`).
+`neo4j-admin database info` on the copy reported store format
+`record-aligned-1.1`, last committed transaction `50228`, and no recovery
+required. A network-isolated, CPU/memory-limited Neo4j 5.26 clone was then
+attempted on that copy, but it exited with code 3 before becoming queryable;
+the only server log says shutdown was requested, and Docker reported no OOM.
+Therefore no Cypher corpus export or same-query result has been obtained yet.
+
+**Conclusion:** actual installed-reference evidence now proves the active
+RedAmon profile, model/configuration, and vector artifact. It also proves the
+current seven-family E5-large Assistant snapshot is not a matching profile or
+model. Exact corpus hashes and same-query ranking remain unverified. Keep
+parity `PARTIAL`; fill the checked full-profile index under the constrained
+worker while the separately verified snapshot/rechunk work proceeds.
 
 ## Go service manifest-freshness reporting
 

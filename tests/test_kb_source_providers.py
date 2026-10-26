@@ -446,6 +446,54 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             self.assertIsNone(index.stats()["maintenance_state"])
             self.assertEqual(len(index.search("authorization")), 2)
 
+    def test_rechunk_reconciles_done_coverage_counts_from_stored_records(self) -> None:
+        source_names = ("tool_docs", "gtfobins", "lolbas", "owasp", "exploitdb", "nvd", "nuclei")
+        documents = tuple(
+            SourceDocument.create(
+                source_name=name, source_id=f"fixture-{name}", title=name,
+                text=f"Pinned {name} coverage fixture.",
+            )
+            for name in source_names
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        coverage_rows = [
+            {
+                "source_name": name, "state": "done", "document_count": 1,
+                "chunk_count": 99, "expected_count": 1, "fetched_count": 1,
+            }
+            for name in source_names
+        ]
+        report = {
+            "coverage_state": "DONE", "source_count": len(source_names),
+            "blocked_source_count": 0, "partial_source_count": 0,
+            "sources": coverage_rows,
+        }
+        report_sha = hashlib.sha256(
+            (json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+        ).hexdigest()
+
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-rechunk-coverage-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(
+                chunks, "3" * 64, sources=documents,
+                source_manifest_sha256="4" * 64,
+                source_coverage_state="DONE",
+                source_coverage_report_sha256=report_sha,
+                source_coverage_report=report,
+            )
+
+            result = rechunk_index(index, project_root=Path(__file__).resolve().parents[1])
+            stats = index.stats()
+
+        self.assertEqual(result["coverage_state"], "DONE")
+        self.assertEqual(stats["coverage_state"], "DONE")
+        self.assertTrue(stats["source_coverage"])
+        for row in stats["source_coverage"]:
+            name = row["source_name"]
+            document = next(item for item in documents if item.source_name == name)
+            self.assertEqual(row["document_count"], 1)
+            self.assertEqual(row["chunk_count"], len(chunk_document(document)))
+
     def test_snapshot_preserves_raw_upstream_json_separately_from_search_text(self) -> None:
         raw = '{"cve":{"id":"CVE-2026-12345","future":"retained"}}'
         document = SourceDocument.create(

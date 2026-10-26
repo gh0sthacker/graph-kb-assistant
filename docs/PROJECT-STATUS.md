@@ -1,5 +1,55 @@
 # Project status and known limitations
 
+## KB max-fill work resumed on Proxmox — 2026-10-26 19:34 UTC — IN PROGRESS
+
+- The selected completeness target is RedAmon's pinned seven-family `full`
+  profile, rather than the installed VM112 `cpu-lite` snapshot. CT108 already
+  contains that seven-family corpus: 207,878 source documents, 209,036 stored
+  chunks (209,026 content chunks), and 38,888 content vectors. Semantic
+  coverage is incomplete; exact RedAmon parity remains unproven.
+- A read-only preflight found all seven current source revisions match their
+  pins. The old source-manifest digest is stale because current legal/notice
+  metadata was added later; the existing per-source chunk counts are also
+  inaccurate for ToolDocs and OWASP. The existing source index was not rebuilt.
+- `rechunk_index` now recomputes per-source document/chunk counts from stored
+  source and chunk rows. Its focused 17-test provider/rechunk suite passed.
+- Started the resumable E5 embedding service on CT108, with one thread, batch
+  size 2, 20% CPU quota, 3 GiB memory cap, and a ten-minute cool-down gate below
+  70 C. It began in a low-resource thermal wait (13.7 MiB RSS, 88 ms CPU); no
+  vectors had been added at that check. It will publish readiness only after
+  all content chunks are covered. Kali is not running the workload; VM112 stays
+  paused.
+- Next: verify progress and thermal state; deploy the coverage reconciliation
+  change, create an isolated corrected full-profile candidate from the stored
+  sources, then validate candidate counts and same-query behavior before
+  promoting it. Keep parity `PARTIAL` until RedAmon corpus and query receipts
+  match.
+
+## Installed RedAmon reference identified read-only — 2026-10-26 — PARTIAL
+
+- The authoritative reference is VM112 on the Proxmox host (not a RedAmon
+  service on Proxmox2). VM112 remains paused as the user requested. Its
+  qcow2 was inspected via a read-only `qemu-nbd` attachment; it was then
+  unmounted and disconnected without resuming the VM.
+- Its installed RedAmon checkout is `e1dfdff671b7e76d3a002eeba37b01d92cb949e1`
+  plus four local modifications. `.last_ingest` records profile `cpu-lite`
+  from 2026-10-19. That profile contains `tool_docs`, `gtfobins`, and `lolbas`.
+  The local checkout changes the installed embedder to E5-base-v2 at pinned
+  revision `f52bf8ec8c7124536f0efb74aca902b2995e5bcd`.
+- The deployed FAISS artifact has 2,449 IDs and is consistent with 768-d
+  vectors. The current Assistant KB instead has seven source families and
+  E5-large-v2 vectors (38,888/209,026); this is a confirmed profile/model
+  mismatch, not an identity claim.
+- A byte-verified copy of the RedAmon Neo4j store was made on PVE. A
+  network-isolated Neo4j 5.26 clone exited with code 3 before queries became
+  available (`OOMKilled=false`; server log: shutdown requested). The original
+  VM112/DB has not been started or modified. Exact document/chunk digests and
+  same-query ranking still need to be obtained from a queryable isolated copy.
+- See [`KB-CT108-PARITY.md`](KB-CT108-PARITY.md) for the detailed evidence.
+  Keep KB parity `PARTIAL`; a maximum-coverage full-profile vector job is now
+  running on CT108, while the RedAmon clone and same-query receipt remain
+  separate follow-up blockers.
+
 ## KB source-coverage integrity fix deployed to CT108 — 2026-10-26 18:46 UTC — PARTIAL
 
 - CI run [40380086566](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40380086566)

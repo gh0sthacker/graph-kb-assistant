@@ -260,6 +260,19 @@ def rechunk_index(
 
             coverage_rows = json.loads(meta.get("source_coverage", "[]"))
             coverage_state = meta.get("coverage_state", "unverified")
+            if not isinstance(coverage_rows, list) or any(
+                not isinstance(row, dict) or not isinstance(row.get("source_name"), str)
+                for row in coverage_rows
+            ):
+                raise ValueError("source coverage rows are malformed")
+            coverage_names = {row["source_name"] for row in coverage_rows}
+            document_names = {
+                row[0] for row in connection.execute("SELECT DISTINCT source_name FROM source_documents")
+            }
+            if coverage_state == "DONE" and (
+                coverage_names != document_names or document_names != set(family_order)
+            ):
+                raise ValueError("DONE source coverage families do not match stored source documents")
             coverage_report: dict[str, object] | None = None
             coverage_sha: str | None = None
             if coverage_state != "unverified":
@@ -383,6 +396,19 @@ def rechunk_index(
             connection.execute("DELETE FROM chunks WHERE NOT EXISTS (SELECT 1 FROM kb_rechunk_ids i WHERE i.chunk_id=chunks.chunk_id)")
             connection.commit()
             chunk_count = connection.execute("SELECT count(*) FROM chunks").fetchone()[0]
+            documents_by_source = dict(connection.execute(
+                "SELECT source_name,count(*) FROM source_documents GROUP BY source_name"
+            ).fetchall())
+            chunks_by_source = dict(connection.execute(
+                "SELECT source_name,count(*) FROM chunks GROUP BY source_name"
+            ).fetchall())
+            for row in coverage_rows:
+                name = row["source_name"]
+                row["document_count"] = int(documents_by_source.get(name, 0))
+                row["chunk_count"] = int(chunks_by_source.get(name, 0))
+            if coverage_report is not None:
+                coverage_report["sources"] = coverage_rows
+                coverage_sha = hashlib.sha256(_json_line(coverage_report)).hexdigest()
             connection.execute("DELETE FROM kb_meta WHERE key IN ('vector_model','vector_dimensions','vector_snapshot_id')")
             for key, value in (
                 ("snapshot_id", target_snapshot_id), ("chunk_count", str(chunk_count)),
