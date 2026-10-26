@@ -108,7 +108,9 @@ copied to CT108 and its SHA-256 matched the local file above. The active DB
 still reports the older snapshot and null snapshot-manifest hash. Its full
 Python stats report 209,036 stored chunks including notice records; the Go
 API’s 209,026 is the content-chunk count used for vector readiness. The embed
-service remains inactive. `coretemp` Package id 0 was 77–78 C in two checks,
-above the 70 C worker stop threshold; no source rebuild or embedding was
-started. CT108 has 89 GiB free on its data filesystem. No RedAmon runtime or
+service remains inactive. `coretemp` Package id 0 ranged from 74–85 C in subsequent checks, above
+the 70 C worker stop threshold. At 16:20 UTC, PVE load average was 3.71 and
+the KVM process for VM 112 (`agent-hub`) showed about 60% CPU in a point
+sample; the Graph Assistant embedding unit was inactive. No source rebuild or
+embedding was started. That unrelated VM was left untouched. CT108 has 89 GiB free on its data filesystem. No RedAmon runtime or
 reference receipt was available from PVE.
