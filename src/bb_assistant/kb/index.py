@@ -340,15 +340,11 @@ class KBIndex:
                 ),
             )
 
-            # Keep identical chunk rows (and their vectors) in place. Replace
-            # only changed FTS rows and remove identities absent from the new
-            # snapshot; chunk_id binds source hash, content hash and span.
-            connection.execute("""
-                DELETE FROM chunk_search WHERE chunk_id IN (
-                  SELECT f.chunk_id FROM chunk_search f
-                  LEFT JOIN incoming_chunks i ON i.chunk_id=f.chunk_id
-                  WHERE i.chunk_id IS NULL OR f.title IS NOT i.title OR f.text IS NOT i.text)
-            """)
+            # FTS5 leaves chunk_id UNINDEXED, so probing it for each incoming
+            # row degenerates into a quadratic full-table scan at RedAmon scale.
+            # Rebuild the lexical projection linearly; canonical chunks and
+            # unchanged vectors remain in their keyed tables.
+            connection.execute("DELETE FROM chunk_search")
             connection.execute("""
                 DELETE FROM chunks WHERE NOT EXISTS (
                   SELECT 1 FROM incoming_chunks i WHERE i.chunk_id=chunks.chunk_id)
@@ -412,8 +408,7 @@ class KBIndex:
             """)
             connection.execute("""
                 INSERT INTO chunk_search(chunk_id,source_name,title,text)
-                SELECT i.chunk_id,i.source_name,i.title,i.text FROM incoming_chunks i
-                WHERE NOT EXISTS (SELECT 1 FROM chunk_search f WHERE f.chunk_id=i.chunk_id)
+                SELECT chunk_id,source_name,title,text FROM incoming_chunks
             """)
             count = len(chunk_rows)
             connection.execute(

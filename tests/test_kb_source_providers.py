@@ -8,6 +8,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -543,7 +544,8 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
                 snapshot, temp_root / "snapshots", max_chars=1200, overlap_chars=0,
             )
             index = KBIndex(temp_root / "index.sqlite3")
-            stats = import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
+            with patch("bb_assistant.kb.rebuild._read_jsonl", side_effect=AssertionError("bulk JSONL materializer used")):
+                stats = import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
             self.assertEqual(stats["coverage_state"], "PARTIAL")
             self.assertEqual(stats["source_documents"], 44)
             hits = index.search("PKINIT", top_k=10, source_names=("tool_docs",))
@@ -556,8 +558,9 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
 
             chunks_path = temp_root / "snapshots" / exported["snapshot_id"] / "chunks.jsonl"
             original_chunks = chunks_path.read_bytes()
-            chunks_path.write_bytes(original_chunks[:-1] + bytes([original_chunks[-1] ^ 1]))
-            with self.assertRaisesRegex(ValueError, "JSONL hash mismatch"):
+            # Whitespace preserves valid JSON while changing the pinned file hash.
+            chunks_path.write_bytes(original_chunks.replace(b"{", b"{ ", 1))
+            with self.assertRaisesRegex(ValueError, "manifest byte count mismatch|JSONL hash mismatch"):
                 import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
             self.assertEqual(index.stats()["snapshot_id"], exported["snapshot_id"])
 

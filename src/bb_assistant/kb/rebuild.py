@@ -423,30 +423,39 @@ def _strict_json_value(value: str) -> None:
     raise ValueError(f"snapshot contains non-standard JSON constant: {value}")
 
 
-def _read_jsonl(path: Path, expected_sha256: object, expected_rows: int) -> list[dict[str, object]]:
+def _iter_jsonl(path: Path, expected_sha256: object, expected_rows: int) -> Iterator[dict[str, object]]:
+    """Validate and yield JSONL rows without materializing the source file."""
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"snapshot JSONL file is missing or not a regular file: {path.name}")
-    payload = path.read_bytes()
-    if not _is_sha256(expected_sha256) or hashlib.sha256(payload).hexdigest() != expected_sha256:
-        raise ValueError(f"snapshot JSONL hash mismatch: {path.name}")
-    if payload and not payload.endswith(b"\n"):
-        raise ValueError(f"snapshot JSONL file has an unterminated final row: {path.name}")
-    raw_rows = payload[:-1].split(b"\n") if payload else []
-    if len(raw_rows) != expected_rows:
+    if not _is_sha256(expected_sha256):
+        raise ValueError(f"snapshot JSONL hash is invalid: {path.name}")
+    digest = hashlib.sha256()
+    row_count = 0
+    with path.open("rb") as stream:
+        for line_number, raw_row in enumerate(stream, start=1):
+            digest.update(raw_row)
+            if not raw_row.endswith(b"\n"):
+                raise ValueError(f"snapshot JSONL file has an unterminated final row: {path.name}")
+            payload = raw_row[:-1]
+            if not payload:
+                raise ValueError(f"snapshot JSONL contains a blank row: {path.name}:{line_number}")
+            try:
+                value = json.loads(payload.decode("utf-8"), parse_constant=_strict_json_value)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"snapshot JSONL row is invalid: {path.name}:{line_number}") from exc
+            if not isinstance(value, dict):
+                raise ValueError(f"snapshot JSONL row must be an object: {path.name}:{line_number}")
+            row_count += 1
+            yield value
+    if row_count != expected_rows:
         raise ValueError(f"snapshot JSONL row count mismatch: {path.name}")
+    if digest.hexdigest() != expected_sha256:
+        raise ValueError(f"snapshot JSONL hash mismatch: {path.name}")
 
-    rows: list[dict[str, object]] = []
-    for line_number, raw_row in enumerate(raw_rows, start=1):
-        if not raw_row:
-            raise ValueError(f"snapshot JSONL contains a blank row: {path.name}:{line_number}")
-        try:
-            value = json.loads(raw_row.decode("utf-8"), parse_constant=_strict_json_value)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"snapshot JSONL row is invalid: {path.name}:{line_number}") from exc
-        if not isinstance(value, dict):
-            raise ValueError(f"snapshot JSONL row must be an object: {path.name}:{line_number}")
-        rows.append(value)
-    return rows
+
+def _read_jsonl(path: Path, expected_sha256: object, expected_rows: int) -> list[dict[str, object]]:
+    """Compatibility helper for small callers; large imports use _iter_jsonl."""
+    return list(_iter_jsonl(path, expected_sha256, expected_rows))
 
 
 def _validate_metadata(value: object, field_name: str) -> dict[str, str | int | float | bool | None]:
@@ -583,14 +592,14 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     chunk_bytes = _manifest_integer(manifest, "chunks_bytes")
     source_path = root / "source-documents.jsonl"
     chunks_path = root / "chunks.jsonl"
-    document_records = _read_jsonl(source_path, source_documents_sha256, document_count)
-    chunk_records = _read_jsonl(chunks_path, chunks_sha256, chunk_count)
     if source_path.stat().st_size != source_bytes or chunks_path.stat().st_size != chunk_bytes:
         raise ValueError("snapshot manifest byte count mismatch")
-    if not document_records:
+    source_documents = [
+        _source_document_from_record(record)
+        for record in _iter_jsonl(source_path, source_documents_sha256, document_count)
+    ]
+    if not source_documents:
         raise ValueError("snapshot contains no source documents")
-
-    source_documents = [_source_document_from_record(record) for record in document_records]
     source_names = {document.source_name for document in source_documents}
     if len(source_names) != source_count:
         raise ValueError("snapshot manifest source count mismatch")
@@ -598,21 +607,33 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     if len(set(document_keys)) != len(document_keys):
         raise ValueError("snapshot contains duplicate source document identities")
 
-    expected_chunks = [
+    expected_chunks = (
         chunk
         for document in source_documents
         for chunk in chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars)
-    ]
-    if len(expected_chunks) != chunk_count:
-        raise ValueError("snapshot chunk count does not match its source documents")
+    )
     expected_chunk_keys = {item.name for item in fields(CanonicalChunk)}
-    for ordinal, (record, expected) in enumerate(zip(chunk_records, expected_chunks)):
+    chunk_count_seen = 0
+    for ordinal, record in enumerate(_iter_jsonl(chunks_path, chunks_sha256, chunk_count)):
+        try:
+            expected = next(expected_chunks)
+        except StopIteration as exc:
+            raise ValueError("snapshot chunk count does not match its source documents") from exc
         integer_fields_valid = all(
             isinstance(record.get(key), int) and not isinstance(record.get(key), bool)
             for key in ("ordinal", "start_char", "end_char")
         )
         if set(record) != expected_chunk_keys or not integer_fields_valid or record != asdict(expected):
             raise ValueError(f"snapshot chunk hash, identity, provenance, or span mismatch at row {ordinal}")
+        chunk_count_seen += 1
+    try:
+        next(expected_chunks)
+    except StopIteration:
+        pass
+    else:
+        raise ValueError("snapshot chunk count does not match its source documents")
+    if chunk_count_seen != chunk_count:
+        raise ValueError("snapshot chunk count does not match its source documents")
 
     identity_payload = {
         "source_manifest_sha256": source_manifest_sha256,
@@ -629,8 +650,13 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     if expected_snapshot_id != snapshot_id:
         raise ValueError("snapshot manifest id does not match its content digests")
 
+    replacement_chunks = (
+        chunk
+        for document in source_documents
+        for chunk in chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars)
+    )
     imported_count = index.replace_snapshot(
-        expected_chunks,
+        replacement_chunks,
         snapshot_id,
         sources=source_documents,
         source_coverage_state=coverage_state,

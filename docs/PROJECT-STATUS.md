@@ -2749,3 +2749,10 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   provider behavior only. The pinned ExploitDB feed is staged in the validated
   seven-family snapshot; active-index replacement and exact RedAmon snapshot
   and retrieval parity are still pending.
+
+### RedAmon KB import progress — 2026-10-25 20:32 EDT
+
+- The seven-family staged snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049` contains 207,878 source documents and 209,036 canonical chunks, with every configured source reporting `done`. The snapshot passed the importer’s hash/schema validation in read-only mode.
+- The first active import was stopped after identifying a quadratic FTS5 existence check on the unindexed `chunk_id` column. SQLite recovered the original six-family snapshot (`0b7bc15e...`, 161,240 documents, 162,398 chunks, 8,416 staged vectors); no partial replacement was published.
+- Snapshot replacement now rebuilds the FTS5 projection in a linear pass instead of checking each incoming row against the unindexed FTS column. The focused provider/index suite passed (15 tests).
+- The retry completed and the active index now reports snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, `DONE`, 7 families, 207,878 source documents, and 209,036 chunks. It retained 8,416 embeddings, but has no published vector snapshot marker; vector search is not ready. SQLite `quick_check`, the deployed RedAmon data snapshot, and representative retrieval-result parity remain unverified. Do not call the KB identical until those checks pass.
