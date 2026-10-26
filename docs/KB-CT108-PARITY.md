@@ -5,6 +5,48 @@ operator-provided read-only stats; service and single-sample temperature state
 come from the operator's PVE check. No claim below means the installed KB is
 identical to RedAmon.
 
+## Latest coordinator verification — 2026-10-26 22:09 UTC
+
+- Read-only CT108 checks confirmed `VM112` is `paused`. The candidate-only
+  embed unit is still active with PID 83922, but had consumed 1.103 CPU seconds
+  after about 26 minutes and its process showed 0.0% CPU. No vector progress
+  occurred: the candidate remains at 38,775/215,382 content vectors; the active
+  application index remains at 38,888/209,026. The configured `coretemp`
+  `Package id 0` sensor read 84 C; `thermal_zone0` read 27.8 C and is not the
+  package sensor. The 70 C / ten-minute gate therefore remains closed. No
+  model inference or index write was observed in this check.
+- Candidate snapshot ID is
+  `272df7647cab52f6fc0067fd4cdedfd196776a76685a587e885b95273ddd8a33` and its
+  stored source-manifest digest is
+  `931151ff9d5abd47ba1c75db7cb97fff662163ca678cb8e1f22d8b47ccb3e084`.
+  The current workspace manifest digest is
+  `95336ab4a4f6109d93f515d9b465740e035b3bc277197926edbd167d617a0b10`. A
+  direct comparison with commit `274c622` confirms that the only manifest
+  change is a more precise ExploitDB dataset-terms statement; feed URLs,
+  revisions, profile filters, and source-family membership did not change.
+- Inspected the current official RedAmon source at commit
+  [`4585b3442cf3c6e075fca5d3b512a8f47be501b6`](https://github.com/samugit83/redamon/tree/4585b3442cf3c6e075fca5d3b512a8f47be501b6)
+  (2026-10-22). Its [`full` profile config](https://github.com/samugit83/redamon/blob/4585b3442cf3c6e075fca5d3b512a8f47be501b6/services/knowledge_base/kb_config.yaml)
+  lists `tool_docs`, `gtfobins`, `lolbas`, `owasp`, `exploitdb`, `nvd`, and
+  `nuclei`; [`kb-build-full`](https://github.com/samugit83/redamon/blob/4585b3442cf3c6e075fca5d3b512a8f47be501b6/services/knowledge_base/Makefile)
+  sets NVD lookback to 730 days, and the [NVD full profile](https://github.com/samugit83/redamon/blob/4585b3442cf3c6e075fca5d3b512a8f47be501b6/services/knowledge_base/curation/nvd_client.py)
+  ignores the CVSS threshold. These settings match the workspace's declared
+  full-profile manifest. The config file's Git blob ID is
+  `3599de4c7fdd4e75d5c7ff1144ec3d0dec135207`.
+- Compared all ToolDocs Markdown paths and Git blob hashes in the candidate's
+  vendored source against the same upstream commit's `agentic/skills/` tree:
+  46 upstream files, 46 local files, no missing/extra paths, and no differing
+  blobs. This proves the vendored ToolDocs source is current at that commit;
+  it does not prove that the installed RedAmon VM has the same KB snapshot.
+- Candidate source aggregates (content documents/chunks): ExploitDB
+  46,636/46,636; GTFOBins 458/731; LOLBAS 242/464; Nuclei 13,401/19,359; NVD
+  146,938/146,938; OWASP 129/899; ToolDocs 43/355. They sum to the candidate's
+  207,847 searchable source documents and 215,382 content chunks. Source
+  membership and profile-filter parity are now evidenced against upstream
+  source, but the installed RedAmon snapshot and cross-system query results
+  remain unverified because VM112 is paused. Exact corpus/retrieval parity is
+  still `PARTIAL`.
+
 ## Latest coordinator check — 2026-10-26 21:53 UTC
 
 CT108's candidate index was read through SQLite `-readonly`: 215,382 chunk
