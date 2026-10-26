@@ -2842,3 +2842,22 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   It has remained active through two 25-second checks with zero restarts. The
   latest count is 10,656/209,026 content vectors; `vector_ready` is still
   false. These steps do not establish end-to-end RedAmon retrieval parity.
+
+### Resume KB vector generation and strict identity requirement — 2026-10-25 21:32 EDT
+
+- The user clarified that RedAmon KB identity is a required outcome. The prior
+  architecture description of a compatible rebuild from pinned sources is not
+  sufficient evidence for that requirement.
+- The embedding unit was found inactive and disabled. Re-enabled and started
+  the resumable user service against the active seven-family snapshot. It was
+  still running with zero restarts after 70 seconds; the read-only index count
+  advanced from 10,848 to 10,912 of 209,026 content chunks. The vector-ready
+  marker remains unpublished, so vector retrieval is not ready.
+- Exact chunker behavior is verified for all 207,878 documents in the current
+  snapshot, but source bytes are not compared to RedAmon's deployed corpus.
+  The local RedAmon checkout contains source configuration, not its deployed
+  corpus snapshot or FAISS index. Current retrieval remains SQLite FTS5 plus a
+  SQLite vector store rather than RedAmon's Neo4j Lucene plus FAISS. Therefore
+  corpus and query/rank identity remain unverified; do not claim the KB is
+  identical until a pinned RedAmon deployment snapshot or export is available
+  and same-query parity has been measured.
