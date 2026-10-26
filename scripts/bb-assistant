@@ -81,4 +81,11 @@ fi
 export BB_ASSISTANT_KB_MODELS="${BB_ASSISTANT_KB_MODELS:-1}"
 export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
 cd "$repo_root"
+if [[ -n "${BB_ASSISTANT_BINARY:-}" ]]; then
+  if [[ ! -x "$BB_ASSISTANT_BINARY" ]]; then
+    printf 'configured BB_ASSISTANT_BINARY is not executable: %s\n' "$BB_ASSISTANT_BINARY" >&2
+    exit 1
+  fi
+  exec "$BB_ASSISTANT_BINARY" "$@"
+fi
 exec go run ./cmd/bb-assistant "$@"

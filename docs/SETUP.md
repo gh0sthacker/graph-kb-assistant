@@ -51,6 +51,36 @@ The service remains bound to loopback on port 8765. Use a reverse proxy with
 the intended network access policy for remote browser access; do not change the
 application bind address to a LAN or public interface.
 
+For a managed server where Go is not installed on the runtime host, use the
+system service template instead. Build the Go binary on the build host and
+install it as `/usr/local/bin/bb-assistant`; keep the checkout and private
+runtime data on the server. Create
+`~/.local/share/bb-graph-assistant/service.env` from
+`deploy/graph-kb-assistant-system.env.example`, set the selected registered
+project's exact key, and keep the file owner-only (`0600`). The unit routes
+through the tracked launcher, which loads the same private Neo4j/vault
+configuration as the developer launcher before executing the installed binary.
+
+```sh
+go build -o /tmp/bb-assistant ./cmd/bb-assistant
+sudo install -m 0755 /tmp/bb-assistant /usr/local/bin/bb-assistant
+install -d -m 0700 ~/.local/share/bb-graph-assistant
+install -m 0600 deploy/graph-kb-assistant-system.env.example \
+  ~/.local/share/bb-graph-assistant/service.env
+# Edit service.env and set BB_ASSISTANT_PROJECT_KEY to the selected project key.
+sudo install -m 0644 deploy/graph-kb-assistant-system.service \
+  /etc/systemd/system/graph-kb-assistant.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now graph-kb-assistant.service
+sudo systemctl status graph-kb-assistant.service --no-pager
+```
+
+The example assumes the runtime account is `max` and that the checkout and
+private data directory use the paths shown in the unit. Adjust those paths and
+the `User`/`Group` together for another host; do not put Neo4j passwords or the
+vault key in `service.env` or the unit. The corresponding private files remain
+`neo4j.env` and `runtime.env` with mode `0600`.
+
 ## Connect an assistant over MCP
 
 The project exposes a stdio MCP server. The included launcher is:

@@ -1,0 +1,30 @@
+[Unit]
+Description=Graph KB Assistant web application
+After=network-online.target neo4j.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=max
+Group=max
+WorkingDirectory=%h/bb/graph-kb-assistant
+Environment=HOME=%h
+Environment=XDG_DATA_HOME=%h/.local/share
+Environment=BB_ASSISTANT_BINARY=/usr/local/bin/bb-assistant
+Environment=BB_ASSISTANT_NEO4J_ENV_FILE=%h/.local/share/bb-graph-assistant/neo4j.env
+Environment=BB_ASSISTANT_RUNTIME_ENV_FILE=%h/.local/share/bb-graph-assistant/runtime.env
+Environment=BB_ASSISTANT_KB_INDEX=%h/.local/share/bb-graph-assistant/kb/index.sqlite3
+Environment=BB_ASSISTANT_KB_MODELS=1
+Environment=PYTHONPATH=%h/bb/graph-kb-assistant/src
+EnvironmentFile=%h/.local/share/bb-graph-assistant/service.env
+ExecStart=%h/bb/graph-kb-assistant/scripts/bb-assistant serve --addr 127.0.0.1:8765 --project-key=${BB_ASSISTANT_PROJECT_KEY}
+Restart=on-failure
+RestartSec=5
+CPUQuota=150%
+MemoryMax=4G
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

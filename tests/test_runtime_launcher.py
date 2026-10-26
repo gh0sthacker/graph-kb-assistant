@@ -33,6 +33,7 @@ def make_fake_go(tmp_path: Path) -> tuple[dict[str, str], Path]:
     env.pop("BB_ASSISTANT_DATA_HOME", None)
     env.pop("BB_ASSISTANT_RUNTIME_ENV_FILE", None)
     env.pop("BB_ASSISTANT_VAULT_KEY", None)
+    env.pop("BB_ASSISTANT_BINARY", None)
     return env, args_file
 
 
@@ -282,3 +283,78 @@ def test_launcher_preserves_explicit_runtime_configuration_precedence(
     assert state_file.read_text().splitlines() == [
         str(data_root), "sqlite", "explicit-file", "explicit"
     ]
+
+
+def test_launcher_executes_configured_binary_after_loading_runtime_environment(
+    tmp_path: Path,
+) -> None:
+    env, args_file = make_fake_go(tmp_path)
+    binary = tmp_path / "installed" / "bb-assistant"
+    binary.parent.mkdir()
+    binary.write_text(
+        '#!/bin/sh\n'
+        'printf "%s\\n" "$*" > "$GO_ARGS_FILE"\n'
+        'printf "%s" "${BB_ASSISTANT_VAULT_KEY:-missing}" > "$GO_KEY_STATE_FILE"\n'
+    )
+    binary.chmod(0o700)
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text("BB_ASSISTANT_VAULT_KEY=synthetic-installed-key\n")
+    runtime_env.chmod(0o600)
+    key_state_file = tmp_path / "vault-key-state.txt"
+    env.update(
+        {
+            "BB_ASSISTANT_BINARY": str(binary),
+            "BB_ASSISTANT_GRAPH_BACKEND": "sqlite",
+            "BB_ASSISTANT_RUNTIME_ENV_FILE": str(runtime_env),
+            "GO_KEY_STATE_FILE": str(key_state_file),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "scripts" / "bb-assistant"),
+            "serve",
+            "--addr",
+            "127.0.0.1:8765",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text().splitlines() == [
+        "serve --addr 127.0.0.1:8765"
+    ]
+    assert key_state_file.read_text() == "synthetic-installed-key"
+    assert not (Path(env["PATH"].split(":", maxsplit=1)[0]) / "go-args.txt").exists()
+
+
+def test_launcher_fails_closed_for_non_executable_configured_binary(
+    tmp_path: Path,
+) -> None:
+    env, args_file = make_fake_go(tmp_path)
+    binary = tmp_path / "not-executable"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o600)
+    env.update(
+        {
+            "BB_ASSISTANT_BINARY": str(binary),
+            "BB_ASSISTANT_GRAPH_BACKEND": "sqlite",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant"), "status"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "configured BB_ASSISTANT_BINARY is not executable" in result.stderr
+    assert not args_file.exists()
