@@ -2815,3 +2815,30 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   title, and text (zero differences). This proves chunking parity for the
   active stored document text; it does not prove the stored source text is
   byte-identical to RedAmon's deployed corpus.
+
+### LAN access and resumable embedding — 2026-10-25 21:25 EDT
+
+- Proxmox2 is `192.168.1.148`; the Kali guest is `10.10.10.10`. The prior
+  persistent LAN DNAT sent port 8765 to the guest's unauthenticated UI port
+  8766. Its `/api/projects` response included `project_key`. Updated
+  `/etc/iptables/rules.v4` and `/usr/local/sbin/graph-assistant-lan-nat` on
+  Proxmox2 so LAN clients from `192.168.1.0/24` reach the Basic Auth proxy at
+  guest port 8765. `netfilter-persistent reload` and the idempotent NAT script
+  both completed; persistent DNAT, hairpin, MASQUERADE, and FORWARD rules now
+  target port 8765. Backups of both host files were retained.
+- Read-only hairpin verification from the guest through
+  `192.168.1.148:8765` returned `401` for unauthenticated `/api/projects` and
+  `200` for the authenticated Graph Explorer page and one-project API result.
+  No project key was printed. The entry URL for clients on the Proxmox2 LAN is
+  `http://192.168.1.148:8765/`; a separate physical LAN client has not yet
+  been used for a direct check.
+- Added a `graph-user` Basic Auth account to the guest proxy; its password is
+  delivered to the owner out of this project-status file. The user-level web
+  app and authenticated proxy units are active under the lingering `max`
+  systemd user manager.
+- The embedding process had received an external clean stop in shell/transient
+  sessions. Replaced that launch with enabled user unit
+  `graph-kb-assistant-kb-embed.service` (`Restart=on-failure`, batch size 64).
+  It has remained active through two 25-second checks with zero restarts. The
+  latest count is 10,656/209,026 content vectors; `vector_ready` is still
+  false. These steps do not establish end-to-end RedAmon retrieval parity.
