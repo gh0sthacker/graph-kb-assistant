@@ -339,11 +339,17 @@ instance until its active profile and snapshot are identified.
 KB parity acceptance requires all of the following:
 
 - The same selected profile, source families, pinned revisions, filters,
-  source document counts, and normalized/chunked content. Record per-source
-  counts and content digests; keep generated corpus/index files outside Git.
-- The same pinned E5 and BGE model revisions and complete vector coverage for
-  the selected corpus. Compare representative retrieval outputs against the
-  same RedAmon snapshot; matching configuration constants alone is insufficient.
+  source records, metadata, normalized content, chunk order, IDs, titles, and
+  text as the identified active RedAmon snapshot. Record per-source counts and
+  content digests; keep generated corpus/index files outside Git.
+- The same embedding input/preprocessing, pinned E5 and BGE model revisions,
+  dimensions, and complete vector coverage. Vector readiness is bound to the
+  exact selected corpus snapshot.
+- A fixed query fixture from that same RedAmon snapshot must return identical
+  ordered chunk IDs and compatible score components within a documented
+  numeric tolerance. Matching model/config constants alone is insufficient;
+  if the current FTS/vector backends diverge, replace or adapt them until the
+  fixture passes rather than weakening the parity criterion.
 - Every source has recorded license/terms evidence and required attribution.
   The metadata-only ExploitDB GitLab feed now records the pinned README and
   LICENSE as its terms evidence and excludes PoC/source files. Its data has
@@ -353,9 +359,21 @@ KB parity acceptance requires all of the following:
   snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
   query-parity item remains incomplete or unverified.
 
-Current verification (2026-10-25): the corrected chunker matched RedAmon's
-`ChunkStrategy` over the original 161,240 source documents. The expanded pinned
-`full` snapshot has since been installed as `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`: seven families report `done`, with 207,878 source documents and 209,036 chunks. SQLite `quick_check` returned `ok`. The active Graph Assistant service explicitly selects this full index through `BB_ASSISTANT_KB_INDEX`; a separate older five-family index under the app data root is not selected. At the 2026-10-25 20:56 EDT checkpoint, the resumable E5 job was active without restarts and had produced 9,184/209,026 content vectors; `vector_ready` remains false. The installed source set matches the seven family names selected by RedAmon's `full` profile, with pinned revisions and recorded fetch filters/counts. The active deployment's RedAmon profile/snapshot is not available for comparison, so exact source-content equality and same-corpus result/rank parity remain unverified. Retrieval uses the same pinned E5/BGE revisions and configured RRF, source boosts, rerank pool, and MMR policy, but keyword candidate generation differs: Graph Assistant uses SQLite FTS5/BM25 while RedAmon uses Neo4j Lucene full-text. Matching ranking constants alone cannot establish query parity. Metadata filters for `min_cvss` and `severity` were added to the Go search/MCP contract and their focused synthetic tests pass. These results verify source-provider coverage, import, runtime path selection, and selected retrieval behavior, not full deployed KB parity; delivery remains `PARTIAL` until vector readiness and same-snapshot query comparisons are verified.
+Current verification (2026-10-25 21:36 EDT): the corrected chunker matched RedAmon's
+`ChunkStrategy` over the original 161,240 source documents. The installed pinned
+`full` snapshot is `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`:
+seven source families report `done`, with 207,878 documents and 209,036 chunks.
+The active Graph Assistant service selects this index through
+`BB_ASSISTANT_KB_INDEX`; SQLite `quick_check` previously returned `ok`. The
+resumable E5 service is active with zero restarts and currently has 11,296 of
+209,026 content vectors; `vector_ready` is false. All seven configured source
+families, including the metadata-only ExploitDB feed, are installed, but their
+counts and hashes have not been compared with the active RedAmon deployment.
+The RedAmon deployment profile, exact corpus snapshot, and same-query reference
+fixture are still unavailable in this workspace. Retrieval currently uses
+SQLite FTS5/BM25 and a SQLite vector store, while RedAmon uses Neo4j Lucene and
+FAISS. Same-snapshot content equality and ordered result/score parity therefore
+remain unverified; delivery is `PARTIAL`, not identical.
 The `bb-assistant-kb rechunk` command is implemented to refresh the installed
 index from already stored source documents, with no source fetch. It uses
 bounded, resumable transactions and a durable maintenance marker; Python and
