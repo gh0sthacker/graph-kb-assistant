@@ -804,7 +804,7 @@ func TestOperationAliasAPIIsProjectScopedAndRequiresAnExistingOperationNode(t *t
 		t.Fatalf("list response status=%d calls=%d body=%s", get.Code, api.operationAliasGetCalls, get.Body.String())
 	}
 
-	body := `{"project_key":"` + projectKey + `","operation_id":"` + operationID + `","expected_version":1,"idempotency_key":"operation-alias-0123456789","alias":"Profile update"}`
+	body := `{"project_key":"` + projectKey + `","operation_id":"` + operationID + `","expected_version":1,"idempotency_key":"test-idem","alias":"Profile update"}`
 	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/operation-alias", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", "http://127.0.0.1")
