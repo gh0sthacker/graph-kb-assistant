@@ -123,6 +123,40 @@ func TestOpenIndexReadsPythonCompatibleFTSIndexReadOnly(t *testing.T) {
 	}
 }
 
+func TestStatsAndSearchDowngradeStaleDoneCoverageCounts(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic stale coverage fixture"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE kb_meta SET value='DONE' WHERE key='coverage_state'`); err == nil {
+		_, err = db.Exec(`UPDATE kb_meta SET value=? WHERE key='source_coverage'`,
+			`[{"source_name":"synthetic","state":"done","document_count":1,"chunk_count":2}]`)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare stale DONE coverage metadata: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	stats, err := index.Stats(context.Background())
+	if err != nil || stats.CoverageState != "PARTIAL" {
+		t.Fatalf("Stats() coverage = %q, %v; want PARTIAL", stats.CoverageState, err)
+	}
+	result, err := index.Search(context.Background(), "synthetic", SearchOptions{})
+	if err != nil || result.CoverageState != "PARTIAL" || len(result.Hits) != 1 {
+		t.Fatalf("Search() coverage/hits = %q/%d, %v; want PARTIAL/1", result.CoverageState, len(result.Hits), err)
+	}
+}
+
 func TestStatsReportsStagedVectorProgressAndFailsClosed(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
 	content := "synthetic second chunk for embedding progress"

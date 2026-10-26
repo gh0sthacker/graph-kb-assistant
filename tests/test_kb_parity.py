@@ -10,7 +10,7 @@ from bb_assistant.kb.canonical import SourceDocument, chunk_document
 from bb_assistant.kb.index import KBIndex
 from bb_assistant.kb.parity import compare_receipts, export_assistant_receipt, load_query_fixture, load_receipt
 from bb_assistant.kb.redamon_sources import RedAmonSnapshot
-from bb_assistant.kb.rebuild import export_redamon_snapshot, import_snapshot
+from bb_assistant.kb.rebuild import _validate_coverage_source_counts, export_redamon_snapshot, import_snapshot
 
 
 _HASH_A = "a" * 64
@@ -71,6 +71,17 @@ def _receipt(producer: str) -> dict[str, object]:
 
 def _fixture() -> dict[str, object]:
     return {"schema_version": 1, "queries": _receipt("redamon")["queries"]}
+
+
+def test_done_coverage_counts_must_match_the_snapshot_records() -> None:
+    report = {"coverage_state": "DONE", "sources": [{
+        "source_name": "owasp", "state": "done", "document_count": 1, "chunk_count": 2,
+    }]}
+
+    with pytest.raises(ValueError, match="chunk_count does not match snapshot"):
+        _validate_coverage_source_counts(report, {"owasp": 1}, {"owasp": 1})
+
+    _validate_coverage_source_counts(report, {"owasp": 1}, {"owasp": 2})
 
 
 def test_load_receipt_rejects_incomplete_vectors(tmp_path: Path) -> None:

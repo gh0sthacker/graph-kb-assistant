@@ -5,6 +5,7 @@ only serializes already-fetched source documents and deterministic chunks.
 """
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import asdict, fields
 from datetime import datetime, timezone
@@ -90,6 +91,8 @@ def export_snapshot(
     chunks_digest = hashlib.sha256()
     source_size = 0
     chunks_size = 0
+    documents_by_source: Counter[str] = Counter()
+    chunks_by_source: Counter[str] = Counter()
     try:
         with _atomic_writer(staging_dir / "source-documents.jsonl") as source_stream:
             with _atomic_writer(staging_dir / "chunks.jsonl") as chunk_stream:
@@ -103,14 +106,17 @@ def export_snapshot(
                     source_size += len(line)
                     document_count += 1
                     source_names.add(document.source_name)
+                    documents_by_source[document.source_name] += 1
                     for chunk in chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars):
                         chunk_line = _json_line(asdict(chunk))
                         chunk_stream.write(chunk_line)
                         chunks_digest.update(chunk_line)
                         chunks_size += len(chunk_line)
                         chunk_count += 1
+                        chunks_by_source[document.source_name] += 1
         if document_count == 0:
             raise ValueError("Cannot create an empty KB snapshot")
+        _validate_coverage_source_counts(coverage_report, documents_by_source, chunks_by_source)
         source_digest_hex = source_digest.hexdigest()
         chunks_digest_hex = chunks_digest.hexdigest()
         snapshot_identity = {
@@ -539,6 +545,36 @@ def _validate_coverage_report(
     return state, report_sha256, report
 
 
+def _validate_coverage_source_counts(
+    report: Mapping[str, object] | None,
+    documents_by_source: Mapping[str, int],
+    chunks_by_source: Mapping[str, int],
+) -> None:
+    """Reject a DONE report whose source counts do not describe its files."""
+    if report is None or report.get("coverage_state") != "DONE":
+        return
+    sources = report.get("sources")
+    if not isinstance(sources, list):
+        raise ValueError("DONE source coverage must include per-source counts")
+    names: set[str] = set()
+    for row in sources:
+        if not isinstance(row, dict):
+            raise ValueError("DONE source coverage contains a malformed source row")
+        name = row.get("source_name")
+        if not isinstance(name, str) or not name or name in names:
+            raise ValueError("DONE source coverage contains a missing or duplicate source name")
+        names.add(name)
+        for field, actual in (
+            ("document_count", documents_by_source.get(name, 0)),
+            ("chunk_count", chunks_by_source.get(name, 0)),
+        ):
+            value = row.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value != actual:
+                raise ValueError(f"DONE source coverage {field} does not match snapshot for {name}")
+    if names != set(documents_by_source) or names != set(chunks_by_source):
+        raise ValueError("DONE source coverage families do not match snapshot records")
+
+
 def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     """Validate and atomically import a previously exported lexical KB snapshot.
 
@@ -603,6 +639,7 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     source_names = {document.source_name for document in source_documents}
     if len(source_names) != source_count:
         raise ValueError("snapshot manifest source count mismatch")
+    documents_by_source = Counter(document.source_name for document in source_documents)
     document_keys = [(document.source_name, document.source_id) for document in source_documents]
     if len(set(document_keys)) != len(document_keys):
         raise ValueError("snapshot contains duplicate source document identities")
@@ -614,6 +651,7 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     )
     expected_chunk_keys = {item.name for item in fields(CanonicalChunk)}
     chunk_count_seen = 0
+    chunks_by_source: Counter[str] = Counter()
     for ordinal, record in enumerate(_iter_jsonl(chunks_path, chunks_sha256, chunk_count)):
         try:
             expected = next(expected_chunks)
@@ -626,6 +664,7 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
         if set(record) != expected_chunk_keys or not integer_fields_valid or record != asdict(expected):
             raise ValueError(f"snapshot chunk hash, identity, provenance, or span mismatch at row {ordinal}")
         chunk_count_seen += 1
+        chunks_by_source[expected.source_name] += 1
     try:
         next(expected_chunks)
     except StopIteration:
@@ -634,6 +673,7 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
         raise ValueError("snapshot chunk count does not match its source documents")
     if chunk_count_seen != chunk_count:
         raise ValueError("snapshot chunk count does not match its source documents")
+    _validate_coverage_source_counts(coverage_report, documents_by_source, chunks_by_source)
 
     identity_payload = {
         "source_manifest_sha256": source_manifest_sha256,

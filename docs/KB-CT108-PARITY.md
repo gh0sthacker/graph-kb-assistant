@@ -175,3 +175,36 @@ manifest hashes were updated from the CI-passing branch files with backups.
 Hashes now match for all 21 tracked `src/bb_assistant/kb` files. This ensures
 the next imported snapshot records the current source-manifest hash instead of
 leaving it null.
+
+## Live read-only index integrity check — 2026-10-26 18:36–18:40 UTC
+
+Authenticated read-only inspection of PVE confirmed CT108's
+`graph-kb-assistant.service` is active and `/api/health` returns `ok` at
+`0.1.0-go-dev+d0efdb63e31f`; the embed unit is inactive. VM112 (`agent-hub`)
+remains paused. PVE had 3.8 GiB available memory, 7.8/8 GiB swap used, and one
+66 C package-temperature sample. No guest was resumed, and no rebuild or
+embedding was started.
+
+The CT108 SQLite index was opened using SQLite URI `mode=ro` and
+`PRAGMA query_only=ON`. Its active snapshot remains
+`ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, with
+207,878 source documents, 209,036 stored chunks, and 38,888 E5 vector rows.
+The published vector model metadata is absent; a staging marker targets this
+snapshot, so vectors are not ready. The index's coverage metadata says `DONE`,
+but per-source counts do not match either its immutable `chunks.jsonl` or the
+active `chunks` table: ToolDocs coverage says 434 versus 432 actual chunks;
+OWASP says 913 versus 900. All other source-family chunk counts match. The
+snapshot-level total of 209,036 matches the file and database, while the
+per-source coverage rows sum to 209,051. A streaming read of the 513 MB chunk
+file confirmed the per-source counts in SQLite. Therefore the source-level
+`DONE` assertion is not trustworthy, and the current data cannot produce a
+valid parity receipt.
+
+The parity exporter and snapshot importer now reject `DONE` coverage whose
+per-source document or chunk counts disagree with the snapshot records. Go KB
+stats and search also downgrade such a snapshot to `PARTIAL` while preserving
+search results. These code changes are not yet deployed to CT108; the installed
+Go binary above still reports its prior behavior. The new checks passed their
+focused local Go and Python tests. The next safe data action is to reconcile the
+coverage rows from already stored documents, then produce a new immutable
+snapshot before any vector work.

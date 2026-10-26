@@ -370,6 +370,15 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 				return StatsResult{}, errors.New("KB source coverage contradicts its DONE state")
 			}
 		}
+		if result.CoverageState == "DONE" {
+			matches, err := coverageCountsMatch(ctx, tx)
+			if err != nil {
+				return StatsResult{}, errors.New("KB source coverage counts could not be verified")
+			}
+			if !matches {
+				result.CoverageState = "PARTIAL"
+			}
+		}
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil || len(encoded) > maximumSourceCoverageBytes+4096 {
@@ -592,6 +601,15 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	result, err := readSnapshotInfo(ctx, tx)
 	if err != nil {
 		return SearchResult{}, err
+	}
+	if result.CoverageState == "DONE" {
+		matches, err := coverageCountsMatch(ctx, tx)
+		if err != nil {
+			return SearchResult{}, errors.New("KB source coverage counts could not be verified")
+		}
+		if !matches {
+			result.CoverageState = "PARTIAL"
+		}
 	}
 	if result.MaintenanceState != "" {
 		return SearchResult{}, errors.New("KB index maintenance is in progress")
@@ -1177,6 +1195,92 @@ func readSnapshotInfo(ctx context.Context, queryer rowQueryer) (SearchResult, er
 		return SearchResult{}, errors.New("KB coverage report provenance is invalid")
 	}
 	return result, nil
+}
+
+// coverageCountsMatch checks that a DONE report describes the active tables,
+// rather than only trusting a hashed but stale coverage report.
+func coverageCountsMatch(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var raw []byte
+	err := tx.QueryRowContext(ctx,
+		"SELECT substr(CAST(value AS BLOB),1,?) FROM kb_meta WHERE key='source_coverage'",
+		maximumSourceCoverageBytes+1,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil || len(raw) > maximumSourceCoverageBytes {
+		return false, errors.New("source coverage metadata could not be read")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var coverage []map[string]any
+	if err := decoder.Decode(&coverage); err != nil || coverage == nil || len(coverage) > maximumSourceCoverageRows {
+		return false, errors.New("source coverage metadata is invalid")
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return false, errors.New("source coverage metadata has trailing data")
+	}
+	actualDocuments, err := groupedSourceCounts(ctx, tx, "source_documents")
+	if err != nil {
+		return false, err
+	}
+	actualChunks, err := groupedSourceCounts(ctx, tx, "chunks")
+	if err != nil {
+		return false, err
+	}
+	if len(coverage) != len(actualDocuments) || len(coverage) != len(actualChunks) {
+		return false, nil
+	}
+	seen := make(map[string]struct{}, len(coverage))
+	for _, row := range coverage {
+		name, ok := row["source_name"].(string)
+		if !ok || name == "" {
+			return false, nil
+		}
+		if _, exists := seen[name]; exists {
+			return false, nil
+		}
+		seen[name] = struct{}{}
+		documents, documentsOK := coverageCount(row["document_count"])
+		chunks, chunksOK := coverageCount(row["chunk_count"])
+		if !documentsOK || !chunksOK || actualDocuments[name] != documents || actualChunks[name] != chunks {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func groupedSourceCounts(ctx context.Context, tx *sql.Tx, table string) (map[string]int64, error) {
+	if table != "source_documents" && table != "chunks" {
+		return nil, errors.New("unsupported KB source-count table")
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT source_name,count(*) FROM "+table+" GROUP BY source_name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var count int64
+		if err := rows.Scan(&name, &count); err != nil {
+			return nil, err
+		}
+		counts[name] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+func coverageCount(value any) (int64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	count, err := number.Int64()
+	return count, err == nil && count >= 0
 }
 
 func queryTerms(input string) []string {
