@@ -3235,3 +3235,26 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   browser flow and post-deployment runtime version remain unverified. KB
   indexing/parity is being handled separately and was not changed by this
   check; delivery remains `PARTIAL`.
+
+## CT108 current Go deployment and LAN smoke — 2026-10-26 — PARTIAL
+
+- Deployed the Linux amd64 artifact for commit `895ac465832e291fdc0755363d5c50d43cfb0b86`
+  to `/usr/local/bin/bb-assistant` in existing LXC CT 108. The prior executable
+  is retained as `/usr/local/bin/bb-assistant.before-895ac46` for rollback.
+  The installed artifact reports `0.1.0-go-dev+895ac465832e` and SHA-256
+  `58aa5cd713363e4e86d1b85b2318c80d346fb0edbe53ce63279270b5a19e42b9`.
+- Restarted `graph-kb-assistant.service`; it is active with zero restarts.
+  Read-only checks against the deployed runtime returned `neo4j-check=ready`,
+  HTTP 200 for the authenticated Graph Explorer page and `/api/health`, and
+  one project from `/api/projects`. A dedicated `graph-demo` Basic Auth account
+  was added; its credential was delivered directly and is intentionally not
+  recorded here.
+- Direct address for clients with a route to the private LAN is
+  `http://192.168.2.154/`; unauthenticated traffic receives the expected
+  `401`. No NAT/port-forwarding rules were added. The CT remains on DHCP and
+  the app, Neo4j, and Nginx run there; no KB embedding or model process was
+  started.
+- The deployed Go status remains `PARTIAL`: one registered project has 1,400
+  captures, 1,398 applied projection jobs and two dead-letter jobs. Historical
+  source completeness and active-target behavior remain unverified. KB vectors
+  and exact RedAmon corpus/query parity remain outside this deployment change.
