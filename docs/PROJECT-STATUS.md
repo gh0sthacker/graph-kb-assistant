@@ -2808,3 +2808,10 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   still unverified. Do not call the KB identical. Next: finish vectors, then
   compare against a pinned RedAmon corpus/query fixture and close or document
   any remaining engine-specific differences.
+- A read-only corpus-wide chunker comparison then fed every active source
+  document through both this project's canonical chunker and the actual
+  `ChunkStrategy` from pinned RedAmon checkout `cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`.
+  All 207,878 documents and 209,036 stored chunks matched on chunk count,
+  title, and text (zero differences). This proves chunking parity for the
+  active stored document text; it does not prove the stored source text is
+  byte-identical to RedAmon's deployed corpus.
