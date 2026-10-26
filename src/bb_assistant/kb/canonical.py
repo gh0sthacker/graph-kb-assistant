@@ -138,16 +138,27 @@ def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_c
         raise ValueError("RedAmon-compatible chunks require max_chars >= 256 and zero overlap")
     if not document.text:
         return ()
-    rendered = (_markdown_chunks(document.text, max_chars)
-                if document.source_name in {"tool_docs", "owasp"}
-                else _structured_chunks(document, max_chars))
+    if document.source_name == "tool_docs" and document.metadata.get("category_dir") == "tooling":
+        # RedAmon indexes each tooling file as one compact summary card and
+        # keeps the tool name as its title; the summary's first line is not a
+        # Markdown section heading.
+        rendered = [(document.text, document.title, False)]
+    else:
+        rendered = (_markdown_chunks(document.text, max_chars)
+                    if document.source_name in {"tool_docs", "owasp"}
+                    else _structured_chunks(document, max_chars))
     chunks = []
     cursor = 0
     for content, title, truncated in rendered:
         start, end, exact = _source_span(document.text, content, cursor)
         metadata = {**document.metadata, "chunk_truncated": True} if truncated else document.metadata
+        chunk_title = title
+        if document.source_name == "tool_docs" and document.metadata.get("category_dir") != "tooling":
+            tool_name = str(document.metadata.get("tool_name") or document.title)
+            if tool_name.lower() not in title.lower():
+                chunk_title = f"{tool_name} — {title}"
         chunks.append(CanonicalChunk.from_document(
-            document, len(chunks), start, end, content, title=title, metadata=metadata,
+            document, len(chunks), start, end, content, title=chunk_title, metadata=metadata,
             source_span_exact=exact,
         ))
         cursor = end

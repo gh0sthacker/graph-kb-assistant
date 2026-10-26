@@ -10,7 +10,7 @@ sources:
   - id: tool_docs
     kind: local_markdown
     local_root: references/redamon/agentic-skills
-    include_categories: [tooling, vulnerabilities, frameworks, protocols, technologies, scan_modes, active_directory, api_security, cloud, coordination, mobile, network, post_exploitation, reporting, social_engineering, wireless]
+    include_categories: [tooling, vulnerabilities, frameworks, protocols, technologies, scan_modes, active_directory, api_security, cloud, coordination, mobile, network, reporting, social_engineering, wireless]
     exclude: [root_agent.md]
     revision: cf1b9e926a2af4420f5a894e7c8ddd225968c9d2
     revision_date: "2026-10-20"

@@ -352,6 +352,13 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires a frontmatter description"):
             _redamon_search_text("# Missing description", "tooling", "fixture")
 
+        sectioned = SourceDocument.create(
+            source_name="tool_docs", source_id="vulnerabilities/business_logic.md",
+            title="Business Logic Flaws", text="## Tool wiring\n\nUse the captured request flow.",
+            metadata={"category_dir": "vulnerabilities", "tool_name": "Business Logic Flaws"},
+        )
+        self.assertEqual(chunk_document(sectioned)[0].title, "Business Logic Flaws — Tool wiring")
+
     def test_snapshot_refresh_reuses_vectors_for_unchanged_chunk_identities(self) -> None:
         class FakeEmbedder:
             model_name = "fixture-model"
@@ -553,18 +560,29 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         ).build(max_chars=1200, overlap_chars=0)
         coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "tool_docs")
         self.assertEqual(coverage["state"], "done")
-        self.assertEqual(coverage["fetched_count"], 46)
-        self.assertEqual(len(snapshot.documents), 47)  # All 46 documents plus the MIT notice.
+        self.assertEqual(coverage["fetched_count"], 43)
+        self.assertEqual(len(snapshot.documents), 44)  # RedAmon's 43 imported documents plus the MIT notice.
+        tool_doc_chunks = [
+            chunk for document in snapshot.documents
+            if document.source_name == "tool_docs" and document.metadata.get("document_role") != "license_notice"
+            for chunk in chunk_document(document)
+        ]
+        parity_rows = sorted((chunk.title, chunk.text) for chunk in tool_doc_chunks)
+        self.assertEqual(len(parity_rows), 355)
+        self.assertEqual(
+            hashlib.sha256(json.dumps(parity_rows, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+            "dff7ec09f6fb428beaa97f917eba5ddc211ac58db10b281536eb7a1c27592c6b",
+        )  # Golden title/content output from RedAmon ToolDocsClient at the pinned commit.
         tool_doc_ids = {
             document.source_id for document in snapshot.documents
             if document.source_name == "tool_docs" and document.metadata.get("document_role") != "license_notice"
         }
-        self.assertEqual(tool_doc_ids, {row["path"] for row in bundle_manifest["documents"]})
-        self.assertTrue({
-            "post_exploitation/docker_escape.md",
-            "post_exploitation/linux_privesc.md",
-            "post_exploitation/windows_privesc.md",
-        }.issubset(tool_doc_ids))
+        expected_tool_doc_ids = {
+            row["path"] for row in bundle_manifest["documents"]
+            if row["path"].partition("/")[0] in spec["include_categories"]
+        }
+        self.assertEqual(tool_doc_ids, expected_tool_doc_ids)
+        self.assertFalse(any(source_id.startswith("post_exploitation/") for source_id in tool_doc_ids))
         tooling_doc = next(
             document for document in snapshot.documents
             if document.source_name == "tool_docs" and document.source_id == "tooling/nmap.md"
@@ -591,7 +609,7 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             with patch("bb_assistant.kb.rebuild._read_jsonl", side_effect=AssertionError("bulk JSONL materializer used")):
                 stats = import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
             self.assertEqual(stats["coverage_state"], "PARTIAL")
-            self.assertEqual(stats["source_documents"], 47)
+            self.assertEqual(stats["source_documents"], 44)
             self.assertEqual(stats["source_manifest_sha256"], hashlib.sha256(raw_manifest).hexdigest())
             self.assertTrue(stats["source_manifest_matches_current"])
             hits = index.search("PKINIT", top_k=10, source_names=("tool_docs",))
