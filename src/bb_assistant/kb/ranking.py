@@ -53,8 +53,10 @@ def reciprocal_rank_fusion(
 def source_title_similarity(a: RankedCandidate, b: RankedCandidate) -> float:
     """RedAmon's inexpensive source/title overlap proxy used by MMR."""
     similarity = 0.4 if a.source_name and a.source_name == b.source_name else 0.0
-    tokens_a = set(a.title.casefold().split())
-    tokens_b = set(b.title.casefold().split())
+    # RedAmon uses str.lower(), not casefold(); keep Unicode tokenization
+    # identical because the similarity score can change MMR result order.
+    tokens_a = set(a.title.lower().split())
+    tokens_b = set(b.title.lower().split())
     if tokens_a or tokens_b:
         similarity += 0.6 * len(tokens_a & tokens_b) / max(len(tokens_a | tokens_b), 1)
     return min(similarity, 1.0)

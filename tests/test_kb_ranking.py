@@ -7,7 +7,9 @@ import sqlite3
 import tempfile
 from unittest.mock import patch
 
-from bb_assistant.kb.ranking import RankedCandidate, rank_candidates, reciprocal_rank_fusion
+from bb_assistant.kb.ranking import (
+    RankedCandidate, rank_candidates, reciprocal_rank_fusion, source_title_similarity,
+)
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
 from bb_assistant.kb.index import KBIndex, _commit_with_busy_retry, _redamon_fulltext_expression
 from bb_assistant.project_lock import project_maintenance_read_lock
@@ -71,6 +73,11 @@ class _TransientLockConnection:
 
 
 class RetrievalRankingTests(unittest.TestCase):
+    def test_mmr_title_normalization_matches_redamon_lower_not_casefold(self) -> None:
+        first = RankedCandidate("a", "nvd", "Straße vulnerability")
+        second = RankedCandidate("b", "nuclei", "Strasse vulnerability")
+        self.assertAlmostEqual(source_title_similarity(first, second), 0.2)
+
     def test_supplemental_chunks_are_opt_in_and_remain_searchable(self) -> None:
         canonical_document = SourceDocument.create(
             source_name="fixture", source_id="canonical.yaml", title="Canonical template",
