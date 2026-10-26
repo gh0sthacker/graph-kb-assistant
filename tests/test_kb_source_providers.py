@@ -20,7 +20,7 @@ from bb_assistant.kb.owasp import RedAmonOWASPProvider
 from bb_assistant.kb.pinned_github_archive import read_pinned_archive
 from bb_assistant.kb.index import KBIndex
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
-from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider
+from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider, _redamon_search_text
 from bb_assistant.kb.rebuild import _source_document_from_record, export_redamon_snapshot, import_snapshot, rechunk_index
 from bb_assistant.kb.redamon_sources import (
     RedAmonSourceAdapter,
@@ -333,6 +333,25 @@ class SourceRightsAndCoverageGateTests(unittest.TestCase):
 
 
 class VendoredToolDocsSnapshotTests(unittest.TestCase):
+    def test_tooldocs_search_text_matches_redamon_normalization(self) -> None:
+        tooling = (
+            "---\nname: nmap\ndescription: Network mapper.\n---\n"
+            "# nmap\n\nCanonical syntax: `nmap [options] target`\n\n"
+            "Agent-safe baseline for automation: `nmap -sV 192.0.2.10`\n"
+        )
+        self.assertEqual(
+            _redamon_search_text(tooling, "tooling", "nmap"),
+            "nmap — Network mapper.\n\nSyntax: `nmap [options] target`\n\n"
+            "Example: `nmap -sV 192.0.2.10`",
+        )
+        prose = "---\nname: access-control\ndescription: Metadata.\n---\n# Access control\n\nBody.\n"
+        self.assertEqual(
+            _redamon_search_text(prose, "vulnerabilities", "Access control"),
+            "# Access control\n\nBody.",
+        )
+        with self.assertRaisesRegex(ValueError, "requires a frontmatter description"):
+            _redamon_search_text("# Missing description", "tooling", "fixture")
+
     def test_snapshot_refresh_reuses_vectors_for_unchanged_chunk_identities(self) -> None:
         class FakeEmbedder:
             model_name = "fixture-model"
@@ -546,6 +565,21 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             "post_exploitation/linux_privesc.md",
             "post_exploitation/windows_privesc.md",
         }.issubset(tool_doc_ids))
+        tooling_doc = next(
+            document for document in snapshot.documents
+            if document.source_name == "tool_docs" and document.source_id == "tooling/nmap.md"
+        )
+        self.assertTrue(tooling_doc.text.startswith("nmap playbook — "))
+        self.assertTrue(tooling_doc.raw_source_text.startswith("---\n"))
+        self.assertNotEqual(tooling_doc.text, tooling_doc.raw_source_text)
+        non_tooling_doc = next(
+            document for document in snapshot.documents
+            if document.source_name == "tool_docs"
+            and document.metadata.get("document_role") != "license_notice"
+            and not document.source_id.startswith("tooling/")
+        )
+        self.assertIsNotNone(non_tooling_doc.raw_source_text)
+        self.assertFalse(non_tooling_doc.text.startswith("---\n"))
         self.assertEqual(snapshot.coverage_state, "PARTIAL")  # Other six source families are not in this fixture.
 
         with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-test-") as temporary:
