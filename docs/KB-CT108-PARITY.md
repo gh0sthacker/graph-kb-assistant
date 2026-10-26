@@ -114,3 +114,35 @@ the KVM process for VM 112 (`agent-hub`) showed about 60% CPU in a point
 sample; the Graph Assistant embedding unit was inactive. No source rebuild or
 embedding was started. That unrelated VM was left untouched. CT108 has 89 GiB free on its data filesystem. No RedAmon runtime or
 reference receipt was available from PVE.
+
+## Coordinator deployment check — 2026-10-26 16:32 UTC
+
+CI run `40358810695` completed successfully for PR head
+`625eb0fde07ac011f98efb0e86a992eb9b9db142`. The verified Linux artifact was
+built from the PR merge revision `d0efdb63e31f`; its SHA-256 matched the
+workflow checksum before and after transfer to CT108. The binary is installed
+as `/usr/local/bin/bb-assistant`, and its reported version is
+`0.1.0-go-dev+d0efdb63e31f`. The previous binary and systemd unit were backed
+up before replacement. The only unit difference was the explicit
+`BB_ASSISTANT_KB_PYTHON` path to the existing pinned-model virtual environment.
+`systemd-analyze verify` passed, the app service is active, and
+`/api/health` returned `ok` with the new version. The KB embed service remains
+inactive.
+
+A fresh read-only `bb_kb_stats` MCP call against CT108 confirmed the active
+snapshot is still `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`:
+7 families, 207,878 documents, 209,026 content chunks, and 38,888 embedded
+content chunks (18.6%). `vector_ready=false`; the snapshot manifest hash is
+still null while the current source-manifest hash is
+`95336ab4a4f6109d93f515d9b465740e035b3bc277197926edbd167d617a0b10`. The
+active ToolDocs coverage remains 434 chunks versus 355 expected from the
+pinned RedAmon-derived fixture. The snapshot therefore needs a controlled
+source rebuild before vector completion can be meaningful.
+
+The pinned E5 and BGE model cache directories and Python package are present.
+An idle model-worker import/exit check passed without loading either model or
+running inference. At 16:32 UTC the PVE package sensor reported 69 C once;
+this is not the required continuous ten-minute below-70 C window. No source
+rebuild or embedding was started, and the vector count is unchanged. The
+current blockers are the stale active snapshot, incomplete vectors, absent
+RedAmon query receipts, and the unverified thermal dwell.
