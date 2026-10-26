@@ -1,5 +1,22 @@
 # Project status and known limitations
 
+## Current read-only runtime check (2026-10-26 01:53 EDT) — PARTIAL
+
+- The configured KB index was read through SQLite's standard read-only mode
+  while its existing embedding worker was present. It contains 207,878 source
+  documents and 209,036 total chunks (209,026 content chunks), with 31,264
+  stored E5 vectors. Source coverage is `DONE`; vector staging targets the
+  current snapshot, but the published vector-ready metadata is not set. The
+  active worker is making progress, so no duplicate embedder was started.
+- A concurrent-reader check initially used SQLite `immutable=1`, which ignores
+  normal writer coordination and returned a malformed-database error while the
+  embedder was active. Repeating the narrow metadata/count queries with a
+  WAL-aware read-only connection succeeded. This was not evidence of database
+  corruption; no repair or write operation was run.
+- The current shell has no user-systemd D-Bus session, so unit enablement and
+  restart policy were not verified in this check. Runtime coverage and exact
+  RedAmon snapshot/query parity remain `PARTIAL`.
+
 ## Current synthetic app acceptance and KB status (2026-10-25 20:03 EDT)
 
 - `go test ./internal/webui -run '^TestBrowserAcceptanceFixture$' -count=1 -v
