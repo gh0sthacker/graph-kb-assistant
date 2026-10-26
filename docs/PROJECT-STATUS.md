@@ -3050,3 +3050,22 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   `idle`, while startup explicitly left Neo4j connectivity `not_checked`. A
   separate MCP protocol fixture now verifies that `bb_kb_stats` exposes the
   staging counters and target metadata to the harness.
+
+### Neo4j runtime snapshot verification — 2026-10-26 07:10 UTC — PARTIAL
+
+- `neo4j-check` connected to the configured local Neo4j database and confirmed
+  the required constraints/indexes (`state=ready`). `neo4j-backfill
+  --verify-only` then compared a consistent read-only local BehaviorGraph
+  snapshot against Neo4j. Its local and Neo4j snapshot digests matched
+  (`state=verified`) across 1,400 source records, 115,136 entities, 117,050
+  assertions, and 1,400 analysis cards. The check held the normal project
+  maintenance lock and did not rebuild or import graph data.
+- This verifies storage parity for the currently selected local project, not
+  completeness of its Caido source history: coverage remains
+  `source_sync_not_assessed`. No Caido intake was started.
+- After the service restart, its systemd unit remained active with zero
+  restarts, and the loopback UI and projects API both returned HTTP 200.
+- The active KB snapshot still has source coverage `DONE`; the existing E5
+  worker is live with 35,296 of 209,026 content vectors. `vector_ready=false`.
+  RedAmon deployed snapshot and query-result parity remain unavailable, so KB
+  identity and overall delivery remain `PARTIAL`.
