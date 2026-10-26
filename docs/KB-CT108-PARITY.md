@@ -627,3 +627,22 @@ The installed file SHA-256 matches the checked-in file. No application or
 embedding service was restarted and no candidate/active KB data was changed;
 the correction will be used by the next controlled source refresh after the
 current embedding worker releases the candidate.
+
+## Thermal gate recheck — 2026-10-26 23:18–23:21 UTC
+
+The worker process `83922` is still live in `hrtimer_nanosleep`; its CPU time
+rose only from 3.734 to 3.866 seconds while elapsed time advanced about ten
+minutes. CT108's application and embedding services are both active. A
+read-only candidate query still returns 215,382 chunks and 38,775 vectors, so
+no embedding progress occurred during this interval.
+
+A 60-second, one-second-sample read of the same `coretemp` Package id 0 sensor
+used by the worker ranged from 58 C to 92 C; 6 of 60 samples were at or above
+the 70 C stop threshold. This explains why the worker's ten-minute cool-dwell
+timer keeps resetting; do not raise or bypass the threshold. VM112's QMP state
+is `paused` and its QMP CPU metric is zero. The `qm list`/top-level API can
+still show a running QEMU process for a paused VM, so that process's lifetime
+average from `ps` is not current CPU usage. A `top` snapshot showed most
+current host CPU load in VM920, but that single sample does not prove it caused
+the temperature peaks. VM920 was left unchanged. The candidate remains
+incomplete, and vector/retrieval parity remains `PARTIAL`.
