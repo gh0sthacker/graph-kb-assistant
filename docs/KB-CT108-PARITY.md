@@ -5,6 +5,36 @@ operator-provided read-only stats; service and single-sample temperature state
 come from the operator's PVE check. No claim below means the installed KB is
 identical to RedAmon.
 
+## Coordinator verification — 2026-10-26 22:53 UTC
+
+- Installed the checksum-verified Go CI artifact for PR head `3c19db6`
+  (artifact version `0.1.0-go-dev+348adf896e38`) on CT108, retaining the
+  previous binary at `/usr/local/bin/bb-assistant.backup-44c6468`. Restarted
+  `graph-kb-assistant.service`; `/api/health` returned `status=ok` and the new
+  version.
+- Updated the four KB Python runtime files (`cli.py`, `index.py`, `ranking.py`,
+  and `tools.py`) from pinned commit `3c19db60b371e5650f8253b49fe16825905aa117`.
+  Their SHA-256 values match the clean local checkout; `py_compile` succeeded.
+  The source backup is under the private data directory
+  `deploy-backups/python-pre-3c19db`.
+- Read-only SQLite verification: the isolated `full` candidate has 215,382
+  content chunks, 38,775 E5-large-v2 vectors, and 176,607 missing vectors;
+  source coverage is `DONE`, but vector readiness and parity remain incomplete.
+  The active application index has 209,026 content chunks and 38,888 vectors;
+  it was not modified. No embedding job or database rebuild was run by this
+  deployment.
+- The single candidate embed service remains active behind its fail-closed
+  thermal gate. At this check it held about 15 MB, with 2.76 CPU seconds
+  accumulated; `coretemp` `Package id 0` read 81 C, above its 70 C threshold.
+  The required ten-minute cool dwell has not been established, so no vectors
+  were added. VM112 remains `paused`.
+- The public RedAmon wiki page returned by web search is stale for current
+  profile details. The pinned upstream source and the existing local audit at
+  commit `4585b3442cf3c6e075fca5d3b512a8f47be501b6` remain the comparison
+  basis; they confirm the seven source families and full-profile NVD settings
+  recorded below. Exact installed-instance corpus and query-result parity is
+  still unverified.
+
 ## Latest coordinator verification — 2026-10-26 22:09 UTC
 
 - Read-only CT108 checks confirmed `VM112` is `paused`. The candidate-only
