@@ -243,7 +243,9 @@ def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tu
         stripped = line.lstrip(" ")
         if stripped and not stripped.startswith("#"):
             max_indent = max(max_indent, len(line) - len(stripped))
-        for char in line:
+        # Match RedAmon's bounded YAML pre-scan: comment bodies are not YAML
+        # tokens and must not inflate alias/anchor/flow limits.
+        for char in (() if not stripped or stripped.startswith("#") else line):
             if char in "{[":
                 flow_depth += 1
                 max_flow_depth = max(max_flow_depth, flow_depth)

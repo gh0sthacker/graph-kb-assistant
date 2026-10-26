@@ -141,6 +141,17 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
         self.assertEqual(owasp_chunk.chunk_id,
                          hashlib.sha256(b"owasp:WSTG-INFO-01:1. Example test WSTG-INFO-01").hexdigest()[:16])
 
+    def test_nuclei_yaml_comment_symbols_do_not_trip_complexity_guard(self) -> None:
+        document = SourceDocument.create(
+            source_name="nuclei", source_id="http/commented.yaml", title="commented",
+            text=("# " + ("* & {[" * 300) + "\n"
+                  "id: commented\ninfo:\n  name: Commented\n"),
+            metadata={"template_id": "commented"},
+        )
+        chunk = chunk_document(document)[0]
+        self.assertEqual(chunk.title, "commented — Commented")
+        self.assertEqual(chunk.text, "Commented (info)")
+
     def test_redamon_duplicate_native_ids_keep_last_loader_value(self) -> None:
         spec = {
             "id": "gtfobins", "kind": "github_archive", "url": GTFO_URL,
