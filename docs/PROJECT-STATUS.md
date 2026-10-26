@@ -10,6 +10,17 @@
   graph/evidence interaction, or the Hermes gateway's current MCP handshake.
   Overall runtime coverage remains `PARTIAL`.
 
+## Fresh Hermes MCP discovery check — 2026-10-26 07:27 UTC — PARTIAL
+
+- `./scripts/run-hermes mcp test bb_assistant` connected to the current
+  checkout's stdio launcher in 5.9 seconds and discovered the expected 15
+  allowlisted tools, including consultation resume. This starts a fresh local
+  MCP child; it made no model request and read no capture body.
+- The already-running Hermes gateway and its MCP child predate this checkout's
+  recent build. The fresh CLI discovery check does not reload or verify that
+  gateway child, so its loaded code remains unconfirmed; no gateway restart was
+  performed. Overall Hermes runtime coverage remains `PARTIAL`.
+
 ## Local KB parity receipt export — 2026-10-26 — PARTIAL
 
 - Added `bb-assistant-kb parity-export`, which validates a completed snapshot,
