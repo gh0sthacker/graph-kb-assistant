@@ -447,8 +447,9 @@ limit, and VM112 was confirmed paused.
 The `a1eff94` correction was subsequently deployed to CT108 with matching file
 hashes. A root-owned environment file points the unit at the isolated full
 candidate. Its runtime guard rejected the live-index path before opening it.
-The candidate worker was then started manually (not enabled at boot); at
-21:41 UTC it remained active at 0.2% CPU and 0.4% memory while the temperature
+The candidate worker was then started manually and enabled for boot to resume
+the gated job after a CT restart; at 21:41 UTC it remained active at 0.2% CPU
+and 0.4% memory while the temperature
 read 77 C. Candidate SQLite counts were unchanged at 215,382 chunks and 38,775
 vectors, so the thermal gate had not begun embedding. VM112 remains paused.
 

@@ -30,7 +30,8 @@ SHA-256 hashes match the workspace files. The root-owned environment file now
 selects only `kb/candidates/full-20261026-1936/index.sqlite3`. The deployed
 CLI was invoked against the live `kb/index.sqlite3` as a negative safety
 check and rejected it before opening the database. The corrected unit was
-started manually and remains disabled for boot. At the read-only check,
+started manually and enabled for boot so it resumes the same gated candidate
+job after a CT restart. At the read-only check,
 MainPID 83922 was active at 0.2% CPU and 0.4% memory, while the package sensor
 read 77 C. Candidate counts were 215,382 chunks and 38,775 vectors, unchanged
 from the preceding read; the thermal gate is waiting, not embedding. VM112

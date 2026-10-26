@@ -143,8 +143,9 @@ each durable batch, fails closed on unreadable sensor data, and stops at 70 C.
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
 The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
-and caps CPU at 20%, disables automatic restarts, and leaves boot activation
-disabled. Do not start or resume until the package temperature has remained
+and caps CPU at 20%, disables automatic restarts, and is enabled for boot so
+the same guarded job resumes after a CT restart. The CLI still waits for the
+ten-minute thermal gate before model loading. Do not start or resume until the package temperature has remained
 below 70 C for at least 10 continuous minutes. A single cool reading does not
 satisfy this precondition.
 Before enabling the unit, create the root-owned

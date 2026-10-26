@@ -9,7 +9,8 @@
   isolated `kb/candidates/full-20261026-1936/index.sqlite3` path.
 - A negative runtime check against the live `kb/index.sqlite3` was rejected by
   the new guard before the database was opened. The corrected candidate-only
-  unit is started manually but remains disabled for boot. Its process uses
+  unit is started manually and enabled for boot so it resumes the same gated
+  candidate job after a CT restart. Its process uses
   one thread, batch size 2, a 20% CPU quota, a 3 GiB memory cap, and the
   ten-minute cool-dwell gate below 70 C.
 - At the latest sample the process was active at 0.2% CPU and 0.4% memory,
