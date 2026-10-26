@@ -499,6 +499,12 @@ def rechunk_index(
             connection.commit()
             connection.execute("DELETE FROM chunks WHERE NOT EXISTS (SELECT 1 FROM kb_rechunk_ids i WHERE i.chunk_id=chunks.chunk_id)")
             connection.commit()
+            connection.execute(
+                "DELETE FROM chunk_embeddings WHERE chunk_id NOT IN ("
+                "SELECT chunk_id FROM chunks WHERE "
+                "COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content')"
+            )
+            connection.commit()
             chunk_count = connection.execute("SELECT count(*) FROM chunks").fetchone()[0]
             documents_by_source = dict(connection.execute(
                 "SELECT source_name,count(*) FROM source_documents GROUP BY source_name"

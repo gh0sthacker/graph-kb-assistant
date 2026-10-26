@@ -407,6 +407,44 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             self.assertTrue(index.stats()["vector_ready"])
             self.assertEqual(len(embedder.encoded) - len(first_encoded), 1)
 
+    def test_rechunk_prunes_vectors_for_replaced_source_chunks(self) -> None:
+        class FakeEmbedder:
+            model_name = "fixture-model"
+
+            def embed_documents_batch(self, texts: list[str], *, batch_size: int) -> list[list[float]]:
+                return [[float(len(text)), 1.0] for text in texts]
+
+        before = SourceDocument.create(
+            source_name="tool_docs", source_id="tooling/example.md", title="Example",
+            text="Pinned old source content.",
+        )
+        after = SourceDocument.create(
+            source_name="tool_docs", source_id="tooling/example.md", title="Example",
+            text="Refreshed source content with a different chunk identity.",
+        )
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-rechunk-vectors-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunk_document(before), "5" * 64, sources=(before,))
+            index.rebuild_embeddings(FakeEmbedder(), batch_size=2)
+            with index.connect() as connection:
+                connection.execute(
+                    "UPDATE source_documents SET content_sha256=?,text=? WHERE source_name=? AND source_id=?",
+                    (after.content_sha256, after.text, after.source_name, after.source_id),
+                )
+                connection.commit()
+
+            result = rechunk_index(index, project_root=Path(__file__).resolve().parents[1])
+            with index.connect() as connection:
+                orphan_vectors = connection.execute(
+                    "SELECT count(*) FROM chunk_embeddings e LEFT JOIN chunks c ON c.chunk_id=e.chunk_id "
+                    "WHERE c.chunk_id IS NULL"
+                ).fetchone()[0]
+            embedded_vectors = index.stats()["embedded_chunks"]
+
+        self.assertEqual(result["chunks"], 1)
+        self.assertEqual(embedded_vectors, 0)
+        self.assertEqual(orphan_vectors, 0)
+
     def test_rechunk_resumes_after_a_committed_source_batch(self) -> None:
         documents = (
             SourceDocument.create(
