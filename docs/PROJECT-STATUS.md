@@ -10,10 +10,11 @@
   is still present, so semantic readiness is false. The active application index
   remains unchanged.
 - Candidate embedding runs only on CT108. Its single-thread worker remains
-  active behind the 70 C / ten-minute cool-dwell gate. At 20:23 UTC, CT108's
-  `coretemp Package id 0` sensor read 89 C; no inference is allowed to start
-  under that reading. VM112 remains paused and the Kali embedding unit remains
-  disabled.
+  active behind the 70 C / ten-minute cool-dwell gate. CT108's `coretemp
+  Package id 0` sensor read 89 C at 20:23 UTC and 55 C at 20:28 UTC. Those
+  samples are five minutes apart, so they do not establish the required
+  ten-minute cool dwell; the worker remains in its gate. VM112 remains paused
+  and the Kali embedding unit remains disabled.
 - These seven-family counts are the selected RedAmon `full`-profile target,
   not proof that the candidate equals the installed RedAmon corpus. The
   installed VM112 profile is `cpu-lite`; exact corpus and query parity remain

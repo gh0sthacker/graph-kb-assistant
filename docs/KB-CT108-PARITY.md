@@ -33,7 +33,8 @@ Proxmox CT108. Its unit is bounded to one thread, batch size 2, 20% CPU and
 loading the model and checks temperature before every durable batch. At
 20:23 UTC `coretemp Package id 0` inside CT108 read 89 C; the worker remained
 active in its thermal gate with under one second CPU and had added no vectors.
-No inference should run while the package is this hot. The candidate worker
+A single later 20:28 UTC sample read 55 C, five minutes after the 89 C sample;
+this does not establish the required ten-minute dwell. The candidate worker
 preserves completed batches and only publishes vector readiness after all
 content chunks are embedded. The original Kali embed unit is disabled and
 VM112 remains paused.
