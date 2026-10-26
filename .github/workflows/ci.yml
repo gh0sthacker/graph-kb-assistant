@@ -30,11 +30,24 @@ jobs:
           GOARCH: amd64
           GOOS: linux
         run: |
-          binary="${RUNNER_TEMP}/bb-assistant-linux-amd64"
+          release_dir="${RUNNER_TEMP}/bb-assistant-release"
+          mkdir -p "$release_dir"
+          binary="${release_dir}/bb-assistant-linux-amd64"
           go build -trimpath -buildvcs=true -o "$binary" ./cmd/bb-assistant
           version="$($binary version)"
           expected="0.1.0-go-dev+${GITHUB_SHA:0:12}"
           test "$version" = "$expected"
+          (
+            cd "$release_dir"
+            sha256sum bb-assistant-linux-amd64 > SHA256SUMS
+          )
+      - name: Publish commit-pinned runtime artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bb-assistant-linux-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/bb-assistant-release/
+          if-no-files-found: error
+          retention-days: 30
 
   python:
     name: Python

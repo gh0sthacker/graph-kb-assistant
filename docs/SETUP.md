@@ -40,7 +40,20 @@ embedded short Git revision (`.dirty` when the build included tracked or
 untracked changes). CI builds the Linux amd64 runtime binary with VCS stamping
 and checks that the reported revision equals the tested commit. Builds without
 Git metadata retain the base development version and must not be used as proof
-of which source revision is deployed.
+of which source revision is deployed. Each successful Go CI job also publishes
+the Linux amd64 binary and a `SHA256SUMS` file as a 30-day workflow artifact
+named `bb-assistant-linux-amd64-<full-commit-sha>`. Download the artifact from
+the successful run for the exact commit being deployed, then verify it before
+installing:
+
+```sh
+sha256sum --check SHA256SUMS
+./bb-assistant-linux-amd64 version
+```
+
+The artifact is a build output, not a signed release; restrict deployment to a
+trusted successful workflow run and verify its commit against the intended
+source revision.
 
 For a persistent per-user service on systemd, install the unit from the
 checkout. The user's systemd manager must be enabled at login (lingering is
