@@ -2940,10 +2940,15 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   first-byte offsets, matching the SQLite-backed browser check.
 - The Neo4j fixture displayed `Value index unavailable · direct graph only`.
   Its test setup writes the graph using incremental projection and does not run
-  the full field-value-index rebuild; therefore this run does not verify
-  cross-capture value-correlation expansion. The UI correctly reported partial
-  graph coverage. Verify the index rebuild path separately before claiming
-  that graph-navigation capability complete.
+  the full field-value-index rebuild; the UI correctly reported partial graph
+  coverage for that incremental-only project. Separately, updated and ran
+  `TestNeo4jFieldValueTraversalIntegrationOnEphemeralPort` against the same
+  disposable Neo4j version/ephemeral-port setup. It now performs
+  `RebuildProjectSnapshot` for two synthetic projects, then verifies indexed
+  cross-capture traversal, project isolation, the published generation, and
+  bounded neighborhood read-back; it passed in 23.37s. This verifies the
+  storage rebuild/traversal path, but not the expanded browser rendering after
+  a maintenance rebuild.
 - This proves the disposable Neo4j-backed browser navigation and exact
   comparison path only. Accepted Hermes access, model execution, candidate
   save/recovery, production service state, and full project coverage remain
