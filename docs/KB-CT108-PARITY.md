@@ -19,9 +19,22 @@ the live index was not modified by the inactive unit.
 The checked-in CLI now fails closed unless embedding points to an existing
 `kb/candidates/<id>/index.sqlite3`; the systemd unit reads that path from
 `/etc/graph-kb-assistant/kb-embed.env` instead of hard-coding the live index.
-The focused CLI tests pass locally. This correction has not yet been deployed
-to CT108 or started there. The 75 C sample is above the 70 C threshold; the
-worker must still observe the ten-minute cool dwell before model loading.
+The focused CLI tests pass locally. At 21:36 UTC the correction had not yet
+been deployed or started. The 75 C sample was above the 70 C threshold; see
+the follow-up below for the deployment and gated start.
+
+## Candidate-only worker deployment — 2026-10-26 21:41 UTC
+
+The pushed `a1eff94` CLI and systemd unit were deployed to CT108; their
+SHA-256 hashes match the workspace files. The root-owned environment file now
+selects only `kb/candidates/full-20261026-1936/index.sqlite3`. The deployed
+CLI was invoked against the live `kb/index.sqlite3` as a negative safety
+check and rejected it before opening the database. The corrected unit was
+started manually and remains disabled for boot. At the read-only check,
+MainPID 83922 was active at 0.2% CPU and 0.4% memory, while the package sensor
+read 77 C. Candidate counts were 215,382 chunks and 38,775 vectors, unchanged
+from the preceding read; the thermal gate is waiting, not embedding. VM112
+remains paused. No live index rows were changed.
 
 ## Latest candidate state — 2026-10-26 21:13 UTC (supersedes older counts below)
 

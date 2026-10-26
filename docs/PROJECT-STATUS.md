@@ -1,5 +1,22 @@
 # Project status and known limitations
 
+## Candidate-only KB embed resumed — 2026-10-26 21:41 UTC — IN PROGRESS
+
+- Fixed commit `a1eff94` passed its focused local CLI tests and CI run
+  [40406247224](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40406247224).
+- Deployed `cli.py` and the embedding systemd unit to CT108; both remote file
+  hashes match the workspace. The root-owned environment file selects the
+  isolated `kb/candidates/full-20261026-1936/index.sqlite3` path.
+- A negative runtime check against the live `kb/index.sqlite3` was rejected by
+  the new guard before the database was opened. The corrected candidate-only
+  unit is started manually but remains disabled for boot. Its process uses
+  one thread, batch size 2, a 20% CPU quota, a 3 GiB memory cap, and the
+  ten-minute cool-dwell gate below 70 C.
+- At the latest sample the process was active at 0.2% CPU and 0.4% memory,
+  while the package temperature read 77 C. Read-only candidate counts were
+  215,382 chunks and 38,775 vectors, unchanged; the worker is waiting and has
+  not resumed embedding. VM112 remains paused and the active index is intact.
+
 ## KB embed destination safety correction — 2026-10-26 21:36 UTC — PARTIAL
 
 - A fresh PVE check confirmed VM112 paused. In CT108, the embed unit is
@@ -11,10 +28,9 @@
 - Local CLI now rejects embedding unless an existing
   `kb/candidates/<id>/index.sqlite3` is selected before any writable index is
   opened. The unit now reads its candidate path from a protected environment
-  file. Focused CLI tests pass; this safety correction is not yet deployed.
-- The 75 C reading exceeds the 70 C gate. Embedding remains stopped until the
-  corrected candidate-only unit is deployed and the thermal worker observes
-  its full ten-minute cool dwell.
+  file. Focused CLI tests pass; see the later deployment note above.
+- At this 21:36 check, the 75 C reading exceeded the 70 C gate. The corrected
+  worker and its later 77 C gated state are recorded above.
 
 ## KB maximum-coverage candidate — 2026-10-26 20:24 UTC — IN PROGRESS
 
