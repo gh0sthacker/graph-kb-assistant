@@ -242,6 +242,7 @@ class KBIndex:
         snapshot_id: str,
         *,
         sources: Iterable[SourceDocument] = (),
+        source_manifest_sha256: str | None = None,
         source_coverage_state: str = "unverified",
         source_coverage_report_sha256: str | None = None,
         source_coverage_report: Mapping[str, object] | None = None,
@@ -253,6 +254,7 @@ class KBIndex:
                 chunks,
                 snapshot_id,
                 sources=sources,
+                source_manifest_sha256=source_manifest_sha256,
                 source_coverage_state=source_coverage_state,
                 source_coverage_report_sha256=source_coverage_report_sha256,
                 source_coverage_report=source_coverage_report,
@@ -264,12 +266,15 @@ class KBIndex:
         snapshot_id: str,
         *,
         sources: Iterable[SourceDocument] = (),
+        source_manifest_sha256: str | None = None,
         source_coverage_state: str = "unverified",
         source_coverage_report_sha256: str | None = None,
         source_coverage_report: Mapping[str, object] | None = None,
     ) -> int:
         if not isinstance(snapshot_id, str) or not re.fullmatch(r"[a-f0-9]{64}", snapshot_id):
             raise ValueError("snapshot_id must be a lowercase SHA-256 digest")
+        if source_manifest_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", source_manifest_sha256):
+            raise ValueError("source_manifest_sha256 must be a lowercase SHA-256 digest")
         coverage_states = {"DONE", "PARTIAL", "BLOCKED", "unverified"}
         if not isinstance(source_coverage_state, str) or source_coverage_state not in coverage_states:
             raise ValueError("source_coverage_state must be DONE, PARTIAL, BLOCKED or unverified")
@@ -455,7 +460,7 @@ class KBIndex:
             """)
             count = len(chunk_rows)
             connection.execute(
-                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
+                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','source_manifest_sha256','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
             )
             connection.executemany(
                 "INSERT INTO kb_meta(key,value) VALUES(?,?)",
@@ -464,6 +469,7 @@ class KBIndex:
                     ("chunk_count", str(count)),
                     ("coverage_state", source_coverage_state),
                     ("coverage_report_sha256", source_coverage_report_sha256 or ""),
+                    ("source_manifest_sha256", source_manifest_sha256 or ""),
                     (
                         "source_coverage",
                         json.dumps(
@@ -667,6 +673,17 @@ class KBIndex:
             source_coverage = json.loads(meta.get("source_coverage", "[]"))
         except json.JSONDecodeError:
             source_coverage = []
+        source_manifest_sha256 = meta.get("source_manifest_sha256") or None
+        try:
+            current_manifest_path = Path(__file__).with_name("sources.yaml")
+            current_source_manifest_sha256 = hashlib.sha256(current_manifest_path.read_bytes()).hexdigest()
+        except OSError:
+            current_source_manifest_sha256 = None
+        source_manifest_matches_current = (
+            source_manifest_sha256 == current_source_manifest_sha256
+            if source_manifest_sha256 is not None and current_source_manifest_sha256 is not None
+            else None
+        )
         vector_storage_complete = (
             vector_count > 0 and meta.get("vector_snapshot_id") == meta.get("snapshot_id")
         )
@@ -682,6 +699,9 @@ class KBIndex:
             "coverage_state": meta.get("coverage_state", "unverified"),
             "coverage_report_sha256": meta.get("coverage_report_sha256") or None,
             "source_coverage": source_coverage,
+            "source_manifest_sha256": source_manifest_sha256,
+            "current_source_manifest_sha256": current_source_manifest_sha256,
+            "source_manifest_matches_current": source_manifest_matches_current,
             "embedded_chunks": vector_count,
             "embedding_model": meta.get("vector_model") or None,
             "embedding_snapshot_id": meta.get("vector_snapshot_id") or None,

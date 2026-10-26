@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 from pathlib import Path
 import sqlite3
@@ -244,6 +245,26 @@ class RetrievalRankingTests(unittest.TestCase):
         self.assertTrue(stats["vector_storage_complete"])
         self.assertFalse(stats["vector_backend_available"])
         self.assertFalse(stats["vector_ready"])
+
+    def test_kb_stats_reports_snapshot_source_manifest_freshness(self) -> None:
+        document = SourceDocument.create(
+            source_name="tool_docs", source_id="alpha.md", title="Alpha",
+            text="alpha authentication flow", metadata={"document_role": "content"},
+        )
+        chunks = tuple(chunk_document(document))
+        manifest_path = Path(__file__).resolve().parents[1] / "src/bb_assistant/kb/sources.yaml"
+        current_manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory(prefix="bb-kb-manifest-freshness-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(chunks, "c" * 64, source_manifest_sha256="a" * 64)
+            stale = index.stats()
+            self.assertEqual(stale["source_manifest_sha256"], "a" * 64)
+            self.assertEqual(stale["current_source_manifest_sha256"], current_manifest_sha256)
+            self.assertFalse(stale["source_manifest_matches_current"])
+
+            index.replace_snapshot(chunks, "d" * 64, source_manifest_sha256=current_manifest_sha256)
+            current = index.stats()
+        self.assertTrue(current["source_manifest_matches_current"])
 
     def test_embedding_batches_resume_after_interruption_without_publishing_partial_vectors(self) -> None:
         documents = (

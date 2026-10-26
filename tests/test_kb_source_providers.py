@@ -548,6 +548,8 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
                 stats = import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
             self.assertEqual(stats["coverage_state"], "PARTIAL")
             self.assertEqual(stats["source_documents"], 44)
+            self.assertEqual(stats["source_manifest_sha256"], hashlib.sha256(raw_manifest).hexdigest())
+            self.assertTrue(stats["source_manifest_matches_current"])
             hits = index.search("PKINIT", top_k=10, source_names=("tool_docs",))
             hit = next(item for item in hits if item.source_id == "active_directory/ad_cs_esc.md")
             self.assertEqual(hit.source_revision, bundle_manifest["source_commit"])

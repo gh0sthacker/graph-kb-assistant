@@ -659,6 +659,7 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
         replacement_chunks,
         snapshot_id,
         sources=source_documents,
+        source_manifest_sha256=source_manifest_sha256,
         source_coverage_state=coverage_state,
         source_coverage_report_sha256=coverage_report_sha256,
         source_coverage_report=coverage_report,

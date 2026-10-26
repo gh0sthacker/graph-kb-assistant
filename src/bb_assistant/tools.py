@@ -111,7 +111,7 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
         "name": "bb_kb_stats",
         "title": "Read KB coverage",
-        "description": "Return the local KB snapshot identity, document/chunk counts, and source coverage state. PARTIAL or BLOCKED coverage must remain visible.",
+        "description": "Return the local KB snapshot identity, document/chunk counts, source coverage state, and whether its source manifest matches the currently installed policy. PARTIAL, BLOCKED, or stale-manifest status must remain visible.",
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
