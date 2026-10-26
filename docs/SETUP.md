@@ -51,6 +51,45 @@ The service remains bound to loopback on port 8765. Use a reverse proxy with
 the intended network access policy for remote browser access; do not change the
 application bind address to a LAN or public interface.
 
+The managed server also exposes the same bounded MCP tool catalog at
+`/mcp` using Streamable HTTP. Remote Hermes clients should use that endpoint
+through the authenticated, source-restricted Nginx vhost; do not expose port
+8765 directly. The proxy must forward MCP request headers and the
+`Mcp-Session-Id` response header. The current LAN-only deployment uses HTTP
+Basic Auth, so keep it on a trusted private network; use TLS before extending
+access beyond that network.
+
+```yaml
+mcp_servers:
+  bb_assistant_remote:
+    url: "http://bb-graph-assistant.example.lan/mcp"
+    headers:
+      Authorization: "Basic <base64(username:password)>"
+    timeout: 300
+    connect_timeout: 15
+    tools:
+      include:
+        - bb_list_projects
+        - bb_search_captures
+        - bb_surface_map
+        - bb_graph_neighborhood
+        - bb_graph_slice
+        - bb_kb_stats
+        - bb_kb_search
+        - bb_kb_get_source
+        - bb_get_capture
+        - bb_consult_create_session
+        - bb_consult_compare
+        - bb_consult_record_proposal
+        - bb_consult_validate_proposal
+        - bb_candidate_save
+        - bb_consult_resume
+```
+
+Store the generated Hermes profile with mode `0600`. The current SSH-backed
+stdio launcher remains supported for installations that prefer a restricted
+SSH command over HTTP.
+
 For a managed server where Go is not installed on the runtime host, use the
 system service template instead. Build the Go binary on the build host and
 install it as `/usr/local/bin/bb-assistant`; keep the checkout and private

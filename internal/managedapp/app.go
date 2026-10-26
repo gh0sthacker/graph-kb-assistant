@@ -87,21 +87,31 @@ type dependencies struct {
 // the others, drains HTTP and waits for worker leases to be released.
 func Run(ctx context.Context, options Options, output io.Writer) error {
 	return run(ctx, options, output, dependencies{
-		listen: net.Listen,
-		handler: func(options Options) (http.Handler, func() error, error) {
-			tools, err := mcpserver.NewTools(options.DataRoot, options.KBIndex)
-			if err != nil {
-				return nil, nil, errors.New("managed application services could not be initialized")
-			}
-			handler, err := webui.NewHandler(tools)
-			if err != nil {
-				_ = tools.Close()
-				return nil, nil, errors.New("managed application web handler could not be initialized")
-			}
-			return handler, tools.Close, nil
-		},
-		worker: runProjectWorker,
+		listen:  net.Listen,
+		handler: newApplicationHandler,
+		worker:  runProjectWorker,
 	})
+}
+
+func newApplicationHandler(options Options) (http.Handler, func() error, error) {
+	tools, err := mcpserver.NewTools(options.DataRoot, options.KBIndex)
+	if err != nil {
+		return nil, nil, errors.New("managed application services could not be initialized")
+	}
+	webHandler, err := webui.NewHandler(tools)
+	if err != nil {
+		_ = tools.Close()
+		return nil, nil, errors.New("managed application web handler could not be initialized")
+	}
+	mcpHandler, err := mcpserver.NewStreamableHTTPHandler(tools)
+	if err != nil {
+		_ = tools.Close()
+		return nil, nil, errors.New("managed application MCP handler could not be initialized")
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/", webHandler)
+	return mux, tools.Close, nil
 }
 
 func run(ctx context.Context, options Options, output io.Writer, deps dependencies) (retErr error) {
