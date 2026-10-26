@@ -1,6 +1,6 @@
 # Project status and known limitations
 
-## Current synthetic app acceptance and KB status (2026-10-25 19:59 EDT)
+## Current synthetic app acceptance and KB status (2026-10-25 20:03 EDT)
 
 - `go test ./internal/webui -run '^TestBrowserAcceptanceFixture$' -count=1 -v
   -timeout=45m` passed in 961.72s. The fixture exercised two exact synthetic
@@ -26,10 +26,12 @@
   in force. `scripts/setup-hermes` now upgrades its own marked profile to this
   setting; a temporary managed-profile check and `git diff --check` passed.
 - Read-only KB status at this check: 162,398 chunks across six source
-  families, 8,224/162,390 eligible E5 vectors, `coverage_state=PARTIAL`, and
+  families, 8,352/162,390 eligible E5 vectors, `coverage_state=PARTIAL`, and
   no published vector-ready snapshot. The single active resumable embedder is
-  PID 1143696; do not start a duplicate. ExploitDB is absent and the exact
-  deployed RedAmon snapshot/profile is still unknown. KB parity remains
+  PID 1143696; do not start a duplicate. It had entered a stopped state despite
+  the transient service reporting active; resuming that same process advanced
+  the durable vector count from 8,224 to 8,352. ExploitDB is absent and the
+  exact deployed RedAmon snapshot/profile is still unknown. KB parity remains
   `PARTIAL`.
 
 ## KB parity update (2026-10-25 19:28 EDT) — PARTIAL at that check
