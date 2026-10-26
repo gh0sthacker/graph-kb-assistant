@@ -2763,3 +2763,26 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
 - A local lexical smoke query for `SQL injection authentication bypass` returned three ExploitDB records. This confirms the installed FTS path can retrieve the newly imported family; it does not compare ranking with RedAmon.
 - The managed `graph-kb-assistant-kb-embed-full.service` is active with zero restarts. It has stored 8,736 vectors; the staging model is `intfloat/e5-large-v2`, 1,024 dimensions, bound to the active snapshot. The vector-ready marker remains unpublished, so search is still lexical-only.
 - Source family names match RedAmon's pinned `full` profile. Its deployed data snapshot is absent from this checkout; exact content equality and representative result/rank parity against that deployment remain open. KB parity remains `PARTIAL`.
+
+### Active KB runtime and strict parity checkpoint — 2026-10-25 20:56 EDT
+
+- Confirmed the running Graph Assistant process has `BB_ASSISTANT_KB_INDEX` set
+  to `/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3`, the installed
+  seven-family full snapshot. The separate five-family index under
+  `.../graph-kb-assistant/kb/` is not selected by this process. The active
+  index reports `DONE`, 207,878 source documents, and 209,036 chunks.
+- Restarted the resumable E5 job against this explicitly selected full index.
+  It is active under PID 1198105 with zero automatic restarts and has embedded
+  9,184/209,026 content chunks; `vector_ready=false`. On this CPU-only Ryzen 5
+  3500U host, the observed short-window rate was 128 vectors/minute. The full
+  vector snapshot is therefore not ready for semantic retrieval yet.
+- Rechecked RedAmon's retrieval implementation: pinned E5/BGE revisions and
+  RRF, source boosts, rerank-pool, sigmoid, and MMR defaults match the Graph
+  Assistant implementation. Keyword candidates do not yet have proven parity:
+  RedAmon uses Neo4j Lucene full-text, while Graph Assistant uses SQLite
+  FTS5/BM25. The RedAmon checkout defaults to `lite`, and no separate active
+  RedAmon corpus snapshot was found in the reachable runtime inventory.
+- Exact deployed-corpus equality and representative same-snapshot result/rank
+  comparison remain open. Do not report the KB as identical; status remains
+  `PARTIAL` until vectors are complete and the source/query parity gaps are
+  resolved or explicitly measured against an available RedAmon snapshot.
