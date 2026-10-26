@@ -646,3 +646,24 @@ average from `ps` is not current CPU usage. A `top` snapshot showed most
 current host CPU load in VM920, but that single sample does not prove it caused
 the temperature peaks. VM920 was left unchanged. The candidate remains
 incomplete, and vector/retrieval parity remains `PARTIAL`.
+
+## Pinned RedAmon full-profile model/source contract — 2026-10-26 23:24 UTC
+
+Read-only Git object inspection of the installed checkout's pinned commit
+`e1dfdff671b7e76d3a002eeba37b01d92cb949e1` confirms that the clean source
+config defaults to `intfloat/e5-large-v2`, pinned to
+`f169b11e22de13617baa190a028a32f3493550b6`. The assistant candidate uses the
+same model name and exact revision. The installed VM's working-tree override
+to `e5-base-v2` is dirty state, not the pinned source default; its 2,449-vector
+index therefore does not establish the model used by a clean full-profile
+build.
+
+The same pinned config defines full as
+`tool_docs, gtfobins, lolbas, owasp, exploitdb, nvd, nuclei`, matching the
+candidate's seven families. RedAmon's full Make target overrides NVD lookback
+to 730 days, and the full profile ignores the standard profile's CVSS cutoff.
+This confirms source-level agreement on the full-family set and embedding
+model. It still does not prove the installed dirty index contains all seven
+families, that every chunk's text/hash matches, or that the two retrievers
+rank identically. Corpus/retrieval parity remains `PARTIAL` until a full
+candidate refresh, complete vectors, and same-query receipts are available.
