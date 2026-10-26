@@ -42,9 +42,11 @@ and checks that the reported revision equals the tested commit. Builds without
 Git metadata retain the base development version and must not be used as proof
 of which source revision is deployed. Each successful Go CI job also publishes
 the Linux amd64 binary and a `SHA256SUMS` file as a 30-day workflow artifact
-named `bb-assistant-linux-amd64-<full-commit-sha>`. Download the artifact from
-the successful run for the exact commit being deployed, then verify it before
-installing:
+named `bb-assistant-linux-amd64-<workflow-sha>`. On a `main` push, this is the
+exact commit SHA. For pull requests GitHub builds the tested merge result, so
+the artifact SHA is the synthetic merge commit and the artifact includes the
+current base branch as well as the PR. Download it from the successful run and
+verify the revision before installing:
 
 ```sh
 sha256sum --check SHA256SUMS
@@ -52,8 +54,9 @@ sha256sum --check SHA256SUMS
 ```
 
 The artifact is a build output, not a signed release; restrict deployment to a
-trusted successful workflow run and verify its commit against the intended
-source revision.
+trusted successful workflow run. Use a `main` push artifact for a normal
+deployment, or explicitly review the tested PR merge result before using its
+artifact.
 
 For a persistent per-user service on systemd, install the unit from the
 checkout. The user's systemd manager must be enabled at login (lingering is
