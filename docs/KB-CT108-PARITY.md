@@ -47,10 +47,12 @@ were 61, 62, 62, 62, 61, 65, 91, 62, 65, and 63 C. A subsequent check at
 no embedding service was started. The package sensor is visible inside CT108
 and readable by its `max` service user. One CT read returned 84 C while a
 PVE-side read shortly afterward returned 63 C; immediate reads of the same
-sysfs path then matched at 61 C. Treat thermal dwell as unverified until a
-fresh, consistent ten-minute series is observed. The same operator supplied
-the fresh read-only Hermes stats summarized in the matrix; no RedAmon receipt
-was available.
+sysfs path then matched at 61 C. A later read-only dwell attempt from the
+PVE session started at 12:08:58 UTC and stopped on its second sample at 85 C.
+Embedding remained inactive. Treat thermal dwell as unverified until a fresh,
+consistent ten-minute series is observed. The same operator supplied the fresh
+read-only Hermes stats summarized in the matrix; no RedAmon receipt was
+available.
 
 ## Earlier coordinator read attempt — 2026-10-26
 

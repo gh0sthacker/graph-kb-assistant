@@ -5,7 +5,7 @@
 - CI run [40319814131](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40319814131) passed Go tests/vet, Python tests, and secret scanning for commit `eb4d078`.
 - Deployed only `src/bb_assistant/kb/cli.py`, `src/bb_assistant/kb/thermal.py`, and the embedding systemd unit from commit `5b89ad6` to CT108. Bundle SHA-256 was `a4b92c1fe85fbd92c1318d867c6b0a7c3442ce869988ef94de6c380d65843089`; all three installed file hashes match the checked-in versions.
 - The CT108 unit was reloaded with `systemctl daemon-reload`; embedding remains `inactive` and `disabled`. Its stop threshold is now 70 C, CPU quota 20%, one thread, batch size 2, and ten-minute cool-dwell gate. Existing KB/app services were not restarted; the app `/api/health` still returned HTTP 200.
-- PVE and CT108 both exposed the same Intel `coretemp` package sensor during this check (64 C). This is a point observation, not a ten-minute dwell; no vectors were generated. The 170,138-vector gap and RedAmon parity remain open.
+- PVE and CT108 both exposed the same Intel `coretemp` package sensor during this check (64 C). A read-only dwell attempt began at 12:08:58 UTC and aborted on its second sample at 85 C; embedding was not started. A new SSH connection to PVE was denied, so the current temperature and subsequent dwell cannot be verified from this session. No vectors were generated. The 170,138-vector gap and RedAmon parity remain open.
 
 ## CT108 HTTP MCP deployment and Hermes check — 2026-10-26 11:48 UTC — PARTIAL
 
