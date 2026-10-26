@@ -2706,3 +2706,25 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   finish embedding, resolve the ExploitDB dataset-rights blocker, identify the
   exact deployed RedAmon profile/snapshot, and complete retrieval-parity
   checks before claiming that the KB is identical.
+
+### KB parity live checkpoint — 2026-10-25 20:08 EDT (PARTIAL)
+
+- Rechecked the pinned RedAmon checkout at `cf1b9e92`: its `full` profile is
+  `tool_docs`, `gtfobins`, `lolbas`, `owasp`, `exploitdb`, `nvd`, and `nuclei`.
+  Its config default is `lite`; the project parity requirement remains the
+  explicitly selected `full` profile.
+- The installed Graph Assistant snapshot is still `0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216`:
+  161,240 documents and 162,398 chunks across six families. `exploitdb` is
+  absent. A bounded filename search in the RedAmon checkout and local app
+  cache/data roots found no ExploitDB dataset file to import; this does not
+  identify or rule out a separately deployed RedAmon snapshot.
+- The resumable E5 job is live as PID 1143696 under
+  `graph-kb-assistant-kb-embed-post-rechunk.service`. A read-only count shows
+  8,416/162,398 vectors (5.18%); `vector_snapshot_id` is unpublished, so
+  vector search is not ready. The service has one automatic restart after a
+  SIGKILL; its current cgroup has no memory limit and reports no OOM kills, so
+  the cause of that exit is not established. No duplicate embedder was started.
+- Exact source-set parity remains blocked on obtaining the missing ExploitDB
+  material with confirmed reuse rights. The live RedAmon profile/snapshot and
+  comparative retrieval-result evidence remain unverified. KB parity is
+  `PARTIAL`; do not describe it as identical.
