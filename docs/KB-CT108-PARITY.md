@@ -28,6 +28,18 @@ candidate, not the live index. This cleanup changed no KB rows. The candidate
 still lacks 176,607 content vectors, and `vector_ready` remains false. VM112
 was not resumed.
 
+At 22:02 UTC, a narrower read-only query showed all 5,960
+`yaml_size_limit` fallback chunks come from exactly two source documents:
+`http/technologies/wordpress/plugins/wordpress-plugin-detect.yaml` (10,079,081
+characters) and `http/technologies/wordpress/themes/wordpress-theme-detect.yaml`
+(1,251,736 characters). No `yaml_complexity_limit`, `yaml_scan_failed`, or
+`yaml_parse_failed` fallback chunks were present. These two templates exceed
+RedAmon's 1 MiB YAML bound and are skipped by its provider. At this check the
+candidate still had 215,382 chunks and 38,775 vectors; the exact CPU package
+sensor read 86 C. This narrows the corpus mismatch to two large Nuclei
+documents, but does not prove the remaining source documents and chunks are
+identical.
+
 ## Embedding destination correction — 2026-10-26 21:36 UTC
 
 A fresh read-only PVE check confirmed VM112 is paused. In CT108,
