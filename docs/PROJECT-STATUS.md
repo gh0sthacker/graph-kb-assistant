@@ -1,5 +1,30 @@
 # Project status and known limitations
 
+## CT108 HTTP MCP deployment and Hermes check — 2026-10-26 11:48 UTC — PARTIAL
+
+- Commit `ba4b52e` adds the official Go SDK Streamable HTTP MCP handler at
+  `/mcp`, mounted beside the existing web UI. Local `go test ./...`,
+  `go vet ./...`, binary build, and `git diff --check` passed. GitHub CI run
+  [40317184288](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40317184288)
+  passed its Python, Go, and secret-scan jobs.
+- The 25 MB build was installed on CT108 as `/usr/local/bin/bb-assistant` via
+  a temporary HTTP transfer restricted to the PVE host, then atomically
+  renamed into place. Its SHA-256 is
+  `6ef9bc14a69fe135f304a71b18e37fa813dbc5a3c048887bb46b6a4051a442be` on
+  both build host and CT108. The transfer listener was stopped immediately.
+  `graph-kb-assistant.service` is active and its loopback `/api/health` returns
+  HTTP 200 after restart.
+- A live MCP initialize negotiated protocol `2025-06-18`; `tools/list` returned
+  all 15 tools. The Kali Hermes profile's existing SSH-backed stdio server
+  reconnected to CT108 in 2.7 seconds, discovered all 15 tools, and a remote
+  `bb_kb_stats` call returned structured content. No model request or capture
+  body was used. The app domain resolves from Kali to `192.168.2.154`; both UI
+  and `/mcp` correctly return HTTP 401 without Nginx credentials.
+- The KB embed service remains inactive. PVE temperature was 62°C in one
+  sample only; the required 10-minute below-70°C dwell is not established, so
+  no embedding job was started. Full RedAmon data/vector/query parity and live
+  Caido intake/runtime remain unverified; overall delivery is still `PARTIAL`.
+
 ## Current loopback runtime check — 2026-10-26 07:22 UTC — PARTIAL
 
 - The Go web process is running on `127.0.0.1:8765`. Read-only requests to

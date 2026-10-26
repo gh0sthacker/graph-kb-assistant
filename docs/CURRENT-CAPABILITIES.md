@@ -25,6 +25,10 @@ snapshot; it does not migrate stores or drain projection jobs.
 
 - Loopback web interface, stdio MCP adapter, project-scoped graph and evidence
   queries, and structural local project audits.
+- Streamable HTTP MCP at `/mcp` for authenticated remote clients behind the
+  configured reverse proxy. The deployed CT108 handler has passed a live MCP
+  initialize/tool-list check; the application remains bound to loopback and
+  remote access passes through the reverse proxy.
 - Durable local projection jobs with bounded retry, dead-letter states, and a
   separate worker. Queue counts are visible in `status`; draining remains an
   explicit worker operation.
@@ -36,8 +40,10 @@ snapshot; it does not migrate stores or drain projection jobs.
   makes project-wide maintenance wait for in-flight session writes and block
   new ones; maintenance actions must fail closed on platforms without project
   lock support.
-- Hermes profile setup and MCP tool discovery. Discovery does not invoke a
-  model or send captured content.
+- Hermes profile setup and MCP tool discovery over the configured SSH-backed
+  stdio transport. Discovery does not invoke a model or send captured content.
+  The optional HTTP MCP transport is available to remote clients that use the
+  authenticated proxy.
 
 ## Runtime items still unverified
 
