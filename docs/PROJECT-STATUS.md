@@ -1,5 +1,20 @@
 # Project status and known limitations
 
+## Selected dead-letter replay — 2026-10-26 14:17 UTC — IMPLEMENTED, RUNTIME APPLY PENDING
+
+- Added `projection-replay`: dry-run by default; apply requires explicit
+  revision IDs, validates their stored normalized payloads and digests, holds
+  the exclusive project lease, refuses unrelated pending/leased work, and
+  performs one bounded attempt per named job without resetting attempt history.
+- Synthetic Go tests and `go vet ./...` pass. This code has not yet been
+  deployed or applied to the registered Juice Shop project; its runtime DLQ
+  state remains the last observed two jobs at attempt 8.
+- A read-only CT108 check after the Caido project deletion still found the old
+  Graph Assistant project registration and graph. Deleting the Caido source
+  project does not delete Graph Assistant's independent local graph; new
+  ingestion from that deleted Caido project will stop until another project
+  is registered.
+
 ## CT108 thermal guard deployment — 2026-10-26 12:08 UTC — PARTIAL
 
 - CI run [40319814131](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40319814131) passed Go tests/vet, Python tests, and secret scanning for commit `eb4d078`.

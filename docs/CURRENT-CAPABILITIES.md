@@ -31,7 +31,9 @@ snapshot; it does not migrate stores or drain projection jobs.
   remote access passes through the reverse proxy.
 - Durable local projection jobs with bounded retry, dead-letter states, and a
   separate worker. Queue counts are visible in `status`; draining remains an
-  explicit worker operation.
+  explicit worker operation. `projection-replay` offers a dry-run-first,
+  digest-validated replay for explicitly selected dead-letter revisions, with
+  one bounded attempt under the project maintenance lease.
 - A reviewed consultation workflow with session persistence, evidence
   comparison, citation checks, candidate versioning, and resume. Its synthetic
   workflow and a model-backed Hermes consultation/resume using only synthetic

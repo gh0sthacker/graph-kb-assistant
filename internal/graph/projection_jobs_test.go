@@ -633,6 +633,62 @@ func TestReconciledProjectionAcknowledgementRequiresPendingJobDigest(t *testing.
 	}
 }
 
+func TestRequeueDeadLetterProjectionJobPreservesAttemptHistoryAndFencesPayload(t *testing.T) {
+	db := openProjectionJobDB(t, filepath.Join(t.TempDir(), "graph.sqlite3"))
+	defer db.Close()
+	ctx := context.Background()
+	revisionID := strings.Repeat("8", 64)
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	registerAndEnqueueProjectionJob(t, db, revisionID, "capture-replay", now)
+	if _, err := db.ExecContext(ctx,
+		"UPDATE projection_jobs SET state='dead_letter',attempt_count=8,last_error_code='graph_records_write_failed' WHERE revision_id=?",
+		revisionID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RequeueDeadLetterProjectionJob(ctx, tx, projectionTestProjectKey, revisionID,
+		strings.Repeat("f", 64), now.Add(time.Minute)); !errors.Is(err, ErrProjectionJobConflict) {
+		_ = tx.Rollback()
+		t.Fatalf("wrong payload digest error=%v, want conflict", err)
+	}
+	_ = tx.Rollback()
+
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedAt := now.Add(2 * time.Minute)
+	if err := RequeueDeadLetterProjectionJob(ctx, tx, projectionTestProjectKey, revisionID,
+		job.PayloadSHA256, queuedAt); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("requeue validated dead letter: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	current, err := ProjectionJobByRevision(ctx, db, projectionTestProjectKey, revisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != "pending" || current.AttemptCount != 8 || !current.LastErrorCode.Valid ||
+		current.LastErrorCode.String != "graph_records_write_failed" || current.NextAttemptAt != queuedAt.Format(projectionTimestampLayout) ||
+		current.LeaseToken.Valid || current.LeaseUntil.Valid {
+		t.Fatalf("replay requeue did not preserve bounded history: %+v", current)
+	}
+	if err := RequeueDeadLetterProjectionJob(ctx, db, projectionTestProjectKey, revisionID,
+		job.PayloadSHA256, queuedAt.Add(time.Second)); !errors.Is(err, ErrProjectionJobNotPending) {
+		t.Fatalf("second requeue error=%v, want non-dead-letter rejection", err)
+	}
+}
+
 func registerAndEnqueueProjectionJob(t *testing.T, db *sql.DB, revisionID, captureID string, createdAt time.Time) {
 	t.Helper()
 	ctx := context.Background()

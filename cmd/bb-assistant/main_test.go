@@ -601,6 +601,79 @@ func TestProjectionWorkerCLIReportsEmptyQueueAsJSON(t *testing.T) {
 	}
 }
 
+func TestProjectionReplayCLIDryRunDoesNotChangeDeadLetter(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	dataRoot := filepath.Join(t.TempDir(), "private-data")
+	ref := project.CaidoProjectRef{InstanceID: "projection-replay-cli", ProjectID: "dry-run"}
+	projectStore, err := store.CreateProject(t.Context(), ref, dataRoot)
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	key := projectStore.ProjectKey
+	revisionID := strings.Repeat("a", 64)
+	if err := enqueueReplayTestJob(t, projectStore, revisionID, "capture-replay-dry-run", "dead_letter"); err != nil {
+		_ = projectStore.Close()
+		t.Fatal(err)
+	}
+	if err := projectStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	outputBytes := captureCommandStdout(t, func() error {
+		return replayDeadLetterProjectionJobs([]string{"--project-key", key, "--revision-id", revisionID, "--data-root", dataRoot})
+	})
+	var output projectionReplayOutput
+	if err := json.Unmarshal(outputBytes, &output); err != nil {
+		t.Fatalf("projection-replay output is not JSON: %s err=%v", outputBytes, err)
+	}
+	if !output.DryRun || output.ProjectKey != key || len(output.Jobs) != 1 ||
+		output.Jobs[0].RevisionID != revisionID || output.Jobs[0].State != "dead_letter" ||
+		output.Jobs[0].AttemptCount != 8 || output.Jobs[0].LastErrorCode != "projection_unavailable" {
+		t.Fatalf("unexpected dry-run output: %+v", output)
+	}
+
+	verify, err := store.OpenProjectReadOnly(t.Context(), ref, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verify.Close()
+	job, err := behaviorgraph.ProjectionJobByRevision(t.Context(), verify.Database.DB(), key, revisionID)
+	if err != nil || job.State != "dead_letter" || job.AttemptCount != 8 {
+		t.Fatalf("dry run changed the durable job: job=%+v err=%v", job, err)
+	}
+}
+
+func enqueueReplayTestJob(t *testing.T, selected *store.ProjectStore, revisionID, captureID, state string) error {
+	t.Helper()
+	ctx := t.Context()
+	createdAt := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	observationDigest := sha256.Sum256([]byte(captureID + "\x00original"))
+	source := `{"path":"/tmp/projection-replay-fixture.jsonl","sha256":"` + strings.Repeat("b", 64) + `","record_locator":"line:1"}`
+	payload := []byte(`{"schema_version":1,"program":"` + selected.ProjectKey + `","sources":[` + source + `],"entities":[{"id":"observation-` + hex.EncodeToString(observationDigest[:]) + `","kind":"observation","data":{"capture_id":"` + captureID + `","program":"` + selected.ProjectKey + `","test_marker":"original"},"source_refs":[` + source + `]}],"assertions":[],"cards":[]}`)
+	tx, err := selected.Database.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at) VALUES(?,?,'historical',?)`,
+		revisionID, captureID, createdAt.UTC().Format("2006-01-02T15:04:05.000000000Z")); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, _, err := behaviorgraph.EnqueueProjectionJob(ctx, tx, selected.ProjectKey, revisionID, captureID, payload, createdAt); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if state == "dead_letter" {
+		_, err = selected.Database.DB().ExecContext(ctx,
+			`UPDATE projection_jobs SET state='dead_letter',attempt_count=8,last_error_code='projection_unavailable' WHERE revision_id=?`, revisionID)
+	}
+	return err
+}
+
 func TestProjectionWorkerCLIAccountsCompletedResultsFromInterruptedBatch(t *testing.T) {
 	output := projectionWorkerDrainOutput{Jobs: make([]ingest.ProjectionWorkerResult, 0)}
 	results := []ingest.ProjectionWorkerResult{
