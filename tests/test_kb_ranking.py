@@ -264,7 +264,17 @@ class RetrievalRankingTests(unittest.TestCase):
 
             index.replace_snapshot(chunks, "d" * 64, source_manifest_sha256=current_manifest_sha256)
             current = index.stats()
+            legacy_index = KBIndex(Path(temporary) / "legacy.sqlite3")
+            legacy_index.replace_snapshot(chunks, "e" * 64)
+            snapshot_dir = Path(temporary) / "snapshots" / ("e" * 64)
+            snapshot_dir.mkdir(parents=True)
+            (snapshot_dir / "manifest.json").write_text(
+                '{"source_manifest_sha256":"' + "f" * 64 + '"}', encoding="utf-8",
+            )
+            legacy = legacy_index.stats()
         self.assertTrue(current["source_manifest_matches_current"])
+        self.assertEqual(legacy["source_manifest_sha256"], "f" * 64)
+        self.assertFalse(legacy["source_manifest_matches_current"])
 
     def test_embedding_batches_resume_after_interruption_without_publishing_partial_vectors(self) -> None:
         documents = (

@@ -674,6 +674,18 @@ class KBIndex:
         except json.JSONDecodeError:
             source_coverage = []
         source_manifest_sha256 = meta.get("source_manifest_sha256") or None
+        if source_manifest_sha256 is None:
+            snapshot_id = meta.get("snapshot_id")
+            if isinstance(snapshot_id, str) and re.fullmatch(r"[a-f0-9]{64}", snapshot_id):
+                snapshot_manifest_path = self.path.parent / "snapshots" / snapshot_id / "manifest.json"
+                try:
+                    snapshot_manifest = json.loads(snapshot_manifest_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    snapshot_manifest = None
+                if isinstance(snapshot_manifest, dict):
+                    candidate = snapshot_manifest.get("source_manifest_sha256")
+                    if isinstance(candidate, str) and re.fullmatch(r"[a-f0-9]{64}", candidate):
+                        source_manifest_sha256 = candidate
         try:
             current_manifest_path = Path(__file__).with_name("sources.yaml")
             current_source_manifest_sha256 = hashlib.sha256(current_manifest_path.read_bytes()).hexdigest()
