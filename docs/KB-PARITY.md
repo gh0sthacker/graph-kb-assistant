@@ -8,7 +8,8 @@ instance, rebuild the local KB, or authenticate who produced the receipts.
 ```sh
 bb-assistant-kb parity-check \
   --redamon /restricted/path/redamon-kb-receipt.json \
-  --assistant /restricted/path/graph-assistant-kb-receipt.json
+  --assistant /restricted/path/graph-assistant-kb-receipt.json \
+  --fixture references/kb-parity-queries.json
 ```
 
 The command writes a JSON report. It exits `0` only when every criterion
@@ -76,6 +77,12 @@ Both files use schema version 1 and the same shape; `producer` is respectively
   }]
 }
 ```
+
+Both receipts must contain exactly the query IDs in the checked-in fixture;
+each query's text, `top_k`, and filters must match it. The fixture contains
+ten generic public security-technique queries and can be revised only by a
+reviewed code change. This prevents passing the gate with a cherry-picked query
+set that happens to match.
 
 The source list must account for all corpus source/document/chunk counts; every
 source must be complete and include its effective revision, filters, and

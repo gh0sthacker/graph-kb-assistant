@@ -131,7 +131,46 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
     return value
 
 
-def compare_receipts(redamon: Mapping[str, Any], assistant: Mapping[str, Any], *, score_tolerance: float = 0.0) -> dict[str, Any]:
+def load_query_fixture(path: Path) -> dict[str, Any]:
+    """Load the pinned public query fixture used to prevent query cherry-picking."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError("cannot read KB parity query fixture") from exc
+    if len(raw) > _MAX_RECEIPT_BYTES:
+        raise ValueError("query fixture exceeds the 64 MiB size limit")
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_object_pairs, parse_constant=_reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("KB parity query fixture is invalid JSON") from exc
+    _require(isinstance(value, dict), "KB parity query fixture must be an object")
+    assert isinstance(value, dict)
+    version = value.get("schema_version")
+    _require(version == 1 and not isinstance(version, bool), "KB parity query fixture schema_version must be 1")
+    queries = value.get("queries")
+    _require(isinstance(queries, list) and bool(queries), "KB parity query fixture must contain queries")
+    assert isinstance(queries, list)
+    ids: set[str] = set()
+    for index, query in enumerate(queries):
+        _require(isinstance(query, dict), f"fixture queries[{index}] must be an object")
+        assert isinstance(query, dict)
+        query_id = query.get("id")
+        _require(isinstance(query_id, str) and bool(query_id), f"fixture queries[{index}].id is required")
+        _require(query_id not in ids, f"duplicate fixture query id {query_id}")
+        ids.add(query_id)
+        _require(isinstance(query.get("query"), str) and bool(query["query"].strip()), f"fixture query {query_id} text is required")
+        _require(_is_nonnegative_int(query.get("top_k")) and 1 <= query["top_k"] <= 100, f"fixture query {query_id} top_k is invalid")
+        _require(isinstance(query.get("filters"), dict), f"fixture query {query_id} filters are required")
+    return value
+
+
+def compare_receipts(
+    redamon: Mapping[str, Any],
+    assistant: Mapping[str, Any],
+    expected_queries: Mapping[str, Any],
+    *,
+    score_tolerance: float = 0.0,
+) -> dict[str, Any]:
     """Compare validated evidence and return all mismatches, never a soft pass."""
     if not math.isfinite(score_tolerance) or score_tolerance < 0:
         raise ValueError("score tolerance must be finite and non-negative")
@@ -158,10 +197,17 @@ def compare_receipts(redamon: Mapping[str, Any], assistant: Mapping[str, Any], *
 
     left_queries = {row["id"]: row for row in redamon["queries"]}
     right_queries = {row["id"]: row for row in assistant["queries"]}
+    fixture_queries = {row["id"]: row for row in expected_queries["queries"]}
+    check("pinned_query_fixture_ids", sorted(fixture_queries), sorted(left_queries))
+    check("pinned_query_fixture_ids_graph_assistant", sorted(fixture_queries), sorted(right_queries))
     check("query_fixture_ids", sorted(left_queries), sorted(right_queries))
     if set(left_queries) == set(right_queries):
         for query_id in sorted(left_queries):
             left, right = left_queries[query_id], right_queries[query_id]
+            if query_id in fixture_queries:
+                for field in ("query", "top_k", "filters"):
+                    check(f"queries.{query_id}.pinned_{field}", fixture_queries[query_id][field], left[field])
+                    check(f"queries.{query_id}.pinned_{field}_graph_assistant", fixture_queries[query_id][field], right[field])
             for field in ("query", "top_k", "filters"):
                 check(f"queries.{query_id}.{field}", left[field], right[field])
             left_results, right_results = left["results"], right["results"]

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from bb_assistant.kb.cli import main
-from bb_assistant.kb.parity import compare_receipts, load_receipt
+from bb_assistant.kb.parity import compare_receipts, load_query_fixture, load_receipt
 
 
 _HASH_A = "a" * 64
@@ -65,6 +65,10 @@ def _receipt(producer: str) -> dict[str, object]:
     }
 
 
+def _fixture() -> dict[str, object]:
+    return {"schema_version": 1, "queries": _receipt("redamon")["queries"]}
+
+
 def test_load_receipt_rejects_incomplete_vectors(tmp_path: Path) -> None:
     receipt = _receipt("redamon")
     receipt["corpus"]["vectors"]["embedded_chunks"] = 0  # type: ignore[index]
@@ -76,7 +80,7 @@ def test_load_receipt_rejects_incomplete_vectors(tmp_path: Path) -> None:
 
 
 def test_compare_receipts_passes_exact_complete_evidence() -> None:
-    result = compare_receipts(_receipt("redamon"), _receipt("graph-kb-assistant"))
+    result = compare_receipts(_receipt("redamon"), _receipt("graph-kb-assistant"), _fixture())
 
     assert result["status"] == "PASS"
     assert result["failed_checks"] == 0
@@ -88,7 +92,7 @@ def test_compare_receipts_fails_on_rank_or_score_difference() -> None:
     assistant = _receipt("graph-kb-assistant")
     assistant["queries"][0]["results"][0]["score_components"]["rrf"] = 0.4  # type: ignore[index]
 
-    result = compare_receipts(redamon, assistant)
+    result = compare_receipts(redamon, assistant, _fixture())
 
     assert result["status"] == "FAIL"
     failures = [row["criterion"] for row in result["checks"] if row["status"] == "FAIL"]
@@ -129,13 +133,39 @@ def test_load_receipt_rejects_duplicate_json_keys(tmp_path: Path) -> None:
 def test_cli_exits_nonzero_for_parity_mismatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     redamon = tmp_path / "redamon.json"
     assistant = tmp_path / "assistant.json"
+    fixture = tmp_path / "fixture.json"
     left = _receipt("redamon")
     right = _receipt("graph-kb-assistant")
     right["sources"][0]["revision"] = "changed"  # type: ignore[index]
     redamon.write_text(json.dumps(left), encoding="utf-8")
     assistant.write_text(json.dumps(right), encoding="utf-8")
+    fixture.write_text(json.dumps(_fixture()), encoding="utf-8")
 
-    assert main(["parity-check", "--redamon", str(redamon), "--assistant", str(assistant)]) == 3
+    assert main(["parity-check", "--redamon", str(redamon), "--assistant", str(assistant), "--fixture", str(fixture)]) == 3
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "FAIL"
     assert "sources.owasp.revision" in {row["criterion"] for row in output["checks"] if row["status"] == "FAIL"}
+
+
+def test_parity_gate_rejects_matching_but_non_fixture_queries() -> None:
+    redamon = _receipt("redamon")
+    assistant = _receipt("graph-kb-assistant")
+    for receipt in (redamon, assistant):
+        receipt["queries"][0]["query"] = "cherry picked query"  # type: ignore[index]
+
+    result = compare_receipts(redamon, assistant, _fixture())
+
+    assert result["status"] == "FAIL"
+    failures = {row["criterion"] for row in result["checks"] if row["status"] == "FAIL"}
+    assert "queries.authorization-boundary.pinned_query" in failures
+    assert "queries.authorization-boundary.pinned_query_graph_assistant" in failures
+
+
+def test_load_query_fixture_rejects_duplicate_ids(tmp_path: Path) -> None:
+    fixture = _fixture()
+    fixture["queries"].append(dict(fixture["queries"][0]))  # type: ignore[union-attr,index]
+    path = tmp_path / "fixture.json"
+    path.write_text(json.dumps(fixture), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate fixture query id"):
+        load_query_fixture(path)
