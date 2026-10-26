@@ -322,9 +322,9 @@ func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	ids, _, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", []string{"other"}, 1)
-	if mode != "hybrid" || len(ids) != 0 {
-		t.Fatalf("filtered global top-1 candidates = %#v (%s); want empty after the higher-ranked source is excluded", ids, mode)
+	ids, _, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1)
+	if mode != "hybrid" || len(ids) != 1 || ids[0] != strings.Repeat("a", 64) {
+		t.Fatalf("unfiltered global top-1 candidates = %#v (%s); want the highest-ranked source before metadata filtering", ids, mode)
 	}
 }
 
@@ -383,7 +383,7 @@ func TestVectorCandidatesUseFaissInnerProductOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	ids, scores, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", nil, 1)
+	ids, scores, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1)
 	if mode != "hybrid" || len(ids) != 1 || ids[0] != secondID || math.Abs(scores[secondID]-0.9) > 1e-6 {
 		t.Fatalf("FAISS-style inner-product top-1 = %#v (%s, %v); want second candidate at 0.9", ids, mode, scores)
 	}

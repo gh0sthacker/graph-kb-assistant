@@ -2786,3 +2786,25 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   comparison remain open. Do not report the KB as identical; status remains
   `PARTIAL` until vectors are complete and the source/query parity gaps are
   resolved or explicitly measured against an available RedAmon snapshot.
+
+### RedAmon parity correction — 2026-10-25 (current session)
+
+- Confirmed the earlier conclusion was only component-level similarity, not
+  KB identity. The active service still uses the full seven-family snapshot
+  `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049` with
+  207,878 source documents and 209,036 total chunks (209,026 content chunks).
+  The latest authoritative stats show 9,824/209,026 vectors; a single
+  resumable CPU embedding process is still running. Semantic search is not
+  ready until all vectors match the active snapshot.
+- Tightened known retrieval differences: lexical queries now use RedAmon-style
+  sanitized terms without SQLite prefix expansion; BM25 gives title and body
+  equal weights; lexical and vector candidates are collected globally before
+  source allowlists are applied. Focused ranking tests passed: Python 14/14
+  and Go `internal/kb` plus `internal/mcpserver`.
+- These changes do not make FTS5 equivalent to RedAmon's Neo4j Lucene, and the
+  SQLite vector index is not the same storage/search implementation as its
+  FAISS index. No deployed RedAmon corpus snapshot or same-query result fixture
+  is available here; exact source-byte and rank/output parity are therefore
+  still unverified. Do not call the KB identical. Next: finish vectors, then
+  compare against a pinned RedAmon corpus/query fixture and close or document
+  any remaining engine-specific differences.

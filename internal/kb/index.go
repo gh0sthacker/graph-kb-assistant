@@ -496,7 +496,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		substr(c.source_revision,1,257),substr(c.license_id,1,257),substr(c.attribution,1,4097),
 		substr(c.source_sha256,1,65),substr(c.chunk_sha256,1,65),
 		CASE WHEN length(CAST(c.metadata_json AS BLOB))<=? THEN c.metadata_json END,c.start_char,c.end_char,
-		bm25(chunk_search,0.0,0.0,4.0,1.0)
+		bm25(chunk_search,0.0,0.0,1.0,1.0)
 		FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
 		WHERE chunk_search MATCH ?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
@@ -524,7 +524,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	fulltextHits = filterHitsBySources(fulltextHits, sources)
 	fulltextIDs := hitIDs(fulltextHits)
 	result.Hits = fulltextHits
-	vectorIDs, vectorScores, vectorMode := i.vectorCandidates(ctx, tx, query, sources, candidateLimit)
+	vectorIDs, vectorScores, vectorMode := i.vectorCandidates(ctx, tx, query, candidateLimit)
 	if vectorMode != "" {
 		result.RetrievalMode = vectorMode
 	}
@@ -547,10 +547,11 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 			result.Hits = append(result.Hits, vectorHits...)
 		}
 	}
-	// Match RedAmon's filter_chunks stage: form the global FTS/vector candidate
-	// pool first, then filter the retrieved chunk metadata. Keep the original
-	// ranked ID lists intact so excluded candidates still occupy their original
-	// rank positions and cannot be replaced by lower-ranked per-filter hits.
+	// Match RedAmon's filter_chunks stage: form the global vector candidate pool
+	// first, then filter retrieved metadata without backfilling lower-ranked
+	// source-specific candidates. Keep vector IDs intact so excluded candidates
+	// still occupy their original ranks in RRF.
+	result.Hits = filterHitsBySources(result.Hits, sources)
 	result.Hits = filterHitsByNVDMetadata(result.Hits, options.MinCVSS, options.Severity)
 	preRanked := rankHybridHits(result.Hits, vectorIDs, vectorScores, fulltextIDs, nil, candidateLimit)
 	if i.models != nil && len(preRanked) > 1 {
@@ -697,7 +698,7 @@ func stringArgs(values []string) []any {
 }
 
 func (i *Index) vectorCandidates(
-	ctx context.Context, tx *sql.Tx, query string, sources []string, limit int,
+	ctx context.Context, tx *sql.Tx, query string, limit int,
 ) ([]string, map[string]float64, string) {
 	if i.models == nil {
 		return nil, nil, "lexical_model_unavailable"
@@ -732,7 +733,7 @@ func (i *Index) vectorCandidates(
 	if queryNorm == 0 {
 		return nil, nil, "lexical_fallback"
 	}
-	statement := `SELECT e.chunk_id,e.vector,c.source_name FROM chunk_embeddings e
+	statement := `SELECT e.chunk_id,e.vector FROM chunk_embeddings e
 		JOIN chunks c ON c.chunk_id=e.chunk_id
 		WHERE e.model_name=? AND e.dimensions=?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
@@ -742,15 +743,14 @@ func (i *Index) vectorCandidates(
 		return nil, nil, "lexical_fallback"
 	}
 	type scored struct {
-		id     string
-		source string
-		score  float64
+		id    string
+		score float64
 	}
 	all := make([]scored, 0)
 	for rows.Next() {
-		var id, source string
+		var id string
 		var blob []byte
-		if err := rows.Scan(&id, &blob, &source); err != nil || len(blob) != dimensions*4 {
+		if err := rows.Scan(&id, &blob); err != nil || len(blob) != dimensions*4 {
 			_ = rows.Close()
 			return nil, nil, "lexical_fallback"
 		}
@@ -768,7 +768,7 @@ func (i *Index) vectorCandidates(
 			norm += float64(value) * float64(value)
 		}
 		if norm > 0 {
-			all = append(all, scored{id: id, source: source, score: float64(dot)})
+			all = append(all, scored{id: id, score: float64(dot)})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -784,21 +784,7 @@ func (i *Index) vectorCandidates(
 	}
 	// RedAmon asks FAISS for one global candidate pool, then applies the
 	// include_sources filter while fetching the fused candidates from Neo4j.
-	// Filtering before top-k changes which vectors can enter RRF and can fill
-	// the pool with lower-ranked source-specific rows that RedAmon would omit.
-	if len(sources) > 0 {
-		allowed := make(map[string]struct{}, len(sources))
-		for _, source := range sources {
-			allowed[source] = struct{}{}
-		}
-		filtered := all[:0]
-		for _, item := range all {
-			if _, ok := allowed[item.source]; ok {
-				filtered = append(filtered, item)
-			}
-		}
-		all = filtered
-	}
+	// Preserve these global IDs for RRF; Search filters metadata afterwards.
 	ids, scores := make([]string, 0, len(all)), make(map[string]float64, len(all))
 	for _, item := range all {
 		ids = append(ids, item.id)

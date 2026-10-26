@@ -28,6 +28,47 @@ from .ranking import (
 
 logger = logging.getLogger(__name__)
 
+_MAX_SEARCH_TERMS = 32
+
+
+def _redamon_fulltext_expression(query: str) -> str:
+    """Build the same unprefixed OR/Lucene-operator query RedAmon sends to Neo4j."""
+    sanitized = re.sub(r'[+\-!(){}\[\]^"~*?:\\/]', " ", query)
+    sanitized = sanitized.replace("&&", " ").replace("||", " ").strip()
+    items: list[str] = []
+    term_count = 0
+    for word in sanitized.split():
+        if word in {"AND", "OR", "NOT"}:
+            items.append(word)
+            continue
+        for term in re.findall(r"[\w-]{1,64}", word, flags=re.UNICODE):
+            if term_count >= _MAX_SEARCH_TERMS:
+                break
+            items.append('"' + term.replace('"', '""') + '"')
+            term_count += 1
+        if term_count >= _MAX_SEARCH_TERMS:
+            break
+    if not items:
+        return ""
+
+    expression: list[str] = []
+    previous_was_term = False
+    for index, item in enumerate(items):
+        if item in {"AND", "OR", "NOT"}:
+            if not previous_was_term or index + 1 == len(items) or items[index + 1] in {"AND", "OR", "NOT"}:
+                return ""
+            expression.append(item)
+            previous_was_term = False
+        else:
+            expression.append(item)
+            previous_was_term = True
+    rendered = []
+    for item in expression:
+        if rendered and item not in {"AND", "OR", "NOT"} and rendered[-1] not in {"AND", "OR", "NOT"}:
+            rendered.append("OR")
+        rendered.append(item)
+    return " ".join(rendered)
+
 
 def _commit_with_busy_retry(connection: sqlite3.Connection, *, retries: int = 5) -> None:
     """Retry a durable batch commit when another local reader briefly holds SQLite."""
@@ -785,7 +826,7 @@ class KBIndex:
                 progress_callback(embedded, total)
 
     def _vector_search(
-        self, query: str, *, top_k: int, source_names: tuple[str, ...],
+        self, query: str, *, top_k: int,
     ) -> tuple[list[str], dict[str, float]]:
         with self.connect() as connection:
             meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
@@ -821,9 +862,6 @@ class KBIndex:
                      WHERE e.model_name=? AND e.dimensions=?
                        AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
             params: list[object] = [model_name, dimensions]
-            if source_names:
-                sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
-                params.extend(source_names)
             with self.connect() as connection:
                 rows = connection.execute(sql, params).fetchall()
             if not rows:
@@ -856,20 +894,16 @@ class KBIndex:
             raise ValueError("top_k must be between 1 and 100")
         if len(query) > 4096:
             raise ValueError("KB query exceeds the 4096-character limit")
-        terms = re.findall(r"[\w-]{2,64}", query, flags=re.UNICODE)[:32]
-        if not terms:
+        match_query = _redamon_fulltext_expression(query)
+        if not match_query:
             return ()
-        match_query = " OR ".join('"' + term.replace('"', '""') + '"*' for term in terms)
         sql = """SELECT c.chunk_id,c.source_name,c.source_id,c.title,c.text,c.source_locator,c.source_url,
                         c.source_revision,c.license_id,c.attribution,c.source_sha256,c.chunk_sha256,c.metadata_json,
-                        c.start_char,c.end_char,bm25(chunk_search,0.0,0.0,4.0,1.0) AS score
+                        c.start_char,c.end_char,bm25(chunk_search,0.0,0.0,1.0,1.0) AS score
                  FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
                  WHERE chunk_search MATCH ?
                    AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content') = 'content'"""
         params: list[object] = [match_query]
-        if source_names:
-            sql += " AND c.source_name IN (" + ",".join("?" for _ in source_names) + ")"
-            params.extend(source_names)
         candidate_limit = max(top_k * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE)
         sql += " ORDER BY score LIMIT ?"
         params.append(candidate_limit)
@@ -877,10 +911,16 @@ class KBIndex:
             if connection.execute("SELECT 1 FROM kb_meta WHERE key='rechunk_target_snapshot_id'").fetchone():
                 raise RuntimeError("KB index maintenance is in progress")
             rows = connection.execute(sql, params).fetchall()
+        # RedAmon applies source allowlists after asking Lucene for its global
+        # top-k pool. Filtering in SQL before LIMIT would backfill lower-ranked
+        # family-specific rows and change the RRF candidates.
+        if source_names:
+            allowed_sources = set(source_names)
+            rows = [row for row in rows if row["source_name"] in allowed_sources]
         fulltext_ids = [row["chunk_id"] for row in rows]
         fulltext_scores = {row["chunk_id"]: float(row["score"]) for row in rows}
         vector_ids, vector_scores = self._vector_search(
-            query, top_k=candidate_limit, source_names=source_names,
+            query, top_k=candidate_limit,
         )
         candidate_ids = list(dict.fromkeys([*fulltext_ids, *vector_ids]))
         if not candidate_ids:

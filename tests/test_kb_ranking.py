@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from bb_assistant.kb.ranking import RankedCandidate, rank_candidates, reciprocal_rank_fusion
 from bb_assistant.kb.canonical import SourceDocument, chunk_document
-from bb_assistant.kb.index import KBIndex, _commit_with_busy_retry
+from bb_assistant.kb.index import KBIndex, _commit_with_busy_retry, _redamon_fulltext_expression
 from bb_assistant.project_lock import project_maintenance_read_lock
 
 
@@ -70,6 +70,72 @@ class _TransientLockConnection:
 
 
 class RetrievalRankingTests(unittest.TestCase):
+    def test_lexical_query_terms_match_redamon_without_prefix_expansion(self) -> None:
+        self.assertEqual(
+            _redamon_fulltext_expression("auth sql-injection"),
+            '"auth" OR "sql" OR "injection"',
+        )
+        self.assertEqual(_redamon_fulltext_expression("x"), '"x"')
+        self.assertEqual(
+            _redamon_fulltext_expression("needle AND body"),
+            '"needle" AND "body"',
+        )
+
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="auth.md", title="Auth guide",
+                text="auth flow", metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="tool_docs", source_id="authentication.md", title="Authentication guide",
+                text="authentication flow", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-lucene-query-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3", reranker=_FixtureReranker())
+            index.replace_snapshot(chunks, "e" * 64, sources=documents)
+            hits = index.search("auth", top_k=5)
+        self.assertEqual([hit.source_id for hit in hits], ["auth.md"])
+
+    def test_source_allowlist_does_not_backfill_global_lexical_pool(self) -> None:
+        documents = [
+            SourceDocument.create(
+                source_name="gtfobins", source_id=f"other-{index}.md", title=f"Needle guide {index}",
+                text="needle reference", metadata={"document_role": "content"},
+            )
+            for index in range(30)
+        ]
+        documents.append(SourceDocument.create(
+            source_name="tool_docs", source_id="allowed.md", title="Sparse guide",
+            text="needle " + "background " * 80, metadata={"document_role": "content"},
+        ))
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-source-pool-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3", reranker=_FixtureReranker())
+            index.replace_snapshot(chunks, "f" * 64, sources=documents)
+            hits = index.search("needle", top_k=1, source_names=("tool_docs",))
+        self.assertEqual(hits, ())
+
+    def test_lexical_bm25_weights_title_and_body_equally(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="nvd", source_id="title-hit", title="needle guide",
+                text="alpha beta", metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="nvd", source_id="body-hit", title="sample guide",
+                text="needle beta", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-bm25-parity-test-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3", reranker=_FixtureReranker())
+            index.replace_snapshot(chunks, "1" * 64, sources=documents)
+            hits = index.search("needle", top_k=2)
+        self.assertEqual(len(hits), 2)
+        self.assertAlmostEqual(hits[0].bm25, hits[1].bm25, places=7)
+
     def test_embedding_batches_process_shorter_chunks_first(self) -> None:
         documents = tuple(
             SourceDocument.create(
