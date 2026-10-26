@@ -44,6 +44,7 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         _require(_is_hash(corpus.get(field)), f"corpus.{field} must be a lowercase SHA-256 digest")
     for field in ("source_count", "document_count", "chunk_count"):
         _require(_is_nonnegative_int(corpus.get(field)), f"corpus.{field} must be a non-negative integer")
+        _require(corpus[field] > 0, f"corpus.{field} must be positive")
     coverage = corpus.get("coverage_state")
     _require(isinstance(coverage, str) and coverage in _COVERAGE_STATES, "corpus.coverage_state is invalid")
     _require(coverage == "DONE", "corpus coverage must be DONE")
@@ -55,6 +56,7 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         _require(isinstance(vectors.get(field), str) and bool(vectors[field]), f"corpus.vectors.{field} is required")
     for field in ("dimensions", "embedded_chunks", "total_content_chunks"):
         _require(_is_nonnegative_int(vectors.get(field)), f"corpus.vectors.{field} must be a non-negative integer")
+    _require(vectors["dimensions"] > 0 and vectors["total_content_chunks"] > 0, "vector dimensions and content count must be positive")
     _require(vectors.get("complete") is True, "corpus vectors must be explicitly complete")
     _require(vectors["embedded_chunks"] == vectors["total_content_chunks"], "vector counts are incomplete")
 
@@ -65,6 +67,13 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         _require(isinstance(reranker.get(field), str) and bool(reranker[field]), f"corpus.reranker.{field} is required")
     retrieval = corpus.get("retrieval")
     _require(isinstance(retrieval, dict) and bool(retrieval), "corpus retrieval recipe is required")
+    assert isinstance(retrieval, dict)
+    for field in ("lexical_engine", "vector_engine"):
+        _require(isinstance(retrieval.get(field), str) and bool(retrieval[field]), f"corpus.retrieval.{field} is required")
+    for field in ("candidate_pool", "rrf_k", "rerank_pool_size"):
+        _require(_is_nonnegative_int(retrieval.get(field)) and retrieval[field] > 0, f"corpus.retrieval.{field} must be a positive integer")
+    mmr_lambda = retrieval.get("mmr_lambda")
+    _require(isinstance(mmr_lambda, (int, float)) and not isinstance(mmr_lambda, bool) and math.isfinite(mmr_lambda) and 0 <= mmr_lambda <= 1, "corpus.retrieval.mmr_lambda must be between 0 and 1")
 
     sources = value.get("sources")
     _require(isinstance(sources, list) and bool(sources), "receipt sources must be a non-empty array")
@@ -82,6 +91,7 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         _require(isinstance(source.get("filters"), dict), f"source family {name} filters are required")
         for field in ("document_count", "chunk_count"):
             _require(_is_nonnegative_int(source.get(field)), f"source family {name} {field} is invalid")
+            _require(source[field] > 0, f"source family {name} {field} must be positive")
         for field in ("content_sha256", "chunk_sha256"):
             _require(_is_hash(source.get(field)), f"source family {name} {field} is invalid")
     _require(len(sources) == corpus["source_count"], "source family count does not match corpus")
