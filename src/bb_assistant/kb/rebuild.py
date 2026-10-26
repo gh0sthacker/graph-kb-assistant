@@ -232,8 +232,6 @@ def _refresh_pinned_local_sources(index: object, *, project_root: Path, manifest
            for family in local_families):
         raise ValueError("pinned local source is incomplete")
 
-    from .project_lock import project_maintenance_lock
-
     with project_maintenance_lock(index.path.parent):
         with index.connect(_maintenance_lock_held=True) as connection:
             meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
