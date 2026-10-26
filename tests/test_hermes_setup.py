@@ -80,7 +80,7 @@ class HermesSetupTests(unittest.TestCase):
         self.assertIn("resources: false", mcp_block)
         self.assertIn("prompts: false", mcp_block)
         self.assertIn("supports_parallel_tool_calls: false", mcp_block)
-        self.assertIn("trust: untrusted", mcp_block)
+        self.assertIn("trust: full", mcp_block)
         env_block = (
             mcp_block.split("\n    env:\n", 1)[1]
             .split("\n    supports_parallel_tool_calls:", 1)[0]

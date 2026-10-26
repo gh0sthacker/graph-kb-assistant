@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add an offline, fail-closed RedAmon KB parity receipt checker. It compares complete corpus/source/vector evidence and fixed-query ordered results; receipt provenance still requires external verification.
 - Update GitHub Actions to Node 24 compatible releases.
 - Update `golang.org/x/net` to v0.61.0, including the upstream HTML parser denial-of-service fix.
 

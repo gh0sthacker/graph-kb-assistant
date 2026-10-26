@@ -19,6 +19,7 @@ from .owasp import RedAmonOWASPProvider
 from .redamon_local import RedAmonLocalToolDocsProvider
 from .redamon_sources import RedAmonSourceAdapter
 from .rebuild import export_redamon_snapshot, import_snapshot, rechunk_index
+from .parity import compare_receipts, load_receipt
 from .ranking import DEFAULT_TOP_K
 
 
@@ -130,6 +131,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     search.add_argument("query")
     search.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     search.add_argument("--source", action="append", default=[])
+    parity = commands.add_parser(
+        "parity-check",
+        help="fail-closed comparison of RedAmon and local KB evidence receipts",
+    )
+    parity.add_argument("--redamon", type=Path, required=True, help="RedAmon JSON parity receipt")
+    parity.add_argument("--assistant", type=Path, required=True, help="Graph Assistant JSON parity receipt")
+    parity.add_argument("--score-tolerance", type=float, default=0.0, help="absolute score tolerance (default: exact)")
     args = parser.parse_args(argv)
 
     if args.data_home is not None:
@@ -147,6 +155,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         index = KBIndex(_configured_index_path(args.index_path))
         print(json.dumps(index.stats(), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
+    if args.command == "parity-check":
+        redamon = load_receipt(args.redamon, expected_producer="redamon")
+        assistant = load_receipt(args.assistant, expected_producer="graph-kb-assistant")
+        result = compare_receipts(redamon, assistant, score_tolerance=args.score_tolerance)
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if result["status"] == "PASS" else 3
     if args.command == "rechunk":
         index = KBIndex(_configured_index_path(args.index_path))
         last_progress = 0
