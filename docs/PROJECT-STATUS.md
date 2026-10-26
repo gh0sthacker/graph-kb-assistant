@@ -2861,3 +2861,22 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   corpus and query/rank identity remain unverified; do not claim the KB is
   identical until a pinned RedAmon deployment snapshot or export is available
   and same-query parity has been measured.
+
+### KB parity follow-up — 2026-10-25 21:38 EDT
+
+- Confirmed the only running Neo4j container is the Graph Assistant deployment
+  (`deploy/neo4j/compose.yaml`); the checked-out RedAmon source contains no
+  deployed KB snapshot or FAISS index. Thus no local reference corpus/query
+  fixture is available for exact parity comparison.
+- Rechecked the active full snapshot read-only: seven families, 207,878 source
+  documents, 209,036 chunks, 11,296/209,026 content vectors, `vector_ready=false`.
+- The E5 generation service was stopped at 21:36 and its user unit is now
+  masked (`/home/max/.config/systemd/user/graph-kb-assistant-kb-embed.service`
+  points to `/dev/null`). The user journal records the stop but not its caller;
+  there has been no vector-count progress since 11,296. Do not claim semantic
+  retrieval readiness. This checkpoint supersedes the preceding entry's
+  statement that the service is active.
+- The strict parity gate is now explicit in `docs/ARCHITECTURE-V2-PROPOSAL.md`:
+  same deployed source snapshot/content and same ordered query results/score
+  components are required; differing search backends must pass the fixture or
+  be replaced/adapted. Delivery remains `PARTIAL`.
