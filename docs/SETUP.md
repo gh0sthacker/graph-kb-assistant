@@ -144,6 +144,14 @@ the `User`/`Group` together for another host; do not put Neo4j passwords or the
 vault key in `service.env` or the unit. The corresponding private files remain
 `neo4j.env` and `runtime.env` with mode `0600`.
 
+For hybrid KB retrieval, install the optional pinned model dependencies into
+the dedicated `kb-models-venv` and keep the local E5/BGE model snapshots
+available offline. The service template sets `BB_ASSISTANT_KB_PYTHON` to that
+environment's interpreter; without it, the Go service deliberately falls back
+to lexical-only search. Query and reranker models load lazily on the first KB
+search. Vector ranking is used only after every content chunk in the active
+snapshot has a published E5 vector generation.
+
 ## Connect an assistant over MCP
 
 The project exposes a stdio MCP server. The included launcher is:
