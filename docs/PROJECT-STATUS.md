@@ -3141,10 +3141,10 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   default and disabling Nginx's generic default site (a private backup was
   kept). Unauthenticated requests from Kali now receive the app's Basic Auth
   challenge. The active vhost is now tracked at
-  `deploy/nginx/graph-kb-assistant.conf`. The upstream HTML on
-  `127.0.0.1:8765` identifies itself as
-  `Graph Explorer — BB Graph Assistant`, and its loopback `/api/health` returns
-  200. The UI has not yet been tested after entering Basic Auth credentials.
+  `deploy/nginx/graph-kb-assistant.conf`. Using the existing `graph` Basic
+  Auth account from CT 114 returned HTTP 200 and the `Graph Explorer — BB Graph
+  Assistant` UI title; authenticated `/api/health` also returned 200. The
+  browser flow on the user's workstation has not yet been verified.
   Direct `/api/health` from CT 114 (`192.168.1.132`) and from `pve` reaches
   Nginx and receives the same 401 challenge, confirming routed access from the
   `192.168.1.x` network without DNAT.
