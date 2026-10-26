@@ -24,6 +24,13 @@
   sample only; the required 10-minute below-70°C dwell is not established, so
   no embedding job was started. Full RedAmon data/vector/query parity and live
   Caido intake/runtime remain unverified; overall delivery is still `PARTIAL`.
+- A fresh read-only `bb_kb_stats` call over Hermes' SSH MCP route identifies
+  snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`:
+  source coverage is `DONE` across seven configured families (207,878
+  documents, 209,026 content chunks), but only 38,888/209,026 chunks have E5
+  vectors and `vector_ready=false`. This live status supersedes older vector
+  counts below; it does not prove equality with an identified deployed RedAmon
+  snapshot or query results.
 
 ## Current loopback runtime check — 2026-10-26 07:22 UTC — PARTIAL
 
