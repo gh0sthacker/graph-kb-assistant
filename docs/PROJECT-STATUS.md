@@ -3016,3 +3016,26 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   access/model execution, candidate save/recovery through Hermes, production
   service readiness, or RedAmon KB identity; the overall project and KB remain
   `PARTIAL`.
+
+### Current application, CI and KB runtime check — 2026-10-26 06:48 UTC — PARTIAL
+
+- Pushed `9a625af` (`ci: scan application branch for secrets`) to the active
+  development branch. The branch now runs the pinned Gitleaks scan on PRs and
+  `main` pushes, with narrowly fingerprinted synthetic test fixtures. The
+  current checkout scan reported no leaks; workflow YAML parsing and
+  `git diff --check` passed. The Go and Python suites were not rerun for this
+  workflow-only change.
+- The running app answered HTTP 200 for its loopback UI and local projects API.
+  The configured LAN proxy answered HTTP 401 without credentials, confirming
+  the proxy/authentication gate is reachable from this host; authenticated
+  access from a separate client remains unverified.
+- A read-only KB stats query reported the active full snapshot
+  `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, with
+  207,878 source documents, 209,036 chunks and source coverage `DONE`. It had
+  34,016 of 209,026 content vectors; `vector_ready` remains false. The existing
+  embedding process (PID 1229966 at this check) was live, so no duplicate job
+  was started. The user-systemd D-Bus was unavailable in this shell, so unit
+  enablement/restart policy was not verified.
+- KB delivery remains `PARTIAL`: a deployed RedAmon snapshot and its fixed
+  query-result receipt are still unavailable, and the local SQLite FTS5
+  backend is not demonstrated equivalent to RedAmon's Neo4j Lucene backend.
