@@ -2890,3 +2890,26 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
 - A read-only follow-up confirmed progress from 11,296 to 11,488 of 209,026
   content vectors. `vector_ready` remains false. The caller for the prior stop
   is still unknown; this service checkpoint does not establish KB parity.
+
+### Synthetic browser acceptance — 2026-10-25 21:55 EDT — PARTIAL
+
+- Ran `TestBrowserAcceptanceFixture` with its temporary SQLite graph backend
+  and two encrypted synthetic HTTP exchanges. The test completed successfully
+  (`go test ./internal/webui -run '^TestBrowserAcceptanceFixture$' -count=1
+  -v -timeout=11m`; 387.959s). The temporary fixture was stopped and its
+  browser tab closed afterward.
+- In the actual embedded web UI, selected the operation and loaded its bounded
+  graph, set a baseline, selected the second capture, and compared exact stored
+  request and response bytes. The UI showed differing request and response
+  hashes and first-byte offsets. Opened the exact stored HTTP message and
+  verified that the packet preview redacted its synthetic Authorization value.
+- Saved the redacted consultation packet, reloaded the page, and resumed that
+  session by ID. The exact question, evidence reference, and redacted excerpt
+  were restored; the session remained unaccepted, so Hermes access stayed
+  blocked pending operator review. No model was called.
+- This verifies a synthetic SQLite-backed browser path, not Neo4j deployment,
+  real-project completeness, accepted Hermes/model execution, or candidate
+  creation and recovery. The graph and project UI correctly report `PARTIAL`.
+  These paths remain open acceptance criteria.
+- KB parity is still `PARTIAL`: the preceding checkpoint's incomplete vector
+  coverage and missing deployed RedAmon corpus/query fixture have not changed.
