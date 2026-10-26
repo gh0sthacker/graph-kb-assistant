@@ -22,6 +22,15 @@
   reachable through the hairpin route. A separate client device is still
   needed to verify the user-to-app path end-to-end.
 
+### Vector progress follow-up (2026-10-26 01:59 EDT)
+
+- The existing embedder process remained running. A WAL-aware, read-only count
+  advanced from 31,264 to 31,648 vectors; the full content denominator remains
+  209,026. The vector-ready snapshot is still unpublished.
+- The complete Python suite passed after the KB parity gate and pinned query
+  fixture changes: 173 tests and 8 subtests. These are local synthetic/unit
+  checks, not RedAmon deployment parity evidence.
+
 ## Current synthetic app acceptance and KB status (2026-10-25 20:03 EDT)
 
 - `go test ./internal/webui -run '^TestBrowserAcceptanceFixture$' -count=1 -v
