@@ -578,3 +578,43 @@ no new vectors reported. The worker targets the candidate, not the active
 application index. Promotion remains pending until embeddings finish and the
 candidate passes final integrity and retrieval checks. Graph API and Neo4j
 remain active; VM112 remains paused.
+
+## VM112 installed-index ID reconciliation — 2026-10-26 23:08 UTC
+
+The RedAmon reference disk was rechecked while VM112 was paused, using a
+read-only qcow2/NBD attachment and ext4 `ro,noload`; the mount was then removed
+and `/dev/nbd0` disconnected. A checksum-verified temporary copy of
+`chunk_ids.json` on CT108 was removed after comparison. VM112 remains paused.
+
+The installed index contains 2,449 IDs. Its artifact hashes are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `index.faiss` | `20fa1849164b537a6b5068b19b90d7a58370f73ab868f6fd0df3aaf0752ea030` |
+| `chunk_ids.json` | `41793591519064947966fe877bd3d2f8e79710086d0993739fdf1604c8539ef1` |
+| `index.faiss.manifest.json` | `12674436584b2aa5376817e0f2d3b8f8c56b12508a03390b544e82e3b617a1f6` |
+
+The candidate's four RedAmon-compatible families have 2,449 IDs in total and
+overlap the installed ID list on 2,448 IDs: ToolDocs 355/355, LOLBAS 464/464,
+OWASP 899/899, and GTFOBins 730/731. The only difference is the `ld.so` shell
+card. RedAmon's key `gtfobins:ld.so:shell` produces
+`064de01bda88d0b3`; our old importer used `Path.stem`, changed the key to
+`gtfobins:ld:shell`, and produced `3c3199b415f18567`. The importer now strips
+only a trailing `.md`, matching RedAmon's filename handling and preserving
+`.so` as part of a real binary name. This corrects stable-ID parity; the
+candidate database has not yet been refreshed with the fix because its
+embedding worker is active.
+
+This ID-level result is much stronger than the earlier profile-marker-only
+assessment, but it does not prove chunk-text hashes or same-query ranking. The
+installed `.last_ingest` still says `cpu-lite`, while the four-family ID set
+matches the candidate subset; treat that marker as inconsistent with the
+artifact until the installed source/text manifest is independently reconciled.
+The installed RedAmon config uses `intfloat/e5-base-v2` (768 dimensions); our
+candidate uses E5-large-v2 (1024 dimensions), so its vectors cannot be compared
+directly. The candidate currently has 215,382 chunks and 38,775 vectors; its
+worker is active but has used only about 3.45 CPU seconds and 14.7 MiB RAM,
+consistent with waiting before model load. A single 60 C PVE temperature
+sample is not proof that the worker's ten-minute cool-dwell gate has passed.
+Do not bypass that gate. VM112 stays paused, and exact corpus-text and retrieval
+parity remain `PARTIAL`.
