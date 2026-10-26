@@ -5,6 +5,29 @@ operator-provided read-only stats; service and single-sample temperature state
 come from the operator's PVE check. No claim below means the installed KB is
 identical to RedAmon.
 
+## Latest coordinator check — 2026-10-26 21:53 UTC
+
+CT108's candidate index was read through SQLite `-readonly`: 215,382 chunk
+rows and 38,775 E5-large-v2 vectors (1,024 dimensions). No vector progress was
+observed. The retained service `graph-kb-assistant-kb-embed.service` is active
+and enabled with MainPID 83922, but has consumed only 0.48 CPU seconds after
+about ten minutes and holds about 16 MB; it is waiting before model loading.
+The exact configured sensor (`coretemp`, label `Package id 0`) read 87 C, so
+the 70 C limit and ten-minute cool dwell correctly prevent embedding. An
+earlier 27.8 C read from `/sys/class/thermal/thermal_zone0/temp` was a
+different thermal zone and is not valid evidence that the CPU package is
+cool. Other hwmon zones also differed from the CPU package sensor.
+
+Two active services were found targeting the same candidate. Both were
+sleeping behind the thermal gate and the embed code has an exclusive per-index
+lock, so only one could write; the redundant legacy
+`graph-kb-assistant-kb-embed-candidate.service` was stopped and disabled. The
+repository-managed `graph-kb-assistant-kb-embed.service` remains the single
+enabled worker. Its installed unit and environment select the isolated
+candidate, not the live index. This cleanup changed no KB rows. The candidate
+still lacks 176,607 content vectors, and `vector_ready` remains false. VM112
+was not resumed.
+
 ## Embedding destination correction — 2026-10-26 21:36 UTC
 
 A fresh read-only PVE check confirmed VM112 is paused. In CT108,
