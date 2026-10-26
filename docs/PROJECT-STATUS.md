@@ -2756,3 +2756,10 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
 - The first active import was stopped after identifying a quadratic FTS5 existence check on the unindexed `chunk_id` column. SQLite recovered the original six-family snapshot (`0b7bc15e...`, 161,240 documents, 162,398 chunks, 8,416 staged vectors); no partial replacement was published.
 - Snapshot replacement now rebuilds the FTS5 projection in a linear pass instead of checking each incoming row against the unindexed FTS column. The focused provider/index suite passed (15 tests).
 - The retry completed and the active index now reports snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, `DONE`, 7 families, 207,878 source documents, and 209,036 chunks. It retained 8,416 embeddings, but has no published vector snapshot marker; vector search is not ready. SQLite `quick_check`, the deployed RedAmon data snapshot, and representative retrieval-result parity remain unverified. Do not call the KB identical until those checks pass.
+
+### Active RedAmon KB verification — 2026-10-25 20:49 EDT
+
+- The active snapshot is `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`: coverage `DONE`, 7 families, 207,878 source documents and 209,036 chunks. `PRAGMA quick_check` returned `ok`; FTS5 row count equals the chunk count (209,036). The earlier importer's rollback journal is absent.
+- A local lexical smoke query for `SQL injection authentication bypass` returned three ExploitDB records. This confirms the installed FTS path can retrieve the newly imported family; it does not compare ranking with RedAmon.
+- The managed `graph-kb-assistant-kb-embed-full.service` is active with zero restarts. It has stored 8,736 vectors; the staging model is `intfloat/e5-large-v2`, 1,024 dimensions, bound to the active snapshot. The vector-ready marker remains unpublished, so search is still lexical-only.
+- Source family names match RedAmon's pinned `full` profile. Its deployed data snapshot is absent from this checkout; exact content equality and representative result/rank parity against that deployment remain open. KB parity remains `PARTIAL`.
