@@ -1,5 +1,15 @@
 # Project status and known limitations
 
+## Current loopback runtime check — 2026-10-26 07:22 UTC — PARTIAL
+
+- The Go web process is running on `127.0.0.1:8765`. Read-only requests to
+  `/` and `/api/projects` returned HTTP 200. `/api/health` is not a registered
+  route and returned 404; this is not evidence that the app is unhealthy.
+- This verifies loopback serving and route registration only. It does not
+  verify access from a separate client, authenticated proxy behavior, a full
+  graph/evidence interaction, or the Hermes gateway's current MCP handshake.
+  Overall runtime coverage remains `PARTIAL`.
+
 ## Local KB parity receipt export — 2026-10-26 — PARTIAL
 
 - Added `bb-assistant-kb parity-export`, which validates a completed snapshot,
