@@ -2927,3 +2927,24 @@ Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever da
   These paths remain open acceptance criteria.
 - KB parity is still `PARTIAL`: the preceding checkpoint's incomplete vector
   coverage and missing deployed RedAmon corpus/query fixture have not changed.
+
+### Neo4j-backed synthetic browser acceptance — 2026-10-25 22:03 EDT — PARTIAL
+
+- Re-ran `TestBrowserAcceptanceFixture` against a disposable Neo4j 2026.10.0
+  container on a loopback ephemeral port. The fixture inserted only its two
+  encrypted synthetic HTTP exchanges; the test passed in 99.292s. The browser
+  tab, test server, temporary project, and container were stopped and removed.
+- In the real embedded UI, selected the operation, loaded both request nodes
+  from Neo4j, chose a baseline and compared the exact stored request and
+  response bytes. The comparison returned the expected differing hashes and
+  first-byte offsets, matching the SQLite-backed browser check.
+- The Neo4j fixture displayed `Value index unavailable · direct graph only`.
+  Its test setup writes the graph using incremental projection and does not run
+  the full field-value-index rebuild; therefore this run does not verify
+  cross-capture value-correlation expansion. The UI correctly reported partial
+  graph coverage. Verify the index rebuild path separately before claiming
+  that graph-navigation capability complete.
+- This proves the disposable Neo4j-backed browser navigation and exact
+  comparison path only. Accepted Hermes access, model execution, candidate
+  save/recovery, production service state, and full project coverage remain
+  unverified. KB identity remains `PARTIAL` as recorded above.
