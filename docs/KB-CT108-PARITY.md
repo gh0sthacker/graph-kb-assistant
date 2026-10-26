@@ -157,6 +157,16 @@ reranker pool, MMR lambda, and source boosts also match the declared RedAmon
 settings. This is configuration parity only; it does not prove the active
 RedAmon snapshot's contents or exact search ordering.
 
+The vendored ToolDocs source was then compared file-by-file with the checked
+out RedAmon `agentic/skills` tree at commit
+`cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`: both contain 46 Markdown files,
+with identical relative paths and SHA-256 hashes. This proves parity for that
+pinned source tree, not for RedAmon's deployed corpus or its other six source
+families. It also narrows the active ToolDocs discrepancy: the deployed local
+snapshot still has 434 chunks while reprocessing the current pinned source is
+expected to produce 355. The candidate rebuild must be checked before import
+to identify whether old chunking or stale content accounts for the difference.
+
 Before a source rebuild, the two CT108 Python files that write/report snapshot
 manifest hashes were updated from the CI-passing branch files with backups.
 Hashes now match for all 21 tracked `src/bb_assistant/kb` files. This ensures
