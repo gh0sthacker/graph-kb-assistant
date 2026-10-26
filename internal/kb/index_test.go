@@ -185,6 +185,156 @@ func TestStatsReportsStagedVectorProgressAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestStatsReportsSourceManifestFreshnessAndUnknownState(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "source manifest freshness fixture"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+
+	manifestPath := filepath.Join(t.TempDir(), "sources.yaml")
+	manifest := []byte("sources:\n  - name: synthetic\n")
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("INSERT INTO kb_meta(key,value) VALUES('source_manifest_sha256',?)", digestHex(string(manifest)))
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("set source manifest hash: %v", err)
+	}
+	t.Setenv("BB_ASSISTANT_KB_SOURCE_MANIFEST", manifestPath)
+
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = index.Close() }()
+
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.SourceManifestSHA256 == nil || stats.CurrentSourceManifestSHA256 == nil ||
+		*stats.SourceManifestSHA256 != digestHex(string(manifest)) ||
+		*stats.CurrentSourceManifestSHA256 != digestHex(string(manifest)) ||
+		stats.SourceManifestMatchesCurrent == nil || !*stats.SourceManifestMatchesCurrent {
+		t.Fatalf("matching source manifest status = pinned:%v current:%v matches:%v", stats.SourceManifestSHA256, stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+
+	if err := os.WriteFile(manifestPath, []byte("sources: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() after manifest change error = %v", err)
+	}
+	if stats.SourceManifestMatchesCurrent == nil || *stats.SourceManifestMatchesCurrent {
+		t.Fatalf("changed source manifest was not marked stale: pinned:%v current:%v matches:%v", stats.SourceManifestSHA256, stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+
+	t.Setenv("BB_ASSISTANT_KB_SOURCE_MANIFEST", filepath.Join(t.TempDir(), "missing.yaml"))
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	index, err = OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err = index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() with unavailable current manifest error = %v", err)
+	}
+	if stats.CurrentSourceManifestSHA256 != nil || stats.SourceManifestMatchesCurrent != nil {
+		t.Fatalf("unavailable current manifest must remain unknown: current:%v matches:%v", stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+}
+
+func TestStatsFallsBackToPinnedSnapshotManifestForOlderIndex(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "older index freshness fixture"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	pinnedManifest := "sources:\n  - name: old\n"
+	currentManifest := "sources:\n  - name: current\n"
+	currentPath := filepath.Join(t.TempDir(), "sources.yaml")
+	if err := os.WriteFile(currentPath, []byte(currentManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshotID := writeMinimalSnapshotManifest(t, filepath.Join(filepath.Dir(indexPath), "snapshots"), digestHex(pinnedManifest))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("UPDATE kb_meta SET value=? WHERE key='snapshot_id'", snapshotID)
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("set old snapshot id: %v", err)
+	}
+	t.Setenv("BB_ASSISTANT_KB_SOURCE_MANIFEST", currentPath)
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = index.Close() }()
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.SourceManifestSHA256 == nil || *stats.SourceManifestSHA256 != digestHex(pinnedManifest) ||
+		stats.CurrentSourceManifestSHA256 == nil || *stats.CurrentSourceManifestSHA256 != digestHex(currentManifest) ||
+		stats.SourceManifestMatchesCurrent == nil || *stats.SourceManifestMatchesCurrent {
+		t.Fatalf("snapshot fallback freshness = pinned:%v current:%v matches:%v", stats.SourceManifestSHA256, stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+}
+
+func writeMinimalSnapshotManifest(t *testing.T, snapshotsRoot, sourceManifestSHA256 string) string {
+	t.Helper()
+	emptyHash := digestHex("")
+	identity := map[string]any{
+		"source_manifest_sha256":        sourceManifestSHA256,
+		"source_documents_sha256":       emptyHash,
+		"chunks_sha256":                 emptyHash,
+		"source_coverage_report_sha256": (*string)(nil),
+		"chunk_schema":                  ChunkSchema,
+		"max_chars":                     1200,
+		"overlap_chars":                 100,
+	}
+	canonical, err := canonicalJSON(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID := digestHex(string(canonical))
+	root := filepath.Join(snapshotsRoot, snapshotID)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "source-documents.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "chunks.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		SchemaVersion: 1, SnapshotID: snapshotID, SnapshotDir: snapshotID,
+		SourceManifestSHA256: sourceManifestSHA256, SourceDocumentsSHA256: emptyHash, ChunksSHA256: emptyHash,
+		ChunkSchema: ChunkSchema, MaxChars: 1200, OverlapChars: 100, SourceCount: 1,
+		ExportComplete: true, SourceCoverageState: "unverified", SourceCoverageReport: []byte("null"),
+	}
+	payload, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return snapshotID
+}
+
 func TestSearchDoesNotReturnLicenseNoticeOnlyMatches(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
 	content := "ordinary authentication reference content"

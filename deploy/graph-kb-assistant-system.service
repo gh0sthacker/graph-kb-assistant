@@ -14,6 +14,7 @@ Environment=BB_ASSISTANT_BINARY=/usr/local/bin/bb-assistant
 Environment=BB_ASSISTANT_NEO4J_ENV_FILE=/home/max/.local/share/bb-graph-assistant/neo4j.env
 Environment=BB_ASSISTANT_RUNTIME_ENV_FILE=/home/max/.local/share/bb-graph-assistant/runtime.env
 Environment=BB_ASSISTANT_KB_INDEX=/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3
+Environment=BB_ASSISTANT_KB_SOURCE_MANIFEST=/home/max/bb/graph-kb-assistant/src/bb_assistant/kb/sources.yaml
 Environment=BB_ASSISTANT_KB_MODELS=1
 Environment=PYTHONPATH=/home/max/bb/graph-kb-assistant/src
 EnvironmentFile=/home/max/.local/share/bb-graph-assistant/service.env

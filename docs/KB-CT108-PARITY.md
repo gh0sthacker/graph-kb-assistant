@@ -84,3 +84,16 @@ policy-valid.
 
 Until all four are available and matching, report the corpus and retrieval
 parity as `PARTIAL`.
+
+## Go service manifest-freshness reporting
+
+The production `/mcp` server calls the Go `bb_kb_stats` implementation. Its
+local branch now reports `source_manifest_sha256`,
+`current_source_manifest_sha256`, and `source_manifest_matches_current` when
+the pinned snapshot and checked-in `sources.yaml` are readable. Older indexes
+fall back to the immutable snapshot manifest; unavailable hashes remain
+`null`. The systemd templates configure the manifest path explicitly. This is
+only a source-definition freshness signal: it does not establish source
+coverage validity, vector completeness, or RedAmon parity. The change is local
+code and still needs CI, push, and redeployment before CT108 exposes these
+fields.

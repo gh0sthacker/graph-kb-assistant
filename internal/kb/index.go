@@ -57,8 +57,10 @@ var snapshotDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 // Index opens an existing Python-compatible FTS index in SQLite read-only mode.
 // Snapshot construction and source fetching remain separate operations.
 type Index struct {
-	db     *sql.DB
-	models RetrievalModels
+	db                 *sql.DB
+	models             RetrievalModels
+	indexPath          string
+	sourceManifestPath string
 }
 
 // RetrievalModels supplies the pinned E5 query embedding and BGE cross-encoder.
@@ -112,6 +114,9 @@ type StatsResult struct {
 	CoverageState                string           `json:"coverage_state"`
 	CoverageReportHash           *string          `json:"coverage_report_sha256"`
 	SourceCoverage               []map[string]any `json:"source_coverage"`
+	SourceManifestSHA256         *string          `json:"source_manifest_sha256"`
+	CurrentSourceManifestSHA256  *string          `json:"current_source_manifest_sha256"`
+	SourceManifestMatchesCurrent *bool            `json:"source_manifest_matches_current"`
 	MaintenanceState             *string          `json:"maintenance_state,omitempty"`
 	ReferenceMaterialIsUntrusted bool             `json:"reference_material_is_untrusted"`
 }
@@ -204,7 +209,18 @@ func OpenIndex(path string) (*Index, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	index := &Index{db: db}
+	sourceManifestPath := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_SOURCE_MANIFEST"))
+	if sourceManifestPath == "" {
+		// In a source checkout, the repository root is the service working
+		// directory. Installed deployments should set the explicit path.
+		if workingDir, err := os.Getwd(); err == nil {
+			candidate := filepath.Join(workingDir, "src", "bb_assistant", "kb", "sources.yaml")
+			if fileIsRegular(candidate) {
+				sourceManifestPath = candidate
+			}
+		}
+	}
+	index := &Index{db: db, indexPath: resolved, sourceManifestPath: sourceManifestPath}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := index.validate(ctx); err != nil {
@@ -244,6 +260,12 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 		CoverageReportHash:           optionalString(info.CoverageReportHash),
 		SourceCoverage:               []map[string]any{},
 		ReferenceMaterialIsUntrusted: true,
+	}
+	result.SourceManifestSHA256 = i.sourceManifestDigest(ctx, tx, info.SnapshotID)
+	result.CurrentSourceManifestSHA256 = hashConfiguredSourceManifest(i.sourceManifestPath)
+	if result.SourceManifestSHA256 != nil && result.CurrentSourceManifestSHA256 != nil {
+		matches := *result.SourceManifestSHA256 == *result.CurrentSourceManifestSHA256
+		result.SourceManifestMatchesCurrent = &matches
 	}
 	if info.MaintenanceState != "" {
 		result.MaintenanceState = optionalString(info.MaintenanceState)
@@ -357,6 +379,58 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 		return StatsResult{}, errors.New("KB read transaction could not finish")
 	}
 	return result, nil
+}
+
+const maximumSourceManifestBytes = 4 << 20
+
+func (i *Index) sourceManifestDigest(ctx context.Context, queryer rowQueryer, snapshotID string) *string {
+	var digest string
+	err := queryer.QueryRowContext(ctx,
+		"SELECT substr(value,1,65) FROM kb_meta WHERE key='source_manifest_sha256'").Scan(&digest)
+	if err == nil && snapshotDigestPattern.MatchString(digest) {
+		return optionalString(digest)
+	}
+	if i == nil || i.indexPath == "" || !snapshotDigestPattern.MatchString(snapshotID) {
+		return nil
+	}
+	// Older indexes predate the duplicated kb_meta value. Their immutable
+	// snapshot manifest remains the authoritative source of the pinned hash.
+	snapshotPath := filepath.Join(filepath.Dir(i.indexPath), "snapshots", snapshotID)
+	snapshot, err := OpenSnapshot(snapshotPath)
+	if err != nil || snapshot.Manifest.SnapshotID != snapshotID {
+		return nil
+	}
+	return optionalString(snapshot.Manifest.SourceManifestSHA256)
+}
+
+func hashConfiguredSourceManifest(path string) *string {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > maximumSourceManifestBytes {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Size() != info.Size() || opened.Size() > maximumSourceManifestBytes {
+		return nil
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, maximumSourceManifestBytes+1))
+	if err != nil || len(payload) > maximumSourceManifestBytes || int64(len(payload)) != opened.Size() {
+		return nil
+	}
+	digest := sha256.Sum256(payload)
+	return optionalString(hex.EncodeToString(digest[:]))
+}
+
+func fileIsRegular(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
 }
 
 // GetSource reads one exact source document and a bounded prefix of its text.
