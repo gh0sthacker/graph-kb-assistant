@@ -102,7 +102,7 @@ class RetrievalRankingTests(unittest.TestCase):
     def test_source_allowlist_does_not_backfill_global_lexical_pool(self) -> None:
         documents = [
             SourceDocument.create(
-                source_name="gtfobins", source_id=f"other-{index}.md", title=f"Needle guide {index}",
+                source_name="nvd", source_id=f"CVE-2026-{index + 1000}", title=f"Needle guide {index}",
                 text="needle reference", metadata={"document_role": "content"},
             )
             for index in range(30)
@@ -194,7 +194,7 @@ class RetrievalRankingTests(unittest.TestCase):
                 text="long " * 300, metadata={"document_role": "content"},
             ),
             SourceDocument.create(
-                source_name="gtfobins", source_id="short.md", title="Short",
+                source_name="nvd", source_id="CVE-2026-0099", title="Short",
                 text="short", metadata={"document_role": "content"},
             ),
         )
@@ -213,7 +213,7 @@ class RetrievalRankingTests(unittest.TestCase):
                 text="alpha authentication flow", metadata={"document_role": "content"},
             ),
             SourceDocument.create(
-                source_name="gtfobins", source_id="bravo.md", title="Bravo",
+                source_name="nvd", source_id="CVE-2026-0002", title="Bravo",
                 text="bravo credential renewal", metadata={"document_role": "content"},
             ),
         )
@@ -227,7 +227,7 @@ class RetrievalRankingTests(unittest.TestCase):
             self.assertEqual(index.rebuild_embeddings(_FixtureEmbedder(), batch_size=1), 2)
             self.assertTrue(index.stats()["vector_ready"])
             hits = index.search("semantic concept", top_k=2)
-            self.assertEqual({hit.source_id for hit in hits}, {"alpha.md", "bravo.md"})
+            self.assertEqual({hit.source_id for hit in hits}, {"alpha.md", "CVE-2026-0002"})
             self.assertIsNotNone(next(hit for hit in hits if hit.source_id == "alpha.md").rerank_score)
 
     def test_vector_ready_requires_the_runtime_vector_backend(self) -> None:
@@ -283,7 +283,7 @@ class RetrievalRankingTests(unittest.TestCase):
                 text="alpha authentication flow", metadata={"document_role": "content"},
             ),
             SourceDocument.create(
-                source_name="gtfobins", source_id="bravo.md", title="Bravo",
+                source_name="nvd", source_id="CVE-2026-0002", title="Bravo",
                 text="bravo credential renewal", metadata={"document_role": "content"},
             ),
         )

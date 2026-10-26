@@ -18,6 +18,7 @@ import tempfile
 from typing import BinaryIO, Iterable, Iterator, Mapping
 
 from .canonical import CHUNK_SCHEMA, CanonicalChunk, SourceDocument, chunk_document
+from .embeddings import E5_MODEL
 from ..project_lock import project_maintenance_lock
 
 
@@ -400,9 +401,22 @@ def rechunk_index(
                 }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
                 connection.execute("DROP TABLE IF EXISTS kb_rechunk_ids")
                 connection.execute("DROP TABLE IF EXISTS kb_rechunk_fts_ids")
+                connection.execute("DROP TABLE IF EXISTS kb_rechunk_vectors")
                 connection.execute("CREATE TABLE kb_rechunk_ids(chunk_id TEXT PRIMARY KEY)")
                 connection.execute("CREATE TABLE kb_rechunk_fts_ids(chunk_id TEXT PRIMARY KEY, fts_rowid INTEGER NOT NULL)")
                 connection.execute("INSERT INTO kb_rechunk_fts_ids(chunk_id,fts_rowid) SELECT chunk_id,rowid FROM chunk_search")
+                connection.execute("""
+                    CREATE TABLE kb_rechunk_vectors(
+                      chunk_sha256 TEXT NOT NULL, model_name TEXT NOT NULL,
+                      dimensions INTEGER NOT NULL, vector BLOB NOT NULL,
+                      PRIMARY KEY(chunk_sha256,model_name))
+                """)
+                connection.execute("""
+                    INSERT OR IGNORE INTO kb_rechunk_vectors(chunk_sha256,model_name,dimensions,vector)
+                    SELECT c.chunk_sha256,e.model_name,e.dimensions,e.vector
+                    FROM chunks c JOIN chunk_embeddings e USING(chunk_id)
+                    WHERE e.model_name=? AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
+                """, (E5_MODEL,))
                 for key in ("rechunk_progress_family", "rechunk_progress_source_id"):
                     connection.execute("DELETE FROM kb_meta WHERE key=?", (key,))
                 connection.execute(
@@ -450,6 +464,11 @@ def rechunk_index(
                     chunks.extend(chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars))
                 for chunk in chunks:
                     metadata_json = json.dumps(chunk.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                    old_chunk = connection.execute(
+                        "SELECT chunk_sha256 FROM chunks WHERE chunk_id=?", (chunk.chunk_id,),
+                    ).fetchone()
+                    if old_chunk and old_chunk[0] != chunk.chunk_sha256:
+                        connection.execute("DELETE FROM chunk_embeddings WHERE chunk_id=?", (chunk.chunk_id,))
                     old_fts = connection.execute(
                         "SELECT fts_rowid FROM kb_rechunk_fts_ids WHERE chunk_id=?", (chunk.chunk_id,),
                     ).fetchone()
@@ -468,6 +487,11 @@ def rechunk_index(
                         chunk.source_sha256, chunk.chunk_sha256, chunk.chunk_schema, chunk.text,
                     )
                     connection.execute(upsert_chunk_sql, values)
+                    connection.execute("""
+                        INSERT OR IGNORE INTO chunk_embeddings(chunk_id,model_name,dimensions,vector)
+                        SELECT ?,model_name,dimensions,vector FROM kb_rechunk_vectors
+                        WHERE chunk_sha256=? AND model_name=?
+                    """, (chunk.chunk_id, chunk.chunk_sha256, E5_MODEL))
                     connection.execute("INSERT OR IGNORE INTO kb_rechunk_ids(chunk_id) VALUES(?)", (chunk.chunk_id,))
                     if not old_fts:
                         cursor = connection.execute(
@@ -533,6 +557,7 @@ def rechunk_index(
                 )
             connection.execute("DROP TABLE kb_rechunk_ids")
             connection.execute("DROP TABLE kb_rechunk_fts_ids")
+            connection.execute("DROP TABLE kb_rechunk_vectors")
             connection.execute("DELETE FROM kb_meta WHERE key LIKE 'rechunk_%'")
             connection.commit()
             if progress_callback is not None:

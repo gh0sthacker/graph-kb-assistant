@@ -18,7 +18,7 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from ..paths import data_root, ensure_private_directory
 from ..project_lock import project_maintenance_lock, project_maintenance_read_lock
-from .canonical import CHUNK_SCHEMA, CanonicalChunk, SourceDocument
+from .canonical import CHUNK_SCHEMA, CanonicalChunk, SourceDocument, redamon_chunk_id
 from .ranking import (
     DEFAULT_OVERFETCH_FACTOR,
     DEFAULT_RERANK_POOL_SIZE,
@@ -391,6 +391,11 @@ class KBIndex:
             # row degenerates into a quadratic full-table scan at RedAmon scale.
             # Rebuild the lexical projection linearly; canonical chunks and
             # unchanged vectors remain in their keyed tables.
+            connection.execute("""
+                DELETE FROM chunk_embeddings WHERE chunk_id IN (
+                  SELECT old.chunk_id FROM chunks old JOIN incoming_chunks new USING(chunk_id)
+                  WHERE old.chunk_sha256 IS NOT new.chunk_sha256)
+            """)
             connection.execute("DELETE FROM chunk_search")
             connection.execute("""
                 DELETE FROM chunks WHERE NOT EXISTS (
@@ -1083,8 +1088,13 @@ class KBIndex:
             "end_char": chunk.end_char,
             "chunk_sha256": chunk.chunk_sha256,
         }
-        expected_chunk_id = hashlib.sha256(
-            json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        ).hexdigest()
+        unique_key = chunk.metadata.get("redamon_unique_key")
+        expected_chunk_id = (
+            redamon_chunk_id(chunk.source_name, unique_key)
+            if isinstance(unique_key, str) and unique_key
+            else hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+        )
         if chunk.chunk_schema != CHUNK_SCHEMA or chunk.chunk_id != expected_chunk_id:
             raise ValueError("KB chunk identity does not match its provenance")

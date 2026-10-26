@@ -68,9 +68,11 @@
   VM112/DB has not been started or modified. Exact document/chunk digests and
   same-query ranking still need to be obtained from a queryable isolated copy.
 - See [`KB-CT108-PARITY.md`](KB-CT108-PARITY.md) for the detailed evidence.
-  Keep KB parity `PARTIAL`; a maximum-coverage full-profile vector job is now
-  running on CT108, while the RedAmon clone and same-query receipt remain
-  separate follow-up blockers.
+  Keep KB parity `PARTIAL`; RedAmon-compatible source-specific chunking is now
+  implemented and covered by offline fixtures, but the CT108 candidate has not
+  yet been re-chunked. The candidate embedding unit is inactive/disabled after
+  the latest operator stop, and VM112 remains paused. Full vector coverage,
+  deployed corpus hashes, and same-query receipts remain open.
 
 ## KB source-coverage integrity fix deployed to CT108 — 2026-10-26 18:46 UTC — PARTIAL
 

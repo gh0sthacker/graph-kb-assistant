@@ -25,6 +25,8 @@ class ImportSnapshotCLITests(unittest.TestCase):
                 "repository_license_id": "MIT",
                 "license_evidence": "fixture-license",
                 "license_status": "confirmed_at_pinned_revision",
+                "include_categories": ["tooling"],
+                "exclude": [],
             }],
         }
 
@@ -38,6 +40,7 @@ class ImportSnapshotCLITests(unittest.TestCase):
                         title="Fixture doc",
                         original_text="Synthetic snapshot import fixture.",
                         source_locator="fixture/doc.md",
+                        metadata={"category_dir": "tooling"},
                     ),
                     SourceRecord(
                         source_id="NOTICE:license",
@@ -76,5 +79,5 @@ class ImportSnapshotCLITests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(exit_code, 3)
         self.assertEqual(result["coverage_state"], "PARTIAL")
-        self.assertEqual(result["source_documents"], 1)
+        self.assertEqual(result["source_documents"], 2)  # Content plus retained license provenance.
         self.assertGreater(result["chunks"], 0)

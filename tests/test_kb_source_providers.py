@@ -19,7 +19,7 @@ from bb_assistant.kb.nuclei import RedAmonNucleiProvider
 from bb_assistant.kb.owasp import RedAmonOWASPProvider
 from bb_assistant.kb.pinned_github_archive import read_pinned_archive
 from bb_assistant.kb.index import KBIndex
-from bb_assistant.kb.canonical import SourceDocument, chunk_document
+from bb_assistant.kb.canonical import CanonicalChunk, SourceDocument, chunk_document
 from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider, _redamon_search_text
 from bb_assistant.kb.rebuild import _source_document_from_record, export_redamon_snapshot, import_snapshot, rechunk_index
 from bb_assistant.kb.redamon_sources import (
@@ -62,6 +62,115 @@ def _request(name: str, url: str, filters: dict[str, object]) -> SourceRequest:
 
 
 class ArchiveProviderFixtureTests(unittest.TestCase):
+    def test_redamon_structured_source_cards_use_native_ids_and_rendering(self) -> None:
+        gtfo = SourceDocument.create(
+            source_name="gtfobins", source_id="_gtfobins/curl", title="curl",
+            text=("---\nfunctions:\n  suid:\n    - description: Find files\n"
+                  "      contexts: {file-read: true, file-write: false}\n"
+                  "      code: curl file:///etc/passwd\n      comment:  Safe note  \n---\n"),
+            metadata={"binary_name": "curl"},
+        )
+        gtfo_chunks = chunk_document(gtfo)
+        self.assertEqual(len(gtfo_chunks), 1)
+        self.assertEqual(gtfo_chunks[0].title, "curl — suid")
+        self.assertEqual(
+            gtfo_chunks[0].text,
+            "curl — suid: Find files\nContexts: file-read\nCommand: curl file:///etc/passwd\nNote: Safe note",
+        )
+        self.assertEqual(
+            gtfo_chunks[0].chunk_id,
+            hashlib.sha256(b"gtfobins:curl:suid").hexdigest()[:16],
+        )
+
+        lolbas = SourceDocument.create(
+            source_name="lolbas", source_id="yml/OSBinaries/Fixture.yml", title="Fixture",
+            text=("Name: Fixture\nDescription: Binary description\nFull_Path:\n"
+                  "  - Path: C:/Windows/fixture.exe\nCommands:\n"
+                  "  - Command: fixture.exe /safe\n    Description: Command description\n"
+                  "    Usecase: Testing\n    Category: LOLBAS\n    MitreID: T1105\n"
+                  "    Privileges: User\n    OperatingSystem: Windows\n"
+                  "    Tags: [{Category: Transfer}]\n"),
+        )
+        lolbas_chunks = chunk_document(lolbas)
+        self.assertEqual(len(lolbas_chunks), 1)
+        self.assertEqual(lolbas_chunks[0].title, "Fixture — LOLBAS")
+        self.assertEqual(
+            lolbas_chunks[0].text,
+            "Fixture — LOLBAS\n\nBinary description\n\nCommand description\n\n"
+            "Command: fixture.exe /safe\nUsecase: Testing\nPrivileges: User\nOS: Windows\n"
+            "Tags: Category: Transfer\nMITRE: T1105\nFull Path: C:/Windows/fixture.exe",
+        )
+        self.assertEqual(
+            lolbas_chunks[0].chunk_id,
+            hashlib.sha256(b"lolbas:Fixture:LOLBAS:fixture.exe /safe").hexdigest()[:16],
+        )
+
+        notice = SourceDocument.create(
+            source_name="gtfobins", source_id="NOTICE:license", title="License",
+            text="License terms", metadata={"document_role": "license_notice"},
+        )
+        self.assertEqual(chunk_document(notice), ())
+
+    def test_nuclei_and_owasp_use_redamon_template_and_test_ids(self) -> None:
+        nuclei = SourceDocument.create(
+            source_name="nuclei", source_id="http/fixture.yaml", title="fixture",
+            text=("id: fixture-template\ninfo:\n  name: Demo\n  severity: high\n"
+                  "  description: Fixture description\nvariables:\n  user: admin\nflow: http(1)\n"
+                  "http:\n  - method: get\n    path: ['{{BaseURL}}/path']\n"
+                  "    body: '{\"x\":1}'\n    payloads: {user: [admin, guest]}\n"
+                  "dns:\n  - name: _demo.example\n    type: txt\n"),
+            metadata={"template_id": "fixture-template"},
+        )
+        chunk = chunk_document(nuclei)[0]
+        self.assertEqual(chunk.title, "fixture-template — Demo")
+        self.assertEqual(chunk.chunk_id, hashlib.sha256(b"nuclei:fixture-template").hexdigest()[:16])
+        self.assertEqual(
+            chunk.text,
+            "Demo (high)\n\nFixture description\n\nVariables: user=admin\n\nFlow:\nhttp(1)"
+            "\n\nHTTP: GET {{BaseURL}}/path\nBody: {\"x\":1}\nPayloads: user=admin,guest"
+            "\n\nDNS query: _demo.example (TXT)",
+        )
+
+        owasp = SourceDocument.create(
+            source_name="owasp", source_id="01-Testing.md", title="01 Testing",
+            text="# 1. Example test WSTG-INFO-01\n\n## General\n\nFixture body.",
+            metadata={"filename": "01-Testing.md"},
+        )
+        owasp_chunk = chunk_document(owasp)[0]
+        self.assertEqual(owasp_chunk.title, "OWASP WSTG-INFO-01: 1. Example test WSTG-INFO-01")
+        self.assertEqual(owasp_chunk.chunk_id,
+                         hashlib.sha256(b"owasp:WSTG-INFO-01:1. Example test WSTG-INFO-01").hexdigest()[:16])
+
+    def test_redamon_duplicate_native_ids_keep_last_loader_value(self) -> None:
+        spec = {
+            "id": "gtfobins", "kind": "github_archive", "url": GTFO_URL,
+            "revision": REVISION, "license_id": "GPL-3.0-only",
+            "license_evidence": "fixture", "license_status": "confirmed_at_pinned_revision",
+        }
+        records = (
+            SourceRecord(
+                source_id="_gtfobins/curl", title="curl",
+                original_text=("---\nfunctions:\n  suid:\n    - code: first command\n"
+                               "    - code: last command\n---\n"),
+                source_locator="_gtfobins/curl", metadata={"binary_name": "curl"},
+            ),
+            SourceRecord(source_id="NOTICE:LICENSE", title="License", original_text="Fixture license",
+                         source_locator="LICENSE", document_role="license_notice"),
+        )
+        batch = SourceBatch(
+            source_revision=REVISION, records=records, expected_count=1, fetched_count=1,
+            parsed_count=1, rejected_count=0, complete=True, applied_filters={"source_directory": "_gtfobins"},
+            notices_complete=True,
+        )
+        snapshot = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [spec]},
+            {"gtfobins": lambda _request: batch},
+            source_manifest_sha256="b" * 64,
+        ).build()
+        chunks = [chunk for chunk in snapshot.chunks if chunk.source_name == "gtfobins"]
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].text, "curl — suid\nCommand: last command")
+
     def test_gtfobins_and_lolbas_pass_canonical_adapter_with_required_notices(self) -> None:
         gtfo_archive = _archive(GTFO_URL.rsplit("/", 1)[-1], {
             "_gtfobins/curl.md": b"# curl\nFixture GTFOBins content.\n",
@@ -445,6 +554,37 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         self.assertEqual(embedded_vectors, 0)
         self.assertEqual(orphan_vectors, 0)
 
+    def test_rechunk_reuses_e5_vector_when_redamon_identity_changes_but_text_does_not(self) -> None:
+        class FakeEmbedder:
+            model_name = "intfloat/e5-large-v2"
+
+            def embed_documents_batch(self, texts: list[str], *, batch_size: int) -> list[list[float]]:
+                return [[float(len(text)), 1.0] for text in texts]
+
+        document = SourceDocument.create(
+            source_name="nvd", source_id="CVE-2026-9001", title="CVE-2026-9001",
+            text="An unchanged CVE search description.", metadata={"cve_id": "CVE-2026-9001"},
+        )
+        old_chunk = CanonicalChunk.from_document(
+            document, 0, 0, len(document.text), document.text,
+        )  # Simulates the previous content-hash based chunk ID.
+        new_chunk = chunk_document(document)[0]
+        self.assertNotEqual(old_chunk.chunk_id, new_chunk.chunk_id)
+
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-rechunk-vector-remap-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot((old_chunk,), "8" * 64, sources=(document,))
+            index.rebuild_embeddings(FakeEmbedder(), batch_size=2)
+            with index.connect() as connection:
+                old_vector = connection.execute(
+                    "SELECT vector FROM chunk_embeddings WHERE chunk_id=?", (old_chunk.chunk_id,),
+                ).fetchone()[0]
+            rechunk_index(index, project_root=Path(__file__).resolve().parents[1])
+            with index.connect() as connection:
+                rows = connection.execute("SELECT chunk_id,vector FROM chunk_embeddings").fetchall()
+
+        self.assertEqual([(row[0], row[1]) for row in rows], [(new_chunk.chunk_id, old_vector)])
+
     def test_rechunk_resumes_after_a_committed_source_batch(self) -> None:
         documents = (
             SourceDocument.create(
@@ -486,12 +626,22 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
 
     def test_rechunk_reconciles_done_coverage_counts_from_stored_records(self) -> None:
         source_names = ("tool_docs", "gtfobins", "lolbas", "owasp", "exploitdb", "nvd", "nuclei")
-        documents = tuple(
-            SourceDocument.create(
-                source_name=name, source_id=f"fixture-{name}", title=name,
-                text=f"Pinned {name} coverage fixture.",
-            )
-            for name in source_names
+        documents = (
+            SourceDocument.create(source_name="tool_docs", source_id="tooling/fixture.md", title="Fixture tool",
+                                  text="# Fixture tool\n\nDescription."),
+            SourceDocument.create(source_name="gtfobins", source_id="_gtfobins/fixture", title="Fixture",
+                                  text="---\nfunctions:\n  suid:\n    code: fixture\n---\n",
+                                  metadata={"binary_name": "fixture"}),
+            SourceDocument.create(source_name="lolbas", source_id="yml/fixture.yml", title="Fixture",
+                                  text="Name: Fixture\nCommands:\n  - Command: fixture\n    Category: Test\n"),
+            SourceDocument.create(source_name="owasp", source_id="fixture.md", title="Fixture",
+                                  text="## Test\n\nPinned OWASP fixture.", metadata={"filename": "fixture.md"}),
+            SourceDocument.create(source_name="exploitdb", source_id="10001", title="EDB-10001", text="Pinned ExploitDB fixture."),
+            SourceDocument.create(source_name="nvd", source_id="CVE-2026-0001", title="CVE-2026-0001",
+                                  text="Pinned NVD fixture.", metadata={"cve_id": "CVE-2026-0001"}),
+            SourceDocument.create(source_name="nuclei", source_id="http/fixture.yaml", title="fixture",
+                                  text="id: fixture\ninfo:\n  name: Fixture\n",
+                                  metadata={"template_id": "fixture"}),
         )
         chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
         coverage_rows = [
@@ -582,17 +732,19 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
     def test_redamon_chunking_keeps_atomic_records_and_heading_based_markdown(self) -> None:
         structured = SourceDocument.create(
             source_name="nuclei", source_id="template.yaml", title="Template",
-            text="id: demo\ninfo:\n  name: Demo template\n" + ("description " * 500),
+            text="id: demo\ninfo:\n  name: Demo template\n  description: " + ("description " * 500) + "\n",
+            metadata={"template_id": "demo"},
         )
         structured_chunks = chunk_document(structured)
         self.assertEqual(len(structured_chunks), 1)
         self.assertTrue(structured_chunks[0].metadata["chunk_truncated"])
-        self.assertEqual(structured_chunks[0].text, structured.text[:len(structured_chunks[0].text) - 3] + "...")
+        self.assertTrue(structured_chunks[0].text.startswith("Demo template (info)\n\n"))
+        self.assertTrue(structured_chunks[0].text.endswith("..."))
         self.assertFalse(structured_chunks[0].metadata["source_span_exact"])
-        self.assertEqual(structured_chunks[0].end_char, len(structured_chunks[0].text) - 3)
+        self.assertEqual(structured_chunks[0].end_char, len(structured.text))
         self.assertEqual(
             structured_chunks[0].chunk_sha256,
-            "bd68ce1355d3cf0bd066136d06bda336a76194ca7cd72eda88167f31b4f09efa",
+            "fb83ad3a6823a3980d52e742c4054ed7fe1a2c06e64aa483289823719d7e997e",
         )
 
         markdown_text = (
@@ -608,7 +760,7 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         self.assertEqual(markdown_chunks[0].title, "Guide")
         self.assertIn("## First", markdown_chunks[0].text)
         self.assertIn("## Second", markdown_chunks[0].text)
-        self.assertTrue(all(chunk.chunk_schema == "bb-kb-chunk-v2" for chunk in markdown_chunks))
+        self.assertTrue(all(chunk.chunk_schema == "redamon-compatible-chunk-v1" for chunk in markdown_chunks))
         for chunk in markdown_chunks:
             if chunk.metadata.get("source_span_exact", True):
                 self.assertEqual(markdown.text[chunk.start_char:chunk.end_char], chunk.text)

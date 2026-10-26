@@ -290,6 +290,21 @@ class RedAmonSourceAdapter:
 
         documents.sort(key=lambda item: (item.source_name, item.source_id))
         chunks.sort(key=lambda item: (SOURCE_FAMILIES.index(item.source_name), item.source_id, item.ordinal))
+        # RedAmon's Neo4j loader MERGEs by its 16-hex ID and SETs each row;
+        # repeated identities therefore have last-write-wins semantics. Mirror
+        # that behavior before exporting into SQLite's unique chunk_id key.
+        unique_chunks: dict[str, CanonicalChunk] = {}
+        for chunk in chunks:
+            unique_chunks[chunk.chunk_id] = chunk
+        chunks = sorted(
+            unique_chunks.values(),
+            key=lambda item: (SOURCE_FAMILIES.index(item.source_name), item.source_id, item.ordinal),
+        )
+        unique_counts: dict[str, int] = {}
+        for chunk in chunks:
+            unique_counts[chunk.source_name] = unique_counts.get(chunk.source_name, 0) + 1
+        for row in coverage:
+            row["chunk_count"] = unique_counts.get(str(row["source_name"]), 0)
         states = [str(row["state"]) for row in coverage]
         if len(coverage) == len(SOURCE_FAMILIES) and all(state == "done" for state in states) and not manifest_blockers:
             state = "DONE"

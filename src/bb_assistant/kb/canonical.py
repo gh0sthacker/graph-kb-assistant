@@ -6,12 +6,17 @@ import hashlib
 import json
 
 
-CHUNK_SCHEMA = "bb-kb-chunk-v2"
+CHUNK_SCHEMA = "redamon-compatible-chunk-v1"
 
 
 def _digest(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def redamon_chunk_id(source_name: str, unique_key: str) -> str:
+    """Return RedAmon's stable 16-hex identifier for a chunk identity key."""
+    return hashlib.sha256(f"{source_name}:{unique_key}".encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,12 +95,14 @@ class CanonicalChunk:
     def from_document(
         cls, document: SourceDocument, ordinal: int, start_char: int, end_char: int, text: str,
         *, title: str | None = None, metadata: dict[str, str | int | float | bool | None] | None = None,
-        source_span_exact: bool = True,
+        source_span_exact: bool = True, redamon_unique_key: str | None = None,
     ) -> "CanonicalChunk":
         if (ordinal < 0 or start_char < 0 or end_char < start_char
                 or (source_span_exact and end_char - start_char != len(text)) or not text.strip()):
             raise ValueError("Chunk ordinal must be nonnegative and text must not be blank")
         chunk_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        chunk_metadata = {**(document.metadata if metadata is None else metadata),
+                          **({} if source_span_exact else {"source_span_exact": False})}
         identity = {
             "schema": CHUNK_SCHEMA,
             "source_name": document.source_name,
@@ -106,8 +113,14 @@ class CanonicalChunk:
             "end_char": end_char,
             "chunk_sha256": chunk_hash,
         }
+        chunk_id = _digest(identity)
+        if redamon_unique_key is not None:
+            if not redamon_unique_key:
+                raise ValueError("RedAmon unique key must not be empty")
+            chunk_metadata["redamon_unique_key"] = redamon_unique_key
+            chunk_id = redamon_chunk_id(document.source_name, redamon_unique_key)
         return cls(
-            chunk_id=_digest(identity),
+            chunk_id=chunk_id,
             source_name=document.source_name,
             source_id=document.source_id,
             title=title or document.title,
@@ -120,8 +133,7 @@ class CanonicalChunk:
             source_revision=document.source_revision,
             license_id=document.license_id,
             attribution=document.attribution,
-            metadata={**(document.metadata if metadata is None else metadata),
-                      **({} if source_span_exact else {"source_span_exact": False})},
+            metadata=chunk_metadata,
             source_sha256=document.content_sha256,
             chunk_sha256=chunk_hash,
         )
@@ -136,8 +148,12 @@ def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_c
     """
     if max_chars < 256 or overlap_chars != 0:
         raise ValueError("RedAmon-compatible chunks require max_chars >= 256 and zero overlap")
-    if not document.text:
+    if not document.text or document.metadata.get("document_role") == "license_notice":
         return ()
+    if document.source_name in {"gtfobins", "lolbas", "nuclei"}:
+        rendered = _redamon_yaml_chunks(document, max_chars=max_chars)
+        return tuple(_canonical_redamon_chunk(document, i, title, text, key, truncated=truncated)
+                     for i, (title, text, key, truncated) in enumerate(rendered))
     if document.source_name == "tool_docs" and document.metadata.get("category_dir") == "tooling":
         # RedAmon indexes each tooling file as one compact summary card and
         # keeps the tool name as its title; the summary's first line is not a
@@ -157,12 +173,330 @@ def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_c
             tool_name = str(document.metadata.get("tool_name") or document.title)
             if tool_name.lower() not in title.lower():
                 chunk_title = f"{tool_name} — {title}"
+        if document.source_name == "owasp":
+            test_id = _owasp_test_id(document)
+            if test_id:
+                chunk_title = f"OWASP {test_id}: {title}"
+        unique_key = _redamon_key(document, title)
         chunks.append(CanonicalChunk.from_document(
             document, len(chunks), start, end, content, title=chunk_title, metadata=metadata,
-            source_span_exact=exact,
+            source_span_exact=exact, redamon_unique_key=unique_key,
         ))
         cursor = end
     return tuple(chunks)
+
+
+def _canonical_redamon_chunk(
+    document: SourceDocument, ordinal: int, title: str, text: str, unique_key: str, *, truncated: bool = False,
+) -> CanonicalChunk:
+    # These records are rendered from structured source fields, so they do not
+    # claim a literal span in the original YAML/Markdown document.
+    return CanonicalChunk.from_document(
+        document, ordinal, 0, len(document.text), text, title=title,
+        metadata={**document.metadata, **({"chunk_truncated": True} if truncated else {})}
+        if truncated else None,
+        source_span_exact=False, redamon_unique_key=unique_key,
+    )
+
+
+def _redamon_key(document: SourceDocument, section_title: str) -> str:
+    source = document.source_name
+    metadata = document.metadata
+    if source == "tool_docs":
+        tool = str(metadata.get("tool_name") or document.title)
+        section = "summary" if metadata.get("category_dir") == "tooling" else section_title.removeprefix(f"{tool} — ")
+        return f"{tool}:{section}"
+    if source == "owasp":
+        test_id = _owasp_test_id(document)
+        filename = str(metadata.get("filename") or document.source_id.rsplit("/", 1)[-1])
+        return f"{test_id or filename}:{section_title}"
+    if source in {"nvd", "exploitdb"}:
+        value = metadata.get("cve_id") if source == "nvd" else metadata.get("edb_id")
+        return str(value or document.source_id)
+    if source == "nuclei":
+        return str(metadata.get("template_id") or document.source_id.rsplit("/", 1)[-1].rsplit(".", 1)[0])
+    return f"{document.source_id}:{section_title}"
+
+
+def _owasp_test_id(document: SourceDocument) -> str:
+    import re
+    text = document.raw_source_text or document.text
+    match = re.search(r"WSTG-[A-Z]+-\d+", text)
+    return match.group(0) if match else ""
+
+
+def _redamon_yaml_chunks(document: SourceDocument, *, max_chars: int) -> list[tuple[str, str, str, bool]]:
+    """Render the RedAmon GTFOBins, LOLBAS, and Nuclei cards from pinned YAML.
+
+    The input is third-party data: size and alias limits are checked before
+    PyYAML's safe loader is used. Invalid records fail the source build closed.
+    """
+    import re
+    import yaml
+
+    raw = document.text
+    if len(raw.encode("utf-8")) > 1024 * 1024:
+        raise ValueError(f"{document.source_name} source document exceeds YAML size limit")
+    max_indent = max_flow_depth = anchors = aliases = 0
+    flow_depth = 0
+    for line in raw.splitlines():
+        stripped = line.lstrip(" ")
+        if stripped and not stripped.startswith("#"):
+            max_indent = max(max_indent, len(line) - len(stripped))
+        for char in line:
+            if char in "{[":
+                flow_depth += 1
+                max_flow_depth = max(max_flow_depth, flow_depth)
+            elif char in "}]" and flow_depth:
+                flow_depth -= 1
+            elif char == "&":
+                anchors += 1
+            elif char == "*":
+                aliases += 1
+    if max_indent > 256 or max_flow_depth > 64 or anchors > 100 or aliases > 1000:
+        raise ValueError(f"{document.source_name} source document exceeds YAML complexity limits")
+    try:
+        if document.source_name == "gtfobins":
+            match = re.match(r"^---\s*\n(.*?)\n(?:\.\.\.|---)(?:\s|$)", raw, re.DOTALL)
+            value = yaml.safe_load(match.group(1) if match else raw.strip().removeprefix("---").strip())
+            binary = str(document.metadata.get("binary_name") or document.title)
+            functions = value.get("functions", {}) if isinstance(value, dict) else {}
+            output: list[tuple[str, str, str, bool]] = []
+            if not isinstance(functions, dict):
+                raise ValueError("GTFOBins functions is not a mapping")
+            for function_type, rows in functions.items():
+                if rows is None:
+                    continue
+                for row in rows if isinstance(rows, list) else [rows]:
+                    if not isinstance(row, dict):
+                        continue
+                    contexts = row.get("contexts") or {}
+                    if isinstance(contexts, dict):
+                        contexts = [str(k) for k, v in contexts.items() if v is not False]
+                    elif isinstance(contexts, list):
+                        contexts = [str(v) for v in contexts if v]
+                    else:
+                        contexts = []
+                    description = row.get("description", "")
+                    code = row.get("code", "")
+                    comment = row.get("comment", "") or ""
+                    if isinstance(comment, str):
+                        comment = comment.strip()
+                    text = f"{binary} — {function_type}"
+                    if description:
+                        text += f": {description}"
+                    if contexts:
+                        text += f"\nContexts: {', '.join(contexts)}"
+                    if code:
+                        text += f"\nCommand: {code}"
+                    if comment:
+                        text += f"\nNote: {comment}"
+                    text, truncated = _truncate_redamon_structured(text, max_chars)
+                    output.append((f"{binary} — {function_type}", text, f"{binary}:{function_type}", truncated))
+            return output
+
+        value = yaml.safe_load(raw)
+        if document.source_name == "nuclei":
+            if not isinstance(value, dict):
+                raise ValueError("Nuclei YAML is not a mapping")
+            template_id = value.get("id") or value.get("template-id") or value.get("ID")
+            if not template_id:
+                raise ValueError("Nuclei template has no ID")
+            info = value.get("info", value)
+            info = info if isinstance(info, dict) else {}
+            name = info.get("name", "")
+            severity = info.get("severity", "info")
+            description = _as_text(info.get("description"))
+            variables_raw = value.get("variables")
+            variables = {str(k): str(v) for k, v in variables_raw.items()} if isinstance(variables_raw, dict) else {}
+            flow = _as_text(value.get("flow"))
+            content = f"{name} ({severity})" if name else f"{template_id} ({severity})"
+            if description:
+                content += f"\n\n{description}"
+            if variables:
+                content += "\n\nVariables: " + ", ".join(f"{k}={v}" for k, v in variables.items())
+            if flow:
+                content += f"\n\nFlow:\n{flow}"
+            http = _nuclei_http(value.get("http"))
+            dns = _nuclei_dns(value.get("dns"))
+            code = _nuclei_code(value.get("code"))
+            tcp = _nuclei_tcp(value.get("tcp") or value.get("network"))
+            javascript = _nuclei_javascript(value.get("javascript"))
+            for i, block in enumerate(http, start=1):
+                label = f"HTTP step {i}" if len(http) > 1 else "HTTP"
+                if block["raw"]:
+                    for request in block["raw"]:
+                        content += f"\n\n{label} (raw):\n{request}"
+                else:
+                    line = f"\n\n{label}:"
+                    if block["method"] and block["paths"]:
+                        line += f" {block['method']} {'; '.join(block['paths'])}"
+                    elif block["method"]:
+                        line += f" {block['method']}"
+                    elif block["paths"]:
+                        line += f" {'; '.join(block['paths'])}"
+                    content += line
+                    if block["body"]:
+                        content += f"\nBody: {block['body']}"
+                if block["payloads"]:
+                    content += f"\nPayloads: {block['payloads']}"
+            for i, block in enumerate(dns, start=1):
+                label = f"DNS query {i}" if len(dns) > 1 else "DNS query"
+                line = f"\n\n{label}: {block['name']}"
+                if block["type"]:
+                    line += f" ({block['type']}" + (f"/{block['class']}" if block["class"] else "") + ")"
+                content += line
+            for i, block in enumerate(code, start=1):
+                if not block["source"].strip():
+                    continue
+                label = f"Code step {i}" if len(code) > 1 else "Code"
+                if block["engine"]:
+                    label += f" ({block['engine']})"
+                content += f"\n\n{label}:\n{block['source'].strip()}"
+            for i, block in enumerate(tcp, start=1):
+                label = f"TCP probe {i}" if len(tcp) > 1 else "TCP probe"
+                if block["port"]:
+                    label += f" (port {block['port']})"
+                content += f"\n\n{label}:" + (f" {'; '.join(block['inputs'])}" if block["inputs"] else "")
+            for i, block in enumerate(javascript, start=1):
+                if not block["code"].strip():
+                    continue
+                label = f"JavaScript step {i}" if len(javascript) > 1 else "JavaScript"
+                content += f"\n\n{label}:\n{block['code'].strip()}"
+                if block["payloads"]:
+                    content += f"\nPayloads: {block['payloads']}"
+            content, truncated = _truncate_redamon_structured(content, max_chars)
+            return [(f"{template_id} — {name}", content, str(template_id), truncated)]
+
+        if not isinstance(value, dict) or "Name" not in value:
+            raise ValueError("LOLBAS YAML has no Name")
+        name = str(value.get("Name") or "unknown")
+        binary_description = value.get("Description", "") or ""
+        paths: list[str] = []
+        for path in value.get("Full_Path") or []:
+            if isinstance(path, dict) and isinstance(path.get("Path"), str) and path["Path"]:
+                paths.append(path["Path"])
+            elif isinstance(path, str):
+                paths.append(path)
+        output = []
+        for command_row in value.get("Commands", []):
+            if not isinstance(command_row, dict):
+                continue
+            command = command_row.get("Command", "") or ""
+            category = command_row.get("Category", "") or ""
+            title = f"{name} — {category}"
+            parts = [title]
+            command_description = command_row.get("Description", "") or ""
+            if binary_description:
+                parts.extend(("", str(binary_description)))
+            if command_description:
+                parts.extend(("", str(command_description)))
+            if command:
+                parts.extend(("", f"Command: {command}"))
+            for field_name, label in (("Usecase", "Usecase"), ("Privileges", "Privileges"), ("OperatingSystem", "OS")):
+                field = command_row.get(field_name, "") or ""
+                if field:
+                    parts.append(f"{label}: {field}")
+            tags: list[str] = []
+            for tag in command_row.get("Tags") or []:
+                if isinstance(tag, dict):
+                    tags.extend(f"{key}: {item}" for key, item in tag.items())
+                elif isinstance(tag, str):
+                    tags.append(tag)
+            if tags:
+                parts.append(f"Tags: {', '.join(tags)}")
+            mitre = command_row.get("MitreID", "") or ""
+            if mitre:
+                parts.append(f"MITRE: {mitre}")
+            if paths:
+                parts.append(f"Full Path: {'; '.join(paths)}")
+            unique = f"{name}:{category}:{str(command)[:50]}"
+            content, truncated = _truncate_redamon_structured("\n".join(parts), max_chars)
+            output.append((title, content, unique, truncated))
+        return output
+    except (yaml.YAMLError, UnicodeError) as exc:
+        raise ValueError(f"Invalid {document.source_name} YAML source document") from exc
+
+
+def _as_text(value: object) -> str:
+    if value is None:
+        return ""
+    return value.strip() if isinstance(value, str) else str(value).strip()
+
+
+def _truncate_redamon_structured(text: str, max_chars: int) -> tuple[str, bool]:
+    if len(text) // 4 <= max_chars // 4:
+        return text, False
+    return text[:max_chars].rsplit(" ", 1)[0] + "...", True
+
+
+def _payload_text(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return "; ".join(f"{key}={','.join(map(str, item)) if isinstance(item, list) else item}" for key, item in value.items())
+
+
+def _nuclei_http(raw: object) -> list[dict[str, object]]:
+    if not isinstance(raw, list):
+        return []
+    output = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        method = row.get("method")
+        method = method.upper() if isinstance(method, str) else ""
+        paths = row.get("path")
+        paths = [str(x) for x in paths if x] if isinstance(paths, list) else ([paths] if isinstance(paths, str) and paths else [])
+        body = row.get("body")
+        body = body.strip() if isinstance(body, str) else ""
+        raw_requests = row.get("raw")
+        raw_requests = [x.strip() for x in raw_requests if isinstance(x, str) and x.strip()] if isinstance(raw_requests, list) else []
+        payloads = _payload_text(row.get("payloads"))
+        if method or paths or body or raw_requests:
+            output.append({"method": method, "paths": paths, "body": body, "raw": raw_requests, "payloads": payloads})
+    return output
+
+
+def _nuclei_dns(raw: object) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    return [{"name": row["name"], "type": row.get("type", "").upper() if isinstance(row.get("type"), str) else "",
+             "class": row.get("class", "") if isinstance(row.get("class"), str) else ""}
+            for row in raw if isinstance(row, dict) and isinstance(row.get("name"), str) and row["name"]]
+
+
+def _nuclei_code(raw: object) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    output = []
+    for row in raw:
+        if not isinstance(row, dict) or not isinstance(row.get("source"), str):
+            continue
+        engine = row.get("engine")
+        engine = ",".join(map(str, engine)) if isinstance(engine, list) else engine if isinstance(engine, str) else ""
+        output.append({"engine": engine, "source": row["source"]})
+    return output
+
+
+def _nuclei_tcp(raw: object) -> list[dict[str, object]]:
+    if not isinstance(raw, list):
+        return []
+    output = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        port = row.get("port")
+        port = str(port[0]) if isinstance(port, list) and port else str(port) if port is not None and not isinstance(port, list) else ""
+        inputs = [entry["data"] for entry in row.get("inputs", []) if isinstance(entry, dict) and isinstance(entry.get("data"), str) and entry["data"]] if isinstance(row.get("inputs"), list) else []
+        output.append({"port": port, "inputs": inputs})
+    return output
+
+
+def _nuclei_javascript(raw: object) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    return [{"code": row["code"], "payloads": _payload_text(row.get("payloads"))}
+            for row in raw if isinstance(row, dict) and isinstance(row.get("code"), str)]
 
 
 def _estimated_tokens(text: str) -> int:
