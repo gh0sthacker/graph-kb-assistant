@@ -62,6 +62,17 @@ remains paused. No live index rows were changed.
   retained in bounded chunks instead of aborting the family rebuild. This
   preserves source material but is not proof that these records have the same
   normalized text/chunk boundaries as RedAmon.
+- A direct source-code comparison confirms this is a corpus difference, not
+  merely an unverified implementation detail: RedAmon's pinned
+  inspected RedAmon `file_cache.py` caps YAML at 1 MiB, and its
+  `NucleiClient.fetch()` catches
+  `YAMLTooComplexError` and skips the template. The Assistant candidate instead
+  retains these oversized templates as searchable raw chunks. A read-only
+  group count on CT108 found 5,960 such chunks and 13,399 normally rendered
+  Nuclei chunks. Thus the candidate is fuller, but its default Nuclei corpus is
+  not byte/chunk-identical to RedAmon; strict parity needs a separate
+  supplemental path or RedAmon-side matching behavior, plus same-query
+  receipts.
 - A read-only `PRAGMA quick_check` was started on the candidate, but no result
   returned within the check window. Candidate database integrity therefore
   remains unverified; no success is claimed. The
