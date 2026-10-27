@@ -265,6 +265,14 @@ report still contains the older wording and must be reconciled with the current
 manifest before the final parity receipt. The candidate is not published as
 active; the active application index was not changed.
 
+A direct read-only comparison of the candidate coverage rows against the
+current manifest also found that the serializer omitted five NVD terms and
+attribution fields even though both the candidate-era and current manifests
+contain them. The serializer now preserves those fields for new coverage
+reports, with a regression fixture. The in-progress candidate still needs its
+coverage report/snapshot metadata reconciled after embedding; its source rows
+and vectors are left untouched while the worker runs.
+
 ## Thermal-bounded embedding resumed — 2026-10-27 02:28 UTC
 
 At 02:27 UTC the candidate remained at 42,495/215,382 vectors after the

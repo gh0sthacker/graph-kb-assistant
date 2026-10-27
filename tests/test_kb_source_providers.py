@@ -465,6 +465,26 @@ class SourceRightsAndCoverageGateTests(unittest.TestCase):
         self.assertIn("dataset_terms_evidence", row["source_metadata"])
         self.assertIn("NOTICE:README.md", {doc.source_id for doc in snapshot.documents})
 
+    def test_nvd_coverage_preserves_terms_and_embedded_content_metadata(self) -> None:
+        spec = {
+            "id": "nvd", "kind": "paginated_api", "url": "https://nvd.example/api",
+            "filter": {"profile": "full", "nvd_lookback_days": 730},
+            "license_status": "terms_confirmed_with_required_notices",
+            "embedded_content_review": "complete",
+            "embedded_content_policy": "Preserve source metadata and notices.",
+            "cve_terms_evidence": "https://www.cve.org/legal/termsofuse",
+            "cve_terms_reviewed_at": "2026-10-21",
+            "cve_copyright_designation": "CVE Program designation",
+            "nvd_citation": "NIST NVD citation",
+        }
+        details = RedAmonSourceAdapter._source_details(spec)
+        for key in (
+            "embedded_content_policy", "cve_terms_evidence", "cve_terms_reviewed_at",
+            "cve_copyright_designation", "nvd_citation",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(details[key], spec[key])
+
     def test_mismatched_counts_keep_an_otherwise_eligible_family_partial(self) -> None:
         spec = {
             "id": "gtfobins", "kind": "github_archive", "url": GTFO_URL,

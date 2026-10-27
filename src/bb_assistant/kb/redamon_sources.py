@@ -405,6 +405,8 @@ class RedAmonSourceAdapter:
             "repository_license_id", "license_status", "license_evidence",
             "dataset_terms", "dataset_terms_evidence", "dataset_terms_basis",
             "content_scope", "attribution", "embedded_content_review", "filter",
+            "embedded_content_policy", "cve_terms_evidence", "cve_terms_reviewed_at",
+            "cve_copyright_designation", "nvd_citation",
             "local_root", "include_categories", "exclude",
         )
         return {key: spec[key] for key in keys if key in spec}
