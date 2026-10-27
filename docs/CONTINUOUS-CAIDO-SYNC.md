@@ -36,11 +36,27 @@ projection with links back to Caido request IDs.
   subscription. Caido's Workflow SDK can inspect the request/response attached
   to a workflow run, but a reliable local push into our service has not yet
   been verified.
+- Caido's official backend plugin SDK documents asynchronous
+  `onInterceptRequest`, `onInterceptResponse`, and `onProjectChange` events.
+  Its saved Request/Response raw interfaces expose bytes as `Uint8Array`; the
+  official Client SDK also returns full raw bytes by default for paginated
+  history. This provides a better path for lossless capture intake than MCP's
+  reconstructed text. The plugin has not yet been implemented or exercised
+  against this instance, and event-to-project attribution/order still needs a
+  durable acceptance test.
+- The official Client SDK history API requires a project to be open. The
+  documented backend Projects SDK exposes `getCurrent()` but no list/open
+  operation. Therefore the SDK closes the raw-byte gap for an open project;
+  it does not by itself prove automated historical traversal of every saved
+  project.
 - The model-facing live project-list check exposed one project. The service
   deployed in CT 108 uses its own pinned Caido MCP connection, so its project
   inventory is checked separately before claiming all-project coverage.
 
 References: [Caido HTTPQL fields and timestamps](https://docs.caido.io/app/reference/httpql.html),
+[Caido backend SDK events](https://developer.caido.io/plugins/reference/sdks/backend/events.html),
+[Caido backend request raw-byte API](https://developer.caido.io/plugins/reference/sdks/backend/requests),
+[Caido Client SDK request extraction](https://developer.caido.io/client-sdk/guides/extract_requests.html),
 [Caido workflow JavaScript SDK](https://docs.caido.io/app/guides/workflows_javascript),
 [Caido GraphQL stability note](https://docs.caido.io/app/concepts/graphql.html).
 
