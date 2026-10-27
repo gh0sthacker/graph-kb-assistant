@@ -317,3 +317,54 @@ At 02:54 UTC, a read-only CT120 check found 43,303/215,382 E5 vectors
 (20.1%); the worker remained active at the same 600 ms/s CPU quota. This is
 progress evidence only: the candidate is still incomplete and has not passed
 the source/chunk or same-query parity gates.
+
+## Candidate fullness and isolated Neo4j reference — 2026-10-27 03:23 UTC
+
+A read-only SQLite query on CT120 found 207,878 source documents and 215,382
+chunks across all seven full-profile families. `coverage_state` is `DONE`.
+The candidate had 44,657 E5-large-v2 (1,024-dimension) vectors, or 20.7%;
+`vector_ready` is therefore still false. The candidate snapshot is
+`e9ebe2dfc6494b7a48c9120c75b1a337d04fda59bb0d570993f04e134f5a8848`.
+
+The candidate-only embed service remains active on CT120 in the Proxmox
+`proxmox3` node, not on Kali. It uses one thread, batch size 2, a 600 ms/s CPU
+quota, a 70 C stop, and a ten-minute cool dwell. The service reported 2.3 GiB
+resident against a 3.5 GiB effective memory ceiling. The hottest readable
+sensor input was 69 C in one sample; that is not proof of a ten-minute cool
+dwell. Leave the guard and quota unchanged. The worker continues to own the
+candidate index; do not rechunk, refresh, or promote it while that worker is
+active.
+
+The byte-verified VM112 Neo4j copy (tree SHA-256
+`fec02bf190ecc773db7e49331454bcbeed1fd42d38fcf98272420aa5f8d08823`, last
+transaction 50228) was started only in a temporary, unexposed Docker container
+on an internal network. The original VM112 remains paused. Docker's default
+`docker-default` AppArmor profile denied Java AF_UNIX socket creation with
+`EACCES`; the isolated clone became queryable after disabling HTTP and using
+`apparmor=unconfined` while retaining the internal-only network and 1 CPU /
+1.5 GiB limits. That temporary container and network were stopped and removed
+after the read-only queries; the offline copy was retained.
+
+The copied Neo4j database is not a full seven-family RedAmon snapshot. Its
+online `kb_chunk_fulltext` index covers `KBChunk.content` and `KBChunk.title`.
+It contains 49,085 nodes across five families: ExploitDB 46,636, OWASP 899,
+GTFOBins 731, LOLBAS 464, and ToolDocs 355; no NVD or Nuclei chunk nodes were
+present, although indexes for those labels exist. RedAmon vectors are in its
+separate FAISS artifact, not a Neo4j node property.
+
+The RedAmon full-text API returned 30 candidates for each of the ten fixed
+parity queries. The top five were all ExploitDB for the SSRF, SQL-injection,
+and race-condition fixtures; CORS and web-cache fixtures started with ToolDocs;
+GraphQL/object-authorization started with OWASP. This demonstrates that the
+installed copy's Lucene tier can surface stale/high-volume ExploitDB records
+even though the installed profile marker says `cpu-lite`; RedAmon's query
+implementation applies no source restriction unless `include_sources` is
+passed. These are lexical-only observations, not final hybrid/reranked
+receipts, and no same-query candidate comparison has been completed.
+
+**Current result:** the Assistant's seven-family source corpus is complete,
+but its vectors are only 20.7% complete. The installed RedAmon reference is a
+dirty, mixed-state corpus, not an authoritative full-profile gold snapshot.
+Keep KB parity `PARTIAL`; finish the guarded vector build, reconcile candidate
+coverage against the current manifest, and then capture comparable same-query
+hybrid receipts against an explicitly selected RedAmon full-profile reference.
