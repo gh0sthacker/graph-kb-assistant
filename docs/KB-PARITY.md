@@ -481,3 +481,26 @@ remains paused. The embedding service is active only in the isolated,
 networkless CT121; neither this migration nor the candidate has changed the
 application's active KB. The candidate remains incomplete and parity remains
 `PARTIAL`.
+
+## Primary-PVE thermal gate adjusted for candidate fill — 2026-10-27 05:31 UTC
+
+The candidate remained at 45,935/215,382 E5 vectors. On PVE, a read-only
+five-second sample read `coretemp` Package id 0 between 64 C and 73 C while
+host load average was 0.36/0.56; available RAM was 3.58 GiB. The prior 70 C
+threshold therefore kept resetting the ten-minute dwell before the model
+could load. The host CPU is an Intel Core i3-N305; Intel specifies a 105 C
+Tjunction limit. The worker template now stops at 80 C (25 C below that
+limit), keeps the ten-minute cool dwell and fail-closed sensor checks, and
+reduces CPUQuota from 60% to 40% of one core. One inference thread, batch size
+two, 3.5 GiB memory cap, no network, candidate-only writes, and VM112's paused
+state are unchanged.
+
+The updated `thermal.py`, CLI, and systemd unit were copied into CT121 after
+stopping its wait-only service. Their SHA-256 digests match commit `e178930`;
+the active unit reports 400 ms/s CPU quota and 3.5 GiB memory maximum. The
+service restarted at 05:31 UTC and was active at 14 MiB RSS, before model
+loading. Its ten-minute below-80 C dwell must complete before any new vectors
+can be counted. The last candidate count remains 45,935/215,382; no fill
+progress or completion is claimed yet. The workstation's active index is a
+separate older snapshot with 207,878 documents, 209,036 chunks, and 38,816 E5
+vectors; it has not been promoted or modified.
