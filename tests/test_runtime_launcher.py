@@ -409,7 +409,7 @@ def test_launcher_preserves_explicit_runtime_configuration_precedence(
     runtime_env.chmod(0o600)
     neo4j_env = tmp_path / "synthetic-neo4j.env"
     neo4j_env.write_text(
-        "BB_ASSISTANT_VAULT_KEY=synthetic-neo4j-key\n"
+        'BB_ASSISTANT_VAULT_KEY=test-only\n'
         "BB_ASSISTANT_GRAPH_BACKEND=neo4j\n"
         f"BB_ASSISTANT_DATA_HOME={tmp_path / 'neo4j-data-root'}\n"
     )
