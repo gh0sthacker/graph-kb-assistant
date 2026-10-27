@@ -442,3 +442,35 @@ service settings or active application index were changed during this check.
 The candidate is not vector-ready and has not been promoted. The next gates
 remain complete vectors, current-manifest/source/content/chunk identity, and
 fixed-query retrieval parity.
+
+## Candidate worker moved to the primary PVE — 2026-10-27 04:50 UTC
+
+After stopping the CT120 embed service and confirming its candidate index was
+unchanged at 45,935/215,382 E5 vectors, a successful vzdump backup was made:
+`vzdump-lxc-120-2026_10_27-07_05_47.tar.zst`, SHA-256
+`18ff25b2f2bab27f9a7d9349aec5042ff3b8a424f96db17bb67b05a6a2a57890`. The
+backup was made available in the PVE-managed dump directory as a hard link to
+the existing shared-storage file, so the 3.34 GB archive was not duplicated.
+CT121 (`kb-embedder-pve`) was restored on the primary `pve` node with a 64 GB
+thin rootfs, one CPU, 4 GB memory, no swap, and no network interface. The
+source CT120 remains intact on `proxmox3` as rollback; its embed service was
+stopped for the migration and has not been restarted.
+
+CT121 is running the restored candidate-only service with the original 600
+ms/s CPU quota, 3.5 GiB memory ceiling, one inference thread, batch size two,
+and fail-closed `coretemp` Package id 0 thermal guard at 70 C. A read-only
+SQLite query after restore found 215,382 chunks and the same 45,935 vectors.
+The service process remains around 34 MiB and has used less than one CPU-second;
+it has not loaded the model or written embeddings because PVE temperature
+samples exceeded 70 C during the startup interval. At 04:50 UTC the package
+sensor read 58 C, but readings earlier in the interval reached 93 C and 77 C;
+the required continuous ten-minute cool dwell has therefore not yet been
+proven. Leave the guard unchanged and monitor the host before treating any
+vector increase as resumed work.
+
+At this checkpoint PVE reported 3.9 GiB available RAM, swap essentially full,
+and the `ssd-lvm` thin-pool at 39.41% data usage with 85.3 GB available. VM112
+remains paused. The embedding service is active only in the isolated,
+networkless CT121; neither this migration nor the candidate has changed the
+application's active KB. The candidate remains incomplete and parity remains
+`PARTIAL`.
