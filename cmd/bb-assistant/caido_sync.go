@@ -28,7 +28,7 @@ func syncCaidoProjects(args []string) error {
 	mcpSHA256 := flags.String("mcp-sha256", "", "expected SHA-256 of the Caido MCP executable")
 	tokenFile := flags.String("token-file", "", "private Caido MCP token JSON file")
 	pollInterval := flags.Duration("poll-interval", 30*time.Second, "project inventory and request tail interval (1s-10m)")
-	missingConfirmations := flags.Int("missing-confirmations", 3, "successful project inventories required before purge (2-20)")
+	missingConfirmations := flags.Int("missing-confirmations", 3, "successful project inventories required before reporting absence (2-20)")
 	backfillPages := flags.Int("backfill-pages", 5, "historical pages per project per inventory cycle (1-100)")
 	backfillPageSize := flags.Int("backfill-page-size", 50, "historical requests per page (1-100)")
 	backfillDelay := flags.Duration("backfill-delay", 250*time.Millisecond, "delay between persisted historical pages")

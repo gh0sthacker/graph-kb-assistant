@@ -252,6 +252,8 @@ func TestApplyHistoricalOperationBackfillRequiresPreviewDigestAndQueuesIdempoten
 	defer liveWriter.Close()
 	projectKey := projectStore.ProjectKey
 	exchange := projectionWorkerExchange(selected, "operation-backfill-apply-fixture", "")
+	exchange.Target = "https://api.fixture.invalid/api/items/42"
+	exchange.RequestRaw = []byte("GET /api/items/42 HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n")
 	pageWriter, err := OpenPageWriter(ctx, projectStore)
 	if err != nil {
 		t.Fatal(err)

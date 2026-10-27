@@ -722,12 +722,28 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 		version, okVersion := data["route_family_version"].(string)
 		family, okFamily := data["route_family"].(string)
 		parsedOrigin, originErr := url.Parse(origin)
-		canonicalFamily, familyOK := RouteFamilyV1(family)
+		canonicalFamily, familyReason := "", "unsupported_route_family_version"
+		switch version {
+		case RouteFamilyV1Version:
+			var familyOK bool
+			canonicalFamily, familyOK = RouteFamilyV1(family)
+			if familyOK {
+				familyReason = ""
+			}
+		case RouteFamilyV2Version:
+			// Existing canonical placeholders are substituted with a numeric
+			// sentinel so the strict v2 classifier can validate the shape.
+			canonicalFamily, familyReason = RouteFamilyV2WithReason(strings.ReplaceAll(family, "{value}", "123"))
+			if data["grouping_basis"] != "known_route_word_or_strong_identifier_shape" ||
+				data["semantic_status"] != "heuristic_candidate" {
+				familyReason = "invalid_route_family_semantics"
+			}
+		}
 		if !okProgram || selectedProgram != program || !okOrigin || len(origin) > 4096 || originErr != nil ||
 			parsedOrigin == nil || (parsedOrigin.Scheme != "http" && parsedOrigin.Scheme != "https") ||
 			parsedOrigin.Hostname() == "" || parsedOrigin.User != nil || parsedOrigin.Path != "" ||
 			parsedOrigin.RawQuery != "" || parsedOrigin.Fragment != "" || !okMethod || !httpMethodPattern.MatchString(method) ||
-			!okVersion || version != RouteFamilyV1Version || !okFamily || !familyOK || canonicalFamily != family {
+			!okVersion || !okFamily || familyReason != "" || canonicalFamily != family {
 			return errors.New("invalid operation metadata")
 		}
 	case "parameter":

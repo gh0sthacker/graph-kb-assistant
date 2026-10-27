@@ -64,7 +64,8 @@ func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing
 		t.Fatalf("dynamic paths should preserve legacy endpoint grouping and share a versioned operation: endpoints %q/%q, operations %q/%q",
 			firstEndpointID, secondEndpointID, firstOperation["id"], secondOperation["id"])
 	}
-	if firstData["route_family_version"] != RouteFamilyV1Version || firstData["route_family"] != "/api/products/{value}" {
+	if firstData["route_family_version"] != RouteFamilyV2Version || firstData["route_family"] != "/api/products/{value}" ||
+		firstData["semantic_status"] != "heuristic_candidate" {
 		t.Fatalf("versioned operation data = %#v", firstData)
 	}
 	operationRecord := Record{
@@ -80,6 +81,13 @@ func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing
 	invalidOperation["data"] = map[string]any(invalidData)
 	if err := validateEntity(invalidOperation, 2, program); err == nil {
 		t.Fatal("reader accepted an unmasked operation route family")
+	}
+	invalidSemantics := cloneRecord(operationRecord)
+	invalidSemanticsData := cloneRecord(firstData)
+	invalidSemanticsData["semantic_status"] = "verified"
+	invalidSemantics["data"] = map[string]any(invalidSemanticsData)
+	if err := validateEntity(invalidSemantics, 2, program); err == nil {
+		t.Fatal("reader accepted a heuristic route grouping as verified semantics")
 	}
 	if !hasOperationGroupingAssertion(first, firstEndpointID, firstOperation["id"].(string)) {
 		t.Fatal("endpoint is not linked to its grouped operation")
@@ -99,8 +107,8 @@ func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing
 	if operationEntity(t, otherMethod)["id"] == firstOperation["id"] {
 		t.Fatal("different HTTP methods shared one operation identity")
 	}
-	if operationEntity(t, encodedSeparator)["id"] == operationEntity(t, plainSegments)["id"] {
-		t.Fatal("encoded path separator changed the segment count used for grouping")
+	if hasOperationEntity(encodedSeparator) || hasOperationEntity(plainSegments) {
+		t.Fatal("ambiguous path segments were guessed into a heuristic operation group")
 	}
 	encoded, err := json.Marshal(first)
 	if err != nil {
@@ -109,6 +117,16 @@ func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing
 	if strings.Contains(string(encoded), "/api/products/50") {
 		t.Fatal("grouped graph contains the concrete dynamic path")
 	}
+}
+
+func hasOperationEntity(bundle Record) bool {
+	entities, _ := bundle["entities"].([]Record)
+	for _, entity := range entities {
+		if entity["kind"] == "operation" {
+			return true
+		}
+	}
+	return false
 }
 
 func operationEntity(t *testing.T, bundle Record) Record {

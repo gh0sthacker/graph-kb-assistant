@@ -40,6 +40,7 @@ const (
 	operationBackfillReasonUnknownMethod      = "canonical_method_unknown"
 	operationBackfillReasonRouteFamilyMissing = "canonical_route_family_unavailable"
 	operationBackfillReasonRoutePathTooLong   = "canonical_route_path_too_long"
+	operationBackfillReasonRouteAmbiguous     = "canonical_route_segment_ambiguous"
 	operationBackfillReasonRouteOpaque        = "canonical_route_opaque"
 	operationBackfillReasonRouteInvalid       = "canonical_route_invalid"
 	operationBackfillReasonRouteSegments      = "canonical_route_segments_exceeded"
@@ -333,8 +334,10 @@ func operationBackfillProjectionReason(operation bool, endpointEntity behaviorgr
 		if method == "" || method == "UNKNOWN" {
 			return operationBackfillReasonUnknownMethod
 		}
-		if _, routeReason := behaviorgraph.RouteFamilyV1WithReason(target); routeReason != "" {
+		if _, routeReason := behaviorgraph.RouteFamilyV2WithReason(target); routeReason != "" {
 			switch routeReason {
+			case "ambiguous_segment":
+				return operationBackfillReasonRouteAmbiguous
 			case "path_too_long":
 				return operationBackfillReasonRoutePathTooLong
 			case "opaque_target":

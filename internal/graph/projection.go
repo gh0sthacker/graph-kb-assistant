@@ -27,13 +27,21 @@ const (
 )
 
 const RouteFamilyV1Version = "route-family-v1"
+const RouteFamilyV2Version = "route-family-v2"
 
 var (
-	fieldNamePattern        = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$`)
-	secretNamePattern       = regexp.MustCompile(`(?i)(token|secret|password|passwd|cookie|authorization|session|api[_-]?key|credential|email|phone|ssn)`)
-	httpMethodPattern       = regexp.MustCompile(`^[A-Z]{1,16}$`)
-	headerNamePattern       = regexp.MustCompile(`^[a-z0-9!#$%&'*+.^_` + "`" + `|~0-9-]{1,128}$`)
-	pseudoHeaderNamePattern = regexp.MustCompile(`^:[a-z0-9!#$%&'*+.^_` + "`" + `|~-]{1,128}$`)
+	fieldNamePattern                = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$`)
+	secretNamePattern               = regexp.MustCompile(`(?i)(token|secret|password|passwd|cookie|authorization|session|api[_-]?key|credential|email|phone|ssn)`)
+	httpMethodPattern               = regexp.MustCompile(`^[A-Z]{1,16}$`)
+	headerNamePattern               = regexp.MustCompile(`^[a-z0-9!#$%&'*+.^_` + "`" + `|~0-9-]{1,128}$`)
+	pseudoHeaderNamePattern         = regexp.MustCompile(`^:[a-z0-9!#$%&'*+.^_` + "`" + `|~-]{1,128}$`)
+	routeFamilyV2IdentifierPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`^[0-9]+$`),
+		regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`),
+		regexp.MustCompile(`(?i)^[0-9a-f]{24}$`),
+		regexp.MustCompile(`(?i)^[0-9a-f]{32,64}$`),
+		regexp.MustCompile(`(?i)^[0-9a-hjkmnp-tv-z]{26}$`),
+	}
 )
 
 type SearchRecord struct {
@@ -276,6 +284,64 @@ func routeFamilyFromEscapedPath(path string) string {
 		}
 	}
 	return strings.Join(parts, "/")
+}
+
+// RouteFamilyV2WithReason returns a conservative, value-free route grouping
+// candidate. It masks only identifier shapes that are unambiguous from the
+// path syntax; unknown segments are rejected instead of guessed as either
+// static route words or parameter values. Callers must still label the group
+// as heuristic because path shape alone cannot prove application semantics.
+func RouteFamilyV2WithReason(target string) (family, reason string) {
+	if target == "" || !historicalTargetValid(target) {
+		return "", "invalid_target"
+	}
+	parsed, err := historicalParseURL(target)
+	if err != nil {
+		return "", "unparseable_target"
+	}
+	if parsed.Opaque != "" {
+		return "", "opaque_target"
+	}
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if len(path) > maxRouteFamilyPathBytes {
+		return "", "path_too_long"
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) > 4096 {
+		return "", "too_many_path_segments"
+	}
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		decoded, valid := historicalURLUnquote(part, false, true)
+		if !valid {
+			return "", "ambiguous_segment"
+		}
+		lower := strings.ToLower(decoded)
+		if _, isStatic := historicalRouteWords[lower]; isStatic {
+			parts[index] = lower
+			continue
+		}
+		if isRouteFamilyV2Identifier(lower) {
+			parts[index] = "{value}"
+			continue
+		}
+		return "", "ambiguous_segment"
+	}
+	return strings.Join(parts, "/"), ""
+}
+
+func isRouteFamilyV2Identifier(segment string) bool {
+	for _, pattern := range routeFamilyV2IdentifierPatterns {
+		if pattern.MatchString(segment) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeriveLiveKeys mirrors the existing Python project-keyed signature scheme.

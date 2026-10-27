@@ -33,6 +33,24 @@ func TestRouteFamilyV1WithReasonUsesFixedCodes(t *testing.T) {
 	}
 }
 
+func TestRouteFamilyV2ConservativelyGroupsOnlyKnownPathsAndStrongIDs(t *testing.T) {
+	for _, test := range []struct {
+		name, target, wantFamily, wantReason string
+	}{
+		{name: "numeric id", target: "https://fixture.invalid/api/items/42", wantFamily: "/api/items/{value}"},
+		{name: "uuid id", target: "https://fixture.invalid/api/items/550e8400-e29b-41d4-a716-446655440000", wantFamily: "/api/items/{value}"},
+		{name: "unknown slug is not guessed", target: "https://fixture.invalid/api/items/alice", wantReason: "ambiguous_segment"},
+		{name: "unknown static route is not merged", target: "https://fixture.invalid/api/custom-report", wantReason: "ambiguous_segment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			family, reason := RouteFamilyV2WithReason(test.target)
+			if family != test.wantFamily || reason != test.wantReason {
+				t.Fatalf("RouteFamilyV2WithReason() = %q, %q; want %q, %q", family, reason, test.wantFamily, test.wantReason)
+			}
+		})
+	}
+}
+
 func TestSplitMessagePreservesHTTP2PseudoHeaders(t *testing.T) {
 	raw := []byte("GET /items?id=1 HTTP/2\r\n:method: GET\r\n:scheme: https\r\n:authority: fixture.invalid\r\n:path: /items?id=1\r\naccept: application/json\r\n\r\n")
 	headers, body, boundary, complete := splitMessage(raw)

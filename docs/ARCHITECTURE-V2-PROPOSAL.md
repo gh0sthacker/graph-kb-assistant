@@ -158,6 +158,16 @@ route meaning where policy permits, expose ambiguous grouping, and let the
 analyst assign readable project-local names. An unfamiliar segment must not be
 displayed as a proven dynamic parameter merely because it was masked.
 
+New Go operation records use `route-family-v2`: only known static route words
+and strong identifier shapes (numeric IDs, UUIDs, ObjectIDs, long hex IDs and
+ULIDs) participate in automatic grouping. An unfamiliar or encoded-ambiguous
+segment is left as an endpoint without an operation group and is reported as a
+coverage gap. `route-family-v1` remains readable for stored graph compatibility
+but is not used for new grouping. Even v2 is a heuristic candidate, not proof
+that two routes have the same business semantics; the UI must preserve that
+label. Dynamic slugs outside the strong patterns are intentionally under-grouped
+until an API specification or analyst annotation supplies a verified template.
+
 ### Neo4j representation and query API
 
 Retain assertion nodes for independent provenance, contradiction and proposal
