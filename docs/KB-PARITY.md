@@ -916,3 +916,29 @@ files inspected for this work were read directly from pinned commit
 `4585b3442cf3c6e075fca5d3b512a8f47be501b6` with `git show`; future source
 claims must continue to name that exact commit. The deployed RedAmon runtime
 receipt and same-query retrieval comparison are still missing.
+
+## CT121 runtime source refresh — 2026-10-27 12:08 UTC
+
+On the primary `pve` node, the isolated CT121 embedding service was switched
+to a private local runtime copy of the current workspace Python package,
+`/home/max/.local/share/bb-graph-assistant/kb-runtime/src`. The deployed
+`canonical.py` and `sources.yaml` hashes match workspace commit `6e4da33`
+(`665ae38e…` and `95336ab4…` respectively); importing through that runtime
+reports `redamon-compatible-chunk-v2`. This avoids modifying the shared
+workspace path inside CT121 and ensures its next candidate maintenance run uses
+the corrected chunk identity rules and current source manifest.
+
+The service's candidate destination remains
+`kb/candidates/full-20261026-1936/index.sqlite3`; a read-only check found
+215,382 chunks and 45,935 E5 vectors. No KB rows were modified, and CT108's
+active index was untouched. The service is active again with the existing
+80 C stop / 10-minute stable-cool gate. A previous single package-temperature
+sample was 87 C; this does not establish that the gate has cleared. VM112
+remains paused, and no work was run on `proxmox3` or CT120.
+
+The candidate is still **not promotable**: vectors are incomplete, the stored
+snapshot/manifest provenance has not been refreshed, and pinned RedAmon
+full-profile corpus plus hybrid-query receipts are still missing. Once the
+thermal gate permits work, run the candidate-only v2 rechunk/source refresh,
+verify its new snapshot and per-family parity, resume E5 embedding, then
+generate and compare receipts before any CT108 activation.
