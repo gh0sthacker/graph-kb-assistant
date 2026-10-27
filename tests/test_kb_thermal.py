@@ -121,9 +121,10 @@ class ThermalMonitorTests(unittest.TestCase):
     def test_rejects_aggressive_or_invalid_limits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):
-                ThermalMonitor(Path(directory) / "temp", stop_celsius=90)
+                ThermalMonitor(Path(directory) / "temp", stop_celsius=81)
             with self.assertRaises(ValueError):
-                ThermalMonitor(Path(directory) / "temp", stop_celsius=71)
+                ThermalMonitor(Path(directory) / "temp", stop_celsius=64)
+            self.assertEqual(ThermalMonitor(Path(directory) / "temp", stop_celsius=80).stop_celsius, 80)
             sensor = Path(directory) / "temp"
             sensor.write_text("not-a-temperature", encoding="ascii")
             with self.assertRaisesRegex(RuntimeError, "stopping embedding"):
@@ -132,7 +133,7 @@ class ThermalMonitorTests(unittest.TestCase):
     def test_embed_unit_keeps_cpu_memory_and_temperature_limits(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         unit = (project_root / "deploy/graph-kb-assistant-kb-embed.service").read_text(encoding="utf-8")
-        self.assertIn("CPUQuota=60%", unit)
+        self.assertIn("CPUQuota=40%", unit)
         self.assertIn("MemoryMax=3584M", unit)
         self.assertIn("Restart=no", unit)
         for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
@@ -143,7 +144,7 @@ class ThermalMonitorTests(unittest.TestCase):
         self.assertRegex(start, r"(?:^| )--threads 1(?: |$)")
         match = re.search(r"(?:^| )--stop-temperature-c ([0-9.]+)(?: |$)", start)
         self.assertIsNotNone(match)
-        self.assertLessEqual(float(match.group(1)), 70.0)
+        self.assertEqual(float(match.group(1)), 80.0)
 
     def test_embedding_worker_lock_prevents_a_duplicate_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

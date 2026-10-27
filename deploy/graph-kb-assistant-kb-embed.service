@@ -20,11 +20,11 @@ Environment=OMP_NUM_THREADS=1
 Environment=MKL_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=TOKENIZERS_PARALLELISM=false
-# Previous CT108 runs approached 90 C despite a 50% CPU quota. Stop before
-# 70 C; resume only after a separate 10-minute stable-below-70 C observation.
-ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 70
+# PVE i3-N305 Tjunction is 105 C. Keep a 25 C package-temperature margin;
+# resume only after a separate 10-minute stable-below-80 C observation.
+ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 80
 Restart=no
-CPUQuota=60%
+CPUQuota=40%
 MemoryMax=3584M
 Nice=19
 IOSchedulingClass=idle

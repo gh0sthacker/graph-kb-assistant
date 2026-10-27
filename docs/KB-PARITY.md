@@ -138,16 +138,17 @@ allowlist, or metadata-only filter changes.
 Long E5 builds run only on Proxmox, never on Kali. `bb-assistant-kb embed`
 requires a host-identified, read-only thermal sensor source; the hwmon
 directory mode resolves the uniquely labelled `coretemp` `Package id 0`
-sensor on each check. It checks before
-each durable batch, fails closed on unreadable sensor data, and stops at 70 C.
+sensor on each check. It checks before each durable batch, fails closed on
+unreadable sensor data, and stops at the configured package limit (currently
+80 C on the PVE i3-N305 host).
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
 The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
-and caps CPU at 60% of one core, disables automatic restarts, and is enabled for boot so
+and caps CPU at 40% of one core, disables automatic restarts, and is enabled for boot so
 the same guarded job resumes after a CT restart. The CLI still waits for the
-ten-minute thermal gate before model loading. Do not start or resume until the package temperature has remained
-below 70 C for at least 10 continuous minutes. A single cool reading does not
-satisfy this precondition.
+ten-minute thermal gate before model loading. The PVE worker waits until the
+package temperature has remained below 80 C for at least 10 continuous minutes.
+A single cool reading does not satisfy this precondition.
 Before enabling the unit, create the root-owned
 `/etc/graph-kb-assistant/kb-embed.env` with
 `BB_ASSISTANT_KB_INDEX=/home/max/.local/share/bb-graph-assistant/kb/candidates/<candidate-id>/index.sqlite3`.
@@ -160,8 +161,9 @@ available NumPy search backend; `vector_storage_complete` reports the durable
 generation state separately. Readiness remains false until every content
 chunk has its pinned E5 vector, the completion marker is written, and the
 runtime backend is available.
-The embed CLI waits for a sampled ten-minute dwell below 70 C before starting
-and after a `ThermalLimitReached` batch stop, then resumes the same staged job.
+The embed CLI waits for a sampled ten-minute dwell below its configured limit
+before starting and after a `ThermalLimitReached` batch stop, then resumes the
+same staged job.
 Unreadable sensors and all non-thermal errors fail closed without retry.
 
 ## Active full-profile candidate checkpoint — 2026-10-27 01:16 UTC
