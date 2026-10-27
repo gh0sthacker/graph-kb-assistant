@@ -312,3 +312,8 @@ hottest readable hwmon input was 69 C, just below the 70 C batch stop. It
 continues under the same thermal guard. The workspace KB stats fallback did
 not finish its source-hash scan during this check and was interrupted; this
 is unrelated to the candidate KB and does not change its counts.
+
+At 02:54 UTC, a read-only CT120 check found 43,303/215,382 E5 vectors
+(20.1%); the worker remained active at the same 600 ms/s CPU quota. This is
+progress evidence only: the candidate is still incomplete and has not passed
+the source/chunk or same-query parity gates.
