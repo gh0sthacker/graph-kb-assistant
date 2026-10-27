@@ -368,3 +368,31 @@ dirty, mixed-state corpus, not an authoritative full-profile gold snapshot.
 Keep KB parity `PARTIAL`; finish the guarded vector build, reconcile candidate
 coverage against the current manifest, and then capture comparable same-query
 hybrid receipts against an explicitly selected RedAmon full-profile reference.
+
+## Active candidate audit — 2026-10-27 03:42 UTC
+
+A read-only check on PVE node `proxmox3`, CT120, confirmed 207,878 source
+documents and 215,382 chunks across all seven declared families. The candidate
+contains 45,211 pinned E5-large-v2 vectors (21.0%). Per-family coverage is
+ExploitDB 32,172/46,636; GTFOBins 418/731; LOLBAS 0/464; Nuclei 4,308/19,359;
+NVD 8,219/146,938; OWASP 83/899; and ToolDocs 11/355. `coverage_state` remains
+`DONE`; vector readiness is false.
+
+The snapshot's recorded source filters and revisions match the current full
+profile, including NVD `nvd_lookback_days=730` and `nvd_min_cvss=0.0`. The
+candidate's stored source-manifest digest is
+`931151ff9d5abd47ba1c75db7cb97fff662163ca678cb8e1f22d8b47ccb3e084`; it matches
+the manifest bytes at commit `274c622`, while the current manifest digest is
+`95336ab4a4f6109d93f5e9d465740e035b3bc277197926edbd167d617a0b10`. The only
+manifest diff since that commit is the ExploitDB `dataset_terms_basis` wording,
+which now explicitly disclaims separate PoC licensing and redistribution of
+the assembled corpus. Thus the mismatch is not evidence of a changed source
+pin or NVD window, but the candidate still needs a current-manifest provenance
+receipt before it can pass the strict parity gate.
+
+The candidate-only worker remains active with a 60%-of-one-core quota and a
+3.5 GiB memory cap. Its journal reports a thermal stop at 70 C at 03:38 UTC;
+one subsequent package sample was 48 C, which does not satisfy the ten-minute
+cool dwell. Leave the guard and worker in place. Full vectors, a current
+manifest-bound receipt, and hybrid same-query comparison against an
+authoritative seven-family RedAmon reference remain outstanding.
