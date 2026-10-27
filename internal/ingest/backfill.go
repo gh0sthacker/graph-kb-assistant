@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"time"
 	"unicode/utf8"
@@ -115,6 +116,10 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		CoverageNote: "Caido provided no stable snapshot token or expected history total to reconcile completeness; the cursor reports enumeration progress only.",
 	}
 	cursor := checkpoint.Cursor
+	seenCursors := make(map[[32]byte]struct{})
+	if cursor != nil {
+		seenCursors[sha256.Sum256([]byte(*cursor))] = struct{}{}
+	}
 	var metadataDuration, detailDuration, pageProcessingDuration time.Duration
 
 	markPartial := func(cause error) (BackfillResult, error) {
@@ -141,6 +146,13 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		}
 		if err := validateMetadataPage(metadata, selected, options.PageSize, cursor); err != nil {
 			return markPartial(err)
+		}
+		if metadata.HasMore && metadata.NextCursor != nil {
+			cursorDigest := sha256.Sum256([]byte(*metadata.NextCursor))
+			if _, repeated := seenCursors[cursorDigest]; repeated {
+				return markPartial(errors.New("Caido history pagination repeated a prior cursor"))
+			}
+			seenCursors[cursorDigest] = struct{}{}
 		}
 		scopedMetadata, excluded := filterLiveMetadataPage(metadata, options.Scope)
 		result.RequestsExcludedByScope += excluded

@@ -75,6 +75,37 @@ func TestRunBackfillTerminalCursorDoesNotClaimCoverageReconciled(t *testing.T) {
 	}
 }
 
+func TestRunBackfillStopsOnMultiPageCursorCycle(t *testing.T) {
+	ctx := context.Background()
+	selected, projectStore, _ := newLiveTailFixture(t)
+	pageWriter, err := OpenPageWriter(ctx, projectStore)
+	if err != nil {
+		t.Fatalf("OpenPageWriter() error = %v", err)
+	}
+	t.Cleanup(pageWriter.Close)
+	source := &cyclingBackfillSource{project: selected}
+
+	result, err := RunBackfill(ctx, source, pageWriter, selected, BackfillOptions{
+		PageSize: 1, MaxBodyBytes: 64 << 10,
+	})
+	if err == nil || !strings.Contains(err.Error(), "repeated a prior cursor") {
+		t.Fatalf("RunBackfill() error = %v, want repeated-cursor failure", err)
+	}
+	if result.State != "partial" || result.PagesThisRun != 2 {
+		t.Fatalf("RunBackfill() did not preserve the last accepted checkpoint: %+v", result)
+	}
+	if source.pageCalls != 3 || source.fetchCalls != 2 {
+		t.Fatalf("Caido calls = list:%d fetch:%d, want list:3 fetch:2", source.pageCalls, source.fetchCalls)
+	}
+	var captures int
+	if err := projectStore.Database.DB().QueryRowContext(ctx, "SELECT count(*) FROM captures").Scan(&captures); err != nil {
+		t.Fatal(err)
+	}
+	if captures != 2 {
+		t.Fatalf("accepted captures = %d, want only the two pre-cycle pages", captures)
+	}
+}
+
 func TestRunBackfillReportsProgressOnlyAfterDurablePageAcceptance(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, _ := newLiveTailFixture(t)
@@ -492,6 +523,57 @@ type backfillSourceFixture struct {
 	fetchErr   error
 	pageCalls  int
 	fetchCalls int
+}
+
+type cyclingBackfillSource struct {
+	project    project.CaidoProjectRef
+	pageCalls  int
+	fetchCalls int
+}
+
+func (s *cyclingBackfillSource) ListProjects() ([]caido.ProjectRef, error) {
+	return []caido.ProjectRef{s.project}, nil
+}
+
+func (s *cyclingBackfillSource) ListRequestPage(selected project.CaidoProjectRef, cursor *string, _ int, httpql *string) (caido.RequestMetadataPage, error) {
+	if !selected.SameProject(s.project) || httpql != nil {
+		return caido.RequestMetadataPage{}, errors.New("cycling fixture received an unexpected project or filter")
+	}
+	s.pageCalls++
+	key := ""
+	if cursor != nil {
+		key = *cursor
+	}
+	rows := map[string]caido.RequestMetadataPage{
+		"":         {Requests: []caido.RequestMetadata{{RequestID: "cycle-one", Method: "GET", URL: "https://api.fixture.invalid/one"}}, NextCursor: stringPointerValue("cursor-a"), HasMore: true},
+		"cursor-a": {Requests: []caido.RequestMetadata{{RequestID: "cycle-two", Method: "GET", URL: "https://api.fixture.invalid/two"}}, NextCursor: stringPointerValue("cursor-b"), HasMore: true},
+		"cursor-b": {Requests: []caido.RequestMetadata{{RequestID: "cycle-three", Method: "GET", URL: "https://api.fixture.invalid/three"}}, NextCursor: stringPointerValue("cursor-a"), HasMore: true},
+	}
+	page, ok := rows[key]
+	if !ok {
+		return caido.RequestMetadataPage{}, errors.New("cycling fixture received an unexpected cursor")
+	}
+	return page, nil
+}
+
+func (s *cyclingBackfillSource) FetchHistoryPage(selected project.CaidoProjectRef, metadata caido.RequestMetadataPage, _ map[string]struct{}, _ int) (caido.HistoryPage, error) {
+	if !selected.SameProject(s.project) || len(metadata.Requests) != 1 {
+		return caido.HistoryPage{}, errors.New("cycling fixture received an invalid detail page")
+	}
+	s.fetchCalls++
+	row := metadata.Requests[0]
+	return caido.HistoryPage{
+		Exchanges: []caido.HttpExchange{{
+			Ref:        caido.ExchangeRef{Project: selected, RequestID: row.RequestID},
+			RequestRaw: []byte("GET /" + strings.TrimPrefix(row.RequestID, "cycle-") + " HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n"),
+			Method:     "GET", Scheme: "https", Host: "api.fixture.invalid", Port: 443, Target: row.URL,
+			RequestWireFidelity: "source_bytes", ResponseWireFidelity: "unknown",
+		}}, NextCursor: cloneCursor(metadata.NextCursor), HasMore: metadata.HasMore,
+	}, nil
+}
+
+func (*cyclingBackfillSource) GetExchange(caido.ExchangeRef) (*caido.HttpExchange, error) {
+	return nil, errors.New("cycling fixture does not implement direct exchange lookup")
 }
 
 func (s *backfillSourceFixture) ListProjects() ([]caido.ProjectRef, error) {
