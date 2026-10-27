@@ -40,24 +40,32 @@ class ThermalMonitor:
         sample_interval_seconds: float = 1.0,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        over_limit_samples: int = 3,
     ) -> float:
         """Wait until every sampled package temperature stays below the limit.
 
-        Only a thermal-limit reading resets the dwell. Sensor/configuration
-        errors propagate so callers fail closed instead of waiting forever.
+        A dwell is reset only after ``over_limit_samples`` consecutive readings
+        reach the thermal limit. Sensor/configuration errors propagate so
+        callers fail closed instead of waiting forever.
         """
         if dwell_seconds < 0:
             raise ValueError("dwell_seconds must not be negative")
         if sample_interval_seconds <= 0:
             raise ValueError("sample_interval_seconds must be positive")
+        if over_limit_samples < 1:
+            raise ValueError("over_limit_samples must be positive")
 
         cool_since: float | None = None
+        consecutive_over_limit = 0
         while True:
             try:
                 temperature = self.check()
             except ThermalLimitReached:
-                cool_since = None
+                consecutive_over_limit += 1
+                if consecutive_over_limit >= over_limit_samples:
+                    cool_since = None
             else:
+                consecutive_over_limit = 0
                 now = monotonic()
                 if cool_since is None:
                     cool_since = now

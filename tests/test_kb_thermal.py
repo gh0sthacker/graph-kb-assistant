@@ -83,7 +83,7 @@ class ThermalMonitorTests(unittest.TestCase):
             self.assertEqual(result, 62.0)
             self.assertEqual(clock.now, 3.0)
 
-    def test_hot_reading_resets_cool_dwell(self) -> None:
+    def test_single_hot_spike_does_not_reset_cool_dwell(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             sensor = Path(directory) / "temp"
             sensor.write_text("62.0\n", encoding="ascii")
@@ -91,18 +91,61 @@ class ThermalMonitorTests(unittest.TestCase):
             def change_temperature(now: float) -> None:
                 if now == 2.0:
                     sensor.write_text("70000\n", encoding="ascii")
-                elif now == 4.0:
+                elif now == 3.0:
                     sensor.write_text("65000\n", encoding="ascii")
 
             clock = FakeClock(on_sleep=change_temperature)
-            monitor = ThermalMonitor(sensor)
-            monitor.wait_for_cool_dwell(
+            result = ThermalMonitor(sensor).wait_for_cool_dwell(
                 dwell_seconds=3,
                 sample_interval_seconds=1,
                 monotonic=clock.monotonic,
                 sleep=clock.sleep,
             )
-            self.assertEqual(clock.now, 7.0)
+            self.assertEqual(result, 65.0)
+            self.assertEqual(clock.now, 3.0)
+
+    def test_three_consecutive_hot_readings_reset_cool_dwell(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sensor = Path(directory) / "temp"
+            sensor.write_text("62.0\n", encoding="ascii")
+
+            def change_temperature(now: float) -> None:
+                if now in (2.0, 3.0, 4.0):
+                    sensor.write_text("70000\n", encoding="ascii")
+                elif now == 5.0:
+                    sensor.write_text("65000\n", encoding="ascii")
+
+            clock = FakeClock(on_sleep=change_temperature)
+            ThermalMonitor(sensor).wait_for_cool_dwell(
+                dwell_seconds=3,
+                sample_interval_seconds=1,
+                monotonic=clock.monotonic,
+                sleep=clock.sleep,
+            )
+            self.assertEqual(clock.now, 8.0)
+
+    def test_continuous_overheating_never_completes_cool_dwell(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sensor = Path(directory) / "temp"
+            sensor.write_text("70000\n", encoding="ascii")
+            clock = FakeClock()
+
+            class StopAfterSamples(Exception):
+                pass
+
+            def bounded_sleep(seconds: float) -> None:
+                clock.sleep(seconds)
+                if clock.now >= 5.0:
+                    raise StopAfterSamples
+
+            with self.assertRaises(StopAfterSamples):
+                ThermalMonitor(sensor).wait_for_cool_dwell(
+                    dwell_seconds=3,
+                    sample_interval_seconds=1,
+                    monotonic=clock.monotonic,
+                    sleep=bounded_sleep,
+                )
+            self.assertEqual(clock.now, 5.0)
 
     def test_sensor_failure_aborts_cool_dwell(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
