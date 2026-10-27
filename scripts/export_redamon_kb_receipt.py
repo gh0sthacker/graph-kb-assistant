@@ -110,12 +110,9 @@ def _load_fixture(path: Path) -> dict[str, Any]:
     return value
 
 
-def _runtime_inventory(driver: Any, faiss_ids: list[str]) -> tuple[dict[str, Any], dict[str, int], dict[str, int]]:
-    try:
-        from neo4j import READ_ACCESS
-    except ImportError as exc:
-        raise ReceiptError("Neo4j Python driver is required") from exc
-
+def _runtime_inventory(
+    driver: Any, faiss_ids: list[str], *, read_access: Any = "READ",
+) -> tuple[dict[str, Any], dict[str, int], dict[str, int]]:
     family_hashes = {name: hashlib.sha256() for name in sorted(SOURCE_FAMILIES)}
     family_chunks = {name: 0 for name in sorted(SOURCE_FAMILIES)}
     family_paths: dict[str, set[str]] = {name: set() for name in sorted(SOURCE_FAMILIES)}
@@ -128,7 +125,7 @@ def _runtime_inventory(driver: Any, faiss_ids: list[str]) -> tuple[dict[str, Any
         "c.edb_id AS edb_id ORDER BY c.chunk_id"
     )
     try:
-        with driver.session(default_access_mode=READ_ACCESS, fetch_size=1000) as session:
+        with driver.session(default_access_mode=read_access, fetch_size=1000) as session:
             for row in session.run(query):
                 chunk_id, source_name = row["chunk_id"], row["source_name"]
                 title, content, source_path = row["title"], row["content"], row["source_path"]
@@ -255,7 +252,9 @@ def export_receipt(*, root: Path, kb_path: Path, fixture_path: Path, output_path
     try:
         loader = Neo4jLoader(_ReadOnlyDriver(driver, READ_ACCESS))
         kb = PentestKnowledgeBase(indexer, loader, Embedder(model_name=config.embedder.model), config=config)
-        inventory, family_chunks, family_docs = _runtime_inventory(driver, indexer.chunk_ids)
+        inventory, family_chunks, family_docs = _runtime_inventory(
+            driver, indexer.chunk_ids, read_access=READ_ACCESS,
+        )
 
         queries: list[dict[str, Any]] = []
         for spec in fixture["queries"]:
