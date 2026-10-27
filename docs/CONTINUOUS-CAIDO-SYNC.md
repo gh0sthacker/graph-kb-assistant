@@ -169,19 +169,20 @@ The unit template is `systemd/graph-kb-assistant-caido-sync.service`; its
 private configuration example is
 `systemd/graph-kb-assistant-caido-sync.env.example`. A read-only CT 108 check
 on 2026-10-27 confirmed the Go web service is active, while the Go sync unit
-and its `/etc/bb-graph-assistant/*.env` files are absent; the legacy Python
-tail unit is disabled and inactive. The web service resolves its data home to
-`/home/max/.local/share/bb-graph-assistant/graph-kb-assistant`, whereas the
-current Go sync unit template writes to `/var/lib/bb-graph-assistant/data`.
-Enabling the template unchanged would therefore populate a different project
-catalog and graph from the one served by the UI. Also, no exact Caido scope is
-configured in the inspected service environment, so the template's
-`--require-scope` would fail until the authorized origin is configured.
+and its private sync configuration are absent; the legacy Python tail unit is
+disabled and inactive. The web service resolves its data home to
+`/home/max/.local/share/bb-graph-assistant/graph-kb-assistant`. The repository
+unit template is now aligned to this data root, the web service account and its
+Neo4j environment, but it has not yet been installed. No exact Caido origin
+list is configured for the sync service, so its required scope check will fail
+until that list is populated.
 
-Before deployment, reconcile the sync service's data root, service account,
-Neo4j configuration and token-file access with the running Go web service;
-then configure the exact authorized scope. Only after that should a smoke run
-verify successful project inventories, backfill/tail, and graph projection.
+Before deployment, provision the Caido token at the path in the private sync
+configuration and configure every exact authorized origin in
+`BB_ASSISTANT_CAIDO_SCOPE_ORIGINS`. The service accepts multiple
+scheme/host/port origins and keeps independent checkpoints for each. Only then
+should a smoke run verify project inventories, backfill/tail, and graph
+projection.
 The source API has no stable snapshot token or push event, so synchronization
 is eventual; it cannot promise atomic lockstep or a provably complete
 historical snapshot.

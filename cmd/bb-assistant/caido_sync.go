@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"net/url"
 	"os"
 	"os/signal"
+	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +26,13 @@ import (
 func syncCaidoProjects(args []string) error {
 	flags := flag.NewFlagSet("caido-sync", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
+	var scopeOrigins scopeOriginList
+	for _, origin := range strings.FieldsFunc(os.Getenv("BB_ASSISTANT_CAIDO_SCOPE_ORIGINS"), func(r rune) bool { return r == ',' || r == '\n' }) {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			scopeOrigins = append(scopeOrigins, origin)
+		}
+	}
+	flags.Var(&scopeOrigins, "scope-origin", "exact authorized HTTP origin; repeat for each scheme://host:port")
 	root := flags.String("data-root", "", "private assistant data root")
 	instanceID := flags.String("instance-id", os.Getenv("BB_ASSISTANT_CAIDO_INSTANCE_ID"), "stable operator-defined Caido instance key")
 	mcpCommand := flags.String("mcp-command", "", "pinned Caido MCP v4.3.0 executable")
@@ -42,7 +53,7 @@ func syncCaidoProjects(args []string) error {
 		return err
 	}
 	scopePort := flags.Int("scope-port", scopePortDefault, "optional exact HTTP origin scope port")
-	requireScope := flags.Bool("require-scope", false, "fail unless an exact HTTP origin scope is configured")
+	requireScope := flags.Bool("require-scope", false, "fail unless one or more exact HTTP origin scopes are configured")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -57,9 +68,12 @@ func syncCaidoProjects(args []string) error {
 	if graphaccess.ConfiguredBackend() != "neo4j" {
 		return errors.New("continuous Caido sync requires the Neo4j graph backend")
 	}
-	scope, err := normalizeTailScope(*scopeScheme, *scopeHost, *scopePort, *requireScope)
+	scopes, err := normalizeCaidoScopeOrigins(scopeOrigins, *scopeScheme, *scopeHost, *scopePort, *requireScope)
 	if err != nil {
 		return err
+	}
+	if len(scopes) == 0 {
+		return errors.New("Caido sync requires at least one exact authorized origin scope")
 	}
 	if *backfillPageSize < 1 || int64(*backfillPageSize)*int64(512<<10)*2 > 64<<20 {
 		return errors.New("Caido historical import limits are invalid")
@@ -84,7 +98,7 @@ func syncCaidoProjects(args []string) error {
 		DataRoot: *root, InstanceID: *instanceID, PollInterval: *pollInterval,
 		MissingConfirmations: *missingConfirmations,
 		OnProject: func(ctx context.Context, ref project.CaidoProjectRef) error {
-			if err := processCaidoProject(ctx, source, ref, *root, scope, *backfillPageSize, *backfillPages, *backfillDelay,
+			if err := processCaidoProject(ctx, source, ref, *root, scopes, *backfillPageSize, *backfillPages, *backfillDelay,
 				*pageSize, *tailPages, *bodyLimit, runners); err != nil {
 				return err
 			}
@@ -110,7 +124,104 @@ func syncCaidoProjects(args []string) error {
 	})
 }
 
+type scopeOriginList []string
+
+func (origins *scopeOriginList) String() string {
+	if origins == nil {
+		return ""
+	}
+	return strings.Join(*origins, ",")
+}
+
+func (origins *scopeOriginList) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("exact Caido scope origin is empty")
+	}
+	*origins = append(*origins, value)
+	return nil
+}
+
+func normalizeCaidoScopeOrigins(origins []string, legacyScheme, legacyHost string, legacyPort int, required bool) ([]*ingest.LiveTailScope, error) {
+	if len(origins) == 0 {
+		scope, err := normalizeTailScope(legacyScheme, legacyHost, legacyPort, required)
+		if err != nil {
+			return nil, err
+		}
+		if scope == nil {
+			return nil, nil
+		}
+		return []*ingest.LiveTailScope{scope}, nil
+	}
+	if legacyScheme != "" || legacyHost != "" || legacyPort != 0 {
+		return nil, errors.New("use repeated --scope-origin values or legacy scheme/host/port fields, not both")
+	}
+	seen := make(map[string]struct{}, len(origins))
+	normalized := make([]*ingest.LiveTailScope, 0, len(origins))
+	for _, raw := range origins {
+		parsed, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || parsed == nil || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" ||
+			parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.Hostname() == "" {
+			return nil, errors.New("Caido scope origin must be an exact scheme://host:port origin")
+		}
+		scheme := strings.ToLower(parsed.Scheme)
+		port := 0
+		if parsed.Port() != "" {
+			port, err = strconv.Atoi(parsed.Port())
+			if err != nil {
+				return nil, errors.New("Caido scope origin port is invalid")
+			}
+		} else if scheme == "https" {
+			port = 443
+		} else if scheme == "http" {
+			port = 80
+		}
+		scope, err := normalizeTailScope(scheme, parsed.Hostname(), port, true)
+		if err != nil {
+			return nil, err
+		}
+		key := scope.Scheme + "://" + scope.Host + ":" + strconv.Itoa(scope.Port)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, scope)
+	}
+	if len(normalized) == 0 && required {
+		return nil, errors.New("at least one exact Caido scope origin is required")
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		left := normalized[i].Scheme + "://" + normalized[i].Host + ":" + strconv.Itoa(normalized[i].Port)
+		right := normalized[j].Scheme + "://" + normalized[j].Host + ":" + strconv.Itoa(normalized[j].Port)
+		return left < right
+	})
+	return normalized, nil
+}
+
 func processCaidoProject(
+	ctx context.Context,
+	source caido.ReadSource,
+	ref project.CaidoProjectRef,
+	root string,
+	scopes []*ingest.LiveTailScope,
+	backfillPageSize, backfillPages int,
+	backfillDelay time.Duration,
+	tailPageSize, tailPages, bodyLimit int,
+	runners map[string]*ingest.ProjectionWorkerRunner,
+) error {
+	if len(scopes) == 0 {
+		return errors.New("Caido project sync requires at least one exact origin scope")
+	}
+	for _, scope := range scopes {
+		if err := processCaidoProjectScope(ctx, source, ref, root, scope,
+			backfillPageSize, backfillPages, backfillDelay, tailPageSize, tailPages, bodyLimit, runners); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func processCaidoProjectScope(
 	ctx context.Context,
 	source caido.ReadSource,
 	ref project.CaidoProjectRef,

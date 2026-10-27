@@ -54,6 +54,33 @@ func TestNormalizeTailScope(t *testing.T) {
 	}
 }
 
+func TestNormalizeCaidoScopeOriginsRequiresExactOriginsAndDeduplicates(t *testing.T) {
+	scopes, err := normalizeCaidoScopeOrigins([]string{
+		"HTTPS://API.FIXTURE.INVALID",
+		"https://api.fixture.invalid:443",
+		"http://other.fixture.invalid:8080",
+	}, "", "", 0, true)
+	if err != nil || len(scopes) != 2 {
+		t.Fatalf("normalizeCaidoScopeOrigins() = %#v, %v; want two normalized unique scopes", scopes, err)
+	}
+	if scopes[0].Scheme != "http" || scopes[0].Host != "other.fixture.invalid" || scopes[0].Port != 8080 ||
+		scopes[1].Scheme != "https" || scopes[1].Host != "api.fixture.invalid" || scopes[1].Port != 443 {
+		t.Fatalf("normalized scope ordering/content = %#v", scopes)
+	}
+	if _, err := normalizeCaidoScopeOrigins([]string{"https://api.fixture.invalid/path"}, "", "", 0, true); err == nil {
+		t.Fatal("scope origin with a path was accepted")
+	}
+	if _, err := normalizeCaidoScopeOrigins([]string{"https://user@api.fixture.invalid"}, "", "", 0, true); err == nil {
+		t.Fatal("scope origin with userinfo was accepted")
+	}
+	if _, err := normalizeCaidoScopeOrigins([]string{"https://api.fixture.invalid"}, "https", "api.fixture.invalid", 443, true); err == nil {
+		t.Fatal("mixed repeated-origin and legacy scope configuration was accepted")
+	}
+	if _, err := normalizeCaidoScopeOrigins(nil, "", "", 0, true); err == nil {
+		t.Fatal("required empty scope configuration was accepted")
+	}
+}
+
 func TestLiveTailScopePortDefault(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_CAIDO_SCOPE_PORT", "8443")
 	port, err := liveTailScopePortDefault()
