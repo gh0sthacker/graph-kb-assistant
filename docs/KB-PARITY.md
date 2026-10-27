@@ -299,3 +299,9 @@ state. The live unit reports 600 ms quota per second, PID 601, and remains
 active; the candidate still has 42,743 vectors pending the next resume window.
 Keep this quota for one measured resume interval before making another tuning
 decision.
+
+The cool dwell completed without a manual restart at 02:43 UTC. On the
+first roughly 98-second resume check, the same candidate advanced to
+42,839/215,382 vectors (19.9%); the package sensor read 67 C and systemd still
+reported the worker active at 60% CPU quota. The per-batch 70 C stop remains
+the control point; no completion estimate is inferred from this short sample.
