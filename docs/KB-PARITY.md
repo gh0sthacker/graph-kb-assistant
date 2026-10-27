@@ -143,7 +143,7 @@ each durable batch, fails closed on unreadable sensor data, and stops at 70 C.
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
 The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
-and caps CPU at 80% of one core, disables automatic restarts, and is enabled for boot so
+and caps CPU at 60% of one core, disables automatic restarts, and is enabled for boot so
 the same guarded job resumes after a CT restart. The CLI still waits for the
 ten-minute thermal gate before model loading. Do not start or resume until the package temperature has remained
 below 70 C for at least 10 continuous minutes. A single cool reading does not
@@ -291,3 +291,11 @@ batches and entered the configured ten-minute cool dwell; systemd kept the
 worker alive so it can resume without manual intervention. The candidate then
 contained 42,741/215,382 vectors (19.8%). Do not increase the quota or change
 the stop threshold based on this checkpoint.
+
+At 02:41 UTC the persistent CPU quota was lowered to 60% of one core while the
+same service process was still in that cool dwell. This keeps the existing
+ten-minute below-70 C timer running and avoids resetting the model or candidate
+state. The live unit reports 600 ms quota per second, PID 601, and remains
+active; the candidate still has 42,743 vectors pending the next resume window.
+Keep this quota for one measured resume interval before making another tuning
+decision.
