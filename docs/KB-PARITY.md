@@ -136,7 +136,7 @@ switched to the new candidate or Lucene engine; full parity remains open.
 
 ## Receipt contract
 
-Receipts use schema version 2; schema-1 receipts are rejected because they can
+Receipts use schema version 3; older receipts are rejected because they can
 claim `profile=full` with an incomplete family set, omit retrieval-policy
 settings, or pass with empty query results and arbitrary score fields. `PASS`
 still compares supplied claims and does not authenticate the producer. The
@@ -150,13 +150,19 @@ Receipts are pinned to E5-large-v2 (revision and 1024 dimensions), BGE-reranker-
 and a 1920-character limit per reranker input. A RedAmon receipt must also
 identify its Neo4j Lucene and FAISS engines. The assistant receipt reports its
 actual engines; an SQLite-backed receipt therefore fails parity against RedAmon.
+Internal snapshot IDs and source-manifest digests are retained as provenance,
+not compared across implementations. Parity compares `runtime_inventory`, a
+canonical hash of each default-search chunk's stable ID, source family, title,
+and text digest, plus per-family hashes and counts. This lets two systems prove
+the same retrievable chunk corpus even when their private build manifests use
+different formats.
 
 Both files use the same shape; `producer` is respectively
 `redamon` or `graph-kb-assistant`.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "producer": "redamon",
   "profile": "full",
   "corpus": {
@@ -168,6 +174,13 @@ Both files use the same shape; `producer` is respectively
     "document_count": 123,
     "chunk_count": 456,
     "coverage_state": "DONE",
+    "runtime_inventory": {
+      "chunk_count": 209392,
+      "sha256": "<sha256-of-canonical-runtime-chunk-rows>",
+      "sources": [
+        {"name": "tool_docs", "chunk_count": 1, "sha256": "<sha256>"}
+      ]
+    },
     "vectors": {
       "model": "intfloat/e5-large-v2",
       "revision": "<pinned-revision>",

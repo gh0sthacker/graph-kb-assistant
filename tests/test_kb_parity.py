@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -32,9 +33,14 @@ def _receipt(producer: str) -> dict[str, object]:
         "content_sha256": _HASH_B,
         "chunk_sha256": _HASH_A,
         "complete": True,
-    } for name in SOURCE_FAMILIES]
+    } for name in sorted(SOURCE_FAMILIES)]
+    inventory_sources = [{
+        "name": name,
+        "chunk_count": 1,
+        "sha256": hashlib.sha256(f"inventory-{name}".encode()).hexdigest(),
+    } for name in sorted(SOURCE_FAMILIES)]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "producer": producer,
         "profile": "full",
         "corpus": {
@@ -46,6 +52,11 @@ def _receipt(producer: str) -> dict[str, object]:
             "document_count": len(SOURCE_FAMILIES),
             "chunk_count": len(SOURCE_FAMILIES),
             "coverage_state": "DONE",
+            "runtime_inventory": {
+                "chunk_count": len(SOURCE_FAMILIES),
+                "sha256": _HASH_A,
+                "sources": inventory_sources,
+            },
             "vectors": {
                 "model": E5_MODEL,
                 "revision": E5_REVISION,
@@ -146,7 +157,7 @@ def test_load_receipt_rejects_schema_v1(tmp_path: Path) -> None:
     path = tmp_path / "receipt.json"
     path.write_text(json.dumps(receipt), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="schema_version must be 2"):
+    with pytest.raises(ValueError, match="schema_version must be 3"):
         load_receipt(path, expected_producer="redamon")
 
 
@@ -168,6 +179,30 @@ def test_load_receipt_rejects_unknown_retrieval_settings(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="exactly the pinned full-profile settings"):
         load_receipt(path, expected_producer="redamon")
+
+
+def test_compare_receipts_uses_runtime_inventory_not_private_snapshot_ids() -> None:
+    redamon = _receipt("redamon")
+    assistant = _receipt("graph-kb-assistant")
+    redamon["corpus"]["snapshot_id"] = "a" * 64  # type: ignore[index]
+    assistant["corpus"]["snapshot_id"] = "b" * 64  # type: ignore[index]
+    redamon["corpus"]["source_manifest_sha256"] = "c" * 64  # type: ignore[index]
+    assistant["corpus"]["source_manifest_sha256"] = "d" * 64  # type: ignore[index]
+
+    result = compare_receipts(redamon, assistant, _fixture())
+
+    assert result["status"] == "PASS"
+
+
+def test_compare_receipts_fails_when_runtime_inventory_differs() -> None:
+    redamon = _receipt("redamon")
+    assistant = _receipt("graph-kb-assistant")
+    assistant["corpus"]["runtime_inventory"]["sources"][0]["sha256"] = _HASH_B  # type: ignore[index]
+
+    result = compare_receipts(redamon, assistant, _fixture())
+
+    assert result["status"] == "FAIL"
+    assert "corpus.runtime_inventory" in {row["criterion"] for row in result["checks"] if row["status"] == "FAIL"}
 
 
 @pytest.mark.parametrize("field,value", [
@@ -247,7 +282,7 @@ def test_cli_exits_nonzero_for_parity_mismatch(tmp_path: Path, capsys: pytest.Ca
     fixture = tmp_path / "fixture.json"
     left = _receipt("redamon")
     right = _receipt("graph-kb-assistant")
-    right["sources"][0]["revision"] = "changed"  # type: ignore[index]
+    right["corpus"]["runtime_inventory"]["sha256"] = _HASH_B  # type: ignore[index]
     redamon.write_text(json.dumps(left), encoding="utf-8")
     assistant.write_text(json.dumps(right), encoding="utf-8")
     fixture.write_text(json.dumps(_fixture()), encoding="utf-8")
@@ -255,7 +290,7 @@ def test_cli_exits_nonzero_for_parity_mismatch(tmp_path: Path, capsys: pytest.Ca
     assert main(["parity-check", "--redamon", str(redamon), "--assistant", str(assistant), "--fixture", str(fixture)]) == 3
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "FAIL"
-    assert "sources.tool_docs.revision" in {row["criterion"] for row in output["checks"] if row["status"] == "FAIL"}
+    assert "corpus.runtime_inventory" in {row["criterion"] for row in output["checks"] if row["status"] == "FAIL"}
 
 
 def test_parity_gate_rejects_matching_but_non_fixture_queries() -> None:

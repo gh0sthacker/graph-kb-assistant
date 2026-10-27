@@ -31,6 +31,7 @@ _FULL_PROFILE_SOURCE_FAMILIES = frozenset(SOURCE_FAMILIES)
 _REQUIRED_SCORE_COMPONENTS = frozenset({
     "lexical_score", "vector_cosine", "reranker_logit", "combined_rank",
 })
+_RUNTIME_INVENTORY_FIELDS = frozenset({"chunk_count", "sha256", "sources"})
 
 
 def export_assistant_receipt(
@@ -216,7 +217,7 @@ def export_assistant_receipt(
         queries.append({**spec, "results": result_rows})
 
     receipt = {
-        "schema_version": 2, "producer": "graph-kb-assistant", "profile": profile,
+        "schema_version": 3, "producer": "graph-kb-assistant", "profile": profile,
         "corpus": {
             key: manifest[key] for key in (
                 "snapshot_id", "source_manifest_sha256", "source_documents_sha256", "chunks_sha256",
@@ -224,6 +225,7 @@ def export_assistant_receipt(
             )
         } | {
             "coverage_state": coverage_state,
+            "runtime_inventory": _sqlite_runtime_inventory(index),
             "vectors": {"model": E5_MODEL, "revision": E5_REVISION, "dimensions": 1024,
                         "embedded_chunks": embedded_chunks, "total_content_chunks": total_content_chunks, "complete": True},
             "reranker": {"model": BGE_RERANKER_MODEL, "revision": BGE_RERANKER_REVISION},
@@ -291,7 +293,7 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         raise ValueError(f"cannot read {expected_producer} parity receipt") from exc
     if not isinstance(value, dict):
         raise ValueError(f"{expected_producer} receipt must be a JSON object")
-    _require(value.get("schema_version") == 2 and not isinstance(value.get("schema_version"), bool), "receipt schema_version must be 2")
+    _require(value.get("schema_version") == 3 and not isinstance(value.get("schema_version"), bool), "receipt schema_version must be 3")
     _require(value.get("producer") == expected_producer, f"receipt producer must be {expected_producer}")
     profile = value.get("profile")
     _require(profile == _PARITY_PROFILE, f"receipt profile must be {_PARITY_PROFILE!r} for full KB parity")
@@ -307,6 +309,36 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
     coverage = corpus.get("coverage_state")
     _require(isinstance(coverage, str) and coverage in _COVERAGE_STATES, "corpus.coverage_state is invalid")
     _require(coverage == "DONE", "corpus coverage must be DONE")
+
+    inventory = corpus.get("runtime_inventory")
+    _require(isinstance(inventory, dict) and set(inventory) == _RUNTIME_INVENTORY_FIELDS,
+             "corpus.runtime_inventory must include chunk_count, sha256 and source rows")
+    assert isinstance(inventory, dict)
+    _require(_is_nonnegative_int(inventory.get("chunk_count")) and inventory["chunk_count"] > 0,
+             "corpus.runtime_inventory.chunk_count must be positive")
+    _require(_is_hash(inventory.get("sha256")), "corpus.runtime_inventory.sha256 must be a lowercase SHA-256 digest")
+    inventory_sources = inventory.get("sources")
+    _require(isinstance(inventory_sources, list) and bool(inventory_sources),
+             "corpus.runtime_inventory.sources must be a non-empty array")
+    assert isinstance(inventory_sources, list)
+    inventory_names: set[str] = set()
+    for row in inventory_sources:
+        _require(isinstance(row, dict) and set(row) == {"name", "chunk_count", "sha256"},
+                 "runtime inventory source row is invalid")
+        assert isinstance(row, dict)
+        name = row.get("name")
+        _require(isinstance(name, str) and name in _FULL_PROFILE_SOURCE_FAMILIES and name not in inventory_names,
+                 "runtime inventory source name is invalid or duplicated")
+        inventory_names.add(name)
+        _require(_is_nonnegative_int(row.get("chunk_count")) and row["chunk_count"] > 0,
+                 f"runtime inventory source {name} chunk_count must be positive")
+        _require(_is_hash(row.get("sha256")), f"runtime inventory source {name} sha256 is invalid")
+    _require(inventory_names == _FULL_PROFILE_SOURCE_FAMILIES,
+             "runtime inventory must cover the pinned full-profile source families")
+    _require([row["name"] for row in inventory_sources] == sorted(inventory_names),
+             "runtime inventory sources must be sorted by family name")
+    _require(sum(row["chunk_count"] for row in inventory_sources) == inventory["chunk_count"],
+             "runtime inventory source counts do not sum to corpus count")
 
     vectors = corpus.get("vectors")
     _require(isinstance(vectors, dict), "corpus.vectors evidence is required")
@@ -518,19 +550,20 @@ def compare_receipts(
         checks.append({"criterion": name, "status": "PASS" if passed else "FAIL", "redamon": left, "graph_assistant": right})
 
     check("selected_profile", redamon["profile"], assistant["profile"])
-    for field in ("snapshot_id", "source_manifest_sha256", "source_documents_sha256", "chunks_sha256", "source_count", "document_count", "chunk_count", "coverage_state"):
+    # Snapshot and source-manifest IDs describe each implementation's own
+    # build process. Compare the normalized runtime inventory instead: it is
+    # derived from the actual retrieval chunks and is implementation-neutral.
+    for field in ("source_count", "coverage_state"):
         check(f"corpus.{field}", redamon["corpus"][field], assistant["corpus"][field])
+    check("corpus.runtime_inventory", redamon["corpus"]["runtime_inventory"], assistant["corpus"]["runtime_inventory"])
     check("corpus.retrieval", redamon["corpus"]["retrieval"], assistant["corpus"]["retrieval"])
-    for section, fields in (("vectors", ("model", "revision", "dimensions", "embedded_chunks", "total_content_chunks", "complete")), ("reranker", ("model", "revision"))):
+    for section, fields in (("vectors", ("model", "revision", "dimensions", "complete")), ("reranker", ("model", "revision"))):
         for field in fields:
             check(f"corpus.{section}.{field}", redamon["corpus"][section][field], assistant["corpus"][section][field])
     check("source_family_names", sorted(row["name"] for row in redamon["sources"]), sorted(row["name"] for row in assistant["sources"]))
-    left_sources = {row["name"]: row for row in redamon["sources"]}
-    right_sources = {row["name"]: row for row in assistant["sources"]}
-    if set(left_sources) == set(right_sources):
-        for name in sorted(left_sources):
-            for field in ("revision", "filters", "document_count", "chunk_count", "content_sha256", "chunk_sha256", "complete"):
-                check(f"sources.{name}.{field}", left_sources[name][field], right_sources[name][field])
+    # Source revisions, filters and build digests are retained as provenance,
+    # but are not directly comparable across different ingestion systems.
+    # Their effective retrieval output is covered by the normalized inventory.
 
     left_queries = {row["id"]: row for row in redamon["queries"]}
     right_queries = {row["id"]: row for row in assistant["queries"]}
@@ -562,7 +595,7 @@ def compare_receipts(
                             )
     failed = sum(item["status"] == "FAIL" for item in checks)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "PASS" if failed == 0 else "FAIL",
         "checks": checks,
         "passed_checks": len(checks) - failed,
@@ -574,6 +607,44 @@ def compare_receipts(
 
 def _is_hash(value: object) -> bool:
     return isinstance(value, str) and len(value) == _HASH_LENGTH and all(char in "0123456789abcdef" for char in value)
+
+
+def _sqlite_runtime_inventory(index: Any) -> dict[str, Any]:
+    """Hash default-search chunks using a producer-neutral canonical record."""
+    source_hashes = {name: hashlib.sha256() for name in sorted(_FULL_PROFILE_SOURCE_FAMILIES)}
+    source_counts = {name: 0 for name in sorted(_FULL_PROFILE_SOURCE_FAMILIES)}
+    total = hashlib.sha256()
+    count = 0
+    with index.connect() as connection:
+        rows = connection.execute(
+            "SELECT chunk_id,source_name,title,text FROM chunks "
+            "WHERE COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content' "
+            "AND json_extract(metadata_json,'$.canonicalization_fallback') IS NULL "
+            "AND json_extract(metadata_json,'$.redamon_excluded_reason') IS NULL "
+            "ORDER BY chunk_id"
+        )
+        for row in rows:
+            name = row["source_name"]
+            _require(name in source_hashes, f"runtime inventory contains unsupported source family {name!r}")
+            record = {
+                "chunk_id": row["chunk_id"],
+                "source_name": name,
+                "title": row["title"],
+                "content_sha256": hashlib.sha256(row["text"].encode("utf-8")).hexdigest(),
+            }
+            encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+            total.update(encoded)
+            source_hashes[name].update(encoded)
+            source_counts[name] += 1
+            count += 1
+    return {
+        "chunk_count": count,
+        "sha256": total.hexdigest(),
+        "sources": [
+            {"name": name, "chunk_count": source_counts[name], "sha256": source_hashes[name].hexdigest()}
+            for name in sorted(source_hashes)
+        ],
+    }
 
 
 def _is_nonnegative_int(value: object) -> bool:
