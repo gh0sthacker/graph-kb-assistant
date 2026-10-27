@@ -81,6 +81,54 @@ func TestNormalizeCaidoScopeOriginsRequiresExactOriginsAndDeduplicates(t *testin
 	}
 }
 
+func TestCaidoSyncCycleReceiptNeverEquatesTerminalCursorWithCompleteCoverage(t *testing.T) {
+	ref := project.CaidoProjectRef{InstanceID: "receipt-fixture", ProjectID: "project-one"}
+	receipt, err := newCaidoSyncCycleReceipt(ref, time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("newCaidoSyncCycleReceipt(): %v", err)
+	}
+	receipt.CycleState = "processed"
+	receipt.Scopes = append(receipt.Scopes, caidoScopeCycleReceipt{
+		CycleState: "processed", Origin: "https://fixture.invalid:443", BackfillState: "done", BackfillCursorState: "complete",
+		BackfillCoverageReconciled: false, LiveTailState: "idle", LiveTailWindowBoundary: "2026-10-27T12:00:00Z",
+	})
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatalf("json.Marshal(receipt): %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(receipt): %v", err)
+	}
+	scopes, ok := decoded["scopes"].([]any)
+	if !ok || len(scopes) != 1 {
+		t.Fatalf("receipt scopes = %#v", decoded["scopes"])
+	}
+	if decoded["cycle_state"] != "processed" || decoded["coverage_status"] != "unreconciled" || decoded["coverage_complete"] != false ||
+		decoded["snapshot_proof"] != "unavailable_no_stable_snapshot_token_or_expected_history_total" ||
+		decoded["selection_binding"] == "" || decoded["wire_fidelity"] == "" {
+		t.Fatalf("cycle receipt overstates coverage or omits a limitation: %#v", decoded)
+	}
+	scope := scopes[0].(map[string]any)
+	if scope["cycle_state"] != "processed" || scope["backfill_state"] != "done" || scope["backfill_cursor_state"] != "complete" || scope["backfill_coverage_reconciled"] != false ||
+		scope["live_tail_window_boundary"] == "" {
+		t.Fatalf("scope receipt omits the distinction between terminal enumeration and reconciled coverage: %#v", scope)
+	}
+
+	partial, err := newCaidoSyncCycleReceipt(ref, time.Now())
+	if err != nil || partial.CycleState != "partial" || partial.CoverageComplete {
+		t.Fatalf("new partial receipt = %#v, %v", partial, err)
+	}
+	remaining := caidoScopeReceiptInventory([]*ingest.LiveTailScope{
+		{Scheme: "https", Host: "first.fixture.invalid", Port: 443},
+		{Scheme: "https", Host: "second.fixture.invalid", Port: 443},
+	})
+	if len(remaining) != 2 || remaining[0].CycleState != "not_started" || remaining[1].CycleState != "not_started" ||
+		remaining[0].Origin == remaining[1].Origin {
+		t.Fatalf("scope receipt inventory must retain unattempted configured origins: %#v", remaining)
+	}
+}
+
 func TestLiveTailScopePortDefault(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_CAIDO_SCOPE_PORT", "8443")
 	port, err := liveTailScopePortDefault()

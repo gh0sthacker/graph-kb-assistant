@@ -114,10 +114,12 @@ Store the generated Hermes profile with mode `0600`. The current SSH-backed
 stdio launcher remains supported for installations that prefer a restricted
 SSH command over HTTP.
 
-For a managed server where Go is not installed on the runtime host, use the
-system service template instead. Build the Go binary on the build host and
-install it as `/usr/local/bin/bb-assistant`; keep the checkout and private
-runtime data on the server. Create
+For the current CT108 layout, follow the canonical [Go cutover runbook](GO-CUTOVER-RUNBOOK.md).
+The following section describes the older `bbassist`/`/opt` layout and is kept
+for compatibility deployments only. Do not install it alongside the CT108
+`max`-owned service. Build the Go binary on the build host and install it as
+`/usr/local/bin/bb-assistant`; keep the checkout and private runtime data on
+the server. Create
 `~/.local/share/bb-graph-assistant/service.env` from
 `deploy/graph-kb-assistant-system.env.example`, set the selected registered
 project's exact key, and keep the file owner-only (`0600`). The unit routes

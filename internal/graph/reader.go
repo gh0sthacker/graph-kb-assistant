@@ -738,6 +738,12 @@ func validateEntityData(kind string, data map[string]any, program string) error 
 				data["semantic_status"] != "heuristic_candidate" {
 				familyReason = "invalid_route_family_semantics"
 			}
+		case RouteFamilyV3Version:
+			canonicalFamily, familyReason = RouteFamilyV3WithReason(strings.ReplaceAll(family, "{value}", "123"))
+			if data["grouping_basis"] != "case_preserving_known_route_word_or_strong_identifier_shape" ||
+				data["semantic_status"] != "heuristic_candidate" {
+				familyReason = "invalid_route_family_semantics"
+			}
 		}
 		if !okProgram || selectedProgram != program || !okOrigin || len(origin) > 4096 || originErr != nil ||
 			parsedOrigin == nil || (parsedOrigin.Scheme != "http" && parsedOrigin.Scheme != "https") ||

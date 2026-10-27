@@ -1,5 +1,25 @@
 # Project status and known limitations
 
+## Architecture follow-up — bounded Caido cycle, receipts and route-family v3 — 2026-10-27 — LOCAL, NOT DEPLOYED
+
+- Added `caido-sync --once` for one inventory cycle. It exits nonzero on an
+  inventory or per-project failure instead of sleeping/retrying indefinitely;
+  it still performs bounded writes to the selected local project and must only
+  run after scope/project preflight.
+- Every cycle now emits a structured operational receipt for all configured
+  origins. The receipt records pages, cursor/limit state, graph drain, response
+  refresh and fidelity caveats; `coverage_complete` remains false because the
+  MCP source lacks a stable snapshot token and expected total.
+- Added `route-family-v3`: exact case-preserving static words and strong ID
+  shapes can group; percent-encoded and unknown segments remain ungrouped.
+  Existing endpoint/evidence IDs are unchanged and v1/v2 readers remain
+  supported. Operation backfill previews now use the same v3 classifier.
+- Added a CT108 Go cutover/recovery runbook and marked old Python/`bbassist`/`/opt`
+  setup examples as historical compatibility paths. The sync unit now caps
+  page/body work per poll. `--once` and synthetic tests do not prove live
+  Caido completeness, runtime compatibility, restart/replay or real-project
+  backup/restore. CT108 has not been changed in this work slice.
+
 ## Candidate-only KB embed resumed — 2026-10-26 21:41 UTC — IN PROGRESS
 
 - Fixed commit `a1eff94` passed its focused local CLI tests and CI run

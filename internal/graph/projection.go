@@ -28,6 +28,7 @@ const (
 
 const RouteFamilyV1Version = "route-family-v1"
 const RouteFamilyV2Version = "route-family-v2"
+const RouteFamilyV3Version = "route-family-v3"
 
 var (
 	fieldNamePattern                = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$`)
@@ -342,6 +343,63 @@ func isRouteFamilyV2Identifier(segment string) bool {
 		}
 	}
 	return false
+}
+
+// RouteFamilyV3WithReason returns a conservative, value-free route grouping
+// candidate. Unlike v2, v3 preserves the spelling of static path segments:
+// URL paths are case-sensitive unless an application's routing policy proves
+// otherwise. It also refuses percent-encoded segments because decoding them
+// could merge distinct server-side routes. Only exact known route words and
+// strong identifier shapes are grouped. This remains a heuristic, not proof
+// of business-operation equivalence.
+func RouteFamilyV3WithReason(target string) (family, reason string) {
+	if target == "" || !historicalTargetValid(target) {
+		return "", "invalid_target"
+	}
+	parsed, err := historicalParseURL(target)
+	if err != nil {
+		return "", "unparseable_target"
+	}
+	if parsed.Opaque != "" {
+		return "", "opaque_target"
+	}
+	path := parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if len(path) > maxRouteFamilyPathBytes {
+		return "", "path_too_long"
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) > 4096 {
+		return "", "too_many_path_segments"
+	}
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		// Do not infer equivalence across escaped and unescaped spellings.
+		// This includes encoded unreserved characters: upstream routers differ
+		// in whether and when they decode those bytes.
+		if strings.Contains(part, "%") {
+			return "", "encoded_segment"
+		}
+		decoded, valid := historicalURLUnquote(part, false, true)
+		if !valid {
+			return "", "ambiguous_segment"
+		}
+		lower := strings.ToLower(decoded)
+		if _, isStatic := historicalRouteWords[lower]; isStatic {
+			parts[index] = decoded
+			continue
+		}
+		if isRouteFamilyV2Identifier(lower) {
+			parts[index] = "{value}"
+			continue
+		}
+		return "", "ambiguous_segment"
+	}
+	return strings.Join(parts, "/"), ""
 }
 
 // DeriveLiveKeys mirrors the existing Python project-keyed signature scheme.

@@ -64,7 +64,7 @@ func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing
 		t.Fatalf("dynamic paths should preserve legacy endpoint grouping and share a versioned operation: endpoints %q/%q, operations %q/%q",
 			firstEndpointID, secondEndpointID, firstOperation["id"], secondOperation["id"])
 	}
-	if firstData["route_family_version"] != RouteFamilyV2Version || firstData["route_family"] != "/api/products/{value}" ||
+	if firstData["route_family_version"] != RouteFamilyV3Version || firstData["route_family"] != "/api/products/{value}" ||
 		firstData["semantic_status"] != "heuristic_candidate" {
 		t.Fatalf("versioned operation data = %#v", firstData)
 	}
@@ -92,23 +92,45 @@ func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing
 	if !hasOperationGroupingAssertion(first, firstEndpointID, firstOperation["id"].(string)) {
 		t.Fatal("endpoint is not linked to its grouped operation")
 	}
+	assertReadableRouteFamilyVersion(t, program, RouteFamilyV2Version, "/api/products/{value}", "known_route_word_or_strong_identifier_shape")
+	assertReadableRouteFamilyVersion(t, program, RouteFamilyV1Version, "/api/products/{value}", "")
 
 	static, _ := buildHistoricalOccurrenceBundle(t, "route-search", "GET", "https://fixture.invalid/api/products/search",
 		"GET /api/products/search HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	staticAction, _ := buildHistoricalOccurrenceBundle(t, "route-delete", "GET", "https://fixture.invalid/api/products/delete",
+		"GET /api/products/delete HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
 	otherMethod, _ := buildHistoricalOccurrenceBundle(t, "route-post", "POST", "https://fixture.invalid/api/products/50",
 		"POST /api/products/50 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	caseVariant, _ := buildHistoricalOccurrenceBundle(t, "route-case", "GET", "https://fixture.invalid/API/products/50",
+		"GET /API/products/50 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
 	encodedSeparator, _ := buildHistoricalOccurrenceBundle(t, "route-encoded-separator", "GET", "https://fixture.invalid/api/products/a%2Fb",
 		"GET /api/products/a%2Fb HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	encodedAlias, _ := buildHistoricalOccurrenceBundle(t, "route-encoded-alias", "GET", "https://fixture.invalid/%61pi/products/50",
+		"GET /%61pi/products/50 HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
 	plainSegments, _ := buildHistoricalOccurrenceBundle(t, "route-plain-segments", "GET", "https://fixture.invalid/api/products/a/b",
 		"GET /api/products/a/b HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
 	if operationEntity(t, static)["id"] == firstOperation["id"] {
 		t.Fatal("static search route was grouped with a dynamic product route")
 	}
+	if operationEntity(t, staticAction)["id"] == operationEntity(t, static)["id"] {
+		t.Fatal("distinct static action routes shared one operation identity")
+	}
 	if operationEntity(t, otherMethod)["id"] == firstOperation["id"] {
 		t.Fatal("different HTTP methods shared one operation identity")
 	}
-	if hasOperationEntity(encodedSeparator) || hasOperationEntity(plainSegments) {
+	if operationEntity(t, caseVariant)["id"] == firstOperation["id"] {
+		t.Fatal("case-distinct static routes shared one operation identity")
+	}
+	if hasOperationEntity(encodedSeparator) || hasOperationEntity(encodedAlias) || hasOperationEntity(plainSegments) {
 		t.Fatal("ambiguous path segments were guessed into a heuristic operation group")
+	}
+
+	queryRead, queryReadEndpoint := buildHistoricalOccurrenceBundle(t, "route-query-read", "GET", "https://fixture.invalid/api/products/50?action=read",
+		"GET /api/products/50?action=read HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	queryDelete, queryDeleteEndpoint := buildHistoricalOccurrenceBundle(t, "route-query-delete", "GET", "https://fixture.invalid/api/products/51?action=delete",
+		"GET /api/products/51?action=delete HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n")
+	if queryReadEndpoint != queryDeleteEndpoint || operationEntity(t, queryRead)["id"] != operationEntity(t, queryDelete)["id"] {
+		t.Fatal("query values unexpectedly changed a path/method operation identity")
 	}
 	encoded, err := json.Marshal(first)
 	if err != nil {
@@ -116,6 +138,25 @@ func TestBuildHistoricalBundleGroupsDynamicRoutesByVersionedOperation(t *testing
 	}
 	if strings.Contains(string(encoded), "/api/products/50") {
 		t.Fatal("grouped graph contains the concrete dynamic path")
+	}
+}
+
+func assertReadableRouteFamilyVersion(t *testing.T, program, version, family, basis string) {
+	t.Helper()
+	data := Record{
+		"program": program, "origin": "https://fixture.invalid", "method": "GET",
+		"route_family_version": version, "route_family": family,
+	}
+	if basis != "" {
+		data["grouping_basis"] = basis
+		data["semantic_status"] = "heuristic_candidate"
+	}
+	id, err := historicalEntityID("operation", data)
+	if err != nil {
+		t.Fatalf("operation ID for legacy version %s: %v", version, err)
+	}
+	if err := validateEntity(Record{"id": id, "kind": "operation", "data": map[string]any(data)}, 2, program); err != nil {
+		t.Fatalf("reader rejected compatible %s operation: %v", version, err)
 	}
 }
 

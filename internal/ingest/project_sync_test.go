@@ -33,6 +33,62 @@ func (*inventorySource) GetExchange(caido.ExchangeRef) (*caido.HttpExchange, err
 	return nil, nil
 }
 
+type emptyInventorySource struct{ calls atomic.Int32 }
+
+func (s *emptyInventorySource) ListProjects() ([]caido.ProjectRef, error) {
+	s.calls.Add(1)
+	return []caido.ProjectRef{}, nil
+}
+func (*emptyInventorySource) ListRequestPage(project.CaidoProjectRef, *string, int, *string) (caido.RequestMetadataPage, error) {
+	return caido.RequestMetadataPage{}, nil
+}
+func (*emptyInventorySource) FetchHistoryPage(project.CaidoProjectRef, caido.RequestMetadataPage, map[string]struct{}, int) (caido.HistoryPage, error) {
+	return caido.HistoryPage{}, nil
+}
+func (*emptyInventorySource) GetExchange(caido.ExchangeRef) (*caido.HttpExchange, error) {
+	return nil, nil
+}
+
+func TestProjectInventorySyncOnceCompletesExactlyOneInventoryCycle(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := &emptyInventorySource{}
+	err := RunProjectInventorySync(context.Background(), source, ProjectInventorySyncOptions{
+		DataRoot: root, InstanceID: "caido", PollInterval: time.Second,
+		MissingConfirmations: 3, MaxCycles: 1,
+		OnProject:       func(context.Context, project.CaidoProjectRef) error { return nil },
+		OnProjectAbsent: func(context.Context, project.CaidoProjectRef) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := source.calls.Load(); got != 1 {
+		t.Fatalf("inventory calls = %d, want exactly one", got)
+	}
+}
+
+func TestProjectInventorySyncOnceReturnsFailureInsteadOfSleepingAndRetrying(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := &inventorySource{}
+	err := RunProjectInventorySync(context.Background(), source, ProjectInventorySyncOptions{
+		DataRoot: root, InstanceID: "caido", PollInterval: 10 * time.Minute,
+		MissingConfirmations: 3, MaxCycles: 1,
+		OnProject:       func(context.Context, project.CaidoProjectRef) error { return nil },
+		OnProjectAbsent: func(context.Context, project.CaidoProjectRef) error { return nil },
+	})
+	if err == nil || err.Error() != "Caido project inventory failed" {
+		t.Fatalf("one-shot inventory error = %v, want sanitized inventory failure", err)
+	}
+	if got := source.calls.Load(); got != 1 {
+		t.Fatalf("inventory calls = %d, want exactly one", got)
+	}
+}
+
 func TestProjectInventorySyncReportsAbsenceWithoutDeletingHistory(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {

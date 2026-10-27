@@ -334,6 +334,19 @@ new grouping projections must have explicit versions, replay rules and a
 rollback path. The approved architecture is being implemented incrementally;
 this document is not a claim that the above services already exist.
 
+### 2026-10-27 implementation note
+
+The Go sync manager now emits a per-project/per-origin cycle receipt and has
+an operator `--once` mode for a bounded preflight. These improve observability
+and operational control but do not create a source snapshot proof: the Caido
+MCP adapter still cannot bind a read to an immutable project snapshot or
+provide an expected history total. The production sync unit remains uninstalled
+on CT108 pending private exact-origin configuration and a real bounded smoke.
+Route grouping has advanced to `route-family-v3`, which preserves static path
+case and declines percent-encoded/unknown segments. It remains a heuristic
+candidate; actor, session, tenant, ownership and causality still require
+evidence-linked analyst context.
+
 ## 11. Post-approval scope extension — RedAmon KB parity (2026-10-25)
 
 The user explicitly added exact RedAmon KB parity to this delivery. This

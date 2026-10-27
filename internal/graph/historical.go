@@ -155,11 +155,11 @@ func buildHistoricalBundle(exchange caido.HttpExchange, program string, source R
 	}
 	var operation Record
 	var belongsToOperation Record
-	if family, reason := RouteFamilyV2WithReason(target); reason == "" && origin != "unknown" && method != "UNKNOWN" {
+	if family, reason := RouteFamilyV3WithReason(target); reason == "" && origin != "unknown" && method != "UNKNOWN" {
 		operationData := Record{
 			"program": program, "origin": origin, "method": method,
-			"route_family_version": RouteFamilyV2Version, "route_family": family,
-			"grouping_basis":  "known_route_word_or_strong_identifier_shape",
+			"route_family_version": RouteFamilyV3Version, "route_family": family,
+			"grouping_basis":  "case_preserving_known_route_word_or_strong_identifier_shape",
 			"semantic_status": "heuristic_candidate",
 		}
 		operationID, operationErr := historicalEntityID("operation", operationData)
