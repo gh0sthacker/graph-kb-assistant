@@ -179,7 +179,7 @@ def test_pinned_reference_transformations_match_tiny_retained_fixture(tmp_path: 
         extra = "supplemental retained nuclei row"
         db.execute(
             "INSERT INTO chunks VALUES(?,?,?,?,?,?,?)",
-            ("nuclei:supplemental", "nuclei", "http/test.yaml", "Supplemental", 
+            ("nuclei:supplemental", "nuclei", "http/test.yaml", "Supplemental",
              json.dumps({"redamon_excluded_reason": "pinned_parser_guard"}), _hash(extra), extra),
         )
     with_supplemental = tool.compare(db_path, root, PIN)
