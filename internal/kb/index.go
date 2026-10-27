@@ -52,12 +52,15 @@ const (
 )
 
 var snapshotDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var chunkIDPattern = regexp.MustCompile(`^(?:[a-f0-9]{16}|[a-f0-9]{64})$`)
 
 // Index opens an existing Python-compatible FTS index in SQLite read-only mode.
 // Snapshot construction and source fetching remain separate operations.
 type Index struct {
 	db                 *sql.DB
 	models             RetrievalModels
+	lucene             LuceneCandidateProvider
+	lexicalEngine      string
 	indexPath          string
 	sourceManifestPath string
 }
@@ -72,6 +75,52 @@ type RetrievalModels interface {
 func (i *Index) SetRetrievalModels(models RetrievalModels) {
 	if i != nil {
 		i.models = models
+	}
+}
+
+// SetLuceneCandidateProvider selects the Neo4j Lucene lexical tier. The
+// provider is owned by Index and closed with it.
+func (i *Index) SetLuceneCandidateProvider(provider LuceneCandidateProvider) {
+	if i != nil {
+		i.lucene = provider
+		if provider != nil {
+			i.lexicalEngine = LexicalEngineNeo4j
+		}
+	}
+}
+
+// ConfigureLexicalEngine selects the lexical implementation. An empty value
+// preserves the existing SQLite default for migration compatibility.
+func (i *Index) ConfigureLexicalEngine(engine string) error {
+	if i == nil {
+		return errors.New("KB index is unavailable")
+	}
+	switch strings.TrimSpace(engine) {
+	case "", LexicalEngineSQLite:
+		if i.lucene != nil {
+			closeErr := i.lucene.Close()
+			i.lucene = nil
+			if closeErr != nil {
+				return errors.New("Neo4j KB lexical provider could not be closed")
+			}
+		}
+		i.lexicalEngine = LexicalEngineSQLite
+		return nil
+	case LexicalEngineNeo4j:
+		provider, err := NewNeo4jLuceneProvider()
+		if err != nil {
+			return err
+		}
+		if i.lucene != nil {
+			if closeErr := i.lucene.Close(); closeErr != nil {
+				_ = provider.Close()
+				return errors.New("previous Neo4j KB lexical provider could not be closed")
+			}
+		}
+		i.SetLuceneCandidateProvider(provider)
+		return nil
+	default:
+		return errors.New("KB lexical engine is unsupported")
 	}
 }
 
@@ -93,6 +142,7 @@ type SearchResult struct {
 	CoverageReportHash   string `json:"coverage_report_sha256,omitempty"`
 	MaintenanceState     string `json:"maintenance_state,omitempty"`
 	RetrievalMode        string `json:"retrieval_mode"`
+	LexicalEngine        string `json:"lexical_engine"`
 	SupplementalIncluded bool   `json:"supplemental_included"`
 	Hits                 []Hit  `json:"hits"`
 }
@@ -235,7 +285,11 @@ func (i *Index) Close() error {
 	if i == nil || i.db == nil {
 		return nil
 	}
-	return i.db.Close()
+	var closeErr error
+	if i.lucene != nil {
+		closeErr = errors.Join(closeErr, i.lucene.Close())
+	}
+	return errors.Join(closeErr, i.db.Close())
 }
 
 // Stats returns counts and source coverage from one consistent, read-only
@@ -577,6 +631,9 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		return SearchResult{}, errors.New("KB query exceeds the 4096-character limit")
 	}
 	matchExpression := redAmonFullTextExpression(query)
+	if i.lucene != nil {
+		matchExpression = sanitizeRedAmonLuceneQuery(query)
+	}
 	if len(options.SourceNames) > maximumSourceFilters {
 		return SearchResult{}, errors.New("select no more than 32 KB source families")
 	}
@@ -617,6 +674,10 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	}
 	result.Hits = []Hit{}
 	result.RetrievalMode = "fulltext"
+	result.LexicalEngine = i.lexicalEngine
+	if result.LexicalEngine == "" {
+		result.LexicalEngine = LexicalEngineSQLite
+	}
 	result.SupplementalIncluded = options.IncludeSupplemental
 	if matchExpression == "" {
 		if err := tx.Commit(); err != nil {
@@ -624,7 +685,36 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		}
 		return result, nil
 	}
-	statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
+	candidateLimit := max(options.TopK*6, 30)
+	var fulltextHits []Hit
+	if i.lucene != nil {
+		candidates, searchErr := i.lucene.Search(ctx, query, result.SnapshotID, candidateLimit, sources, options.IncludeSupplemental)
+		if searchErr != nil {
+			return SearchResult{}, errors.New("KB Lucene search failed or its corpus generation is incompatible")
+		}
+		fulltextHits, err = readHitsByID(ctx, tx, luceneCandidateIDs(candidates), options.IncludeSupplemental)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if len(fulltextHits) != len(candidates) {
+			return SearchResult{}, errors.New("KB Lucene candidates do not match the active snapshot")
+		}
+		byID := make(map[string]Hit, len(fulltextHits))
+		for _, hit := range fulltextHits {
+			byID[hit.ChunkID] = hit
+		}
+		ordered := make([]Hit, 0, len(candidates))
+		for _, candidate := range candidates {
+			hit, ok := byID[candidate.ChunkID]
+			if !ok || candidate.SourceName != hit.SourceName {
+				return SearchResult{}, errors.New("KB Lucene candidate is absent from the active snapshot")
+			}
+			hit.BM25 = candidate.Score
+			ordered = append(ordered, hit)
+		}
+		fulltextHits = ordered
+	} else {
+		statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
 		substr(c.source_id,1,1025),substr(c.title,1,2049),substr(c.text,1,?),
 		substr(c.source_locator,1,2049),substr(c.source_url,1,2049),
 		substr(c.source_revision,1,257),substr(c.license_id,1,257),substr(c.attribution,1,4097),
@@ -634,26 +724,26 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
 		WHERE chunk_search MATCH ?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
-	if !options.IncludeSupplemental {
-		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
-	}
-	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, matchExpression}
-	candidateLimit := max(options.TopK*6, 30)
-	statement += " ORDER BY 16 LIMIT ?"
-	args = append(args, candidateLimit)
-	rows, err := tx.QueryContext(ctx, statement, args...)
-	if err != nil {
-		return SearchResult{}, errors.New("KB full-text search failed")
-	}
-	fulltextHits, err := scanSearchHits(rows)
-	if err != nil {
-		return SearchResult{}, err
-	}
-	if err := rows.Err(); err != nil {
-		return SearchResult{}, errors.New("KB full-text search could not finish")
-	}
-	if err := rows.Close(); err != nil {
-		return SearchResult{}, errors.New("KB full-text search could not finish")
+		if !options.IncludeSupplemental {
+			statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
+		}
+		args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, matchExpression}
+		statement += " ORDER BY 16 LIMIT ?"
+		args = append(args, candidateLimit)
+		rows, err := tx.QueryContext(ctx, statement, args...)
+		if err != nil {
+			return SearchResult{}, errors.New("KB full-text search failed")
+		}
+		fulltextHits, err = scanSearchHits(rows)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if err := rows.Err(); err != nil {
+			return SearchResult{}, errors.New("KB full-text search could not finish")
+		}
+		if err := rows.Close(); err != nil {
+			return SearchResult{}, errors.New("KB full-text search could not finish")
+		}
 	}
 	// RedAmon applies include_sources after Neo4j's global Lucene top-k query.
 	// Applying this predicate inside SQL before LIMIT would fill the pool with
@@ -733,7 +823,7 @@ func scanSearchHits(rows *sql.Rows) ([]Hit, error) {
 		); err != nil {
 			return nil, errors.New("KB search result could not be read")
 		}
-		if !snapshotDigestPattern.MatchString(hit.ChunkID) || !snapshotDigestPattern.MatchString(hit.SourceSHA256) || !snapshotDigestPattern.MatchString(hit.ChunkSHA256) || hit.StartChar < 0 || hit.EndChar < hit.StartChar {
+		if !chunkIDPattern.MatchString(hit.ChunkID) || !snapshotDigestPattern.MatchString(hit.SourceSHA256) || !snapshotDigestPattern.MatchString(hit.ChunkSHA256) || hit.StartChar < 0 || hit.EndChar < hit.StartChar {
 			return nil, errors.New("KB search result has invalid provenance")
 		}
 		if len(hit.SourceName) > maximumSourceNameBytes || len(hit.SourceID) > maximumSourceIDBytes || len(hit.Title) > maximumTitleBytes ||
@@ -773,7 +863,7 @@ func readHitsByID(ctx context.Context, tx *sql.Tx, ids []string, includeSuppleme
 		FROM chunks c WHERE c.chunk_id IN (` + placeholders + `)
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
 	if !includeSupplemental {
-		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
 	}
 	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes}
 	for _, id := range ids {
@@ -878,7 +968,7 @@ func (i *Index) vectorCandidates(
 		WHERE e.model_name=? AND e.dimensions=?
 		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
 	if !includeSupplemental {
-		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
 	}
 	args := []any{modelName, dimensions}
 	rows, err := tx.QueryContext(ctx, statement, args...)

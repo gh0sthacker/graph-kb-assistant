@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,70 @@ func TestOpenIndexReadsPythonCompatibleFTSIndexReadOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchUsesSnapshotBoundLuceneCandidates(t *testing.T) {
+	content := "A synthetic corpus binds chunk identity to its source snapshot."
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	createPythonCompatibleIndexWithChunkID(t, indexPath, content, digestHex(content), digestHex(content), strings.Repeat("a", 16))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	provider := &fakeLuceneCandidateProvider{candidates: []LuceneCandidate{{
+		ChunkID: strings.Repeat("a", 16), SnapshotID: strings.Repeat("1", 64), SourceName: "synthetic", Score: 2.5,
+	}}}
+	index.SetLuceneCandidateProvider(provider)
+	result, err := index.Search(context.Background(), "CVE-2025/42", SearchOptions{TopK: 5, SourceNames: []string{"synthetic"}})
+	if err != nil {
+		t.Fatalf("Lucene Search(): %v", err)
+	}
+	if provider.query != "CVE-2025/42" || provider.snapshotID != strings.Repeat("1", 64) || provider.limit != 30 ||
+		!reflect.DeepEqual(provider.sources, []string{"synthetic"}) || provider.includeSupplemental {
+		t.Fatalf("Lucene request = query:%q snapshot:%q limit:%d sources:%v supplemental:%v", provider.query, provider.snapshotID, provider.limit, provider.sources, provider.includeSupplemental)
+	}
+	if result.LexicalEngine != LexicalEngineNeo4j || len(result.Hits) != 1 || result.Hits[0].ChunkID != strings.Repeat("a", 16) || result.Hits[0].BM25 != 2.5 {
+		t.Fatalf("Lucene result engine/hit = %q/%+v", result.LexicalEngine, result.Hits)
+	}
+}
+
+func TestConfigureSQLiteClosesPreviousLuceneProvider(t *testing.T) {
+	content := "A synthetic corpus binds chunk identity to its source snapshot."
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	provider := &fakeLuceneCandidateProvider{}
+	index.SetLuceneCandidateProvider(provider)
+	if err := index.ConfigureLexicalEngine(LexicalEngineSQLite); err != nil {
+		t.Fatal(err)
+	}
+	if provider.closeCalls != 1 || index.lucene != nil || index.lexicalEngine != LexicalEngineSQLite {
+		t.Fatalf("sqlite reconfiguration = closeCalls:%d provider:%v engine:%q", provider.closeCalls, index.lucene, index.lexicalEngine)
+	}
+}
+
+type fakeLuceneCandidateProvider struct {
+	candidates          []LuceneCandidate
+	query               string
+	snapshotID          string
+	limit               int
+	sources             []string
+	includeSupplemental bool
+	closeCalls          int
+}
+
+func (p *fakeLuceneCandidateProvider) Search(_ context.Context, query, snapshotID string, limit int, sources []string, includeSupplemental bool) ([]LuceneCandidate, error) {
+	p.query, p.snapshotID, p.limit = query, snapshotID, limit
+	p.sources = append([]string(nil), sources...)
+	p.includeSupplemental = includeSupplemental
+	return append([]LuceneCandidate(nil), p.candidates...), nil
+}
+
+func (p *fakeLuceneCandidateProvider) Close() error { p.closeCalls++; return nil }
 
 func TestStatsAndSearchDowngradeStaleDoneCoverageCounts(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
@@ -703,6 +768,17 @@ func TestSupplementalChunksAreOptInAndRemainSearchable(t *testing.T) {
 	if err == nil {
 		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "nuclei", "Raw template fallback", text)
 	}
+	excludedText := "Rendered Nuclei parser rejected template retained as a supplemental reference"
+	excludedID := digestHex("redamon-excluded-rendered-nuclei")
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, excludedID, "nuclei", "Rendered rejected template", "Rendered rejected template", 0,
+			len(excludedText), `{"redamon_excluded_reason":"yaml_parser_policy"}`, digestHex(excludedText), digestHex(excludedText), "bb-kb-chunk-v2", excludedText)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, excludedID, "nuclei", "Rendered rejected template", excludedText)
+	}
 	if closeErr := db.Close(); err == nil {
 		err = closeErr
 	}
@@ -722,6 +798,22 @@ func TestSupplementalChunksAreOptInAndRemainSearchable(t *testing.T) {
 	supplementalResult, err := index.Search(context.Background(), "WordPress plugin version detection", SearchOptions{TopK: 5, IncludeSupplemental: true})
 	if err != nil || len(supplementalResult.Hits) != 1 || supplementalResult.Hits[0].SourceID != "wordpress-plugin-detect.yaml" || !supplementalResult.SupplementalIncluded {
 		t.Fatalf("supplemental search = %+v, err:%v; want the opt-in fallback chunk", supplementalResult, err)
+	}
+	excludedDefault, err := index.Search(context.Background(), "Rendered Nuclei parser rejected template", SearchOptions{TopK: 5})
+	if err != nil || len(excludedDefault.Hits) != 0 {
+		t.Fatalf("default rendered-parser search = %d hits, %v; want excluded", len(excludedDefault.Hits), err)
+	}
+	excludedOptIn, err := index.Search(context.Background(), "Rendered Nuclei parser rejected template", SearchOptions{TopK: 5, IncludeSupplemental: true})
+	foundExcluded := false
+	for _, hit := range excludedOptIn.Hits {
+		foundExcluded = foundExcluded || hit.ChunkID == excludedID
+	}
+	if err != nil || !foundExcluded {
+		t.Fatalf("opt-in rendered-parser search = %+v, %v; want retained canonical chunk", excludedOptIn.Hits, err)
+	}
+	baseline, err := index.Search(context.Background(), "baseline content without the supplemental query", SearchOptions{TopK: 5})
+	if err != nil || len(baseline.Hits) != 1 || baseline.Hits[0].SourceID != "document-1" {
+		t.Fatalf("normal core search = %+v, %v; want baseline core chunk", baseline.Hits, err)
 	}
 }
 
@@ -976,6 +1068,10 @@ func TestKBChunkSimilarityMatchesSourceAndTitleProxy(t *testing.T) {
 }
 
 func createPythonCompatibleIndex(t *testing.T, path, content, sourceHash, chunkHash string) {
+	createPythonCompatibleIndexWithChunkID(t, path, content, sourceHash, chunkHash, strings.Repeat("a", 64))
+}
+
+func createPythonCompatibleIndexWithChunkID(t *testing.T, path, content, sourceHash, chunkHash, chunkID string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -1009,7 +1105,6 @@ func createPythonCompatibleIndex(t *testing.T, path, content, sourceHash, chunkH
 	metadata := `{"kind":"fixture","revision":7}`
 	const snapshotID = "1111111111111111111111111111111111111111111111111111111111111111"
 	const reportHash = "2222222222222222222222222222222222222222222222222222222222222222"
-	const chunkID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	coverage := `[{"source_name":"synthetic","state":"partial"}]`
 	inserts := []struct {
 		statement string

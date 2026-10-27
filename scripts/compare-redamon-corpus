@@ -1,0 +1,784 @@
+#!/usr/bin/env python3
+"""Compare indexed chunks with the pinned RedAmon transformation code.
+
+This is deliberately an offline, read-only tool. It never calls a RedAmon
+``fetch`` method, downloads sources, loads embedding models, or opens the input
+SQLite connection writable. A private temporary scratch database stores only
+compact chunk identities and digests. The input corpus must already retain the
+raw documents used by the source adapters.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import importlib
+import json
+import logging
+import os
+from pathlib import Path, PurePosixPath
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from typing import Any, Iterable
+
+
+FAMILIES = ("tool_docs", "gtfobins", "lolbas", "owasp", "exploitdb", "nvd", "nuclei")
+MAX_EXAMPLES = 20
+
+
+class CompareError(RuntimeError):
+    pass
+
+
+class ExpectedUpstreamSkip(ValueError):
+    """A pinned parser outcome that RedAmon fetch treats as a skipped record."""
+
+
+def _git(root: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise CompareError(f"cannot verify RedAmon Git evidence ({args[0]})") from exc
+    return result.stdout.strip()
+
+
+def _verify_upstream(root: Path, commit: str) -> Path:
+    root = root.expanduser()
+    if root.is_symlink():
+        raise CompareError("RedAmon root must not be a symbolic link")
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise CompareError("RedAmon root must be a regular directory")
+    if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        raise CompareError("RedAmon commit must be a full lowercase Git SHA")
+    if _git(root, "rev-parse", "--show-toplevel") != str(root):
+        raise CompareError("RedAmon root does not resolve to a Git worktree")
+    if _git(root, "rev-parse", "HEAD") != commit:
+        raise CompareError("RedAmon checkout HEAD differs from --redamon-commit")
+    services = root / "services"
+    if not services.is_dir():
+        raise CompareError("RedAmon services tree is missing")
+    if services.is_symlink() or (services / "knowledge_base").is_symlink():
+        raise CompareError("RedAmon services/knowledge_base must not escape through a symlink")
+    return services
+
+
+def _verify_tree_sources(root: Path, commit: str) -> list[str]:
+    """Verify executable package/config bytes before importing any upstream code."""
+    package = root / "services" / "knowledge_base"
+    config = package / "kb_config.yaml"
+    if not package.is_dir() or config.is_symlink() or not config.is_file():
+        raise CompareError("pinned RedAmon knowledge_base package/config is missing or symlinked")
+    files: list[Path] = [config]
+    for directory, dirnames, filenames in os.walk(package, followlinks=False):
+        base = Path(directory)
+        for name in dirnames:
+            child = base / name
+            if child.is_symlink():
+                try:
+                    child.resolve(strict=True).relative_to(root)
+                except (OSError, ValueError) as exc:
+                    raise CompareError("RedAmon package contains a symlink escaping the pinned checkout") from exc
+                raise CompareError("RedAmon package source tree contains a symlink")
+        for name in filenames:
+            candidate = base / name
+            if name.endswith(".py"):
+                if candidate.is_symlink():
+                    try:
+                        candidate.resolve(strict=True).relative_to(root)
+                    except (OSError, ValueError) as exc:
+                        raise CompareError("RedAmon Python source symlink escapes the pinned checkout") from exc
+                    raise CompareError("RedAmon Python source tree contains a symlink")
+                files.append(candidate)
+    verified = []
+    for path in sorted(set(files)):
+        try:
+            relative = path.relative_to(root).as_posix()
+            expected = subprocess.run(
+                ["git", "-C", str(root), "show", f"{commit}:{relative}"],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).stdout
+        except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+            raise CompareError(f"cannot verify pinned RedAmon source/config blob: {path.name}") from exc
+        if path.read_bytes() != expected:
+            raise CompareError(f"RedAmon source/config differs from pinned Git blob: {relative}")
+        verified.append(relative)
+    return verified
+
+
+def _verify_imported_sources(root: Path, commit: str, modules: Iterable[object]) -> None:
+    """Ensure every imported in-tree Python module is the pinned Git blob."""
+    checked: set[str] = set()
+    for module in modules:
+        name = str(getattr(module, "__name__", ""))
+        path_value = getattr(module, "__file__", None)
+        if name == "knowledge_base" or name.startswith("knowledge_base."):
+            for location in getattr(module, "__path__", ()):
+                try:
+                    Path(location).resolve(strict=True).relative_to(root)
+                except (OSError, ValueError) as exc:
+                    raise CompareError(f"imported upstream package path escapes pinned checkout: {name}") from exc
+        if not path_value:
+            continue
+        original_path = Path(path_value)
+        if original_path.is_symlink() and (name == "knowledge_base" or name.startswith("knowledge_base.")):
+            try:
+                original_path.resolve(strict=True).relative_to(root)
+            except (OSError, ValueError) as exc:
+                raise CompareError(f"imported upstream module symlink escapes pinned checkout: {name}") from exc
+            raise CompareError(f"imported upstream module is a symlink: {name}")
+        path = original_path.resolve(strict=True)
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            if name == "knowledge_base" or name.startswith("knowledge_base."):
+                raise CompareError(f"imported upstream module comes from outside pinned checkout: {name}")
+            continue  # standard library / installed dependencies
+        if not relative.endswith(".py") or relative in checked:
+            continue
+        checked.add(relative)
+        tree_bytes = subprocess.run(
+            ["git", "-C", str(root), "show", f"{commit}:{relative}"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+        if path.read_bytes() != tree_bytes:
+            raise CompareError(f"imported upstream source differs from pinned Git blob: {relative}")
+
+
+def _load_upstream(root: Path, commit: str) -> tuple[dict[str, Any], dict[str, object]]:
+    services = _verify_upstream(root, commit)
+    verified_tree_sources = _verify_tree_sources(root, commit)
+    for name, module in tuple(sys.modules.items()):
+        if name == "knowledge_base" or name.startswith("knowledge_base."):
+            _verify_imported_sources(root, commit, (module,))
+    sys.path.insert(0, str(services))
+    names = {
+        "tool_docs": "knowledge_base.curation.tool_docs_client",
+        "gtfobins": "knowledge_base.curation.gtfobins_client",
+        "lolbas": "knowledge_base.curation.lolbas_client",
+        "owasp": "knowledge_base.curation.owasp_client",
+        "exploitdb": "knowledge_base.curation.exploitdb_client",
+        "nvd": "knowledge_base.curation.nvd_client",
+        "nuclei": "knowledge_base.curation.nuclei_client",
+    }
+    loaded: dict[str, Any] = {}
+    try:
+        for family, name in names.items():
+            loaded[family] = importlib.import_module(name)
+        classes = {
+            "tool_docs": loaded["tool_docs"].ToolDocsClient,
+            "gtfobins": loaded["gtfobins"].GTFOBinsClient,
+            "lolbas": loaded["lolbas"].LOLBASClient,
+            "owasp": loaded["owasp"].OWASPClient,
+            "exploitdb": loaded["exploitdb"].ExploitDBClient,
+            "nvd": loaded["nvd"].NVDClient,
+            "nuclei": loaded["nuclei"].NucleiClient,
+        }
+        # Constructors only hold local paths/state; fetch() is never invoked.
+        clients = {
+            "tool_docs": classes["tool_docs"](skills_dir=str(root / "agentic" / "skills")),
+            "gtfobins": classes["gtfobins"](cache_dir=os.devnull),
+            "lolbas": classes["lolbas"](cache_dir=os.devnull),
+            "owasp": classes["owasp"](cache_dir=os.devnull),
+            "exploitdb": classes["exploitdb"](cache_dir=os.devnull),
+            "nvd": classes["nvd"](cache_dir=os.devnull),
+            "nuclei": classes["nuclei"](cache_dir=os.devnull),
+        }
+        support = importlib.import_module("knowledge_base.curation.file_cache")
+        modules = [
+            module for name, module in tuple(sys.modules.items())
+            if (name == "knowledge_base" or name.startswith("knowledge_base."))
+            and getattr(module, "__file__", None)
+        ]
+        _verify_imported_sources(root, commit, modules)
+    except (ImportError, AttributeError, OSError, subprocess.CalledProcessError) as exc:
+        raise CompareError(f"cannot load pinned RedAmon parser/chunker: {type(exc).__name__}") from exc
+    ingestion_path = root / "services" / "knowledge_base" / "curation" / "data_ingestion.py"
+    try:
+        tree = ast.parse(ingestion_path.read_text(encoding="utf-8"), filename=str(ingestion_path))
+        names = {"_content_hash", "_filter_unchanged"}
+        functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and node.name in names]
+        if {node.name for node in functions} != names or any(not isinstance(node, ast.FunctionDef) for node in functions):
+            raise CompareError("pinned RedAmon ingestion deduper functions are missing or unsupported")
+        namespace: dict[str, Any] = {"hashlib": hashlib, "logger": logging.getLogger("compare-redamon-corpus")}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(ingestion_path), "exec"), namespace)
+    except (OSError, SyntaxError, TypeError) as exc:
+        raise CompareError(f"cannot load pinned RedAmon deduper functions: {type(exc).__name__}") from exc
+    return clients, {**loaded, "file_cache": support,
+                     "redamon_filter_unchanged": namespace["_filter_unchanged"],
+                     "redamon_deduper_source": "services/knowledge_base/curation/data_ingestion.py::_filter_unchanged",
+                     "verified_source_files": sorted(set(verified_tree_sources) | {
+        Path(module.__file__).resolve().relative_to(root).as_posix()
+        for module in modules if getattr(module, "__file__", None)
+        and Path(module.__file__).resolve().is_relative_to(root)
+    })}
+
+
+def _open_index(path: Path) -> tuple[sqlite3.Connection, dict[str, Any]]:
+    path = Path(os.path.abspath(path.expanduser()))
+    if path.is_symlink() or path != path.resolve(strict=True):
+        raise CompareError("index must be a regular non-symlink SQLite file")
+    if not path.is_file():
+        raise CompareError("index must be a regular non-symlink SQLite file")
+    wal = Path(str(path) + "-wal")
+    journal = Path(str(path) + "-journal")
+    if wal.is_symlink() or journal.is_symlink():
+        raise CompareError("index SQLite sidecars must not be symbolic links")
+    if wal.exists() and wal.stat().st_size:
+        raise CompareError("index has a non-empty WAL; take a consistent offline copy before comparison")
+    if journal.exists() and journal.stat().st_size:
+        raise CompareError("index has a non-empty rollback journal; take a consistent offline copy before comparison")
+    uri = path.as_uri() + "?mode=ro&immutable=1"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"source_documents", "chunks", "kb_meta"}.issubset(tables):
+            raise CompareError("index lacks the supported source_documents/chunks/kb_meta schema")
+        meta = dict(connection.execute("SELECT key,value FROM kb_meta"))
+        connection.row_factory = sqlite3.Row
+        return connection, meta
+    except (sqlite3.Error, CompareError) as exc:
+        connection.close()
+        if isinstance(exc, CompareError):
+            raise
+        raise CompareError(f"cannot read index using immutable read-only SQLite: {exc}") from exc
+
+
+def _json_object(value: str, label: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise CompareError(f"invalid JSON in {label}") from exc
+    if not isinstance(parsed, dict):
+        raise CompareError(f"expected JSON object in {label}")
+    return parsed
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _raw_input(family: str, document: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return required retained input and a safe reason when it is unavailable."""
+    metadata = document["metadata"]
+    if metadata.get("document_role") == "license_notice":
+        return None, "license_notice_not_a_search_record"
+    raw = document["raw_source_text"]
+    if family in {"exploitdb", "nvd"}:
+        if raw is None:
+            return None, "retained_raw_source_text_missing"
+        return raw, None
+    if isinstance(raw, str) and raw:
+        return raw, None
+    if not isinstance(document["text"], str) or not document["text"]:
+        return None, "source_text_missing"
+    return document["text"], None
+
+
+def _upstream_chunks(family: str, document: dict[str, Any], raw: str, client: Any, modules: dict[str, Any]) -> list[dict[str, Any]]:
+    metadata = document["metadata"]
+    source_id = document["source_id"]
+    filename = PurePosixPath(source_id).name
+    source_path = document.get("source_locator") or source_id
+    if family == "tool_docs":
+        subdir = str(metadata.get("category_dir") or PurePosixPath(source_id).parent.name)
+        tool_name = str(metadata.get("tool_name") or client._extract_name(raw, PurePosixPath(filename).stem))
+        category = modules["tool_docs"].SKILL_CATEGORIES.get(subdir)
+        if category is None:
+            raise ValueError("tool_docs_category_not_supported_by_pinned_upstream")
+        parsed = [{"filename": filename, "category": category, "tool_name": tool_name,
+                   "content": raw, "subdir": subdir, "source_path": str(source_path)}]
+    elif family == "gtfobins":
+        binary = str(metadata.get("binary_name") or source_id.rsplit("/", 1)[-1].removesuffix(".md"))
+        entry = client._parse_gtfobins_md(binary, raw)
+        if entry is None:
+            raise ExpectedUpstreamSkip("gtfobins_parser_returned_none")
+        entry["source_path"] = str(source_path)
+        parsed = [entry]
+    elif family == "lolbas":
+        entry = client._parse_lolbas_yaml(raw)
+        if entry is None:
+            raise ValueError("upstream_parser_rejected_lolbas_record")
+        entry["source_path"] = str(source_path)
+        parsed = [entry]
+    elif family == "owasp":
+        category = client._extract_category(str(source_path))
+        test_id = client._extract_test_id(raw, filename)
+        parsed = [{"filename": filename, "category": category, "test_id": test_id,
+                   "content": raw, "source_path": str(source_path)}]
+    elif family == "exploitdb":
+        parsed_record = json.loads(raw)
+        if not isinstance(parsed_record, dict):
+            raise ValueError("exploitdb_raw_record_is_not_an_object")
+        if str(parsed_record.get("id", "")) != source_id:
+            raise ValueError("exploitdb_raw_record_id_differs_from_source_id")
+        parsed = [parsed_record]
+    elif family == "nvd":
+        vulnerability = json.loads(raw)
+        if not isinstance(vulnerability, dict):
+            raise ValueError("nvd_raw_record_is_not_an_object")
+        normalized = client._normalize_cve(vulnerability)
+        if normalized is None:
+            raise ValueError("upstream_parser_rejected_nvd_record")
+        if str(normalized.get("cve_id", "")) != source_id:
+            raise ValueError("nvd_raw_record_id_differs_from_source_id")
+        normalized["source_path"] = str(source_path)
+        parsed = [normalized]
+    elif family == "nuclei":
+        cache_module = modules["file_cache"]
+        try:
+            parsed_yaml = cache_module.bounded_yaml_load(raw, label=f"nuclei:{source_id}")
+        except cache_module.YAMLTooComplexError as exc:
+            raise ExpectedUpstreamSkip("nuclei_yaml_too_complex") from exc
+        if not isinstance(parsed_yaml, dict):
+            raise ExpectedUpstreamSkip("nuclei_yaml_not_a_mapping")
+        if not parsed_yaml.get("id"):
+            raise ExpectedUpstreamSkip("nuclei_template_id_missing")
+        normalized = client._normalize_template(parsed_yaml)
+        if normalized is None:
+            raise ExpectedUpstreamSkip("nuclei_normalizer_returned_none")
+        if str(normalized.get("id", "")) != str(metadata.get("template_id") or normalized.get("id")):
+            raise ValueError("nuclei_raw_record_id_differs_from_index_metadata")
+        normalized["source_path"] = str(source_path)
+        parsed = [normalized]
+    else:  # pragma: no cover - guarded by FAMILIES
+        raise ValueError("unknown_source_family")
+    result = client.to_chunks(parsed)
+    if not isinstance(result, list):
+        raise ValueError("upstream_to_chunks_returned_invalid_result")
+    normalized_result = []
+    for item in result:
+        if not isinstance(item, dict):
+            raise ValueError("upstream_to_chunks_returned_invalid_chunk")
+        chunk_id, title, content = item.get("chunk_id"), item.get("title"), item.get("content")
+        if not isinstance(chunk_id, str) or not chunk_id or not isinstance(title, str) or not isinstance(content, str):
+            raise ValueError("upstream_chunk_missing_id_title_or_content")
+        normalized_result.append({"chunk_id": chunk_id, "source_id": source_id,
+                                  "title": title, "content_sha256": _sha(content),
+                                  "content": content})
+    return normalized_result
+
+
+def _examples(values: Iterable[str]) -> list[str]:
+    return sorted(values)[:MAX_EXAMPLES]
+
+
+def _scratch_database(path: Path) -> sqlite3.Connection:
+    """Create disk-backed compact identity tables; never retain corpus text."""
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=OFF")
+    connection.execute("PRAGMA synchronous=OFF")
+    connection.execute("PRAGMA temp_store=FILE")
+    connection.executescript("""
+      CREATE TABLE reference_chunks(
+        family TEXT NOT NULL, chunk_id TEXT NOT NULL, source_id TEXT NOT NULL,
+        title TEXT NOT NULL, digest TEXT NOT NULL,
+        PRIMARY KEY(family,chunk_id));
+      CREATE TABLE reference_collisions(
+        family TEXT NOT NULL, chunk_id TEXT NOT NULL, first_source_id TEXT NOT NULL,
+        last_source_id TEXT NOT NULL, occurrences INTEGER NOT NULL,
+        cross_document_occurrences INTEGER NOT NULL, PRIMARY KEY(family,chunk_id));
+      CREATE TABLE document_collisions(
+        family TEXT NOT NULL, chunk_id TEXT NOT NULL, occurrences INTEGER NOT NULL,
+        PRIMARY KEY(family,chunk_id));
+      CREATE TABLE local_chunks(
+        family TEXT NOT NULL, chunk_id TEXT NOT NULL, source_id TEXT NOT NULL,
+        title TEXT NOT NULL, digest TEXT NOT NULL, fallback_reason TEXT,
+        redamon_excluded_reason TEXT,
+        PRIMARY KEY(family,chunk_id));
+      CREATE TABLE unavailable_documents(
+        family TEXT NOT NULL, source_id TEXT NOT NULL, reason TEXT NOT NULL,
+        PRIMARY KEY(family,source_id));
+      CREATE TABLE expected_skips(
+        family TEXT NOT NULL, source_id TEXT NOT NULL, reason TEXT NOT NULL,
+        PRIMARY KEY(family,source_id));
+    """)
+    return connection
+
+
+def _add_reference_chunk(
+    scratch: sqlite3.Connection, family: str, source_id: str, chunk: dict[str, Any],
+    duplicate_examples: list[str],
+) -> None:
+    chunk_id = chunk["chunk_id"]
+    prior = scratch.execute(
+        "SELECT source_id FROM reference_chunks WHERE family=? AND chunk_id=?", (family, chunk_id)
+    ).fetchone()
+    if prior:
+        cross = int(prior["source_id"] != source_id)
+        scratch.execute("""INSERT INTO reference_collisions
+            (family,chunk_id,first_source_id,last_source_id,occurrences,cross_document_occurrences)
+            VALUES(?,?,?,?,2,?) ON CONFLICT(family,chunk_id) DO UPDATE SET
+              last_source_id=excluded.last_source_id,
+              occurrences=reference_collisions.occurrences+1,
+              cross_document_occurrences=reference_collisions.cross_document_occurrences+excluded.cross_document_occurrences""",
+            (family, chunk_id, prior["source_id"], source_id, cross),
+        )
+        # Mirror RedAmon's final Neo4j MERGE+SET writer: later chunk wins.
+        scratch.execute("""UPDATE reference_chunks SET source_id=?,title=?,digest=?
+            WHERE family=? AND chunk_id=?""",
+            (source_id, chunk["title"], chunk["content_sha256"], family, chunk_id),
+        )
+        if len(duplicate_examples) < MAX_EXAMPLES and chunk_id not in duplicate_examples:
+            duplicate_examples.append(chunk_id)
+        return
+    scratch.execute(
+        "INSERT INTO reference_chunks VALUES(?,?,?,?,?)",
+        (family, chunk_id, source_id, chunk["title"], chunk["content_sha256"]),
+    )
+
+
+def _stream_family(
+    family: str, index: sqlite3.Connection, scratch: sqlite3.Connection,
+    client: Any, modules: dict[str, Any],
+) -> dict[str, Any]:
+    stats = {
+        "source_documents": 0, "content_documents": 0,
+        "documents_reconstructed_through_upstream_parser": 0,
+        "documents_skipped_as_upstream_expected": 0,
+        "documents_unavailable": 0, "license_notice_documents": 0,
+        "expected_skip_examples": [], "unavailable_document_examples": [],
+        "duplicate_upstream_chunk_ids_examples": [],
+        "within_document_duplicate_occurrences": 0,
+    }
+    docs_cursor = index.execute(
+        "SELECT source_id,title,source_locator,metadata_json,content_sha256,text,raw_source_sha256,raw_source_text "
+        "FROM source_documents WHERE source_name=? ORDER BY source_id", (family,),
+    )
+    for row in docs_cursor:
+        stats["source_documents"] += 1
+        source_id = row["source_id"]
+        metadata = _json_object(row["metadata_json"], f"source document {family}/{source_id} metadata")
+        if row["content_sha256"] != _sha(row["text"]):
+            raise CompareError(f"stored source-document digest is invalid: {family}/{source_id}")
+        if row["raw_source_text"] is None:
+            if row["raw_source_sha256"] is not None:
+                raise CompareError(f"stored raw-source digest has no source text: {family}/{source_id}")
+        elif row["raw_source_sha256"] != _sha(row["raw_source_text"]):
+            raise CompareError(f"stored raw-source digest is invalid: {family}/{source_id}")
+        if metadata.get("document_role") == "license_notice":
+            stats["license_notice_documents"] += 1
+            continue
+        stats["content_documents"] += 1
+        document = dict(row)
+        document["metadata"] = metadata
+        raw, reason = _raw_input(family, document)
+        if reason:
+            failure = reason
+        else:
+            generated = None
+            try:
+                generated = _upstream_chunks(family, document, raw, client, modules)
+            except ExpectedUpstreamSkip as exc:
+                scratch.execute("INSERT INTO expected_skips VALUES(?,?,?)", (family, source_id, str(exc)))
+                stats["documents_skipped_as_upstream_expected"] += 1
+                if len(stats["expected_skip_examples"]) < MAX_EXAMPLES:
+                    stats["expected_skip_examples"].append({"source_id": source_id, "reason": str(exc)})
+                failure = None
+            except Exception as exc:
+                failure = f"upstream_reconstruction_failed:{type(exc).__name__}"
+            else:
+                stats["documents_reconstructed_through_upstream_parser"] += 1
+                per_document_counts: dict[str, int] = {}
+                for chunk in generated:
+                    per_document_counts[chunk["chunk_id"]] = per_document_counts.get(chunk["chunk_id"], 0) + 1
+                for chunk_id, occurrences in per_document_counts.items():
+                    if occurrences > 1:
+                        dropped = occurrences - 1
+                        scratch.execute("""INSERT INTO document_collisions VALUES(?,?,?)
+                            ON CONFLICT(family,chunk_id) DO UPDATE SET
+                            occurrences=document_collisions.occurrences+excluded.occurrences""",
+                            (family, chunk_id, dropped),
+                        )
+                        stats["within_document_duplicate_occurrences"] += dropped
+                        if (len(stats["duplicate_upstream_chunk_ids_examples"]) < MAX_EXAMPLES
+                                and chunk_id not in stats["duplicate_upstream_chunk_ids_examples"]):
+                            stats["duplicate_upstream_chunk_ids_examples"].append(chunk_id)
+                deduped, _empty_manifest = modules["redamon_filter_unchanged"](generated, {})
+                for chunk in deduped:
+                    _add_reference_chunk(
+                        scratch, family, source_id, chunk, stats["duplicate_upstream_chunk_ids_examples"]
+                    )
+                if deduped:
+                    del chunk
+                del generated, deduped, _empty_manifest, per_document_counts
+                failure = None
+        if failure:
+            scratch.execute(
+                "INSERT INTO unavailable_documents VALUES(?,?,?)",
+                (family, source_id, failure),
+            )
+            stats["documents_unavailable"] += 1
+            if len(stats["unavailable_document_examples"]) < MAX_EXAMPLES:
+                stats["unavailable_document_examples"].append({"source_id": source_id, "reason": failure})
+        del document, metadata, row, raw
+
+    local_cursor = index.execute(
+        "SELECT chunk_id,source_id,title,metadata_json,chunk_sha256,text FROM chunks "
+        "WHERE source_name=? ORDER BY source_id,chunk_id", (family,),
+    )
+    for row in local_cursor:
+        if row["chunk_sha256"] != _sha(row["text"]):
+            raise CompareError(f"stored chunk digest is invalid: {family}/{row['chunk_id']}")
+        metadata = _json_object(row["metadata_json"], f"chunk {family}/{row['chunk_id']} metadata")
+        fallback = metadata.get("canonicalization_fallback")
+        excluded = metadata.get("redamon_excluded_reason")
+        scratch.execute(
+            "INSERT INTO local_chunks VALUES(?,?,?,?,?,?,?)",
+            (family, row["chunk_id"], row["source_id"], row["title"], row["chunk_sha256"],
+             str(fallback)[:240] if fallback else None,
+             str(excluded)[:240] if excluded else None),
+        )
+        del metadata, row
+    scratch.commit()
+
+    fallback_count = scratch.execute(
+        "SELECT COUNT(*) FROM local_chunks WHERE family=? AND fallback_reason IS NOT NULL", (family,)
+    ).fetchone()[0]
+    supplemental_count = scratch.execute(
+        "SELECT COUNT(*) FROM local_chunks WHERE family=? "
+        "AND (fallback_reason IS NOT NULL OR redamon_excluded_reason IS NOT NULL)", (family,)
+    ).fetchone()[0]
+    supplemental_by_reason = {
+        row["reason"]: int(row["count"])
+        for row in scratch.execute("""SELECT CASE
+          WHEN redamon_excluded_reason IS NOT NULL AND fallback_reason IS NOT NULL
+            THEN 'canonicalization_fallback:' || fallback_reason || ';redamon_excluded:' || redamon_excluded_reason
+          WHEN redamon_excluded_reason IS NOT NULL THEN 'redamon_excluded:' || redamon_excluded_reason
+          ELSE 'canonicalization_fallback:' || COALESCE(fallback_reason,'unknown') END AS reason,
+          COUNT(*) AS count FROM local_chunks WHERE family=?
+          AND (fallback_reason IS NOT NULL OR redamon_excluded_reason IS NOT NULL)
+          GROUP BY reason ORDER BY reason""", (family,))
+    }
+    uncomparable_count = scratch.execute(
+        "SELECT COUNT(*) FROM local_chunks l JOIN unavailable_documents u USING(family,source_id) "
+        "WHERE l.family=? AND l.fallback_reason IS NULL AND l.redamon_excluded_reason IS NULL", (family,)
+    ).fetchone()[0]
+    within_duplicate_count, within_duplicate_id_count = scratch.execute(
+        "SELECT COALESCE(SUM(occurrences),0),COUNT(*) FROM document_collisions WHERE family=?", (family,)
+    ).fetchone()
+    cross_duplicate_count, cross_duplicate_id_count = scratch.execute(
+        "SELECT COALESCE(SUM(cross_document_occurrences),0),COUNT(*) FROM reference_collisions "
+        "WHERE family=? AND cross_document_occurrences>0", (family,),
+    ).fetchone()
+    cross_collision_examples = [dict(row) for row in scratch.execute("""SELECT chunk_id,first_source_id,
+      last_source_id,occurrences,cross_document_occurrences FROM reference_collisions
+      WHERE family=? AND cross_document_occurrences>0 ORDER BY chunk_id LIMIT ?""",
+      (family, MAX_EXAMPLES))]
+
+    def scalar(sql: str) -> int:
+        return int(scratch.execute(sql, (family,)).fetchone()[0])
+
+    reference_count = scalar("SELECT COUNT(*) FROM reference_chunks WHERE family=?")
+    local_count = scalar("SELECT COUNT(*) FROM local_chunks WHERE family=?")
+    core_local_count = scalar("SELECT COUNT(*) FROM local_chunks WHERE family=? "
+                              "AND fallback_reason IS NULL AND redamon_excluded_reason IS NULL")
+    comparable_count = scalar("""SELECT COUNT(*) FROM reference_chunks r
+      JOIN local_chunks l USING(family,chunk_id)
+      LEFT JOIN unavailable_documents u ON u.family=l.family AND u.source_id=l.source_id
+      WHERE r.family=? AND l.fallback_reason IS NULL AND l.redamon_excluded_reason IS NULL
+        AND u.source_id IS NULL""")
+    missing_count = scalar("""SELECT COUNT(*) FROM reference_chunks r
+      LEFT JOIN local_chunks l USING(family,chunk_id)
+      LEFT JOIN unavailable_documents u ON u.family=l.family AND u.source_id=l.source_id
+      WHERE r.family=? AND (l.chunk_id IS NULL OR l.fallback_reason IS NOT NULL OR l.redamon_excluded_reason IS NOT NULL
+             OR u.source_id IS NOT NULL)""")
+    extra_count = scalar("""SELECT COUNT(*) FROM local_chunks l
+      LEFT JOIN reference_chunks r USING(family,chunk_id)
+      LEFT JOIN unavailable_documents u ON u.family=l.family AND u.source_id=l.source_id
+      WHERE l.family=? AND l.fallback_reason IS NULL AND l.redamon_excluded_reason IS NULL AND u.source_id IS NULL
+        AND r.chunk_id IS NULL""")
+    mismatch_count = scalar("""SELECT COUNT(*) FROM reference_chunks r
+      JOIN local_chunks l USING(family,chunk_id)
+      LEFT JOIN unavailable_documents u ON u.family=l.family AND u.source_id=l.source_id
+      WHERE r.family=? AND l.fallback_reason IS NULL AND l.redamon_excluded_reason IS NULL AND u.source_id IS NULL
+        AND (r.title != l.title OR r.digest != l.digest)""")
+    missing_examples = [row[0] for row in scratch.execute("""SELECT r.chunk_id FROM reference_chunks r
+      LEFT JOIN local_chunks l USING(family,chunk_id)
+      LEFT JOIN unavailable_documents u ON u.family=l.family AND u.source_id=l.source_id
+      WHERE r.family=? AND (l.chunk_id IS NULL OR l.fallback_reason IS NOT NULL OR l.redamon_excluded_reason IS NOT NULL
+             OR u.source_id IS NOT NULL)
+      ORDER BY r.chunk_id LIMIT ?""", (family, MAX_EXAMPLES))]
+    extra_examples = [row[0] for row in scratch.execute("""SELECT l.chunk_id FROM local_chunks l
+      LEFT JOIN reference_chunks r USING(family,chunk_id)
+      LEFT JOIN unavailable_documents u ON u.family=l.family AND u.source_id=l.source_id
+      WHERE l.family=? AND l.fallback_reason IS NULL AND l.redamon_excluded_reason IS NULL AND u.source_id IS NULL
+        AND r.chunk_id IS NULL
+      ORDER BY l.chunk_id LIMIT ?""", (family, MAX_EXAMPLES))]
+    mismatch_examples = []
+    for row in scratch.execute("""SELECT r.chunk_id,r.title AS redamon_title,l.title AS local_title,
+      r.digest AS redamon_digest,l.digest AS local_digest FROM reference_chunks r
+      JOIN local_chunks l USING(family,chunk_id)
+      LEFT JOIN unavailable_documents u ON u.family=l.family AND u.source_id=l.source_id
+      WHERE r.family=? AND l.fallback_reason IS NULL AND l.redamon_excluded_reason IS NULL AND u.source_id IS NULL
+        AND (r.title != l.title OR r.digest != l.digest)
+      ORDER BY r.chunk_id LIMIT ?""", (family, MAX_EXAMPLES)):
+        fields = {}
+        if row["redamon_title"] != row["local_title"]:
+            fields["title"] = {"redamon": row["redamon_title"], "local": row["local_title"]}
+        if row["redamon_digest"] != row["local_digest"]:
+            fields["content_sha256"] = {"redamon": row["redamon_digest"], "local": row["local_digest"]}
+        mismatch_examples.append({"chunk_id": row["chunk_id"], "fields": fields})
+    supplemental_examples = [dict(row) for row in scratch.execute("""SELECT chunk_id,source_id,fallback_reason,
+      redamon_excluded_reason FROM local_chunks WHERE family=?
+      AND (fallback_reason IS NOT NULL OR redamon_excluded_reason IS NOT NULL)
+      ORDER BY chunk_id LIMIT ?""", (family, MAX_EXAMPLES))]
+    collision_examples = [row[0] for row in scratch.execute(
+        "SELECT chunk_id FROM document_collisions WHERE family=? ORDER BY chunk_id LIMIT ?",
+        (family, MAX_EXAMPLES),
+    )]
+    no_evidence = stats["source_documents"] == 0 and local_count == 0
+    stats.update({
+        "source_document_input_evidence": "retained raw records validated and passed to pinned upstream code; not a RedAmon source-document parity claim",
+        "reference_chunks": reference_count,
+        "local_chunks": local_count,
+        "core_local_chunks": core_local_count,
+        "compared_chunk_ids": comparable_count,
+        "missing_local_ids_count": missing_count,
+        "missing_local_ids_examples": missing_examples,
+        "extra_local_ids_count": extra_count,
+        "extra_local_ids_examples": extra_examples,
+        "mismatch_count": mismatch_count,
+        "mismatch_examples": mismatch_examples,
+        "uncomparable_local_chunks_count": uncomparable_count,
+        "supplemental_fallback_rows_count": fallback_count,
+        "supplemental_excluded_rows_count": int(supplemental_count),
+        "supplemental_excluded_rows_by_reason": supplemental_by_reason,
+        "supplemental_excluded_rows_examples": supplemental_examples,
+        "within_document_duplicate_occurrences": int(within_duplicate_count),
+        "within_document_duplicate_ids_count": int(within_duplicate_id_count),
+        "within_document_duplicate_ids_examples": collision_examples,
+        "cross_document_duplicate_occurrences": int(cross_duplicate_count),
+        "cross_document_duplicate_ids_count": int(cross_duplicate_id_count),
+        "cross_document_duplicate_ids_examples": cross_collision_examples,
+        "duplicate_upstream_chunk_id_count": int(within_duplicate_count) + int(cross_duplicate_count),
+        "duplicate_upstream_chunk_ids_examples": stats["duplicate_upstream_chunk_ids_examples"],
+        "state": (
+            "NO_EVIDENCE" if no_evidence else
+            ("CORE_MATCH_WITH_SUPPLEMENTAL" if supplemental_count else "MATCH")
+            if not (missing_count or extra_count or mismatch_count or stats["documents_unavailable"]
+                    or uncomparable_count)
+            else "PARTIAL_OR_MISMATCH"
+        ),
+    })
+    return stats
+
+
+def compare(index_path: Path, redamon_root: Path, redamon_commit: str) -> dict[str, Any]:
+    clients, modules = _load_upstream(redamon_root, redamon_commit)
+    index, meta = _open_index(index_path)
+    try:
+        with tempfile.TemporaryDirectory(prefix="compare-redamon-corpus-") as temp_dir:
+            scratch = _scratch_database(Path(temp_dir) / "identities.sqlite3")
+            try:
+                families = {
+                    family: _stream_family(family, index, scratch, clients[family], modules)
+                    for family in FAMILIES
+                }
+            finally:
+                scratch.close()
+    finally:
+        index.close()
+    supplemental_by_reason: dict[str, int] = {}
+    for family_row in families.values():
+        for reason, count in family_row["supplemental_excluded_rows_by_reason"].items():
+            supplemental_by_reason[reason] = supplemental_by_reason.get(reason, 0) + count
+    return {
+        "schema_version": 1,
+        "mode": "offline_read_only_upstream_transform_comparison",
+        "index_snapshot_id": meta.get("snapshot_id"),
+        "redamon_commit": redamon_commit,
+        "redamon_verified_source_files": modules["verified_source_files"],
+        "redamon_tree_worktree_clean_for_imported_files": True,
+        "redamon_deduper_source": modules["redamon_deduper_source"],
+        "families": families,
+        "summary": {
+            "source_documents": sum(row["source_documents"] for row in families.values()),
+            "documents_reconstructed": sum(row["documents_reconstructed_through_upstream_parser"] for row in families.values()),
+            "documents_skipped_as_upstream_expected": sum(row["documents_skipped_as_upstream_expected"] for row in families.values()),
+            "unavailable_documents": sum(row["documents_unavailable"] for row in families.values()),
+            "reference_chunks": sum(row["reference_chunks"] for row in families.values()),
+            "local_chunks": sum(row["local_chunks"] for row in families.values()),
+            "core_local_chunks": sum(row["core_local_chunks"] for row in families.values()),
+            "compared_chunk_ids": sum(row["compared_chunk_ids"] for row in families.values()),
+            "missing_ids": sum(row["missing_local_ids_count"] for row in families.values()),
+            "extra_ids": sum(row["extra_local_ids_count"] for row in families.values()),
+            "mismatches": sum(row["mismatch_count"] for row in families.values()),
+            "supplemental_fallback_rows": sum(row["supplemental_fallback_rows_count"] for row in families.values()),
+            "supplemental_excluded_rows": sum(row["supplemental_excluded_rows_count"] for row in families.values()),
+            "supplemental_excluded_rows_by_reason": dict(sorted(supplemental_by_reason.items())),
+            "duplicate_upstream_chunk_ids": sum(row["duplicate_upstream_chunk_id_count"] for row in families.values()),
+            "within_document_duplicate_ids": sum(row["within_document_duplicate_ids_count"] for row in families.values()),
+            "cross_document_duplicate_ids": sum(row["cross_document_duplicate_ids_count"] for row in families.values()),
+            "state": (
+                "PARTIAL_OR_MISMATCH" if any(
+                    row["state"] not in {"MATCH", "CORE_MATCH_WITH_SUPPLEMENTAL"} for row in families.values()
+                ) else "CORE_MATCH_WITH_SUPPLEMENTAL"
+                if any(row["state"] == "CORE_MATCH_WITH_SUPPLEMENTAL" for row in families.values())
+                else "MATCH"
+            ),
+        },
+        "limitations": [
+            "The comparator replays pinned RedAmon parsers over raw records retained in the local index; those shared inputs are not an independent RedAmon source-document snapshot.",
+            "It cannot prove that every expected upstream record was fetched, nor that the installed RedAmon snapshot used the same source revisions/filters.",
+            "A missing raw record is reported as unavailable and never replaced with local canonical chunking.",
+            "The authoritative comparison is pinned upstream generated chunk ID, title, content hash, and family; it does not compare embeddings or search ranking.",
+        ],
+    }
+
+
+def _write_private_json(path: Path, value: dict[str, Any]) -> None:
+    destination = path.expanduser().absolute()
+    if destination.is_symlink():
+        raise CompareError("output path must not be a symbolic link")
+    parent = destination.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise CompareError("output parent must be an existing regular directory")
+    if parent.stat().st_mode & 0o077:
+        raise CompareError("output directory must be private (mode 0700 or stricter)")
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if destination.exists() and destination.is_symlink():
+            raise CompareError("output path became a symbolic link")
+        os.replace(temporary, destination)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--index", required=True, type=Path, help="existing SQLite KB index (read-only)")
+    parser.add_argument("--redamon-root", required=True, type=Path, help="pinned RedAmon checkout")
+    parser.add_argument("--redamon-commit", required=True, help="full pinned upstream commit SHA")
+    parser.add_argument("--output", required=True, type=Path, help="JSON report in an existing private directory")
+    args = parser.parse_args(argv)
+    try:
+        result = compare(args.index, args.redamon_root, args.redamon_commit)
+        _write_private_json(args.output, result)
+    except (CompareError, ValueError, OSError, sqlite3.Error) as exc:
+        print(f"compare-redamon-corpus: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result["summary"], sort_keys=True))
+    return 0 if result["summary"]["state"] == "MATCH" else 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

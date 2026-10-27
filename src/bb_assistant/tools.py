@@ -566,6 +566,7 @@ class ReadOnlyAssistantTools:
         )
         return {
             "coverage_state": self._kb.stats()["coverage_state"],
+            "lexical_engine": self._kb.lexical_engine,
             "reference_material_is_untrusted": True,
             "hits": [
                 {

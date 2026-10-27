@@ -151,10 +151,11 @@ def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_c
     if not document.text or document.metadata.get("document_role") == "license_notice":
         return ()
     if document.source_name in {"gtfobins", "lolbas", "nuclei"}:
-        rendered = _redamon_yaml_chunks(document, max_chars=max_chars)
+        rendered, excluded_reason = _redamon_yaml_chunks(document, max_chars=max_chars)
         return tuple(
             _canonical_redamon_chunk(
                 document, i, title, text, key, truncated=truncated, fallback_reason=fallback,
+                redamon_excluded_reason=excluded_reason,
             )
             for i, (title, text, key, truncated, fallback) in enumerate(rendered)
         )
@@ -193,6 +194,7 @@ def chunk_document(document: SourceDocument, *, max_chars: int = 1920, overlap_c
 def _canonical_redamon_chunk(
     document: SourceDocument, ordinal: int, title: str, text: str, unique_key: str, *,
     truncated: bool = False, fallback_reason: str | None = None,
+    redamon_excluded_reason: str | None = None,
 ) -> CanonicalChunk:
     # These records are rendered from structured source fields, so they do not
     # claim a literal span in the original YAML/Markdown document.
@@ -202,6 +204,7 @@ def _canonical_redamon_chunk(
             **document.metadata,
             **({"chunk_truncated": True} if truncated else {}),
             **({"canonicalization_fallback": fallback_reason} if fallback_reason else {}),
+            **({"redamon_excluded_reason": redamon_excluded_reason} if redamon_excluded_reason else {}),
         },
         source_span_exact=False, redamon_unique_key=unique_key,
     )
@@ -235,7 +238,7 @@ def _owasp_test_id(document: SourceDocument) -> str:
 
 def _redamon_yaml_chunks(
     document: SourceDocument, *, max_chars: int,
-) -> list[tuple[str, str, str, bool, str | None]]:
+) -> tuple[list[tuple[str, str, str, bool, str | None]], str | None]:
     """Render the RedAmon GTFOBins, LOLBAS, and Nuclei cards from pinned YAML.
 
     The input is third-party data: size and alias limits are checked before
@@ -247,7 +250,7 @@ def _redamon_yaml_chunks(
     raw = document.text
     if len(raw.encode("utf-8")) > 1024 * 1024:
         if document.source_name == "nuclei":
-            return _nuclei_raw_fallback(document, max_chars, "yaml_size_limit")
+            return _nuclei_raw_fallback(document, max_chars, "yaml_size_limit"), None
         raise ValueError(f"{document.source_name} source document exceeds YAML size limit")
     max_indent = 0
     for line in raw.splitlines():
@@ -276,11 +279,11 @@ def _redamon_yaml_chunks(
                 aliases += 1
     except yaml.YAMLError as exc:
         if document.source_name == "nuclei":
-            return _nuclei_raw_fallback(document, max_chars, "yaml_scan_failed")
+            return _nuclei_raw_fallback(document, max_chars, "yaml_scan_failed"), None
         raise ValueError(f"Invalid {document.source_name} YAML source document") from exc
     if max_indent > 256 or max_flow_depth > 64 or anchors > 100 or aliases > 1000:
         if document.source_name == "nuclei":
-            return _nuclei_raw_fallback(document, max_chars, "yaml_complexity_limit")
+            return _nuclei_raw_fallback(document, max_chars, "yaml_complexity_limit"), None
         raise ValueError(f"{document.source_name} source document exceeds YAML complexity limits")
     try:
         if document.source_name == "gtfobins":
@@ -319,7 +322,7 @@ def _redamon_yaml_chunks(
                     if comment:
                         text += f"\nNote: {comment}"
                     output.append((f"{binary} — {function_type}", text, f"{binary}:{function_type}", False, None))
-            return output
+            return output, None
 
         value = yaml.safe_load(raw)
         if document.source_name == "nuclei":
@@ -387,7 +390,7 @@ def _redamon_yaml_chunks(
                 label = f"TCP probe {i}" if len(tcp) > 1 else "TCP probe"
                 if block["port"]:
                     label += f" (port {block['port']})"
-                content += f"\n\n{label}:" + (f" {'; '.join(block['inputs'])}" if block["inputs"] else "")
+                content += f"\n\n{label}" + (f": {'; '.join(block['inputs'])}" if block["inputs"] else "")
             for i, block in enumerate(javascript, start=1):
                 if not block["code"].strip():
                     continue
@@ -396,7 +399,7 @@ def _redamon_yaml_chunks(
                 if block["payloads"]:
                     content += f"\nPayloads: {block['payloads']}"
             title = f"{template_id} — {name}" if name != str(template_id) else str(template_id)
-            return [(title, content, str(template_id), False, None)]
+            return [(title, content, str(template_id), False, None)], _redamon_nuclei_exclusion(raw, value)
 
         if not isinstance(value, dict) or "Name" not in value:
             raise ValueError("LOLBAS YAML has no Name")
@@ -443,11 +446,36 @@ def _redamon_yaml_chunks(
             unique = f"{name}:{category}:{str(command)[:50]}"
             content = "\n".join(parts)
             output.append((title, content, unique, False, None))
-        return output
+        return output, None
     except (yaml.YAMLError, UnicodeError) as exc:
         if document.source_name == "nuclei":
-            return _nuclei_raw_fallback(document, max_chars, "yaml_parse_failed")
+            return _nuclei_raw_fallback(document, max_chars, "yaml_parse_failed"), None
         raise ValueError(f"Invalid {document.source_name} YAML source document") from exc
+
+
+def _redamon_nuclei_exclusion(raw: str, value: dict) -> str | None:
+    """Retain valid extra templates while matching RedAmon's default corpus.
+
+    Pinned RedAmon file_cache._scan_yaml_complexity counts literal punctuation
+    even in strings/comments. Our token-based parser accepts those valid YAML
+    files, so label the resulting cards supplemental instead of discarding
+    them or silently adding them to the strict reference candidate pool.
+    """
+    if not value.get("id"):
+        return "missing_top_level_id"
+    if raw.count("&") > 100:
+        return "yaml_anchor_character_limit"
+    if raw.count("*") > 1000:
+        return "yaml_alias_character_limit"
+    depth = 0
+    for char in raw:
+        if char in "{[":
+            depth += 1
+            if depth > 64:
+                return "yaml_flow_character_limit"
+        elif char in "}]" and depth:
+            depth -= 1
+    return None
 
 
 def _nuclei_raw_fallback(

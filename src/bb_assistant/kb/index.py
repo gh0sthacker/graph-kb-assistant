@@ -154,11 +154,12 @@ class KBHit:
 
 
 class KBIndex:
-    """Lexical retrieval only; vector ranking can be added behind this API."""
+    """Canonical SQLite provenance with selectable lexical and E5 retrieval."""
 
     def __init__(
         self, path: Path | None = None, *, read_only: bool = False,
         embedder: object | None = None, reranker: object | None = None,
+        lexical_provider: object | None = None,
     ) -> None:
         requested_path = (path if path is not None else data_root() / "kb" / "index.sqlite3").expanduser()
         if read_only and Path(os.path.abspath(requested_path)) != requested_path.resolve():
@@ -167,6 +168,14 @@ class KBIndex:
         self.read_only = bool(read_only)
         self._embedder = embedder
         self._reranker = reranker
+        engine = os.environ.get("BB_ASSISTANT_KB_LEXICAL_ENGINE", "sqlite-fts5").strip()
+        if engine not in {"sqlite-fts5", "neo4j-lucene"}:
+            raise ValueError("KB lexical engine must be sqlite-fts5 or neo4j-lucene")
+        if lexical_provider is None and engine == "neo4j-lucene":
+            from .neo4j_lexical import Neo4jLexicalProvider
+            lexical_provider = Neo4jLexicalProvider.from_env()
+        self._lexical_provider = lexical_provider
+        self.lexical_engine = getattr(lexical_provider, "engine", "sqlite-fts5")
         source_root = Path(__file__).resolve().parents[3]
         if self.path == source_root or source_root in self.path.parents:
             raise ValueError("KB indexes must be stored outside the source checkout")
@@ -923,7 +932,7 @@ class KBIndex:
                      WHERE e.model_name=? AND e.dimensions=?
                        AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
             if not include_supplemental:
-                sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+                sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
             params: list[object] = [model_name, dimensions]
             with self.connect() as connection:
                 rows = connection.execute(sql, params).fetchall()
@@ -963,7 +972,7 @@ class KBIndex:
         if len(query) > 4096:
             raise ValueError("KB query exceeds the 4096-character limit")
         match_query = _redamon_fulltext_expression(query)
-        if not match_query:
+        if not match_query and self._lexical_provider is None:
             return ()
         sql = """SELECT c.chunk_id,c.source_name,c.source_id,c.title,c.text,c.source_locator,c.source_url,
                         c.source_revision,c.license_id,c.attribution,c.source_sha256,c.chunk_sha256,c.metadata_json,
@@ -972,7 +981,7 @@ class KBIndex:
                  WHERE chunk_search MATCH ?
                    AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content') = 'content'"""
         if not include_supplemental:
-            sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+            sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
         params: list[object] = [match_query]
         candidate_limit = max(top_k * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE)
         sql += " ORDER BY score LIMIT ?"
@@ -980,7 +989,36 @@ class KBIndex:
         with self.connect() as connection:
             if connection.execute("SELECT 1 FROM kb_meta WHERE key='rechunk_target_snapshot_id'").fetchone():
                 raise RuntimeError("KB index maintenance is in progress")
-            rows = connection.execute(sql, params).fetchall()
+            if self._lexical_provider is None:
+                rows = connection.execute(sql, params).fetchall()
+            else:
+                snapshot_row = connection.execute("SELECT value FROM kb_meta WHERE key='snapshot_id'").fetchone()
+                snapshot_id = snapshot_row[0] if snapshot_row else ""
+                candidates = self._lexical_provider.search(
+                    snapshot_id, query, limit=candidate_limit,
+                    include_supplemental=include_supplemental,
+                )
+                scores = dict(candidates)
+                if len(scores) != len(candidates):
+                    raise RuntimeError("KB Lucene candidate IDs are duplicated")
+                ids = list(scores)
+                rows = []
+                if ids:
+                    selected = connection.execute(
+                        "SELECT c.* FROM chunks c WHERE c.chunk_id IN (" + ",".join("?" for _ in ids) + ")",
+                        ids,
+                    ).fetchall()
+                    by_id = {row["chunk_id"]: row for row in selected}
+                    if set(by_id) != set(ids):
+                        raise RuntimeError("KB Lucene candidates differ from the SQLite snapshot")
+                    for chunk_id in ids:
+                        row = by_id[chunk_id]
+                        metadata = json.loads(row["metadata_json"])
+                        if (metadata.get("document_role", "content") != "content" or
+                                (not include_supplemental and (metadata.get("canonicalization_fallback") is not None
+                                                             or metadata.get("redamon_excluded_reason") is not None))):
+                            raise RuntimeError("KB Lucene candidates violate the selected corpus policy")
+                        rows.append({**dict(row), "score": scores[chunk_id]})
         # RedAmon applies source allowlists after asking Lucene for its global
         # top-k pool. Filtering in SQL before LIMIT would backfill lower-ranked
         # family-specific rows and change the RRF candidates.
@@ -1002,7 +1040,7 @@ class KBIndex:
         metadata_params: list[object] = list(candidate_ids)
         metadata_sql += " AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
         if not include_supplemental:
-            metadata_sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL"
+            metadata_sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
         if requested_sources:
             metadata_sql += " AND c.source_name IN (" + ",".join("?" for _ in requested_sources) + ")"
             metadata_params.extend(requested_sources)

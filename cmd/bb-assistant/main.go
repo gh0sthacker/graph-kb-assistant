@@ -1926,6 +1926,9 @@ func searchKB(args []string) error {
 		return err
 	}
 	defer index.Close()
+	if err := index.ConfigureLexicalEngine(strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_LEXICAL_ENGINE"))); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	result, err := index.Search(ctx, *query, kb.SearchOptions{TopK: *topK, SourceNames: sourceNames})

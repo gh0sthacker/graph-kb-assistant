@@ -151,6 +151,18 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
         self.assertEqual(owasp_chunk.chunk_id,
                          hashlib.sha256(b"owasp:WSTG-INFO-01:1. Example test WSTG-INFO-01").hexdigest()[:16])
 
+    def test_nuclei_tcp_probe_without_inputs_has_no_extra_colon(self) -> None:
+        # Real full-corpus comparison found this delta on FTP/direct-connect
+        # detection cards. RedAmon appends ':' only when inputs follow it.
+        for inputs, expected in (("", "TCP probe (port 21)"),
+                                 ("    inputs:\n      - data: PING\n", "TCP probe (port 21): PING")):
+            with self.subTest(inputs=bool(inputs)):
+                document = SourceDocument.create(
+                    source_name="nuclei", source_id="network/fixture.yaml", title="Fixture",
+                    text="id: fixture\ninfo:\n  name: Fixture\n  severity: info\nnetwork:\n  - port: 21\n" + inputs,
+                )
+                self.assertEqual(chunk_document(document)[0].text, "Fixture (info)\n\n" + expected)
+
     def test_nuclei_yaml_comment_symbols_do_not_trip_complexity_guard(self) -> None:
         document = SourceDocument.create(
             source_name="nuclei", source_id="http/commented.yaml", title="commented",
@@ -173,6 +185,22 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
         chunk = chunk_document(document)[0]
         self.assertEqual(chunk.title, "wildcards — Wildcard payload")
         self.assertEqual(chunk.text.count("*"), len(wildcards))
+
+    def test_nuclei_literal_wildcards_are_retained_as_redamon_supplemental(self) -> None:
+        wildcards = "*" * 1001
+        document = SourceDocument.create(
+            source_name="nuclei", source_id="http/large-literal.yaml", title="large-literal",
+            text=("id: large-literal\ninfo:\n  name: Large literal payload\n"
+                  "  description: needlemarker\nhttp:\n  - method: GET\n"
+                  f'    path: ["{{{{BaseURL}}}}/{wildcards}"]\n'),
+            metadata={"template_id": "large-literal"},
+        )
+        chunk = chunk_document(document)[0]
+        self.assertEqual(chunk.title, "large-literal — Large literal payload")
+        self.assertIn("needlemarker", chunk.text)
+        self.assertEqual(chunk.text.count("*"), len(wildcards))
+        self.assertNotIn("canonicalization_fallback", chunk.metadata)
+        self.assertEqual(chunk.metadata["redamon_excluded_reason"], "yaml_alias_character_limit")
 
     def test_nuclei_missing_yaml_id_uses_pinned_filename_identity(self) -> None:
         document = SourceDocument.create(

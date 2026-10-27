@@ -138,6 +138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("build", help="build available pinned sources and import the KB index")
     commands.add_parser("stats", help="show KB source and coverage counts")
+    publish_lucene = commands.add_parser("publish-lucene", help="publish a verified snapshot-isolated Neo4j lexical generation")
+    publish_lucene.add_argument("--batch-size", type=int, default=200)
     rechunk = commands.add_parser("rechunk", help="rebuild installed chunks from stored source documents without fetching")
     rechunk.add_argument(
         "--refresh-local-sources", action="store_true",
@@ -174,7 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     search.add_argument("--source", action="append", default=[])
     search.add_argument(
         "--include-supplemental", action="store_true",
-        help="include bounded raw Nuclei templates that RedAmon skips",
+        help="include retained Nuclei records outside RedAmon's parser policy",
     )
     parity = commands.add_parser(
         "parity-check",
@@ -208,6 +210,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "stats":
         index = KBIndex(_configured_index_path(args.index_path))
         print(json.dumps(index.stats(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.command == "publish-lucene":
+        from .neo4j_lexical import _driver_from_env, publish_generation
+        index = KBIndex(_configured_index_path(args.index_path), read_only=True)
+        driver, database = _driver_from_env()
+        try:
+            result = publish_generation(index, driver, database=database, batch_size=args.batch_size)
+        finally:
+            driver.close()
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if args.command == "parity-check":
         redamon = load_receipt(args.redamon, expected_producer="redamon")

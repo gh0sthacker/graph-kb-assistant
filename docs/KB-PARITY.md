@@ -20,8 +20,8 @@ The exporter refuses an active SQLite WAL, maintenance marker, snapshot/index
 mismatch, incomplete source coverage, unpublished or incomplete E5 vectors,
 missing pinned-query results, or unavailable vector/reranker score components.
 It never fetches sources or writes to the index. The output file is atomically
-written with owner-only permissions. It records the actual SQLite FTS5/cosine
-backend and score components, so a receipt can expose a mismatch instead of
+written with owner-only permissions. It records the selected lexical engine,
+SQLite cosine backend and score components, so a receipt can expose a mismatch instead of
 claiming that the local backend is RedAmon. It is still a local assertion and
 does not authenticate the deployed RedAmon reference.
 
@@ -37,6 +37,92 @@ matches, `3` when evidence differs, and a non-zero error for a missing or
 malformed receipt. Score comparison is exact by default. An explicit
 `--score-tolerance 0.000001` may be used only when both systems document a
 known numeric serialization difference; it never relaxes result ordering.
+
+## Snapshot-isolated Lucene migration
+
+RedAmon's default Neo4j Lucene analyzer and raw sanitized query are now
+available to both the Go runtime and the Python search/receipt path. Set
+`BB_ASSISTANT_KB_LEXICAL_ENGINE=neo4j-lucene` to select this implementation;
+an unavailable or mismatched generation fails visibly rather than silently
+substituting SQLite. Search responses identify the lexical engine. The legacy
+`bm25` hit field carries the selected engine's raw lexical score; new parity
+receipts call that component `lexical_score`.
+
+Install the optional `kb-neo4j` dependency for Python administration and use
+the existing private `BB_ASSISTANT_NEO4J_*` settings. Publish an offline,
+read-only SQLite snapshot with:
+
+```sh
+bb-assistant-kb --index-path /private/kb/index.sqlite3 publish-lucene --batch-size 200
+```
+
+Publishing first validates chunk text hashes, then imports only KB projection
+nodes into generation-specific labels and core/all full-text indexes. It
+re-reads every imported record, compares canonical content digests and counts,
+and waits for both indexes to become online before marking the generation
+ready. Search requires that generation's snapshot ID to equal the SQLite
+snapshot ID; old generations cannot consume the new generation's limited
+candidate pool. Supplemental raw Nuclei fallbacks and normally rendered cards
+rejected by the pinned upstream YAML guards stay available through the explicit
+all-content selection. The latter carry `redamon_excluded_reason`; default
+lexical and vector candidates exclude both metadata classes. The original
+documents and their text remain retained. This does not modify captured HTTP graphs.
+Do not run the publisher against an actively written SQLite file; take a
+consistent SQLite backup first. This migration has not yet selected Lucene in
+the deployed application's environment or promoted the incomplete candidate.
+
+The separate `scripts/compare-redamon-corpus` tool verifies a pinned RedAmon
+Git source/config tree before executing its actual parsers and chunkers against
+retained public source records. It reads the input SQLite file immutably and
+uses a private temporary scratch database to compare ID, title, and content
+digests without loading the full corpus into RAM. The `kb-reference` extra
+supplies the upstream parser dependencies. For example:
+
+```sh
+./scripts/compare-redamon-corpus --index /private/kb/offline-copy.sqlite3 \
+  --redamon-root /private/redamon-reference \
+  --redamon-commit 4585b3442cf3c6e075fca5d3b512a8f47be501b6 \
+  --output /private/kb/corpus-comparison.json
+```
+
+The output directory must already be private. A real transformation comparison
+does not prove independent source-fetch completeness, a deployed RedAmon
+snapshot match, complete E5 vectors, or full hybrid-query equivalence. Those
+requirements still need their own observed evidence.
+
+The comparison reports total retained chunks separately from
+`core_local_chunks`. `CORE_MATCH_WITH_SUPPLEMENTAL` means that the core matches
+the pinned transformations while additional material remains explicitly
+excluded from default retrieval. It does not mean the entire retained corpus
+is an identical RedAmon copy. Unexpected core IDs, changed title/content hashes,
+or unavailable source evidence still fail the comparison. Within-document
+duplicate IDs follow the pinned ingestion deduper's last-occurrence rule;
+duplicate counts remain visible in the report.
+
+### Observed integration checkpoint — 2026-10-27
+
+On primary Proxmox CT108, an isolated fixture was published into the real
+Neo4j instance and queried through both the new Python Lucene provider and the
+verified RedAmon `Neo4jLoader.fulltext_search` from commit
+`4585b3442cf3c6e075fca5d3b512a8f47be501b6`. All three control queries returned
+identical ordered IDs and raw scores. The core/all selection returned two/three
+fixture records respectively. Fixture indexes and generation nodes were removed
+after the check. This verifies the lexical integration on that fixture, not
+the full KB, vector tier, or hybrid ranking.
+
+A first full transformation comparison on a consistent, private server-side
+SQLite backup matched all 146,938 NVD, 46,636 ExploitDB and 899 OWASP chunks.
+It exposed a Nuclei TCP rendering difference (an extra colon when inputs were
+absent), now fixed in code, and comparator errors in ToolDocs raw input and
+upstream duplicate handling, also fixed. A corrected complete comparison after
+rechunking is required before extending that claim to the other families.
+The staging repair runs on an offline CT108 copy with a 20% CPU quota and a
+768 MiB memory limit; the live index and candidate are not being modified.
+
+The CT121 candidate still has 45,935 E5 vectors for 215,382 chunks. Its embedding
+worker is waiting for the reviewed thermal conditions (below 80 °C for the
+required cooling interval). VM112 remains paused. The application has not
+switched to the new candidate or Lucene engine; full parity remains open.
 
 ## Receipt contract
 
@@ -140,14 +226,14 @@ requires a host-identified, read-only thermal sensor source; the hwmon
 directory mode resolves the uniquely labelled `coretemp` `Package id 0`
 sensor on each check. It checks before each durable batch, fails closed on
 unreadable sensor data, and stops at the configured package limit (currently
-90 C on the PVE i3-N305 host).
+80 C on the PVE i3-N305 host).
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
 The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
 and caps CPU at 40% of one core, disables automatic restarts, and is enabled for boot so
 the same guarded job resumes after a CT restart. The CLI still waits for the
 ten-minute thermal gate before model loading. The PVE worker waits until the
-package temperature has remained below 90 C for at least 10 continuous minutes.
+package temperature has remained below 80 C for at least 10 continuous minutes.
 A single cool reading does not satisfy this precondition.
 Before enabling the unit, create the root-owned
 `/etc/graph-kb-assistant/kb-embed.env` with
