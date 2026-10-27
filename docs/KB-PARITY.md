@@ -396,3 +396,23 @@ one subsequent package sample was 48 C, which does not satisfy the ten-minute
 cool dwell. Leave the guard and worker in place. Full vectors, a current
 manifest-bound receipt, and hybrid same-query comparison against an
 authoritative seven-family RedAmon reference remain outstanding.
+
+## Retrieval implementation audit — 2026-10-27 03:47 UTC
+
+Static comparison of the pinned RedAmon code and Graph Assistant shows that
+the model/ranking policy is already aligned: both use normalized
+`intfloat/e5-large-v2` revision `f169b11e22de13617baa190a028a32f3493550b6`,
+`BAAI/bge-reranker-base` revision
+`2cfc18c9415c912f9d8155881c133215df768a70`, RRF `k=60`, the same per-source
+boosts, a 30-item reranker pool, and MMR lambda `0.65`. RedAmon uses FAISS
+`IndexFlatIP`; Graph Assistant computes dot products over normalized vectors,
+which is mathematically equivalent but can still differ in floating-point tie
+ordering.
+
+The material retrieval mismatch is the lexical backend. RedAmon queries
+Neo4j's Lucene full-text index; Graph Assistant queries SQLite FTS5, and their
+query escaping/tokenization and lexical score scales are not identical. The
+strict receipt records both engine names and score components, so source and
+model parity alone cannot pass it. Exact retrieval parity requires either
+using the same Lucene tier or proving equivalent ordered results and scores
+for the fixed query fixture; no hybrid receipt comparison has yet done that.
