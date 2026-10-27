@@ -759,4 +759,8 @@ No worker was started or stopped, and no index was read or changed during this
 inventory. Before resuming embedding, reconcile why both candidate-worker
 containers exist and prove their selected paths are isolated and non-conflicting;
 do not assume the cluster-level `running` state means either worker is doing
-embedding.
+embedding. The operator has since clarified that `proxmox3` is a temporary test
+node that may disconnect at any time. Treat CT120 and data available only there
+as nonauthoritative; do not schedule new KB work on that node. Continue the
+candidate workflow only on the primary `pve` node, and retain the current
+thermal gate there.
