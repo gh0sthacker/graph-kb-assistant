@@ -19,6 +19,7 @@ from typing import Any, Mapping
 _HASH_LENGTH = 64
 _MAX_RECEIPT_BYTES = 64 << 20
 _COVERAGE_STATES = {"DONE", "PARTIAL", "BLOCKED"}
+_SUPPORTED_CHUNK_SCHEMAS = {"redamon-compatible-chunk-v1", "redamon-compatible-chunk-v2"}
 
 
 def export_assistant_receipt(
@@ -60,7 +61,7 @@ def export_assistant_receipt(
     _require(manifest.get("export_complete") is True, "snapshot export is incomplete")
     coverage_state, coverage_hash, coverage = _validate_coverage_report(manifest)
     _require(coverage_state == "DONE" and isinstance(coverage, Mapping), "snapshot source coverage must be DONE")
-    _require(manifest.get("chunk_schema") == "redamon-compatible-chunk-v1", "snapshot chunk schema is unsupported")
+    _require(manifest.get("chunk_schema") in _SUPPORTED_CHUNK_SCHEMAS, "snapshot chunk schema is unsupported")
     identity_payload = {
         "source_manifest_sha256": manifest.get("source_manifest_sha256"),
         "source_documents_sha256": manifest.get("source_documents_sha256"),

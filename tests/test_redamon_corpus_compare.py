@@ -75,7 +75,9 @@ def test_pinned_reference_transformations_match_tiny_retained_fixture(tmp_path: 
         "nuclei": (
             "http/test.yaml",
             "id: synthetic-test\ninfo:\n  name: Synthetic test\n  author: fixture\n  severity: low\n  description: Synthetic template description\nhttp:\n  - method: GET\n    path:\n      - '{{BaseURL}}/'\n",
-            {"template_id": "synthetic-test"},
+            # Reconstruction must use the raw YAML ID, as pinned RedAmon does;
+            # this retained metadata value may be stale.
+            {"template_id": "stale-metadata-id"},
         ),
     }
     db_path = tmp_path / "fixture.sqlite3"
@@ -171,6 +173,21 @@ def test_pinned_reference_transformations_match_tiny_retained_fixture(tmp_path: 
     assert report["families"]["gtfobins"]["documents_skipped_as_upstream_expected"] == 1
     assert report["families"]["nuclei"]["documents_skipped_as_upstream_expected"] == 1
     assert report["summary"]["state"] == "MATCH", "upstream-deduped repeated IDs are diagnostic, not a parity failure"
+
+    # Missing-ID witnesses include the source record/title so an opaque hash
+    # can be traced to its retained input during full-corpus review.
+    with sqlite3.connect(db_path) as db:
+        nuclei_row = db.execute(
+            "SELECT chunk_id,source_name,source_id,title,metadata_json,chunk_sha256,text "
+            "FROM chunks WHERE source_name='nuclei' LIMIT 1"
+        ).fetchone()
+        db.execute("DELETE FROM chunks WHERE chunk_id=?", (nuclei_row[0],))
+    missing_nuclei = tool.compare(db_path, root, PIN)["families"]["nuclei"]
+    assert missing_nuclei["missing_local_ids_count"] == 1
+    assert missing_nuclei["missing_local_ids_examples"][0]["source_id"] == "http/test.yaml"
+    assert missing_nuclei["missing_local_ids_examples"][0]["title"]
+    with sqlite3.connect(db_path) as db:
+        db.execute("INSERT INTO chunks VALUES(?,?,?,?,?,?,?)", nuclei_row)
 
     # A locally retained row deliberately excluded from RedAmon's default core
     # search remains visible in total counts, while exact upstream core parity

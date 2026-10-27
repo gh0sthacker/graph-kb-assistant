@@ -19,7 +19,7 @@ from bb_assistant.kb.nuclei import RedAmonNucleiProvider
 from bb_assistant.kb.owasp import RedAmonOWASPProvider
 from bb_assistant.kb.pinned_github_archive import read_pinned_archive
 from bb_assistant.kb.index import KBIndex
-from bb_assistant.kb.canonical import CanonicalChunk, SourceDocument, chunk_document
+from bb_assistant.kb.canonical import CanonicalChunk, SourceDocument, chunk_document, redamon_chunk_id
 from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider, _redamon_search_text
 from bb_assistant.kb.rebuild import _source_document_from_record, export_redamon_snapshot, import_snapshot, rechunk_index
 from bb_assistant.kb.redamon_sources import (
@@ -163,6 +163,31 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
                 )
                 self.assertEqual(chunk_document(document)[0].text, "Fixture (info)\n\n" + expected)
 
+    def test_nuclei_title_always_includes_the_name_even_when_it_equals_id(self) -> None:
+        document = SourceDocument.create(
+            source_name="nuclei", source_id="network/fixture.yaml", title="Fixture",
+            text="id: same-name\ninfo:\n  severity: info\n",
+        )
+        self.assertEqual(chunk_document(document)[0].title, "same-name — same-name")
+
+    def test_nuclei_supplemental_fallback_cannot_overwrite_core_template_id(self) -> None:
+        core = SourceDocument.create(
+            source_name="nuclei", source_id="http/osint/user-enumeration/wordpress.yaml",
+            title="wordpress", metadata={"template_id": "wordpress"},
+            text=("id: wordpress\ninfo:\n  name: WordPress User Name Information - Detect\n"
+                  "  severity: info\n"),
+        )
+        profile = SourceDocument.create(
+            source_name="nuclei", source_id="profiles/wordpress.yml", title="wordpress",
+            metadata={"template_id": "wordpress"}, text="name: wordpress\n",
+        )
+
+        core_chunk = chunk_document(core)[0]
+        profile_chunk = chunk_document(profile)[0]
+        self.assertEqual(core_chunk.chunk_id, redamon_chunk_id("nuclei", "wordpress"))
+        self.assertNotEqual(profile_chunk.chunk_id, core_chunk.chunk_id)
+        self.assertEqual(profile_chunk.metadata["redamon_excluded_reason"], "missing_top_level_id")
+
     def test_nuclei_yaml_comment_symbols_do_not_trip_complexity_guard(self) -> None:
         document = SourceDocument.create(
             source_name="nuclei", source_id="http/commented.yaml", title="commented",
@@ -202,7 +227,7 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
         self.assertNotIn("canonicalization_fallback", chunk.metadata)
         self.assertEqual(chunk.metadata["redamon_excluded_reason"], "yaml_alias_character_limit")
 
-    def test_nuclei_missing_yaml_id_uses_pinned_filename_identity(self) -> None:
+    def test_nuclei_missing_yaml_id_uses_namespaced_supplemental_identity(self) -> None:
         document = SourceDocument.create(
             source_name="nuclei", source_id="http/missing-id.yaml", title="missing-id",
             text="info:\n  name: Unidentified template\n  severity: medium\n",
@@ -210,7 +235,10 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
         )
         chunk = chunk_document(document)[0]
         self.assertEqual(chunk.title, "missing-id — Unidentified template")
-        self.assertEqual(chunk.chunk_id, hashlib.sha256(b"nuclei:missing-id").hexdigest()[:16])
+        self.assertEqual(
+            chunk.chunk_id,
+            redamon_chunk_id("nuclei", "supplemental:http/missing-id.yaml:missing-id"),
+        )
 
     def test_nuclei_invalid_yaml_remains_searchable_in_bounded_source_parts(self) -> None:
         raw = "id: broken\ninfo: [\n" + ("payload detail " * 180)
@@ -919,7 +947,7 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         self.assertEqual(markdown_chunks[0].title, "Guide")
         self.assertIn("## First", markdown_chunks[0].text)
         self.assertIn("## Second", markdown_chunks[0].text)
-        self.assertTrue(all(chunk.chunk_schema == "redamon-compatible-chunk-v1" for chunk in markdown_chunks))
+        self.assertTrue(all(chunk.chunk_schema == "redamon-compatible-chunk-v2" for chunk in markdown_chunks))
         for chunk in markdown_chunks:
             if chunk.metadata.get("source_span_exact", True):
                 self.assertEqual(markdown.text[chunk.start_char:chunk.end_char], chunk.text)

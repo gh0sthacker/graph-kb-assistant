@@ -6,7 +6,7 @@ import hashlib
 import json
 
 
-CHUNK_SCHEMA = "redamon-compatible-chunk-v1"
+CHUNK_SCHEMA = "redamon-compatible-chunk-v2"
 
 
 def _digest(payload: object) -> str:
@@ -198,6 +198,11 @@ def _canonical_redamon_chunk(
 ) -> CanonicalChunk:
     # These records are rendered from structured source fields, so they do not
     # claim a literal span in the original YAML/Markdown document.
+    # Supplemental Nuclei records must not reuse RedAmon's ID namespace. A
+    # profile or fallback can infer the same template_id as a valid template;
+    # sharing its ID would let the supplemental row overwrite the core row.
+    if document.source_name == "nuclei" and (fallback_reason or redamon_excluded_reason):
+        unique_key = f"supplemental:{document.source_id}:{unique_key}"
     return CanonicalChunk.from_document(
         document, ordinal, 0, len(document.text), text, title=title,
         metadata={
@@ -398,7 +403,9 @@ def _redamon_yaml_chunks(
                 content += f"\n\n{label}:\n{block['code'].strip()}"
                 if block["payloads"]:
                     content += f"\nPayloads: {block['payloads']}"
-            title = f"{template_id} — {name}" if name != str(template_id) else str(template_id)
+            # RedAmon always formats the title as `<id> — <name>`, including
+            # when its fallback name equals the identifier.
+            title = f"{template_id} — {name}"
             return [(title, content, str(template_id), False, None)], _redamon_nuclei_exclusion(raw, value)
 
         if not isinstance(value, dict) or "Name" not in value:

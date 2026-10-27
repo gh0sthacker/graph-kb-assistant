@@ -634,3 +634,41 @@ cool-dwell precondition are independently confirmed. VM112 remains paused.
 This operational correction does not change KB parity status. The candidate's
 last confirmed count is still 45,935/215,382 vectors, and RedAmon equivalence is
 not established.
+
+## Pinned full-profile chunk comparison — 2026-10-27 08:09 UTC
+
+The isolated CT108 staging copy was rebuilt from the preserved source
+documents with the updated canonicalizer. Its receipt is snapshot
+`89ab890a1b9ad1ec72d4e18aaf9522e2752ebd4935d13c0b1cf26b0026925d31`, with
+207,878 source documents, 215,383 retained chunks, and `coverage_state=DONE`.
+The active application index and CT121 embedding candidate were not changed.
+
+The strict comparison against RedAmon source commit
+`4585b3442cf3c6e075fca5d3b512a8f47be501b6` completed with 209,392 reference
+IDs and 209,392 local core IDs: **zero missing IDs, extra IDs, text/title
+mismatches, or unavailable source documents**. Each of the seven families
+matches: ToolDocs 355, GTFOBins 731, LOLBAS 464, OWASP 899, ExploitDB 46,636,
+NVD 146,938, and Nuclei 13,369. RedAmon's 53 expected parser skips and 107
+duplicate upstream IDs were reproduced. The comparator exits with its
+partial-status code because the local retained corpus also preserves 5,991
+supplemental rows that RedAmon excludes from its default core corpus: 5,960
+bounded raw-YAML fallbacks, 22 templates without a top-level ID, 2 alias-limit
+templates, and 7 anchor-limit templates. The default core query path filters
+these supplemental rows; they remain available only through the explicit
+supplemental option.
+
+This run exposed and fixed an ID collision: a supplemental Nuclei profile
+without a top-level ID inherited the same filename-derived key as a valid
+template and overwrote its core row. Supplemental/fallback Nuclei IDs are now
+namespaced by source path, and the chunk schema is v2 so the corrected snapshot
+gets a distinct identity; parity readers continue to accept existing v1
+receipts. The full local Python suite passes (229 tests plus 15 subtests).
+
+This proves core chunk parity against the pinned RedAmon source transforms and
+the declared pinned full-profile sources. It still does **not** prove identity
+with RedAmon's currently active deployed snapshot or same-query semantic,
+lexical, hybrid, and reranker outputs: a contemporaneous active-source
+manifest and fixed-query receipts are still unavailable. It also does not
+make vectors complete or deploy this staging snapshot. The CT121 candidate
+remains a separate, partially embedded artifact; promotion and query parity
+remain pending.
