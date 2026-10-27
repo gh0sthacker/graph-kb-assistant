@@ -20,9 +20,9 @@ Environment=OMP_NUM_THREADS=1
 Environment=MKL_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=TOKENIZERS_PARALLELISM=false
-# PVE i3-N305 Tjunction is 105 C. Keep a 15 C package-temperature margin;
-# resume only after a separate 10-minute stable-below-90 C observation.
-ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 90
+# PVE i3-N305 Tjunction is 105 C. Keep a 25 C package-temperature margin;
+# resume only after a separate 10-minute stable-below-80 C observation.
+ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 80
 Restart=no
 CPUQuota=40%
 MemoryMax=3584M

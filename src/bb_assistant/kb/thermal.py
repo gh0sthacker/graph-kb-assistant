@@ -12,8 +12,8 @@ class ThermalLimitReached(RuntimeError):
 
 class ThermalMonitor:
     def __init__(self, sensor_path: Path, *, stop_celsius: float = 70.0) -> None:
-        if not 65.0 <= stop_celsius <= 90.0:
-            raise ValueError("stop_celsius must be between 65 and 90")
+        if not 65.0 <= stop_celsius <= 80.0:
+            raise ValueError("stop_celsius must be between 65 and 80")
         self.sensor_path = sensor_path
         self.stop_celsius = stop_celsius
 

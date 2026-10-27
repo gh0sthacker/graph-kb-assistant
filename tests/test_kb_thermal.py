@@ -121,10 +121,10 @@ class ThermalMonitorTests(unittest.TestCase):
     def test_rejects_aggressive_or_invalid_limits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):
-                ThermalMonitor(Path(directory) / "temp", stop_celsius=91)
+                ThermalMonitor(Path(directory) / "temp", stop_celsius=81)
             with self.assertRaises(ValueError):
                 ThermalMonitor(Path(directory) / "temp", stop_celsius=64)
-            self.assertEqual(ThermalMonitor(Path(directory) / "temp", stop_celsius=90).stop_celsius, 90)
+            self.assertEqual(ThermalMonitor(Path(directory) / "temp", stop_celsius=80).stop_celsius, 80)
             sensor = Path(directory) / "temp"
             sensor.write_text("not-a-temperature", encoding="ascii")
             with self.assertRaisesRegex(RuntimeError, "stopping embedding"):
@@ -144,7 +144,7 @@ class ThermalMonitorTests(unittest.TestCase):
         self.assertRegex(start, r"(?:^| )--threads 1(?: |$)")
         match = re.search(r"(?:^| )--stop-temperature-c ([0-9.]+)(?: |$)", start)
         self.assertIsNotNone(match)
-        self.assertEqual(float(match.group(1)), 90.0)
+        self.assertEqual(float(match.group(1)), 80.0)
 
     def test_embedding_worker_lock_prevents_a_duplicate_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

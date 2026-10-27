@@ -505,22 +505,17 @@ progress or completion is claimed yet. The workstation's active index is a
 separate older snapshot with 207,878 documents, 209,036 chunks, and 38,816 E5
 vectors; it has not been promoted or modified.
 
-## Full-candidate dwell retry envelope — 2026-10-27 05:52 UTC
+## Thermal policy correction — 2026-10-27
 
-At 05:44 UTC CT121's worker was still in `hrtimer_nanosleep`, using less than
-one CPU-second since restart and about 14 MiB; it had not loaded E5. PVE's
-Package id 0 briefly read 95 C while that worker slept, then 60 C seconds
-later. A 20-second simultaneous sample later showed a one-sample 79 C package
-reading while cores were 66-69 C. At 05:48, the package briefly read 85 C and
-returned to 55 C ten seconds later, while cores remained 60-71 C; at 05:51 it
-briefly read 83 C and returned to 57-58 C within seconds. The 80 C dwell
-therefore kept resetting even though the embedding worker was not computing.
+The 90 C policy change above was an error. It was based on sparse, rapidly
+changing temperature snapshots and did not add sensor filtering, so describing
+it as tolerating transient spikes was unsupported. Although the 90 C unit was
+installed on CT121, the service was left stopped; the embedding process did not
+run under that policy and no vector writes were made. Restore the previously
+reviewed 80 C stop limit (25 C below the host's stated 105 C Tjunction), retain
+the ten-minute cool dwell, and leave the service stopped until the readings and
+cool-dwell precondition are independently confirmed. VM112 remains paused.
 
-The guarded limit is now set to 90 C, still 15 C below the i3-N305's 105 C
-Tjunction specification. The service remains capped at 40% of one core, one
-inference thread, batch size two, 3.5 GiB memory, and candidate-only writes.
-The ten-minute dwell and pre-batch stop remain active; this change does not
-ignore a sustained temperature at or above 90 C. VM112 remains paused. This is
-a retry policy change only: no new vectors or parity evidence are claimed
-until read-only counts and service memory confirm model load and durable batch
-progress.
+This operational correction does not change KB parity status. The candidate's
+last confirmed count is still 45,935/215,382 vectors, and RedAmon equivalence is
+not established.
