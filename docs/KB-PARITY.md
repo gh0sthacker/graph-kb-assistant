@@ -725,3 +725,18 @@ message, so this check establishes an idle worker and an over-threshold package
 reading, not completion of any dwell or thermal recovery. PVE had 3.4 GiB
 available RAM and 7.7/8 GiB swap used. Do not start extra Neo4j work or relax
 the thermal gate from this evidence; keep the candidate isolated and unpromoted.
+
+The deployed CT108 application remains on its existing SQLite KB index; its
+BehaviorGraph Neo4j URI is loopback on CT108. A read-only query of that active
+SQLite index found 207,878 source documents, 209,036 chunks, and 38,888 pinned
+E5-large-v2 vectors (18.6%) in snapshot
+`ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`. Its
+family chunk counts are ExploitDB 46,638; GTFOBins 479; LOLBAS 244; Nuclei
+13,403; NVD 146,940; OWASP 900; and ToolDocs 432. The index metadata still has
+a vector-staging marker and no published complete-vector marker. The running
+application was not changed or queried during this inspection. These deployed
+counts differ from both the corrected pinned RedAmon core comparison and the
+separate CT121 candidate; neither `coverage_state=DONE` nor the existing source
+families establish active-query parity. No separate KB Neo4j endpoint is
+configured in the current app process, so do not deploy the new Lucene-provider
+configuration until that isolated endpoint is provisioned and verified.
