@@ -806,6 +806,29 @@ families establish active-query parity. No separate KB Neo4j endpoint is
 configured in the current app process, so do not deploy the new Lucene-provider
 configuration until that isolated endpoint is provisioned and verified.
 
+## Primary PVE follow-up — 2026-10-27 10:10 UTC
+
+All infrastructure inspection for this follow-up was limited to the primary
+`pve` host at `192.168.1.147`; `proxmox3` was not accessed. VM112 remains
+paused; CT108 and CT121 are running. CT121's isolated embedding service is
+systemd-active but has accumulated only 9.91 CPU seconds since its 05:58 UTC
+start. Its candidate still contains 45,935 E5 vectors for 215,382 content
+chunks (21.3%); the snapshot is unchanged and the vector-staging marker is
+still present. No embedding or VM resume was initiated.
+
+The unit retains its reviewed settings: one thread, batch size 2, CPUQuota
+40%, MemoryMax 3.5 GiB, and the ten-minute cool-dwell gate below 80 C. On PVE,
+available RAM was 2.7 GiB and the 8 GiB swap was effectively full. VM112 is
+configured for 8 GiB RAM and 6 vCPUs. The PVE package sensor read 64 C at
+22:08 local time and 91 C at 22:10; core sensors read 63-65 C. These samples
+do not establish a stable cool dwell and show that resuming VM112 or bypassing
+the CT121 thermal gate is unsafe at this checkpoint. The RedAmon runtime
+receipt has not been produced, and KB parity remains `PARTIAL`.
+
+The RedAmon receipt-exporter commits `c497bbe` and `c752e51` are pushed. CI
+run `40485910287` passed Go tests/vet/build, the Python suite and secret scan;
+the complete local Python suite also passed (257 tests plus 15 subtests).
+
 ## Cross-node embedding worker inventory — 2026-10-27 09:13 UTC
 
 A cluster-wide read-only resource query found two running containers explicitly
