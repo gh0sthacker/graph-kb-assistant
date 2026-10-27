@@ -144,7 +144,9 @@ full profile must contain exactly `tool_docs`, `gtfobins`, `lolbas`, `owasp`,
 `exploitdb`, `nvd`, and `nuclei`. Every fixed query must return exactly
 `top_k` unique results and every result must include the same four finite score
 components: `lexical_score`, `vector_cosine`, `reranker_logit`, and
-`combined_rank`. Query filters are restricted to applied `source_names` filters.
+`combined_rank`. A result not contributed by one candidate channel records zero
+for that channel's score. Query filters are restricted to applied
+`source_names` filters.
 Receipts are pinned to E5-large-v2 (revision and 1024 dimensions), BGE-reranker-base
 (revision), the full-profile candidate/RRF/rerank/MMR settings and source boosts,
 and a 1920-character limit per reranker input. A RedAmon receipt must also
@@ -156,6 +158,29 @@ canonical hash of each default-search chunk's stable ID, source family, title,
 and text digest, plus per-family hashes and counts. This lets two systems prove
 the same retrievable chunk corpus even when their private build manifests use
 different formats.
+
+The RedAmon exporter is [`scripts/export_redamon_kb_receipt.py`](../scripts/export_redamon_kb_receipt.py).
+Run it from RedAmon's service environment only when the KB host is within its
+thermal operating limit and the full RedAmon runtime is available. It refuses
+any checkout other than the pinned commit, reads FAISS and Neo4j without
+calling ingestion or schema-creation methods, requires their complete chunk-ID
+sets to match, and runs the fixed query fixture against the configured hybrid
+retriever. Querying may load the pinned E5 and BGE models if they are not cached;
+therefore do not run this receipt step while the host is thermally constrained.
+It writes a mode-0600 receipt. Keep Neo4j credentials in the process environment
+or the service's protected environment file; do not put them on the command
+line. The receipt is the RedAmon side of the comparison, not evidence by itself
+that Graph Assistant is at parity.
+
+Example, from a checkout containing this project and the pinned RedAmon tree:
+
+```sh
+PYTHONPATH=/path/to/graph-kb-assistant/src \
+  /path/to/graph-kb-assistant/scripts/export_redamon_kb_receipt.py \
+  --redamon-root /path/to/redamon-src \
+  --kb-path /path/to/redamon-src/services/knowledge_base/data \
+  --output /restricted/path/redamon-kb-receipt.json
+```
 
 Both files use the same shape; `producer` is respectively
 `redamon` or `graph-kb-assistant`.

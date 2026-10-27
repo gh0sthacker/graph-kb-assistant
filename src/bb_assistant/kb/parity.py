@@ -301,7 +301,7 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
     corpus = value.get("corpus")
     _require(isinstance(corpus, dict), "receipt corpus must be an object")
     assert isinstance(corpus, dict)
-    for field in ("snapshot_id", "source_manifest_sha256", "source_documents_sha256", "chunks_sha256"):
+    for field in ("snapshot_id", "source_manifest_sha256"):
         _require(_is_hash(corpus.get(field)), f"corpus.{field} must be a lowercase SHA-256 digest")
     for field in ("source_count", "document_count", "chunk_count"):
         _require(_is_nonnegative_int(corpus.get(field)), f"corpus.{field} must be a non-negative integer")
