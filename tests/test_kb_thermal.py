@@ -132,7 +132,7 @@ class ThermalMonitorTests(unittest.TestCase):
     def test_embed_unit_keeps_cpu_memory_and_temperature_limits(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         unit = (project_root / "deploy/graph-kb-assistant-kb-embed.service").read_text(encoding="utf-8")
-        self.assertIn("CPUQuota=45%", unit)
+        self.assertIn("CPUQuota=40%", unit)
         self.assertIn("MemoryMax=3584M", unit)
         self.assertIn("Restart=no", unit)
         for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
