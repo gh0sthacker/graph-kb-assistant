@@ -672,3 +672,25 @@ manifest and fixed-query receipts are still unavailable. It also does not
 make vectors complete or deploy this staging snapshot. The CT121 candidate
 remains a separate, partially embedded artifact; promotion and query parity
 remain pending.
+
+## Staging Neo4j isolation correction — 2026-10-27
+
+A follow-up publish attempt used snapshot-specific labels in CT108's existing
+`neo4j` database. Although this kept the active KB marker and application
+configuration unchanged, it was **not resource-isolated** from the live graph
+service. Neo4j logged a 96.7-second stop-the-world pause and repeated pauses
+while the two staging full-text indexes were populated. At the same checkpoint
+the PVE host had 478 MiB free RAM, 7.4/8 GiB swap used, and sustained memory
+pressure; this correlation does not establish the staging task as the only
+cause. The publish client was stopped. Only the two snapshot-specific staging
+full-text indexes were dropped; the active Neo4j service and application remain
+running, and VM112 remains paused. The staging generation marker remains
+`building`, so application KB search fails closed; the unactivated staging
+nodes remain in the shared database and need a separately planned cleanup.
+
+Do not retry `publish-lucene` against CT108's application database. Resume this
+work only in a genuinely separate Neo4j instance/database with an explicit
+host memory budget and operational headroom. Snapshot labels alone do not
+provide resource isolation. No staging generation was selected by the active
+application, and no lexical or semantic query parity is claimed from this
+attempt.
