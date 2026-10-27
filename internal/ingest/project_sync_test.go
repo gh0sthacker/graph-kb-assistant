@@ -33,12 +33,12 @@ func (*inventorySource) GetExchange(caido.ExchangeRef) (*caido.HttpExchange, err
 	return nil, nil
 }
 
-func TestProjectInventorySyncDoesNotTurnOutageIntoDeletion(t *testing.T) {
+func TestProjectInventorySyncReportsAbsenceWithoutDeletingHistory(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ref := project.CaidoProjectRef{InstanceID: "caido", ProjectID: "must-purge"}
+	ref := project.CaidoProjectRef{InstanceID: "caido", ProjectID: "retain-history"}
 	if err := project.RegisterProject(ref, root); err != nil {
 		t.Fatal(err)
 	}
@@ -47,15 +47,21 @@ func TestProjectInventorySyncDoesNotTurnOutageIntoDeletion(t *testing.T) {
 	defer cancel()
 	var errorEvents atomic.Int32
 	var missingCalls atomic.Int32
+	absent := make(chan struct{}, 1)
 	finished := make(chan error, 1)
 	go func() {
 		finished <- RunProjectInventorySync(ctx, source, ProjectInventorySyncOptions{
 			DataRoot: root, InstanceID: "caido", PollInterval: time.Second,
 			MissingConfirmations: 3,
 			OnProject:            func(context.Context, project.CaidoProjectRef) error { return nil },
-			OnProjectMissing: func(_ context.Context, missing project.CaidoProjectRef) error {
+			OnProjectAbsent: func(_ context.Context, missing project.CaidoProjectRef) error {
+				if !missing.SameProject(ref) {
+					t.Errorf("reported absent project = %+v, want %+v", missing, ref)
+				}
 				missingCalls.Add(1)
-				return project.UnregisterProject(context.Background(), missing, root)
+				absent <- struct{}{}
+				cancel()
+				return nil
 			},
 			OnError: func(event string, _ *project.CaidoProjectRef, _ error) {
 				if event == "inventory_failed" {
@@ -64,15 +70,11 @@ func TestProjectInventorySyncDoesNotTurnOutageIntoDeletion(t *testing.T) {
 			},
 		})
 	}()
-	deadline := time.After(8 * time.Second)
-	for missingCalls.Load() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("project was not purged after three successful omissions")
-		case <-time.After(20 * time.Millisecond):
-		}
+	select {
+	case <-absent:
+	case <-time.After(8 * time.Second):
+		t.Fatal("project absence was not reported after three successful omissions")
 	}
-	cancel()
 	select {
 	case err := <-finished:
 		if err != nil {
@@ -82,10 +84,10 @@ func TestProjectInventorySyncDoesNotTurnOutageIntoDeletion(t *testing.T) {
 		t.Fatal("inventory sync did not stop after cancellation")
 	}
 	refs, err := project.LoadProjectRefs(root)
-	if err != nil || len(refs) != 0 {
-		t.Fatalf("project was not unregistered: refs=%v err=%v", refs, err)
+	if err != nil || len(refs) != 1 || !refs[0].SameProject(ref) {
+		t.Fatalf("confirmed Caido absence deleted local history: refs=%v err=%v", refs, err)
 	}
-	if errorEvents.Load() != 1 || source.calls.Load() < 4 {
+	if missingCalls.Load() != 1 || errorEvents.Load() != 1 || source.calls.Load() < 4 {
 		t.Fatalf("inventory outage accounting: errors=%d successful-checks=%d", errorEvents.Load(), source.calls.Load()-1)
 	}
 }

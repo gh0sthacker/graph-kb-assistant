@@ -75,9 +75,12 @@ func ObserveProjectInventory(ctx context.Context, root, instanceID string, avail
 		}
 		if state.Missing[key] < confirmations {
 			state.Missing[key]++
-		}
-		if state.Missing[key] >= confirmations {
-			missing = append(missing, ref)
+			// Emit only the transition to absent. The project stays registered
+			// and its evidence remains available as history; a returning project
+			// resets this counter above and can resume synchronization.
+			if state.Missing[key] == confirmations {
+				missing = append(missing, ref)
+			}
 		}
 	}
 	if err := writeInventoryState(filepath.Join(catalogDir, "inventory-state.json"), state); err != nil {

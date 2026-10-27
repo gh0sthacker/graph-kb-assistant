@@ -15,18 +15,19 @@ type ProjectInventorySyncOptions struct {
 	PollInterval         time.Duration
 	MissingConfirmations int
 	OnProject            func(context.Context, project.CaidoProjectRef) error
-	OnProjectMissing     func(context.Context, project.CaidoProjectRef) error
+	OnProjectAbsent      func(context.Context, project.CaidoProjectRef) error
 	OnError              func(event string, ref *project.CaidoProjectRef, err error)
 }
 
-// RunProjectInventorySync keeps every project in one Caido instance aligned
-// with the local project catalog. Inventory failures never count as omissions;
-// deletion callbacks run only after repeated complete successful inventories.
+// RunProjectInventorySync synchronizes projects currently visible in one
+// Caido instance. Inventory failures never count as omissions. A confirmed
+// omission is reported to OnProjectAbsent, but this layer never deletes the
+// local project, graph, or evidence; removal is a separate explicit action.
 func RunProjectInventorySync(ctx context.Context, source caido.ReadSource, options ProjectInventorySyncOptions) error {
 	if ctx == nil || source == nil || options.InstanceID == "" ||
 		options.PollInterval < time.Second || options.PollInterval > 10*time.Minute ||
 		options.MissingConfirmations < 2 || options.MissingConfirmations > 20 ||
-		options.OnProject == nil || options.OnProjectMissing == nil {
+		options.OnProject == nil || options.OnProjectAbsent == nil {
 		return errors.New("Caido project inventory sync options are invalid")
 	}
 	for {
@@ -58,10 +59,10 @@ func RunProjectInventorySync(ctx context.Context, source caido.ReadSource, optio
 					if err := ctx.Err(); err != nil {
 						return nil
 					}
-					if err := options.OnProjectMissing(ctx, ref); err != nil {
+					if err := options.OnProjectAbsent(ctx, ref); err != nil {
 						if options.OnError != nil {
 							copyRef := ref
-							options.OnError("project_purge_failed", &copyRef, err)
+							options.OnError("project_absence_report_failed", &copyRef, err)
 						}
 					}
 				}

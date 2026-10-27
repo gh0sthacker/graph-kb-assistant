@@ -92,13 +92,12 @@ func syncCaidoProjects(args []string) error {
 			_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"event": "project_synced", "project_key": key})
 			return nil
 		},
-		OnProjectMissing: func(ctx context.Context, ref project.CaidoProjectRef) error {
-			if err := purgeCaidoProject(ctx, ref, *root); err != nil {
-				return err
-			}
+		OnProjectAbsent: func(_ context.Context, ref project.CaidoProjectRef) error {
 			key, _ := ref.StorageKey()
-			delete(runners, key)
-			_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"event": "project_purged", "project_key": key})
+			// A project removed from Caido is retained locally as historical
+			// evidence. Projection workers stay alive to drain accepted jobs;
+			// explicit project purge remains a separate operator action.
+			_ = json.NewEncoder(os.Stderr).Encode(map[string]any{"event": "project_absent_from_caido", "project_key": key, "retained_as_history": true})
 			return nil
 		},
 		OnError: func(event string, ref *project.CaidoProjectRef, _ error) {

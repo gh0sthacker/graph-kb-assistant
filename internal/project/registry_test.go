@@ -73,11 +73,19 @@ func TestObserveProjectInventoryRequiresRepeatedSuccessfulOmissions(t *testing.T
 	if err != nil || len(missing) != 1 || !missing[0].SameProject(removed) {
 		t.Fatalf("third omission: missing=%v err=%v", missing, err)
 	}
+	missing, err = ObserveProjectInventory(context.Background(), root, "caido", nil, 3)
+	if err != nil || len(missing) != 0 {
+		t.Fatalf("continued omission re-emitted absent transition: missing=%v err=%v", missing, err)
+	}
+	refs, err := LoadProjectRefs(root)
+	if err != nil || len(refs) != 2 {
+		t.Fatalf("source absence must retain both projects in the local history catalog: refs=%v err=%v", refs, err)
+	}
 
 	if err := UnregisterProject(context.Background(), removed, root); err != nil {
 		t.Fatal(err)
 	}
-	refs, err := LoadProjectRefs(root)
+	refs, err = LoadProjectRefs(root)
 	if err != nil || len(refs) != 1 || !refs[0].SameProject(other) {
 		t.Fatalf("registry after purge: refs=%v err=%v", refs, err)
 	}
