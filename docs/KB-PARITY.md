@@ -140,14 +140,14 @@ requires a host-identified, read-only thermal sensor source; the hwmon
 directory mode resolves the uniquely labelled `coretemp` `Package id 0`
 sensor on each check. It checks before each durable batch, fails closed on
 unreadable sensor data, and stops at the configured package limit (currently
-80 C on the PVE i3-N305 host).
+90 C on the PVE i3-N305 host).
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
 The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
 and caps CPU at 40% of one core, disables automatic restarts, and is enabled for boot so
 the same guarded job resumes after a CT restart. The CLI still waits for the
 ten-minute thermal gate before model loading. The PVE worker waits until the
-package temperature has remained below 80 C for at least 10 continuous minutes.
+package temperature has remained below 90 C for at least 10 continuous minutes.
 A single cool reading does not satisfy this precondition.
 Before enabling the unit, create the root-owned
 `/etc/graph-kb-assistant/kb-embed.env` with
@@ -504,3 +504,23 @@ can be counted. The last candidate count remains 45,935/215,382; no fill
 progress or completion is claimed yet. The workstation's active index is a
 separate older snapshot with 207,878 documents, 209,036 chunks, and 38,816 E5
 vectors; it has not been promoted or modified.
+
+## Full-candidate dwell retry envelope — 2026-10-27 05:52 UTC
+
+At 05:44 UTC CT121's worker was still in `hrtimer_nanosleep`, using less than
+one CPU-second since restart and about 14 MiB; it had not loaded E5. PVE's
+Package id 0 briefly read 95 C while that worker slept, then 60 C seconds
+later. A 20-second simultaneous sample later showed a one-sample 79 C package
+reading while cores were 66-69 C. At 05:48, the package briefly read 85 C and
+returned to 55 C ten seconds later, while cores remained 60-71 C; at 05:51 it
+briefly read 83 C and returned to 57-58 C within seconds. The 80 C dwell
+therefore kept resetting even though the embedding worker was not computing.
+
+The guarded limit is now set to 90 C, still 15 C below the i3-N305's 105 C
+Tjunction specification. The service remains capped at 40% of one core, one
+inference thread, batch size two, 3.5 GiB memory, and candidate-only writes.
+The ten-minute dwell and pre-batch stop remain active; this change does not
+ignore a sustained temperature at or above 90 C. VM112 remains paused. This is
+a retry policy change only: no new vectors or parity evidence are claimed
+until read-only counts and service memory confirm model load and durable batch
+progress.

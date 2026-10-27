@@ -162,7 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     embed.add_argument("--thermal-sensor", type=Path, required=True,
                        help="read-only sysfs sensor file; accepts Celsius or millidegrees Celsius")
     embed.add_argument("--stop-temperature-c", type=float, default=70.0,
-                       help="stop before the next batch at this temperature (65-80 C; default 70)")
+                       help="stop before the next batch at this temperature (65-90 C; default 70)")
     models = commands.add_parser("models", help="prepare pinned local RedAmon retrieval models")
     models.add_argument(
         "--download", action="store_true",
