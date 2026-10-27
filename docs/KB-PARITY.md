@@ -143,7 +143,7 @@ each durable batch, fails closed on unreadable sensor data, and stops at 70 C.
 The conservative invocation is `--batch-size 2 --threads 1`; the worker also
 takes an exclusive process lock so a second embedding process cannot overlap.
 The deployment unit is [`graph-kb-assistant-kb-embed.service`](../deploy/graph-kb-assistant-kb-embed.service)
-and caps CPU at 20%, disables automatic restarts, and is enabled for boot so
+and caps CPU at 80% of one core, disables automatic restarts, and is enabled for boot so
 the same guarded job resumes after a CT restart. The CLI still waits for the
 ten-minute thermal gate before model loading. Do not start or resume until the package temperature has remained
 below 70 C for at least 10 continuous minutes. A single cool reading does not
@@ -264,3 +264,16 @@ revisions and selected filters are unchanged. The source-family coverage
 report still contains the older wording and must be reconciled with the current
 manifest before the final parity receipt. The candidate is not published as
 active; the active application index was not changed.
+
+## Thermal-bounded embedding resumed — 2026-10-27 02:28 UTC
+
+At 02:27 UTC the candidate remained at 42,495/215,382 vectors after the
+ten-minute cool dwell. The service had loaded the pinned model and was running
+at 40% of one CPU core; the package sensor read 61 C. To shorten the multi-day
+CPU-bound fill without reintroducing the previous multi-core heat load, the
+service quota was raised to 80% of one core. Model inference remains one
+thread, the batch size remains two, the package stop remains 70 C, and the
+ten-minute cool dwell is unchanged. A one-minute follow-up showed 42,515
+vectors, 2.39 GiB service memory, and 61 C. These are candidate-only progress
+figures, not a completion estimate; keep the guarded worker running and check
+the vector count again before any publication decision.
