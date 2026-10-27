@@ -124,7 +124,10 @@ TOOL_SPECS: tuple[dict[str, Any], ...] = (
                 "query": {"type": "string", "minLength": 1, "maxLength": 4096},
                 "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
                 "source_names": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 128}, "maxItems": 20},
-                "include_supplemental": {"type": "boolean"},
+                "include_supplemental": {
+                    "type": "boolean",
+                    "description": "Include retained chunks outside RedAmon's default parser policy, including bounded YAML fallbacks and normally rendered Nuclei templates rejected by its YAML guards.",
+                },
             },
             "required": ["query"],
             "additionalProperties": False,

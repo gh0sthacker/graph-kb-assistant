@@ -252,6 +252,35 @@ before starting and after a `ThermalLimitReached` batch stop, then resumes the
 same staged job.
 Unreadable sensors and all non-thermal errors fail closed without retry.
 
+## Verification follow-up — 2026-10-27
+
+Commit `9612200` adds the snapshot-bound Neo4j Lucene candidate provider to
+the Go and Python interfaces, the exact raw Lucene query sanitizer from the
+pinned RedAmon code, the core/all generation split, and an offline comparator
+that invokes the pinned upstream parsers against retained source records. The
+commit was pushed to the existing branch; GitHub CI passed all Go, Python, and
+secret-scan jobs. Local results were 227 Python tests plus 15 subtests, all Go
+packages, and `go vet ./...`. A real Neo4j integration fixture had already
+confirmed identical ordered IDs and raw lexical scores for three fixed
+queries; it did not test the complete corpus or vectors.
+
+The offline staging copy was rechunked with the TCP-label and upstream-exclusion
+fixes. Its receipt reports 207,878 source documents, 215,382 chunks, and
+`coverage_state=DONE` under the local source manifest. This is not a RedAmon
+parity receipt. A corrected full comparison against pinned commit
+`4585b3442cf3c6e075fca5d3b512a8f47be501b6` is running on CT108 with CPUQuota
+20% and MemoryMax 768 MiB. Its result has not yet been observed. The previous
+comparison is not the final result because it included a ToolDocs input bug,
+upstream deduplication handling bugs, and the now-fixed Nuclei TCP rendering.
+
+The CT121 embedding service is active with its 80 C stop limit and required
+ten-minute cool interval. It had not produced new vectors at the last check;
+the candidate still has 45,935/215,382 vectors. The staging copy's rechunk is
+separate and did not update that candidate. VM112 remains paused. The active
+application still uses its prior SQLite-backed index; Lucene has not been
+enabled in the application environment. No deployed RedAmon snapshot manifest
+or same-query receipt is available, so full identity remains unproven.
+
 ## Active full-profile candidate checkpoint — 2026-10-27 01:16 UTC
 
 The active vector build is isolated in CT120 (`kb-embedder`) on the Proxmox
