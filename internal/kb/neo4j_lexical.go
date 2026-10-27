@@ -54,10 +54,10 @@ type luceneExecutor interface {
 
 type neo4jLuceneProvider struct{ executor luceneExecutor }
 
-// NewNeo4jLuceneProvider creates a driver using the application's existing
-// private Neo4j environment configuration. Driver connection is lazy.
+// NewNeo4jLuceneProvider creates a driver for the separately configured KB
+// Neo4j endpoint. It never falls back to the application's graph database.
 func NewNeo4jLuceneProvider() (LuceneCandidateProvider, error) {
-	cfg, err := neo4jstore.ConfigFromEnv()
+	cfg, err := neo4jstore.ConfigFromRequiredEnvPrefix("BB_ASSISTANT_KB_NEO4J")
 	if err != nil {
 		return nil, errors.New("Neo4j KB credentials are unavailable")
 	}

@@ -10,7 +10,7 @@ import json
 import math
 import os
 import re
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 
@@ -30,16 +30,23 @@ def sanitize_redamon_query(query: str) -> str:
     return re.sub(r'[+\-!(){}\[\]^"~*?:\\/]', " ", query).replace("&&", " ").replace("||", " ").strip()
 
 
-def _driver_from_env() -> tuple[Any, str]:
-    uri = os.environ.get("BB_ASSISTANT_NEO4J_URI", "bolt://127.0.0.1:7687").strip()
-    username = os.environ.get("BB_ASSISTANT_NEO4J_USERNAME", "neo4j").strip()
-    password = os.environ.get("BB_ASSISTANT_NEO4J_PASSWORD", "")
-    database = os.environ.get("BB_ASSISTANT_NEO4J_DATABASE", "neo4j").strip()
+def _driver_config_from_env(environ: Mapping[str, str] | None = None) -> tuple[str, str, str, str]:
+    env = os.environ if environ is None else environ
+    uri = env.get("BB_ASSISTANT_KB_NEO4J_URI", "").strip()
+    username = env.get("BB_ASSISTANT_KB_NEO4J_USERNAME", "").strip()
+    password = env.get("BB_ASSISTANT_KB_NEO4J_PASSWORD", "")
+    database = env.get("BB_ASSISTANT_KB_NEO4J_DATABASE", "").strip()
     parsed = urlsplit(uri)
-    if (parsed.scheme not in {"bolt", "bolt+s", "bolt+ssc", "neo4j", "neo4j+s", "neo4j+ssc"}
+    if (not uri or not username or not password or not database
+            or parsed.scheme not in {"bolt", "bolt+s", "bolt+ssc", "neo4j", "neo4j+s", "neo4j+ssc"}
             or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment
-            or not username or not password or not re.fullmatch(r"[A-Za-z0-9_-]{1,63}", database)):
-        raise ValueError("KB Neo4j connection settings are missing or invalid")
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,63}", database)):
+        raise ValueError("dedicated KB Neo4j connection settings are missing or invalid")
+    return uri, username, password, database
+
+
+def _driver_from_env() -> tuple[Any, str]:
+    uri, username, password, database = _driver_config_from_env()
     try:
         from neo4j import GraphDatabase
     except ImportError as exc:

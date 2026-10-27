@@ -21,6 +21,20 @@ func TestSanitizeRedAmonLuceneQuery(t *testing.T) {
 	}
 }
 
+func TestNeo4jLuceneProviderDoesNotReuseGraphDatabaseConfiguration(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_NEO4J_URI", "bolt://127.0.0.1:7687")
+	t.Setenv("BB_ASSISTANT_NEO4J_USERNAME", "graph-user")
+	t.Setenv("BB_ASSISTANT_NEO4J_PASSWORD", "graph-secret")
+	t.Setenv("BB_ASSISTANT_NEO4J_DATABASE", "neo4j")
+	for _, suffix := range []string{"URI", "USERNAME", "PASSWORD", "DATABASE"} {
+		t.Setenv("BB_ASSISTANT_KB_NEO4J_"+suffix, "")
+	}
+
+	if _, err := NewNeo4jLuceneProvider(); err == nil {
+		t.Fatal("Neo4j KB provider unexpectedly reused the application's graph settings")
+	}
+}
+
 func TestNeo4jLuceneProviderBindsGenerationAndUsesUpstreamIndexContract(t *testing.T) {
 	snapshot := strings.Repeat("1", 64)
 	executor := &fakeLuceneExecutor{generation: validLuceneGeneration(snapshot), candidates: []LuceneCandidate{{

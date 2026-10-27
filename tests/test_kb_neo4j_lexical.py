@@ -7,7 +7,8 @@ from pathlib import Path
 from bb_assistant.kb.canonical import CanonicalChunk, SourceDocument, chunk_document
 from bb_assistant.kb.index import KBIndex
 from bb_assistant.kb.neo4j_lexical import (
-    Neo4jLexicalProvider, generation_names, publish_generation, sanitize_redamon_query,
+    Neo4jLexicalProvider, _driver_config_from_env, generation_names, publish_generation,
+    sanitize_redamon_query,
 )
 
 
@@ -79,6 +80,28 @@ class LexicalTests(unittest.TestCase):
         self.assertEqual(sanitize_redamon_query('alpha+beta AND "gamma" foo:bar && a/b || end*'),
                          "alpha beta AND  gamma  foo bar   a b   end")
         self.assertEqual(sanitize_redamon_query("alpha beta"), "alpha beta")
+
+    def test_kb_driver_requires_explicit_dedicated_endpoint(self):
+        graph_only = {
+            "BB_ASSISTANT_NEO4J_URI": "bolt://127.0.0.1:7687",
+            "BB_ASSISTANT_NEO4J_USERNAME": "graph-user",
+            "BB_ASSISTANT_NEO4J_PASSWORD": "graph-secret",
+            "BB_ASSISTANT_NEO4J_DATABASE": "neo4j",
+        }
+        with self.assertRaisesRegex(ValueError, "dedicated KB Neo4j"):
+            _driver_config_from_env(graph_only)
+
+    def test_kb_driver_reads_separate_connection_namespace(self):
+        env = {
+            "BB_ASSISTANT_NEO4J_URI": "bolt://127.0.0.1:7687",
+            "BB_ASSISTANT_KB_NEO4J_URI": "bolt+s://kb.example.internal:7687",
+            "BB_ASSISTANT_KB_NEO4J_USERNAME": "kb-user",
+            "BB_ASSISTANT_KB_NEO4J_PASSWORD": "kb-secret",
+            "BB_ASSISTANT_KB_NEO4J_DATABASE": "knowledge",
+        }
+        self.assertEqual(_driver_config_from_env(env), (
+            "bolt+s://kb.example.internal:7687", "kb-user", "kb-secret", "knowledge",
+        ))
 
     def test_unpublished_generation_cannot_query_fulltext(self):
         for marker in (None, {"state": "building", "schema_version": 1}):

@@ -73,6 +73,29 @@ func ConfigFromEnv() (Config, error) {
 	return cfg, nil
 }
 
+// ConfigFromRequiredEnvPrefix reads an explicitly configured Neo4j endpoint
+// from a caller-owned environment namespace. It intentionally applies no
+// localhost or credential defaults so an optional store cannot silently bind
+// to the application's primary graph database.
+func ConfigFromRequiredEnvPrefix(prefix string) (Config, error) {
+	if !regexp.MustCompile(`^BB_ASSISTANT_[A-Z0-9_]+$`).MatchString(prefix) {
+		return Config{}, errors.New("Neo4j environment prefix is invalid")
+	}
+	cfg := Config{
+		URI:      strings.TrimSpace(os.Getenv(prefix + "_URI")),
+		Username: strings.TrimSpace(os.Getenv(prefix + "_USERNAME")),
+		Password: os.Getenv(prefix + "_PASSWORD"),
+		Database: strings.TrimSpace(os.Getenv(prefix + "_DATABASE")),
+	}
+	if cfg.URI == "" || cfg.Username == "" || cfg.Password == "" || cfg.Database == "" {
+		return Config{}, errors.New("Neo4j endpoint settings are required")
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
 func (c Config) Validate() error {
 	parsed, err := url.Parse(c.URI)
 	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {

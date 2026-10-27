@@ -48,12 +48,15 @@ substituting SQLite. Search responses identify the lexical engine. The legacy
 `bm25` hit field carries the selected engine's raw lexical score; new parity
 receipts call that component `lexical_score`.
 
-Install the optional `kb-neo4j` dependency for Python administration and use
-the existing private `BB_ASSISTANT_NEO4J_*` settings. Publish an offline,
-read-only SQLite snapshot with:
+Install the optional `kb-neo4j` dependency for Python administration. KB
+publishing and application retrieval require a separate private endpoint in
+`BB_ASSISTANT_KB_NEO4J_*`; they never fall back to the application's graph
+`BB_ASSISTANT_NEO4J_*` settings. Keep the endpoint file owner-only. Publish an
+offline, read-only SQLite snapshot with:
 
 ```sh
-bb-assistant-kb --index-path /private/kb/index.sqlite3 publish-lucene --batch-size 200
+BB_ASSISTANT_KB_NEO4J_ENV_FILE=/private/kb/kb-neo4j.env \
+  ./scripts/bb-assistant-kb --index-path /private/kb/index.sqlite3 publish-lucene --batch-size 200
 ```
 
 Publishing first validates chunk text hashes, then imports only KB projection
@@ -70,6 +73,13 @@ documents and their text remain retained. This does not modify captured HTTP gra
 Do not run the publisher against an actively written SQLite file; take a
 consistent SQLite backup first. This migration has not yet selected Lucene in
 the deployed application's environment or promoted the incomplete candidate.
+Set `BB_ASSISTANT_KB_NEO4J_ENV_FILE` to the private KB endpoint file when
+launching the application or publisher. The admin launcher loads it directly.
+The application launcher also loads it. The default is
+`$BB_ASSISTANT_DATA_HOME/kb-neo4j.env`; the file must define all four
+`BB_ASSISTANT_KB_NEO4J_URI`, `USERNAME`, `PASSWORD`, and `DATABASE` values.
+Use a genuinely separate Neo4j instance for staging and runtime KB reads. The
+graph endpoint can remain on the application's existing `neo4j.env`.
 
 The separate `scripts/compare-redamon-corpus` tool verifies a pinned RedAmon
 Git source/config tree before executing its actual parsers and chunkers against

@@ -29,6 +29,12 @@ def make_fake_go(tmp_path: Path) -> tuple[dict[str, str], Path]:
     env.pop("BB_ASSISTANT_NEO4J_USERNAME", None)
     env.pop("BB_ASSISTANT_NEO4J_PASSWORD", None)
     env.pop("BB_ASSISTANT_NEO4J_DATABASE", None)
+    env.pop("BB_ASSISTANT_KB_NEO4J_ENV_FILE", None)
+    env.pop("BB_ASSISTANT_KB_NEO4J_URI", None)
+    env.pop("BB_ASSISTANT_KB_NEO4J_USERNAME", None)
+    env.pop("BB_ASSISTANT_KB_NEO4J_PASSWORD", None)
+    env.pop("BB_ASSISTANT_KB_NEO4J_DATABASE", None)
+    env.pop("BB_ASSISTANT_KB_LEXICAL_ENGINE", None)
     env.pop("BB_ASSISTANT_GRAPH_BACKEND", None)
     env.pop("BB_ASSISTANT_DATA_HOME", None)
     env.pop("BB_ASSISTANT_RUNTIME_ENV_FILE", None)
@@ -39,6 +45,22 @@ def make_fake_go(tmp_path: Path) -> tuple[dict[str, str], Path]:
 
 def test_status_can_report_missing_neo4j_configuration(tmp_path: Path) -> None:
     env, args_file = make_fake_go(tmp_path)
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant"), "status"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert args_file.read_text().strip() == "run -buildvcs=true ./cmd/bb-assistant status"
+
+
+def test_status_does_not_require_optional_kb_endpoint(tmp_path: Path) -> None:
+    env, args_file = make_fake_go(tmp_path)
+    env["BB_ASSISTANT_KB_LEXICAL_ENGINE"] = "neo4j-lucene"
     result = subprocess.run(
         [str(REPO_ROOT / "scripts" / "bb-assistant"), "status"],
         cwd=REPO_ROOT,
@@ -101,6 +123,129 @@ def test_sqlite_compatibility_mode_does_not_require_neo4j_file(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert args_file.read_text().strip() == "run -buildvcs=true ./cmd/bb-assistant web-ui"
+
+
+def test_launcher_loads_kb_neo4j_endpoint_from_separate_private_file(tmp_path: Path) -> None:
+    env, _ = make_fake_go(tmp_path)
+    neo4j_env = tmp_path / "graph-neo4j.env"
+    neo4j_env.write_text("BB_ASSISTANT_GRAPH_BACKEND=neo4j\n")
+    kb_data_root = Path(env["XDG_DATA_HOME"]) / "bb-graph-assistant"
+    kb_data_root.mkdir(parents=True)
+    kb_neo4j_env = kb_data_root / "kb-neo4j.env"
+    kb_neo4j_env.write_text("BB_ASSISTANT_KB_NEO4J_URI=bolt+s://kb.example.internal:7687\n")
+    state_file = tmp_path / "neo4j-uri-state.txt"
+    go_binary = Path(env["PATH"].split(":", maxsplit=1)[0]) / "go"
+    go_binary.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$BB_ASSISTANT_NEO4J_URI" "$BB_ASSISTANT_KB_NEO4J_URI" > "$GO_RUNTIME_STATE_FILE"\n'
+    )
+    go_binary.chmod(0o700)
+    env.update({
+        "BB_ASSISTANT_NEO4J_ENV_FILE": str(neo4j_env),
+        "BB_ASSISTANT_KB_LEXICAL_ENGINE": "neo4j-lucene",
+        "GO_RUNTIME_STATE_FILE": str(state_file),
+    })
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant"), "web-ui"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert state_file.read_text().splitlines() == [
+        "", "bolt+s://kb.example.internal:7687"
+    ]
+
+
+def test_launcher_fails_closed_when_neo4j_kb_has_no_separate_endpoint(tmp_path: Path) -> None:
+    env, args_file = make_fake_go(tmp_path)
+    neo4j_env = tmp_path / "graph-neo4j.env"
+    neo4j_env.write_text("BB_ASSISTANT_GRAPH_BACKEND=neo4j\n")
+    env.update({
+        "BB_ASSISTANT_NEO4J_ENV_FILE": str(neo4j_env),
+        "BB_ASSISTANT_KB_LEXICAL_ENGINE": "neo4j-lucene",
+    })
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant"), "web-ui"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Dedicated KB Neo4j environment file not found" in result.stderr
+    assert not args_file.exists()
+
+
+def test_kb_admin_launcher_loads_separate_endpoint_file(tmp_path: Path) -> None:
+    kb_env = tmp_path / "kb-neo4j.env"
+    kb_env.write_text("BB_ASSISTANT_KB_NEO4J_URI=bolt+s://kb.example.internal:7687\n")
+    state_file = tmp_path / "kb-admin-state.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" "$BB_ASSISTANT_NEO4J_URI" '
+        '"$BB_ASSISTANT_KB_NEO4J_URI" > "$KB_ADMIN_STATE_FILE"\n'
+    )
+    fake_python.chmod(0o700)
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(tmp_path / "home"),
+        "XDG_DATA_HOME": str(tmp_path / "xdg"),
+        "BB_ASSISTANT_NEO4J_URI": "bolt://graph-only:7687",
+        "BB_ASSISTANT_KB_NEO4J_ENV_FILE": str(kb_env),
+        "BB_ASSISTANT_KB_PYTHON": str(fake_python),
+        "KB_ADMIN_STATE_FILE": str(state_file),
+    })
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant-kb"), "publish-lucene"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert state_file.read_text().splitlines() == [
+        "-m bb_assistant.kb.cli publish-lucene",
+        "bolt://graph-only:7687",
+        "bolt+s://kb.example.internal:7687",
+    ]
+
+
+def test_kb_admin_launcher_requires_endpoint_file_for_publish(tmp_path: Path) -> None:
+    state_file = tmp_path / "kb-admin-state.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text('#!/bin/sh\ntouch "$KB_ADMIN_STATE_FILE"\n')
+    fake_python.chmod(0o700)
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(tmp_path / "home"),
+        "XDG_DATA_HOME": str(tmp_path / "xdg"),
+        "BB_ASSISTANT_KB_NEO4J_ENV_FILE": str(tmp_path / "missing.env"),
+        "BB_ASSISTANT_KB_PYTHON": str(fake_python),
+        "KB_ADMIN_STATE_FILE": str(state_file),
+    })
+
+    result = subprocess.run(
+        [str(REPO_ROOT / "scripts" / "bb-assistant-kb"), "publish-lucene"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Dedicated KB Neo4j environment file not found" in result.stderr
+    assert not state_file.exists()
 
 
 def test_launcher_loads_private_application_runtime_environment(tmp_path: Path) -> None:
