@@ -468,6 +468,11 @@ the required continuous ten-minute cool dwell has therefore not yet been
 proven. Leave the guard unchanged and monitor the host before treating any
 vector increase as resumed work.
 
+At 05:01 UTC the read-only vector count remained 45,935/215,382; the worker
+used about 34 MiB and less than one CPU-second. The Package id 0 sample was
+58 C, but a 75 C sample at 04:59 UTC reset the required cool dwell. The
+service remains active in its wait loop and has not loaded the embedding model.
+
 At this checkpoint PVE reported 3.9 GiB available RAM, swap essentially full,
 and the `ssd-lvm` thin-pool at 39.41% data usage with 85.3 GB available. VM112
 remains paused. The embedding service is active only in the isolated,
