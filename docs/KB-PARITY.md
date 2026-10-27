@@ -277,3 +277,9 @@ ten-minute cool dwell is unchanged. A one-minute follow-up showed 42,515
 vectors, 2.39 GiB service memory, and 61 C. These are candidate-only progress
 figures, not a completion estimate; keep the guarded worker running and check
 the vector count again before any publication decision.
+
+At 02:33 UTC the per-batch thermal check reached 73 C. It preserved completed
+batches and entered the configured ten-minute cool dwell; systemd kept the
+worker alive so it can resume without manual intervention. The candidate then
+contained 42,741/215,382 vectors (19.8%). Do not increase the quota or change
+the stop threshold based on this checkpoint.
