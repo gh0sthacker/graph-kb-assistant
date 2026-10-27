@@ -315,10 +315,10 @@ class RedAmonSourceAdapter:
             unique_counts[chunk.source_name] = unique_counts.get(chunk.source_name, 0) + 1
         for row in coverage:
             row["chunk_count"] = unique_counts.get(str(row["source_name"]), 0)
-        states = [str(row["state"]) for row in coverage]
-        if len(coverage) == len(SOURCE_FAMILIES) and all(state == "done" for state in states) and not manifest_blockers:
+        selected_states = [str(row["state"]) for row in coverage]
+        if selected_states and all(value == "done" for value in selected_states) and not manifest_blockers:
             state = "DONE"
-        elif not manifest_blockers and not documents and states and all(value == "blocked" for value in states):
+        elif not manifest_blockers and not documents and selected_states and all(value == "blocked" for value in selected_states):
             state = "BLOCKED"
         else:
             state = "PARTIAL"

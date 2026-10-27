@@ -94,6 +94,8 @@ def export_snapshot(
     chunks_size = 0
     documents_by_source: Counter[str] = Counter()
     chunks_by_source: Counter[str] = Counter()
+    seen_chunk_ids: set[str] = set()
+    collapsed_duplicate_chunks = 0
     try:
         with _atomic_writer(staging_dir / "source-documents.jsonl") as source_stream:
             with _atomic_writer(staging_dir / "chunks.jsonl") as chunk_stream:
@@ -109,12 +111,25 @@ def export_snapshot(
                     source_names.add(document.source_name)
                     documents_by_source[document.source_name] += 1
                     for chunk in chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars):
+                        if chunk.chunk_id in seen_chunk_ids:
+                            collapsed_duplicate_chunks += 1
+                            continue
+                        seen_chunk_ids.add(chunk.chunk_id)
                         chunk_line = _json_line(asdict(chunk))
                         chunk_stream.write(chunk_line)
                         chunks_digest.update(chunk_line)
                         chunks_size += len(chunk_line)
                         chunk_count += 1
                         chunks_by_source[document.source_name] += 1
+        if coverage_report is not None:
+            coverage_report["collapsed_duplicate_chunks"] = collapsed_duplicate_chunks
+            coverage_report["chunk_count"] = chunk_count
+            report_sources = coverage_report.get("sources")
+            if isinstance(report_sources, list):
+                for row in report_sources:
+                    if isinstance(row, dict):
+                        row["chunk_count"] = chunks_by_source.get(str(row.get("source_name")), 0)
+            coverage_report_sha256 = hashlib.sha256(_json_line(coverage_report)).hexdigest()
         if document_count == 0:
             raise ValueError("Cannot create an empty KB snapshot")
         _validate_coverage_source_counts(coverage_report, documents_by_source, chunks_by_source)
@@ -138,6 +153,7 @@ def export_snapshot(
             "source_count": len(source_names),
             "document_count": document_count,
             "chunk_count": chunk_count,
+            "collapsed_duplicate_chunks": collapsed_duplicate_chunks,
             "source_documents_bytes": source_size,
             "chunks_bytes": chunks_size,
             "built_at": datetime.now(timezone.utc).isoformat(),
@@ -168,6 +184,16 @@ def export_snapshot(
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
+
+
+def _unique_chunks(chunks: Iterable[CanonicalChunk]) -> Iterator[CanonicalChunk]:
+    """Keep the first chunk for each RedAmon identity in traversal order."""
+    seen: set[str] = set()
+    for chunk in chunks:
+        if chunk.chunk_id in seen:
+            continue
+        seen.add(chunk.chunk_id)
+        yield chunk
 
 
 def export_redamon_snapshot(
@@ -909,12 +935,17 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     )
     expected_chunk_keys = {item.name for item in fields(CanonicalChunk)}
     chunk_count_seen = 0
+    seen_chunk_ids: set[str] = set()
     chunks_by_source: Counter[str] = Counter()
     for ordinal, record in enumerate(_iter_jsonl(chunks_path, chunks_sha256, chunk_count)):
-        try:
-            expected = next(expected_chunks)
-        except StopIteration as exc:
-            raise ValueError("snapshot chunk count does not match its source documents") from exc
+        while True:
+            try:
+                expected = next(expected_chunks)
+            except StopIteration as exc:
+                raise ValueError("snapshot chunk count does not match its source documents") from exc
+            if expected.chunk_id not in seen_chunk_ids:
+                seen_chunk_ids.add(expected.chunk_id)
+                break
         integer_fields_valid = all(
             isinstance(record.get(key), int) and not isinstance(record.get(key), bool)
             for key in ("ordinal", "start_char", "end_char")
@@ -923,12 +954,13 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
             raise ValueError(f"snapshot chunk hash, identity, provenance, or span mismatch at row {ordinal}")
         chunk_count_seen += 1
         chunks_by_source[expected.source_name] += 1
-    try:
-        next(expected_chunks)
-    except StopIteration:
-        pass
-    else:
-        raise ValueError("snapshot chunk count does not match its source documents")
+    while True:
+        try:
+            remaining = next(expected_chunks)
+        except StopIteration:
+            break
+        if remaining.chunk_id not in seen_chunk_ids:
+            raise ValueError("snapshot chunk count does not match its source documents")
     if chunk_count_seen != chunk_count:
         raise ValueError("snapshot chunk count does not match its source documents")
     _validate_coverage_source_counts(coverage_report, documents_by_source, chunks_by_source)
@@ -948,7 +980,7 @@ def import_snapshot(snapshot_dir: Path, index: object) -> dict[str, object]:
     if expected_snapshot_id != snapshot_id:
         raise ValueError("snapshot manifest id does not match its content digests")
 
-    replacement_chunks = (
+    replacement_chunks = _unique_chunks(
         chunk
         for document in source_documents
         for chunk in chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars)

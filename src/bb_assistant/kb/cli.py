@@ -79,6 +79,7 @@ def build_kb(
         "source_coverage_state": snapshot.coverage_state,
         "documents_built": len(snapshot.documents),
         "chunks_built": len(snapshot.chunks),
+        "collapsed_duplicate_chunks": exported["collapsed_duplicate_chunks"],
         "index": indexed,
     }
 

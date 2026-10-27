@@ -23,6 +23,7 @@ from bb_assistant.kb.canonical import CanonicalChunk, SourceDocument, chunk_docu
 from bb_assistant.kb.redamon_local import RedAmonLocalToolDocsProvider, _redamon_search_text
 from bb_assistant.kb.rebuild import _source_document_from_record, export_redamon_snapshot, import_snapshot, rechunk_index
 from bb_assistant.kb.redamon_sources import (
+    RedAmonSnapshot,
     RedAmonSourceAdapter,
     SourceBatch,
     SourceRecord,
@@ -1061,6 +1062,39 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "manifest byte count mismatch|JSONL hash mismatch"):
                 import_snapshot(temp_root / "snapshots" / exported["snapshot_id"], index)
             self.assertEqual(index.stats()["snapshot_id"], exported["snapshot_id"])
+
+    def test_export_collapses_duplicate_ids_and_import_is_idempotent(self) -> None:
+        documents = tuple(
+            SourceDocument.create(
+                source_name="gtfobins", source_id=f"_gtfobins/{number}", title="apache2",
+                text=f"functions:\n  suid:\n    - description: section {number}\n      code: apache2 {number}\n",
+                metadata={"binary_name": "apache2"},
+            )
+            for number in (1, 2)
+        )
+        rows = tuple(chunk for document in documents for chunk in chunk_document(document))
+        snapshot = RedAmonSnapshot(
+            "a" * 64, "PARTIAL", documents, rows,
+            ({"source_name": "gtfobins", "state": "partial"},), profile="lite",
+        )
+        with tempfile.TemporaryDirectory(prefix="kb-duplicate-snapshot-") as temporary:
+            root = Path(temporary)
+            exported = export_redamon_snapshot(snapshot, root / "snapshots")
+            snapshot_dir = root / "snapshots" / str(exported["snapshot_id"])
+            manifest = json.loads((snapshot_dir / "manifest.json").read_text("utf-8"))
+            chunks = [json.loads(line) for line in (snapshot_dir / "chunks.jsonl").read_text("utf-8").splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertNotEqual(rows[0].text, rows[1].text)
+            self.assertEqual(len(chunks), 1)
+            self.assertEqual(chunks[0]["text"], rows[0].text)
+            self.assertEqual(exported["collapsed_duplicate_chunks"], 1)
+            self.assertEqual(manifest["source_coverage_report"]["collapsed_duplicate_chunks"], 1)
+            index = KBIndex(root / "index.sqlite3")
+            first = import_snapshot(snapshot_dir, index)
+            second = import_snapshot(snapshot_dir, index)
+            self.assertEqual(first["chunks"], 1)
+            self.assertEqual(second["chunks"], 1)
+            self.assertEqual(second["snapshot_id"], exported["snapshot_id"])
 
     def test_search_does_not_return_license_notice_records(self) -> None:
         content = SourceDocument.create(
