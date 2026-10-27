@@ -59,6 +59,7 @@ type Tools struct {
 	consultations  *consultation.Service
 	kbIndex        *kb.Index
 	kbModels       *kb.PythonRetrievalModels
+	kbBackend      string
 	allowRawReads  bool
 }
 
@@ -126,6 +127,13 @@ type Server struct {
 // NewTools loads only the local project registry and an existing KB index. A
 // missing or incompatible KB index does not disable project and graph tools.
 func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
+	kbBackend := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_BACKEND"))
+	if kbBackend == "" {
+		kbBackend = "local"
+	}
+	if kbBackend != "local" && kbBackend != "redamon" {
+		return nil, errors.New("KB backend is unsupported")
+	}
 	lexicalEngine := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_LEXICAL_ENGINE"))
 	if lexicalEngine != "" && lexicalEngine != kb.LexicalEngineSQLite && lexicalEngine != kb.LexicalEngineNeo4j {
 		return nil, errors.New("KB lexical engine is unsupported")
@@ -165,30 +173,49 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 	tools := &Tools{
 		root: root, projects: projects, projectsByKey: byKey,
 		graphService: graphService, graphQueries: graphQueries, consultations: consultations,
+		kbBackend:      kbBackend,
 		refreshCatalog: true,
 		allowRawReads:  os.Getenv("BB_ASSISTANT_ALLOW_RAW_CAPTURE_TOOL") == "1",
 	}
-	index, indexErr := kb.OpenIndex(kbIndexPath)
-	if indexErr == nil {
-		if err := index.ConfigureLexicalEngine(lexicalEngine); err != nil {
-			_ = index.Close()
-			_ = consultations.Close()
-			_ = graphQueries.Close(context.Background())
-			_ = graphService.Close(context.Background())
-			return nil, err
+	if kbBackend == "redamon" {
+		python := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_PYTHON"))
+		if python == "" {
+			_ = tools.Close()
+			return nil, errors.New("RedAmon KB backend requires BB_ASSISTANT_KB_PYTHON")
 		}
-		tools.kbIndex = index
-		if python := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_PYTHON")); python != "" && os.Getenv("BB_ASSISTANT_KB_MODELS") != "0" {
-			if models, modelErr := kb.StartPythonRetrievalModels(context.Background(), python); modelErr == nil {
-				tools.kbModels = models
-				index.SetRetrievalModels(models)
+		models, modelErr := kb.StartPythonRetrievalModels(context.Background(), python)
+		if modelErr != nil {
+			_ = tools.Close()
+			return nil, errors.New("pinned RedAmon KB worker could not be started")
+		}
+		tools.kbModels = models
+		probeCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		sources, vectors, _, probeErr := models.RedAmonStats(probeCtx)
+		cancel()
+		if probeErr != nil || len(sources) != 7 || vectors <= 0 {
+			_ = tools.Close()
+			return nil, errors.New("pinned RedAmon KB runtime failed its readiness check")
+		}
+	}
+	if kbBackend == "local" {
+		index, indexErr := kb.OpenIndex(kbIndexPath)
+		if indexErr == nil {
+			if err := index.ConfigureLexicalEngine(lexicalEngine); err != nil {
+				_ = index.Close()
+				_ = tools.Close()
+				return nil, err
 			}
+			tools.kbIndex = index
+			if python := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_PYTHON")); python != "" && os.Getenv("BB_ASSISTANT_KB_MODELS") != "0" {
+				if models, modelErr := kb.StartPythonRetrievalModels(context.Background(), python); modelErr == nil {
+					tools.kbModels = models
+					index.SetRetrievalModels(models)
+				}
+			}
+		} else if lexicalEngine == kb.LexicalEngineNeo4j {
+			_ = tools.Close()
+			return nil, errors.New("selected Neo4j Lucene mode requires the active local KB snapshot")
 		}
-	} else if lexicalEngine == kb.LexicalEngineNeo4j {
-		_ = consultations.Close()
-		_ = graphQueries.Close(context.Background())
-		_ = graphService.Close(context.Background())
-		return nil, errors.New("selected Neo4j Lucene mode requires the active local KB snapshot")
 	}
 	return tools, nil
 }
@@ -478,19 +505,45 @@ type kbGetSourceArgs struct {
 	MaxChars   *int   `json:"max_chars,omitempty"`
 }
 
-func (t *Tools) statsKB(ctx context.Context) (kb.StatsResult, error) {
+func (t *Tools) statsKB(ctx context.Context) (any, error) {
+	if t.kbBackend == "redamon" {
+		sources, vectors, ingestedAt, err := t.kbModels.RedAmonStats(ctx)
+		if err != nil {
+			return nil, errors.New("pinned RedAmon KB stats could not be read")
+		}
+		output := map[string]any{
+			"backend": "redamon-pinned", "ingested_at": ingestedAt,
+			"source_chunk_counts": sources, "chunks": sumSourceChunks(sources),
+			"embedded_chunks": vectors,
+			"vector_model":    "intfloat/e5-large-v2", "vector_ready": vectors > 0,
+			"reference_material_is_untrusted": true,
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil || len(encoded) > maxToolResultBytes {
+			return nil, errors.New("RedAmon KB stats exceed the output limit")
+		}
+		return output, nil
+	}
 	if t.kbIndex == nil {
-		return kb.StatsResult{}, errors.New("local KB index is unavailable; configure BB_ASSISTANT_KB_INDEX")
+		return nil, errors.New("local KB index is unavailable; configure BB_ASSISTANT_KB_INDEX")
 	}
 	result, err := t.kbIndex.Stats(ctx)
 	if err != nil {
-		return kb.StatsResult{}, errors.New("KB statistics could not be read")
+		return nil, errors.New("KB statistics could not be read")
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil || len(encoded) > maxToolResultBytes {
-		return kb.StatsResult{}, errors.New("KB statistics exceed the output limit")
+		return nil, errors.New("KB statistics exceed the output limit")
 	}
 	return result, nil
+}
+
+func sumSourceChunks(sources map[string]int) int {
+	total := 0
+	for _, count := range sources {
+		total += count
+	}
+	return total
 }
 
 func (t *Tools) getKBSource(ctx context.Context, args kbGetSourceArgs) (kb.SourceResult, error) {
@@ -842,9 +895,6 @@ type kbSearchArgs struct {
 }
 
 func (t *Tools) searchKB(ctx context.Context, args kbSearchArgs) (map[string]any, error) {
-	if t.kbIndex == nil {
-		return nil, errors.New("local KB index is unavailable; configure BB_ASSISTANT_KB_INDEX")
-	}
 	if strings.TrimSpace(args.Query) == "" || utf8.RuneCountInString(args.Query) > 4096 {
 		return nil, errors.New("KB query must contain 1 to 4096 characters")
 	}
@@ -864,6 +914,50 @@ func (t *Tools) searchKB(ctx context.Context, args kbSearchArgs) (map[string]any
 		default:
 			return nil, errors.New("KB severity filter is invalid")
 		}
+	}
+	if t.kbBackend == "redamon" {
+		hits, ingestedAt, err := t.kbModels.SearchRedAmon(ctx, kb.RedAmonSearchOptions{
+			Query: args.Query, TopK: topK, SourceNames: args.SourceNames,
+			MinCVSS: args.MinCVSS, Severity: args.Severity,
+			IncludeSupplemental: args.IncludeSupplemental,
+		})
+		if err != nil {
+			return nil, errors.New("pinned RedAmon KB search failed; no local retrieval fallback was used")
+		}
+		outputHits := make([]map[string]any, 0, len(hits))
+		for _, hit := range hits {
+			chunkID, _ := hit["chunk_id"].(string)
+			source, _ := hit["source"].(string)
+			title, _ := hit["title"].(string)
+			content, _ := hit["content"].(string)
+			if chunkID == "" || source == "" || title == "" || content == "" {
+				return nil, errors.New("pinned RedAmon KB returned an incomplete chunk")
+			}
+			excerpt := content
+			if utf8.RuneCountInString(excerpt) > 1200 {
+				runes := []rune(excerpt)
+				excerpt = string(runes[:1200])
+			}
+			outputHits = append(outputHits, map[string]any{
+				"chunk_id": chunkID, "source_name": source, "source_id": hit["source_path"],
+				"title": title, "excerpt": excerpt,
+				"bm25": hit["fulltext_score"], "rank_score": hit["score"],
+				"vector_score": hit["vector_score"], "rerank_score": hit["rerank_score"],
+			})
+		}
+		output := map[string]any{
+			"ingested_at": ingestedAt, "retrieval_engine": "redamon-pinned",
+			"lexical_engine": "neo4j-lucene", "vector_engine": "faiss",
+			"reference_material_is_untrusted": true, "hits": outputHits,
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil || len(encoded) > maxToolResultBytes {
+			return nil, errors.New("RedAmon KB search exceeds the output limit")
+		}
+		return output, nil
+	}
+	if t.kbIndex == nil {
+		return nil, errors.New("local KB index is unavailable; configure BB_ASSISTANT_KB_INDEX")
 	}
 	result, err := t.kbIndex.Search(ctx, args.Query, kb.SearchOptions{
 		TopK: topK, SourceNames: args.SourceNames, MinCVSS: args.MinCVSS, Severity: args.Severity,

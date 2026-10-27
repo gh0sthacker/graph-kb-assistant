@@ -28,15 +28,34 @@ type PythonRetrievalModels struct {
 }
 
 type modelWorkerRequest struct {
-	Action string   `json:"action"`
-	Query  string   `json:"query"`
-	Texts  []string `json:"texts,omitempty"`
+	Action              string   `json:"action"`
+	Query               string   `json:"query"`
+	Texts               []string `json:"texts,omitempty"`
+	TopK                int      `json:"top_k,omitempty"`
+	SourceNames         []string `json:"source_names,omitempty"`
+	MinCVSS             *float64 `json:"min_cvss,omitempty"`
+	Severity            string   `json:"severity,omitempty"`
+	IncludeSupplemental bool     `json:"include_supplemental,omitempty"`
 }
 
 type modelWorkerResponse struct {
-	OK        bool      `json:"ok"`
-	ErrorCode string    `json:"error_code,omitempty"`
-	Result    []float64 `json:"result,omitempty"`
+	OK              bool             `json:"ok"`
+	ErrorCode       string           `json:"error_code,omitempty"`
+	Result          []float64        `json:"result,omitempty"`
+	Hits            []map[string]any `json:"hits,omitempty"`
+	IngestedAt      string           `json:"ingested_at,omitempty"`
+	SourceCounts    map[string]int   `json:"source_chunk_counts,omitempty"`
+	VectorCount     int              `json:"vector_count,omitempty"`
+	RetrievalEngine string           `json:"retrieval_engine,omitempty"`
+}
+
+type RedAmonSearchOptions struct {
+	Query               string
+	TopK                int
+	SourceNames         []string
+	MinCVSS             *float64
+	Severity            string
+	IncludeSupplemental bool
 }
 
 // StartPythonRetrievalModels launches the model adapter with the workspace's
@@ -98,6 +117,34 @@ func (m *PythonRetrievalModels) Rerank(ctx context.Context, query string, texts 
 		return nil, err
 	}
 	return response.Result, nil
+}
+
+// SearchRedAmon delegates the complete query to the pinned upstream
+// PentestKnowledgeBase implementation. No vector/ranking stage is reimplemented.
+func (m *PythonRetrievalModels) SearchRedAmon(ctx context.Context, options RedAmonSearchOptions) ([]map[string]any, string, error) {
+	response, err := m.call(ctx, modelWorkerRequest{
+		Action: "redamon_search", Query: options.Query, TopK: options.TopK,
+		SourceNames: options.SourceNames, MinCVSS: options.MinCVSS,
+		Severity: options.Severity, IncludeSupplemental: options.IncludeSupplemental,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if response.RetrievalEngine != "redamon-pinned" || response.IngestedAt == "" {
+		return nil, "", errors.New("pinned RedAmon retrieval backend is unavailable")
+	}
+	return response.Hits, response.IngestedAt, nil
+}
+
+func (m *PythonRetrievalModels) RedAmonStats(ctx context.Context) (map[string]int, int, string, error) {
+	response, err := m.call(ctx, modelWorkerRequest{Action: "redamon_stats"})
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if response.RetrievalEngine != "redamon-pinned" || response.IngestedAt == "" {
+		return nil, 0, "", errors.New("pinned RedAmon KB stats are unavailable")
+	}
+	return response.SourceCounts, response.VectorCount, response.IngestedAt, nil
 }
 
 func (m *PythonRetrievalModels) call(ctx context.Context, request modelWorkerRequest) (modelWorkerResponse, error) {

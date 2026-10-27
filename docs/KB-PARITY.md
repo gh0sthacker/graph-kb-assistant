@@ -62,6 +62,30 @@ until the active corpus has complete E5 vectors and parity receipts can be
 generated. This setting affects the Python KB runtime and receipt exporter;
 the Go runtime continues using its separately configured vector implementation.
 
+## Pinned RedAmon runtime backend
+
+The Go MCP server can delegate `bb_kb_search` and `bb_kb_stats` to the pinned
+RedAmon `PentestKnowledgeBase` implementation directly, instead of reproducing
+its ranking stages. Enable it with `BB_ASSISTANT_KB_BACKEND=redamon` and set:
+
+```text
+BB_ASSISTANT_KB_PYTHON=<RedAmon virtualenv Python>
+BB_ASSISTANT_REDAMON_ROOT=<clean checkout at 4585b3442cf3c6e075fca5d3b512a8f47be501b6>
+BB_ASSISTANT_REDAMON_KB_PATH=<active RedAmon knowledge_base/data directory>
+NEO4J_URI=<RedAmon KB Neo4j URI>
+NEO4J_USER=<read-only KB account>
+NEO4J_PASSWORD=<protected service secret>
+```
+
+The worker verifies the pinned source revision, full-profile marker, required
+retrieval settings, seven source families, and matching FAISS/Neo4j counts. It
+forces offline model loading and fails closed; it never falls back to the local
+SQLite retriever. This mode queries the RedAmon KB itself, so it proves the
+query path is shared, not that a separate Graph Assistant corpus is an
+identical copy. Use the parity receipt exporter and same-query comparison to
+prove a local mirror. `bb_kb_get_source` still requires the local provenance
+index and is unavailable in RedAmon-only mode.
+
 Install the optional `kb-neo4j` dependency for Python administration. KB
 publishing and application retrieval require a separate private endpoint in
 `BB_ASSISTANT_KB_NEO4J_*`; they never fall back to the application's graph
