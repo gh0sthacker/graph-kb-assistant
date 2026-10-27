@@ -416,3 +416,29 @@ strict receipt records both engine names and score components, so source and
 model parity alone cannot pass it. Exact retrieval parity requires either
 using the same Lucene tier or proving equivalent ordered results and scores
 for the fixed query fixture; no hybrid receipt comparison has yet done that.
+
+## Full-profile source audit and current fill — 2026-10-27 04:00 UTC
+
+Read-only inspection of the official RedAmon repository at commit
+`4585b3442cf3c6e075fca5d3b512a8f47be501b6` confirms that the `full` profile
+contains exactly seven families: ToolDocs, GTFOBins, LOLBAS, OWASP, ExploitDB,
+NVD, and Nuclei. Its build targets set the NVD window to 730 days; the full
+profile fetches CVEs without a minimum-CVSS filter. The Graph Assistant
+`sources.yaml` declares those same seven families and those NVD filters. Its
+source revisions match RedAmon's pinned feed commits. The observed RedAmon
+defaults keep KB disabled unless installed with `--kbase`; this is a runtime
+opt-in and does not change the contents of the selected `full` profile.
+
+This confirms the candidate is configured for the maximum source breadth of
+the pinned RedAmon `full` profile; adding unrelated sources would make it a
+different profile. It does **not** prove active-deployment content parity:
+the active RedAmon full-profile snapshot and its source-record hashes are still
+unavailable for comparison. The candidate remains at 207,878 source documents
+and 215,382 chunks. A read-only check at 04:00 UTC found 45,691 pinned E5
+vectors (about 21.2%). The embedding service is running in CT120 on Proxmox
+node `proxmox3`, with a 60%-of-one-core quota and about 2.14 GiB current
+memory; its last log still shows the 70 C stop/cool-dwell guard. No embedding
+service settings or active application index were changed during this check.
+The candidate is not vector-ready and has not been promoted. The next gates
+remain complete vectors, current-manifest/source/content/chunk identity, and
+fixed-query retrieval parity.
