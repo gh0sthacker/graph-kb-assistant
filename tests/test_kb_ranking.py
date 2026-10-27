@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import types
 import unittest
 from pathlib import Path
 import sqlite3
@@ -264,6 +265,53 @@ class RetrievalRankingTests(unittest.TestCase):
             hits = index.search("semantic concept", top_k=2)
             self.assertEqual({hit.source_id for hit in hits}, {"alpha.md", "CVE-2026-0002"})
             self.assertIsNotNone(next(hit for hit in hits if hit.source_id == "alpha.md").rerank_score)
+
+    def test_faiss_backend_uses_snapshot_cache_and_fails_closed(self) -> None:
+        import numpy as np
+
+        class FakeIndexFlatIP:
+            def __init__(self, dimensions):
+                self.dimensions = dimensions
+                self.vectors = np.empty((0, dimensions), dtype=np.float32)
+                self.ntotal = 0
+
+            def add(self, vectors):
+                self.vectors = np.vstack((self.vectors, vectors))
+                self.ntotal = len(self.vectors)
+
+            def search(self, queries, count):
+                scores = queries @ self.vectors.T
+                order = np.argsort(scores[0])[::-1][:count]
+                return scores[:, order], order.reshape(1, -1)
+
+        fake_faiss = types.SimpleNamespace(IndexFlatIP=FakeIndexFlatIP)
+        documents = (
+            SourceDocument.create(source_name="tool_docs", source_id="a", title="Alpha", text="alpha details"),
+            SourceDocument.create(source_name="tool_docs", source_id="b", title="Beta", text="beta details"),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-faiss-test-") as temporary:
+            with patch.dict("os.environ", {"BB_ASSISTANT_KB_VECTOR_ENGINE": "faiss"}), \
+                    patch.dict("sys.modules", {"faiss": fake_faiss}):
+                index = KBIndex(Path(temporary) / "index.sqlite3", embedder=_FixtureEmbedder())
+                index.replace_snapshot(chunks, "b" * 64, sources=documents)
+                index.rebuild_embeddings(_FixtureEmbedder(), batch_size=2)
+                ranked_ids, scores = index._vector_search("semantic-only", top_k=2)
+                cache_before = index._faiss_cache
+                second_ids, _ = index._vector_search("semantic-only", top_k=2)
+
+            self.assertEqual(index.vector_engine, "faiss")
+            self.assertEqual(ranked_ids, [chunks[1].chunk_id, chunks[0].chunk_id])
+            self.assertGreater(scores[chunks[1].chunk_id], scores[chunks[0].chunk_id])
+            self.assertEqual(second_ids, ranked_ids)
+            self.assertIs(index._faiss_cache, cache_before)
+
+        with tempfile.TemporaryDirectory(prefix="bb-kb-faiss-incomplete-test-") as temporary:
+            with patch.dict("os.environ", {"BB_ASSISTANT_KB_VECTOR_ENGINE": "faiss"}), \
+                    patch.dict("sys.modules", {"faiss": fake_faiss}):
+                index = KBIndex(Path(temporary) / "index.sqlite3", embedder=_FixtureEmbedder())
+                with self.assertRaisesRegex(RuntimeError, "complete, published"):
+                    index._vector_search("query", top_k=1)
 
     def test_vector_ready_requires_the_runtime_vector_backend(self) -> None:
         document = SourceDocument.create(

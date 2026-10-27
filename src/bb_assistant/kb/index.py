@@ -168,6 +168,7 @@ class KBIndex:
         self.read_only = bool(read_only)
         self._embedder = embedder
         self._reranker = reranker
+        self._faiss_cache: tuple[tuple[str, str, int, bool], object, tuple[str, ...]] | None = None
         engine = os.environ.get("BB_ASSISTANT_KB_LEXICAL_ENGINE", "sqlite-fts5").strip()
         if engine not in {"sqlite-fts5", "neo4j-lucene"}:
             raise ValueError("KB lexical engine must be sqlite-fts5 or neo4j-lucene")
@@ -176,6 +177,9 @@ class KBIndex:
             lexical_provider = Neo4jLexicalProvider.from_env()
         self._lexical_provider = lexical_provider
         self.lexical_engine = getattr(lexical_provider, "engine", "sqlite-fts5")
+        self.vector_engine = os.environ.get("BB_ASSISTANT_KB_VECTOR_ENGINE", "sqlite-cosine").strip()
+        if self.vector_engine not in {"sqlite-cosine", "faiss"}:
+            raise ValueError("KB vector engine must be sqlite-cosine or faiss")
         source_root = Path(__file__).resolve().parents[3]
         if self.path == source_root or source_root in self.path.parents:
             raise ValueError("KB indexes must be stored outside the source checkout")
@@ -908,6 +912,8 @@ class KBIndex:
             vector_count == 0 or not model_name or dimensions <= 0
             or meta.get("vector_snapshot_id") != snapshot_id
         ):
+            if self.vector_engine == "faiss":
+                raise RuntimeError("FAISS retrieval requires a complete, published vector snapshot")
             return [], {}
         embedder = self._embedder
         if embedder is None:
@@ -916,9 +922,13 @@ class KBIndex:
                 embedder = RedAmonEmbedder(local_files_only=True)
                 self._embedder = embedder
             except Exception as exc:
+                if self.vector_engine == "faiss":
+                    raise RuntimeError(f"FAISS query embedder is unavailable ({type(exc).__name__})") from exc
                 logger.info("KB vector retrieval unavailable: %s", type(exc).__name__)
                 return [], {}
         if getattr(embedder, "model_name", None) != model_name:
+            if self.vector_engine == "faiss":
+                raise RuntimeError("FAISS query embedder does not match the stored embedding model")
             logger.warning("KB vector model does not match the stored embedding model; skipping vector search")
             return [], {}
         try:
@@ -927,6 +937,48 @@ class KBIndex:
                 raise ValueError("query embedding dimensions or values are invalid")
             import numpy as np
             query_array = np.asarray(query_vector, dtype=np.float32)
+            if self.vector_engine == "faiss":
+                try:
+                    import faiss
+                except ImportError as exc:
+                    raise RuntimeError("FAISS vector retrieval is selected but faiss-cpu is not installed") from exc
+                cache_key = (snapshot_id, model_name, dimensions, include_supplemental)
+                cached = self._faiss_cache
+                if cached is None or cached[0] != cache_key:
+                    index = faiss.IndexFlatIP(dimensions)
+                    chunk_ids: list[str] = []
+                    sql = """SELECT e.chunk_id,e.vector FROM chunk_embeddings e
+                             JOIN chunks c ON c.chunk_id=e.chunk_id
+                             WHERE e.model_name=? AND e.dimensions=?
+                               AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
+                    if not include_supplemental:
+                        sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
+                    # Match the pinned RedAmon full-profile ingestion order and
+                    # add in bounded batches to avoid a second corpus-sized matrix.
+                    sql += " ORDER BY CASE c.source_name WHEN 'tool_docs' THEN 0 WHEN 'gtfobins' THEN 1 WHEN 'lolbas' THEN 2 WHEN 'owasp' THEN 3 WHEN 'exploitdb' THEN 4 WHEN 'nvd' THEN 5 WHEN 'nuclei' THEN 6 ELSE 7 END,c.source_id,c.start_char,c.chunk_id"
+                    with self.connect() as connection:
+                        cursor = connection.execute(sql, (model_name, dimensions))
+                        while batch := cursor.fetchmany(512):
+                            vectors = np.vstack([
+                                np.frombuffer(row["vector"], dtype="<f4") for row in batch
+                            ])
+                            if vectors.shape[1] != dimensions or not np.isfinite(vectors).all():
+                                raise ValueError("stored embedding dimensions or values are invalid")
+                            index.add(np.ascontiguousarray(vectors, dtype=np.float32))
+                            chunk_ids.extend(row["chunk_id"] for row in batch)
+                    if index.ntotal != len(chunk_ids) or not chunk_ids:
+                        raise ValueError("FAISS index construction produced an invalid vector inventory")
+                    cached = (cache_key, index, tuple(chunk_ids))
+                    self._faiss_cache = cached
+                _, index, chunk_ids = cached
+                selected_count = min(top_k, len(chunk_ids))
+                scores, offsets = index.search(query_array.reshape(1, -1), selected_count)
+                ranked_ids = [chunk_ids[int(offset)] for offset in offsets[0] if int(offset) >= 0]
+                score_map = {
+                    chunk_ids[int(offset)]: float(score)
+                    for score, offset in zip(scores[0], offsets[0]) if int(offset) >= 0
+                }
+                return ranked_ids, score_map
             sql = """SELECT e.chunk_id,e.vector FROM chunk_embeddings e
                      JOIN chunks c ON c.chunk_id=e.chunk_id
                      WHERE e.model_name=? AND e.dimensions=?
@@ -947,6 +999,8 @@ class KBIndex:
             score_map = {rows[int(index)]["chunk_id"]: float(scores[int(index)]) for index in selected}
             return ranked_ids, score_map
         except Exception as exc:
+            if self.vector_engine == "faiss":
+                raise RuntimeError(f"FAISS vector retrieval failed ({type(exc).__name__})") from exc
             logger.warning("KB vector retrieval failed; using available lexical results (%s)", type(exc).__name__)
             return [], {}
 

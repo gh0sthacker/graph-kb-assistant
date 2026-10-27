@@ -230,7 +230,7 @@ def export_assistant_receipt(
                         "embedded_chunks": embedded_chunks, "total_content_chunks": total_content_chunks, "complete": True},
             "reranker": {"model": BGE_RERANKER_MODEL, "revision": BGE_RERANKER_REVISION},
             "retrieval": {
-                "lexical_engine": index.lexical_engine, "vector_engine": "sqlite-cosine",
+                "lexical_engine": index.lexical_engine, "vector_engine": index.vector_engine,
                 "candidate_pool": max(DEFAULT_TOP_K * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE),
                 "rrf_k": DEFAULT_RRF_K, "rerank_pool_size": DEFAULT_RERANK_POOL_SIZE,
                 "mmr_lambda": DEFAULT_MMR_LAMBDA, "mmr_enabled": True,

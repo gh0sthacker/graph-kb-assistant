@@ -48,6 +48,20 @@ substituting SQLite. Search responses identify the lexical engine. The legacy
 `bm25` hit field carries the selected engine's raw lexical score; new parity
 receipts call that component `lexical_score`.
 
+## FAISS vector backend
+
+Python retrieval can use the same `IndexFlatIP` engine as RedAmon when the
+optional `kb-ml` dependencies (including `faiss-cpu`) are installed. Select it
+with `BB_ASSISTANT_KB_VECTOR_ENGINE=faiss`; the default remains
+`sqlite-cosine`. FAISS mode builds one in-memory index per published snapshot,
+model, dimension and supplemental-content policy, adding vectors in the pinned
+RedAmon family/document/chunk order and bounded batches. It fails closed if the
+vector snapshot is incomplete, the pinned query model or FAISS package is
+unavailable, or the index cannot be built. Do not select it for deployment
+until the active corpus has complete E5 vectors and parity receipts can be
+generated. This setting affects the Python KB runtime and receipt exporter;
+the Go runtime continues using its separately configured vector implementation.
+
 Install the optional `kb-neo4j` dependency for Python administration. KB
 publishing and application retrieval require a separate private endpoint in
 `BB_ASSISTANT_KB_NEO4J_*`; they never fall back to the application's graph
