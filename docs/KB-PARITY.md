@@ -185,10 +185,10 @@ by source were:
 | OWASP | 899 | 83 |
 | ToolDocs | 355 | 4 |
 
-The service was active at the check: CPU quota 40%, memory limit 3.5 GiB,
-about 3.03 GiB in use, one embedding thread, and package temperature 63 C.
-The repository unit template now records the same CPU/memory limits as the
-deployed service. These figures describe the current candidate only.
+At that checkpoint the service was active at CPU quota 40%, memory limit 3.5
+GiB, about 3.03 GiB in use, one embedding thread, and package temperature 63 C.
+The repository unit template records the currently deployed 45% CPU and 3.5
+GiB memory limits. These figures describe the current candidate only.
 `coverage_state=DONE` means all seven declared source
 families were fetched and chunked; it does not mean vectors are complete or
 that RedAmon parity has passed. The pinned RedAmon `full` profile has the same
@@ -197,3 +197,12 @@ corpus. Continue embedding this candidate, then rebuild its canonical chunks
 with the corrected GTFOBins ID handling and compare source/chunk digests and
 same-query receipts. Do not publish it as the active index while any of those
 gates are incomplete.
+
+## Embedding throughput sample — 2026-10-27 01:22 UTC
+
+A 60-second run at 45% CPU quota advanced the pinned E5-large vector count
+from 40,925 to 40,975. Package-temperature samples were 67, 62, 61, 61, 62,
+and 62 C; the worker remained active. The persistent service CPU quota is now
+45%, while the 70 C stop threshold, ten-minute cool dwell, one-thread limit,
+and 3.5 GiB memory cap are unchanged. This short sample supports a cautious
+throughput adjustment but is not a completion estimate.
