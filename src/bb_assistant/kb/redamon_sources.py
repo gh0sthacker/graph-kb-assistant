@@ -114,11 +114,13 @@ class RedAmonSnapshot:
     documents: tuple[SourceDocument, ...]
     chunks: tuple[CanonicalChunk, ...]
     source_coverage: tuple[Mapping[str, object], ...]
+    profile: str = "full"
     manifest_blockers: tuple[str, ...] = ()
 
     def coverage_report(self) -> dict[str, object]:
         return {
             "schema_version": 1,
+            "profile": self.profile,
             "source_manifest_sha256": self.source_manifest_sha256,
             "coverage_state": self.coverage_state,
             "source_count": len(self.source_coverage),
@@ -157,13 +159,21 @@ class RedAmonSourceAdapter:
         self.manifest_sha256 = source_manifest_sha256
 
     def build(self, *, max_chars: int = 1920, overlap_chars: int = 0) -> RedAmonSnapshot:
+        profile = str(self.manifest.get("profile") or "full")
         specs, manifest_blockers = self._source_specs()
-        profile = str(self.manifest.get("profile") or "")
+        profile_map = self.manifest.get("profiles")
+        selected = profile_map.get(profile) if isinstance(profile_map, Mapping) else None
+        if not isinstance(selected, Sequence) or isinstance(selected, (str, bytes)):
+            selected = SOURCE_FAMILIES if profile == "full" else ()
+        selected_families = tuple(name for name in selected if isinstance(name, str))
+        selected_set = frozenset(selected_families)
         documents: list[SourceDocument] = []
         chunks: list[CanonicalChunk] = []
         coverage: list[Mapping[str, object]] = []
 
         for family in SOURCE_FAMILIES:
+            if family not in selected_set:
+                continue
             spec = specs.get(family)
             if spec is None:
                 coverage.append(self._coverage(
@@ -314,7 +324,7 @@ class RedAmonSourceAdapter:
             state = "PARTIAL"
         return RedAmonSnapshot(
             self.manifest_sha256, state, tuple(documents), tuple(chunks),
-            tuple(coverage), manifest_blockers,
+            tuple(coverage), profile, manifest_blockers,
         )
 
     def _source_specs(self) -> tuple[dict[str, Mapping[str, object]], tuple[str, ...]]:
@@ -323,7 +333,25 @@ class RedAmonSourceAdapter:
             return {}, ("manifest_sources_not_a_sequence",)
         result: dict[str, Mapping[str, object]] = {}
         blockers: list[str] = []
-        if self.manifest.get("profile") != "full":
+        profile = str(self.manifest.get("profile") or "full")
+        profiles = self.manifest.get("profiles")
+        if profile == "full":
+            if profiles is not None and isinstance(profiles, Mapping):
+                configured = profiles.get("full")
+                if configured is not None and (
+                    not isinstance(configured, Sequence) or isinstance(configured, (str, bytes))
+                    or len(configured) != len(SOURCE_FAMILIES)
+                    or frozenset(configured) != frozenset(SOURCE_FAMILIES)
+                ):
+                    blockers.append("manifest_profile_full_must_select_all_seven_families")
+        elif profile == "lite":
+            configured = profiles.get("lite") if isinstance(profiles, Mapping) else None
+            if (
+                not isinstance(configured, Sequence) or isinstance(configured, (str, bytes))
+                or len(configured) != 3 or frozenset(configured) != frozenset(("tool_docs", "gtfobins", "lolbas"))
+            ):
+                blockers.append("manifest_profile_lite_must_select_exactly_three_families")
+        else:
             blockers.append("manifest_profile_must_be_full_for_seven_family_snapshot")
         for item in raw:
             if not isinstance(item, Mapping):

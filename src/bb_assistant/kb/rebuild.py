@@ -284,6 +284,7 @@ def rechunk_index(
     overlap_chars: int = 0,
     batch_documents: int = 1000,
     progress_callback: object | None = None,
+    profile: str | None = None,
 ) -> dict[str, object]:
     """Rebuild chunks from stored sources in durable, restartable batches.
 
@@ -305,6 +306,10 @@ def rechunk_index(
     manifest = yaml.safe_load(raw_manifest)
     if not isinstance(manifest, dict) or not isinstance(manifest.get("sources"), list):
         raise ValueError("KB source manifest is malformed")
+    if profile is not None:
+        if profile not in {"lite", "full"}:
+            raise ValueError("profile must be lite or full")
+        manifest = {**manifest, "profile": profile}
     family_order = {
         row["id"]: position
         for position, row in enumerate(manifest["sources"])

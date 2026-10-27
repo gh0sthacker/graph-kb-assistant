@@ -6,6 +6,9 @@ schema_version: 1
 upstream_project: https://github.com/samugit83/redamon
 upstream_pin_date: "2026-07-10"
 profile: full
+profiles:
+  lite: [tool_docs, gtfobins, lolbas]
+  full: [tool_docs, gtfobins, lolbas, owasp, exploitdb, nvd, nuclei]
 sources:
   - id: tool_docs
     kind: local_markdown

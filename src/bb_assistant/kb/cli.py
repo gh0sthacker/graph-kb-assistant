@@ -29,6 +29,7 @@ def build_kb(
     data_home: Path | None = None,
     snapshot_root: Path | None = None,
     index_path: Path | None = None,
+    profile: str | None = None,
 ) -> dict[str, object]:
     """Build the currently available source families and import the snapshot."""
     if data_home is not None:
@@ -44,6 +45,8 @@ def build_kb(
     manifest = yaml.safe_load(raw_manifest)
     if not isinstance(manifest, dict):
         raise ValueError("KB source manifest must be a YAML object")
+    if profile is not None:
+        manifest = {**manifest, "profile": profile}
 
     providers = {
         "tool_docs": RedAmonLocalToolDocsProvider(project_root=root),
@@ -78,6 +81,15 @@ def build_kb(
         "chunks_built": len(snapshot.chunks),
         "index": indexed,
     }
+
+
+def _snapshot_profile(snapshot_dir: Path) -> str:
+    manifest = json.loads((snapshot_dir.expanduser() / "manifest.json").read_text(encoding="utf-8"))
+    report = manifest.get("source_coverage_report", {}) if isinstance(manifest, dict) else {}
+    profile = report.get("profile") if isinstance(report, dict) else None
+    if profile not in {"lite", "full"}:
+        raise ValueError("snapshot does not record a supported source profile")
+    return profile
 
 
 def _data_root() -> Path:
@@ -136,11 +148,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--snapshot-root", type=Path, help="override the KB snapshot directory")
     parser.add_argument("--index-path", type=Path, help="override the SQLite FTS5 index path")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("build", help="build available pinned sources and import the KB index")
+    build = commands.add_parser("build", help="build available pinned sources and import the KB index")
+    build.add_argument("--profile", choices=("lite", "full"), help="source profile (defaults to the manifest)")
     commands.add_parser("stats", help="show KB source and coverage counts")
     publish_lucene = commands.add_parser("publish-lucene", help="publish a verified snapshot-isolated Neo4j lexical generation")
     publish_lucene.add_argument("--batch-size", type=int, default=200)
     rechunk = commands.add_parser("rechunk", help="rebuild installed chunks from stored source documents without fetching")
+    rechunk.add_argument("--profile", choices=("lite", "full"), help="source profile (defaults to the manifest)")
     rechunk.add_argument(
         "--refresh-local-sources", action="store_true",
         help="refresh pinned local Markdown sources before rechunking (candidate indexes only)",
@@ -191,7 +205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="write a fail-closed local receipt from a complete, read-only KB snapshot",
     )
     parity_export.add_argument("--snapshot-dir", type=Path, required=True, help="version directory containing manifest.json")
-    parity_export.add_argument("--profile", required=True, help="explicit selected profile, e.g. full")
+    parity_export.add_argument("--profile", choices=("lite", "full"), help="explicit selected profile, e.g. full")
     parity_export.add_argument("--fixture", type=Path, required=True, help="pinned JSON query fixture")
     parity_export.add_argument("--output", type=Path, required=True, help="private local JSON receipt output path")
     args = parser.parse_args(argv)
@@ -204,6 +218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             data_home=args.data_home,
             snapshot_root=args.snapshot_root,
             index_path=args.index_path,
+            profile=args.profile,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if result["source_coverage_state"] == "DONE" else 3
@@ -232,7 +247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         index = KBIndex(_configured_index_path(args.index_path), read_only=True)
         receipt = export_assistant_receipt(
             index=index, snapshot_dir=args.snapshot_dir, fixture_path=args.fixture,
-            output_path=args.output, profile=args.profile,
+            output_path=args.output, profile=args.profile or _snapshot_profile(args.snapshot_dir),
         )
         print(json.dumps({
             "status": "EXPORTED", "producer": receipt["producer"], "profile": receipt["profile"],
@@ -257,6 +272,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             project_root=args.project_root,
             snapshot_root=args.snapshot_root,
             refresh_local_sources=args.refresh_local_sources,
+            profile=args.profile,
             progress_callback=report_progress,
         )
         print(json.dumps({**result, **index.stats()}, ensure_ascii=False, indent=2, sort_keys=True))
