@@ -704,3 +704,24 @@ host memory budget and operational headroom. Snapshot labels alone do not
 provide resource isolation. No staging generation was selected by the active
 application, and no lexical or semantic query parity is claimed from this
 attempt.
+
+## Live candidate and thermal-gate check — 2026-10-27 08:58 UTC
+
+A read-only check on the primary PVE host confirmed that VM112 is still
+`paused`, while the CT108 application and Neo4j services are `active`. CT121's
+embedding service is also systemd-`active`, but it is not making measurable
+progress: PID 536 showed 0% CPU and 18 MiB RSS after almost three hours, with
+7.16 CPU seconds total since its 05:58 UTC start. The candidate-only SQLite
+index remains 215,382 chunks and 45,935 `intfloat/e5-large-v2` vectors
+(21.3%), snapshot
+`e9ebe2dfc6494b7a48c9120c75b1a337d04fda59bb0d570993f04e134f5a8848`.
+`coverage_state=DONE` is unchanged; vector readiness remains false.
+
+The unit is configured for 400 ms/s CPU quota, a 3.5 GiB memory maximum, and an
+80 C stop threshold. PVE's package sensor read 92–93 C in two samples about 30
+seconds apart, while individual cores read 64–70 C. This is above the configured
+stop threshold. The current journal contains no recent explicit cool-dwell
+message, so this check establishes an idle worker and an over-threshold package
+reading, not completion of any dwell or thermal recovery. PVE had 3.4 GiB
+available RAM and 7.7/8 GiB swap used. Do not start extra Neo4j work or relax
+the thermal gate from this evidence; keep the candidate isolated and unpromoted.
