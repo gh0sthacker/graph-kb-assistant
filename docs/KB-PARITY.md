@@ -305,3 +305,10 @@ first roughly 98-second resume check, the same candidate advanced to
 42,839/215,382 vectors (19.9%); the package sensor read 67 C and systemd still
 reported the worker active at 60% CPU quota. The per-batch 70 C stop remains
 the control point; no completion estimate is inferred from this short sample.
+
+At the 02:47 UTC follow-up, the candidate had advanced to 42,925/215,382
+embeddings (19.9%). The service was active with a 600 ms/s CPU quota; the
+hottest readable hwmon input was 69 C, just below the 70 C batch stop. It
+continues under the same thermal guard. The workspace KB stats fallback did
+not finish its source-hash scan during this check and was interrupted; this
+is unrelated to the candidate KB and does not change its counts.
