@@ -866,3 +866,29 @@ node that may disconnect at any time. Treat CT120 and data available only there
 as nonauthoritative; do not schedule new KB work on that node. Continue the
 candidate workflow only on the primary `pve` node, and retain the current
 thermal gate there.
+
+## Primary-PVE follow-up — 2026-10-27 10:25 UTC
+
+The follow-up connected only to `192.168.1.147`, which identified itself as
+`pve`; `proxmox3` and CT120 were not contacted. VM112 is paused; CT108 and
+CT121 are running. CT121's isolated candidate still has 45,935 E5 vectors for
+215,382 content chunks (21.3%) and snapshot
+`e9ebe2dfc6494b7a48c9120c75b1a337d04fda59bb0d570993f04e134f5a8848`. SQLite
+contains staging snapshot/model markers but no published `vector_snapshot_id`,
+so vector readiness is false. Its service is systemd-active, while the worker
+process is at 0.0% CPU and about 17 MiB RSS after 4h26m; cumulative process CPU
+is about 10.5 seconds, consistent with waiting at the thermal gate.
+
+The package sensor read 84 C, above the configured 80 C stop threshold; cores
+were 62-66 C. PVE showed 2.9 GiB available memory and 8 GiB swap essentially
+full. This single reading does not establish the required ten-minute dwell.
+No process, unit, VM, database, or index was started, stopped, or modified.
+Keep VM112 paused and do not bypass the CT121 gate or start additional Neo4j
+work on this evidence.
+
+The RedAmon checkout at `/home/max/bb/redamon-src` is currently at
+`cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`, not the parity pin. The reference
+files inspected for this work were read directly from pinned commit
+`4585b3442cf3c6e075fca5d3b512a8f47be501b6` with `git show`; future source
+claims must continue to name that exact commit. The deployed RedAmon runtime
+receipt and same-query retrieval comparison are still missing.
