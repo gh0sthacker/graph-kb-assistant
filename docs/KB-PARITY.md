@@ -136,12 +136,27 @@ switched to the new candidate or Lucene engine; full parity remains open.
 
 ## Receipt contract
 
-Both files use schema version 1 and the same shape; `producer` is respectively
+Receipts use schema version 2; schema-1 receipts are rejected because they can
+claim `profile=full` with an incomplete family set, omit retrieval-policy
+settings, or pass with empty query results and arbitrary score fields. `PASS`
+still compares supplied claims and does not authenticate the producer. The
+full profile must contain exactly `tool_docs`, `gtfobins`, `lolbas`, `owasp`,
+`exploitdb`, `nvd`, and `nuclei`. Every fixed query must return exactly
+`top_k` unique results and every result must include the same four finite score
+components: `lexical_score`, `vector_cosine`, `reranker_logit`, and
+`combined_rank`. Query filters are restricted to applied `source_names` filters.
+Receipts are pinned to E5-large-v2 (revision and 1024 dimensions), BGE-reranker-base
+(revision), the full-profile candidate/RRF/rerank/MMR settings and source boosts,
+and a 1920-character limit per reranker input. A RedAmon receipt must also
+identify its Neo4j Lucene and FAISS engines. The assistant receipt reports its
+actual engines; an SQLite-backed receipt therefore fails parity against RedAmon.
+
+Both files use the same shape; `producer` is respectively
 `redamon` or `graph-kb-assistant`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "producer": "redamon",
   "profile": "full",
   "corpus": {
@@ -168,7 +183,14 @@ Both files use schema version 1 and the same shape; `producer` is respectively
       "candidate_pool": 30,
       "rrf_k": 60,
       "rerank_pool_size": 30,
-      "mmr_lambda": 0.65
+      "mmr_lambda": 0.65,
+      "mmr_enabled": true,
+      "source_boosts": {
+        "tool_docs": 1.20, "gtfobins": 1.15, "lolbas": 1.15,
+        "owasp": 1.05, "nuclei": 1.00, "nvd": 0.90, "exploitdb": 0.85
+      },
+      "reranker_enabled": true,
+      "reranker_max_chars_per_side": 1920
     }
   },
   "sources": [{
@@ -188,7 +210,12 @@ Both files use schema version 1 and the same shape; `producer` is respectively
     "filters": {"source_names": []},
     "results": [{
       "chunk_id": "<stable-chunk-id>",
-      "score_components": {"lexical": 0.1, "vector": 0.2, "rerank": 0.3}
+      "score_components": {
+        "lexical_score": 0.1,
+        "vector_cosine": 0.2,
+        "reranker_logit": 0.3,
+        "combined_rank": 0.4
+      }
     }]
   }]
 }

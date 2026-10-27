@@ -15,11 +15,22 @@ from pathlib import Path
 import tempfile
 from typing import Any, Mapping
 
+from .redamon_sources import SOURCE_FAMILIES
+from .ranking import (
+    DEFAULT_MMR_LAMBDA, DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE,
+    DEFAULT_RRF_K, DEFAULT_SOURCE_BOOSTS, DEFAULT_TOP_K,
+)
+
 
 _HASH_LENGTH = 64
 _MAX_RECEIPT_BYTES = 64 << 20
 _COVERAGE_STATES = {"DONE", "PARTIAL", "BLOCKED"}
 _SUPPORTED_CHUNK_SCHEMAS = {"redamon-compatible-chunk-v1", "redamon-compatible-chunk-v2"}
+_PARITY_PROFILE = "full"
+_FULL_PROFILE_SOURCE_FAMILIES = frozenset(SOURCE_FAMILIES)
+_REQUIRED_SCORE_COMPONENTS = frozenset({
+    "lexical_score", "vector_cosine", "reranker_logit", "combined_rank",
+})
 
 
 def export_assistant_receipt(
@@ -31,9 +42,12 @@ def export_assistant_receipt(
     active SQLite WAL, partial vectors, a stale snapshot, or incomplete query
     tiers so an export can never turn partial state into parity evidence.
     """
-    from .embeddings import BGE_RERANKER_MODEL, BGE_RERANKER_REVISION, E5_MODEL, E5_REVISION
+    from .embeddings import (
+        BGE_RERANKER_MODEL, BGE_RERANKER_REVISION, E5_MODEL, E5_REVISION,
+        RERANKER_MAX_CHARS_PER_SIDE,
+    )
     from .index import KBIndex
-    from .ranking import DEFAULT_MMR_LAMBDA, DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE, DEFAULT_RRF_K, DEFAULT_TOP_K
+    from .ranking import DEFAULT_OVERFETCH_FACTOR
     from .rebuild import _validate_coverage_report
 
     if not isinstance(index, KBIndex) or not index.read_only:
@@ -202,7 +216,7 @@ def export_assistant_receipt(
         queries.append({**spec, "results": result_rows})
 
     receipt = {
-        "schema_version": 1, "producer": "graph-kb-assistant", "profile": profile,
+        "schema_version": 2, "producer": "graph-kb-assistant", "profile": profile,
         "corpus": {
             key: manifest[key] for key in (
                 "snapshot_id", "source_manifest_sha256", "source_documents_sha256", "chunks_sha256",
@@ -217,7 +231,9 @@ def export_assistant_receipt(
                 "lexical_engine": index.lexical_engine, "vector_engine": "sqlite-cosine",
                 "candidate_pool": max(DEFAULT_TOP_K * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE),
                 "rrf_k": DEFAULT_RRF_K, "rerank_pool_size": DEFAULT_RERANK_POOL_SIZE,
-                "mmr_lambda": DEFAULT_MMR_LAMBDA,
+                "mmr_lambda": DEFAULT_MMR_LAMBDA, "mmr_enabled": True,
+                "source_boosts": dict(DEFAULT_SOURCE_BOOSTS), "reranker_enabled": True,
+                "reranker_max_chars_per_side": RERANKER_MAX_CHARS_PER_SIDE,
             },
         },
         "sources": source_receipts, "queries": queries,
@@ -275,10 +291,10 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         raise ValueError(f"cannot read {expected_producer} parity receipt") from exc
     if not isinstance(value, dict):
         raise ValueError(f"{expected_producer} receipt must be a JSON object")
-    _require(value.get("schema_version") == 1 and not isinstance(value.get("schema_version"), bool), "receipt schema_version must be 1")
+    _require(value.get("schema_version") == 2 and not isinstance(value.get("schema_version"), bool), "receipt schema_version must be 2")
     _require(value.get("producer") == expected_producer, f"receipt producer must be {expected_producer}")
     profile = value.get("profile")
-    _require(isinstance(profile, str) and profile.strip() == profile and bool(profile), "receipt profile is required")
+    _require(profile == _PARITY_PROFILE, f"receipt profile must be {_PARITY_PROFILE!r} for full KB parity")
 
     corpus = value.get("corpus")
     _require(isinstance(corpus, dict), "receipt corpus must be an object")
@@ -300,6 +316,14 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
     for field in ("dimensions", "embedded_chunks", "total_content_chunks"):
         _require(_is_nonnegative_int(vectors.get(field)), f"corpus.vectors.{field} must be a non-negative integer")
     _require(vectors["dimensions"] > 0 and vectors["total_content_chunks"] > 0, "vector dimensions and content count must be positive")
+    from .embeddings import (
+        BGE_RERANKER_MODEL, BGE_RERANKER_REVISION, E5_MODEL, E5_REVISION,
+    )
+    _require(
+        vectors["model"] == E5_MODEL and vectors["revision"] == E5_REVISION
+        and vectors["dimensions"] == 1024,
+        "full profile vectors must use the pinned E5-large-v2 model revision and 1024 dimensions",
+    )
     _require(vectors.get("complete") is True, "corpus vectors must be explicitly complete")
     _require(vectors["embedded_chunks"] == vectors["total_content_chunks"], "vector counts are incomplete")
 
@@ -308,13 +332,53 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
     assert isinstance(reranker, dict)
     for field in ("model", "revision"):
         _require(isinstance(reranker.get(field), str) and bool(reranker[field]), f"corpus.reranker.{field} is required")
+    _require(
+        reranker["model"] == BGE_RERANKER_MODEL and reranker["revision"] == BGE_RERANKER_REVISION,
+        "full profile reranker must use the pinned BGE model revision",
+    )
     retrieval = corpus.get("retrieval")
     _require(isinstance(retrieval, dict) and bool(retrieval), "corpus retrieval recipe is required")
     assert isinstance(retrieval, dict)
     for field in ("lexical_engine", "vector_engine"):
         _require(isinstance(retrieval.get(field), str) and bool(retrieval[field]), f"corpus.retrieval.{field} is required")
+    if expected_producer == "redamon":
+        _require(
+            retrieval["lexical_engine"] == "neo4j-lucene"
+            and retrieval["vector_engine"] == "faiss",
+            "RedAmon full-profile receipt must use the pinned Neo4j Lucene and FAISS engines",
+        )
+    expected_retrieval = {
+        "lexical_engine": "neo4j-lucene" if expected_producer == "redamon" else retrieval["lexical_engine"],
+        "vector_engine": "faiss" if expected_producer == "redamon" else retrieval["vector_engine"],
+        "candidate_pool": max(DEFAULT_TOP_K * DEFAULT_OVERFETCH_FACTOR, DEFAULT_RERANK_POOL_SIZE),
+        "rrf_k": DEFAULT_RRF_K,
+        "rerank_pool_size": DEFAULT_RERANK_POOL_SIZE,
+        "mmr_lambda": DEFAULT_MMR_LAMBDA,
+        "mmr_enabled": True,
+        "source_boosts": DEFAULT_SOURCE_BOOSTS,
+        "reranker_enabled": True,
+        "reranker_max_chars_per_side": 1920,
+    }
+    _require(
+        set(retrieval) == set(expected_retrieval),
+        "corpus.retrieval must contain exactly the pinned full-profile settings",
+    )
+    for field, expected in expected_retrieval.items():
+        _require(retrieval.get(field) == expected, f"corpus.retrieval.{field} must match the pinned full-profile policy")
     for field in ("candidate_pool", "rrf_k", "rerank_pool_size"):
-        _require(_is_nonnegative_int(retrieval.get(field)) and retrieval[field] > 0, f"corpus.retrieval.{field} must be a positive integer")
+        _require(_is_nonnegative_int(retrieval.get(field)), f"corpus.retrieval.{field} must be a positive integer")
+    _require(retrieval.get("mmr_enabled") is True, "corpus.retrieval.mmr_enabled must be true for full parity")
+    _require(retrieval.get("reranker_enabled") is True, "corpus.retrieval.reranker_enabled must be true for full parity")
+    _require(_is_nonnegative_int(retrieval.get("reranker_max_chars_per_side")),
+             "corpus.retrieval.reranker_max_chars_per_side must be a positive integer")
+    source_boosts = retrieval.get("source_boosts")
+    _require(isinstance(source_boosts, dict) and set(source_boosts) == _FULL_PROFILE_SOURCE_FAMILIES,
+             "corpus.retrieval.source_boosts must cover the full profile")
+    assert isinstance(source_boosts, dict)
+    for name, boost in source_boosts.items():
+        _require(isinstance(boost, (int, float)) and not isinstance(boost, bool)
+                 and math.isfinite(boost) and boost > 0,
+                 f"corpus.retrieval.source_boosts.{name} must be positive and finite")
     mmr_lambda = retrieval.get("mmr_lambda")
     _require(isinstance(mmr_lambda, (int, float)) and not isinstance(mmr_lambda, bool) and math.isfinite(mmr_lambda) and 0 <= mmr_lambda <= 1, "corpus.retrieval.mmr_lambda must be between 0 and 1")
 
@@ -338,6 +402,10 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         for field in ("content_sha256", "chunk_sha256"):
             _require(_is_hash(source.get(field)), f"source family {name} {field} is invalid")
     _require(len(sources) == corpus["source_count"], "source family count does not match corpus")
+    _require(
+        source_names == _FULL_PROFILE_SOURCE_FAMILIES,
+        "full profile source families do not match the pinned RedAmon family set",
+    )
     _require(sum(row["document_count"] for row in sources) == corpus["document_count"], "source document counts do not match corpus")
     _require(sum(row["chunk_count"] for row in sources) == corpus["chunk_count"], "source chunk counts do not match corpus")
 
@@ -353,10 +421,23 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
         _require(query_id not in query_ids, f"duplicate query id {query_id}")
         query_ids.add(query_id)
         _require(isinstance(query.get("query"), str) and bool(query["query"].strip()), f"query {query_id} text is required")
-        _require(_is_nonnegative_int(query.get("top_k")) and 1 <= query["top_k"] <= 100, f"query {query_id} top_k is invalid")
+        _require(_is_nonnegative_int(query.get("top_k")) and query["top_k"] == DEFAULT_TOP_K, f"query {query_id} top_k must match the pinned default")
         _require(isinstance(query.get("filters"), dict), f"query {query_id} filters are required")
+        filters = query["filters"]
+        _require(set(filters) <= {"source_names"}, f"query {query_id} contains an unsupported filter")
+        if "source_names" in filters:
+            source_filter = filters["source_names"]
+            _require(
+                isinstance(source_filter, list)
+                and all(isinstance(name, str) and name in _FULL_PROFILE_SOURCE_FAMILIES for name in source_filter)
+                and len(source_filter) == len(set(source_filter)),
+                f"query {query_id} source_names filter is invalid",
+            )
         results = query.get("results")
-        _require(isinstance(results, list) and len(results) <= query["top_k"], f"query {query_id} results are invalid")
+        _require(
+            isinstance(results, list) and len(results) == query["top_k"],
+            f"query {query_id} must return exactly top_k results",
+        )
         assert isinstance(results, list)
         result_ids: set[str] = set()
         for rank, result in enumerate(results):
@@ -367,7 +448,10 @@ def load_receipt(path: Path, *, expected_producer: str) -> dict[str, Any]:
             _require(chunk_id not in result_ids, f"query {query_id} has a duplicate result chunk_id")
             result_ids.add(chunk_id)
             components = result.get("score_components")
-            _require(isinstance(components, dict) and bool(components), f"query {query_id} score components are required")
+            _require(
+                isinstance(components, dict) and set(components) == _REQUIRED_SCORE_COMPONENTS,
+                f"query {query_id} must include every required score component",
+            )
             assert isinstance(components, dict)
             for name, score in components.items():
                 _require(isinstance(name, str) and isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score), f"query {query_id} has invalid score component")
@@ -402,8 +486,18 @@ def load_query_fixture(path: Path) -> dict[str, Any]:
         _require(query_id not in ids, f"duplicate fixture query id {query_id}")
         ids.add(query_id)
         _require(isinstance(query.get("query"), str) and bool(query["query"].strip()), f"fixture query {query_id} text is required")
-        _require(_is_nonnegative_int(query.get("top_k")) and 1 <= query["top_k"] <= 100, f"fixture query {query_id} top_k is invalid")
+        _require(_is_nonnegative_int(query.get("top_k")) and query["top_k"] == DEFAULT_TOP_K, f"fixture query {query_id} top_k must match the pinned default")
         _require(isinstance(query.get("filters"), dict), f"fixture query {query_id} filters are required")
+        filters = query["filters"]
+        _require(set(filters) <= {"source_names"}, f"fixture query {query_id} contains an unsupported filter")
+        if "source_names" in filters:
+            source_filter = filters["source_names"]
+            _require(
+                isinstance(source_filter, list)
+                and all(isinstance(name, str) and name in _FULL_PROFILE_SOURCE_FAMILIES for name in source_filter)
+                and len(source_filter) == len(set(source_filter)),
+                f"fixture query {query_id} source_names filter is invalid",
+            )
     return value
 
 
@@ -468,7 +562,7 @@ def compare_receipts(
                             )
     failed = sum(item["status"] == "FAIL" for item in checks)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "PASS" if failed == 0 else "FAIL",
         "checks": checks,
         "passed_checks": len(checks) - failed,

@@ -9,6 +9,7 @@ E5_MODEL = "intfloat/e5-large-v2"
 E5_REVISION = "f169b11e22de13617baa190a028a32f3493550b6"
 BGE_RERANKER_MODEL = "BAAI/bge-reranker-base"
 BGE_RERANKER_REVISION = "2cfc18c9415c912f9d8155881c133215df768a70"
+RERANKER_MAX_CHARS_PER_SIDE = 1920
 
 
 class RedAmonEmbedder:
@@ -98,7 +99,7 @@ class RedAmonReranker:
         if not texts:
             return []
         scores = self._load().predict(
-            [(query[:1920], text[:1920]) for text in texts],
+            [(query[:RERANKER_MAX_CHARS_PER_SIDE], text[:RERANKER_MAX_CHARS_PER_SIDE]) for text in texts],
             batch_size=32,
             show_progress_bar=False,
         )
