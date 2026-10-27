@@ -163,3 +163,37 @@ runtime backend is available.
 The embed CLI waits for a sampled ten-minute dwell below 70 C before starting
 and after a `ThermalLimitReached` batch stop, then resumes the same staged job.
 Unreadable sensors and all non-thermal errors fail closed without retry.
+
+## Active full-profile candidate checkpoint — 2026-10-27 01:16 UTC
+
+The active vector build is isolated in CT120 (`kb-embedder`) on the Proxmox
+cluster node `proxmox3`; VM112 remains paused. The candidate is
+`full-20261026-1936`, snapshot
+`272df7647cab52f6fc0067fd4cdedfd196776a76685a587e885b95273ddd8a33`, and its
+SQLite index is under the candidate directory only. A read-only query of
+`chunk_embeddings` found 40,723 vectors for the pinned `intfloat/e5-large-v2`
+model (1024 dimensions), out of 215,382 chunks: 18.9% vector coverage. Counts
+by source were:
+
+| Source | Chunks | Pinned E5 vectors |
+| --- | ---: | ---: |
+| ExploitDB | 46,636 | 30,472 |
+| GTFOBins | 731 | 212 |
+| LOLBAS | 464 | 0 |
+| Nuclei | 19,359 | 1,732 |
+| NVD | 146,938 | 8,220 |
+| OWASP | 899 | 83 |
+| ToolDocs | 355 | 4 |
+
+The service was active at the check: CPU quota 40%, memory limit 3.5 GiB,
+about 3.03 GiB in use, one embedding thread, and package temperature 63 C.
+The repository unit template now records the same CPU/memory limits as the
+deployed service. These figures describe the current candidate only.
+`coverage_state=DONE` means all seven declared source
+families were fetched and chunked; it does not mean vectors are complete or
+that RedAmon parity has passed. The pinned RedAmon `full` profile has the same
+seven source families, but its 730-day NVD window is not the lifetime NVD
+corpus. Continue embedding this candidate, then rebuild its canonical chunks
+with the corrected GTFOBins ID handling and compare source/chunk digests and
+same-query receipts. Do not publish it as the active index while any of those
+gates are incomplete.

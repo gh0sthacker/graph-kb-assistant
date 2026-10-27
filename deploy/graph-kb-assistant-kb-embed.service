@@ -24,8 +24,8 @@ Environment=TOKENIZERS_PARALLELISM=false
 # 70 C; resume only after a separate 10-minute stable-below-70 C observation.
 ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 70
 Restart=no
-CPUQuota=20%
-MemoryMax=3G
+CPUQuota=40%
+MemoryMax=3584M
 Nice=19
 IOSchedulingClass=idle
 IOSchedulingPriority=7
