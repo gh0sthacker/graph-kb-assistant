@@ -740,3 +740,23 @@ separate CT121 candidate; neither `coverage_state=DONE` nor the existing source
 families establish active-query parity. No separate KB Neo4j endpoint is
 configured in the current app process, so do not deploy the new Lucene-provider
 configuration until that isolated endpoint is provisioned and verified.
+
+## Cross-node embedding worker inventory — 2026-10-27 09:13 UTC
+
+A cluster-wide read-only resource query found two running containers explicitly
+described as temporary isolated E5 candidate workers: CT120 `kb-embedder` on
+`proxmox3` and CT121 `kb-embedder-pve` on `pve`. This corrects the earlier
+assumption that only CT121 belonged to this KB work. CT120's PVE API status
+reported 0 CPU and about 49 MiB resident memory; CT121 reported 0 CPU and about
+41 MiB at the cluster level. CT121's in-container systemd unit is active, but
+its Python process is waiting at 0% CPU (about 18 MiB RSS); its environment
+selects only the isolated candidate index. The PVE package sensor read 90 C,
+above CT121's 80 C stop threshold. VM112 remains paused.
+
+SSH host-key verification prevented an in-container read of CT120 in this
+check, so its service state and selected candidate path are not established.
+No worker was started or stopped, and no index was read or changed during this
+inventory. Before resuming embedding, reconcile why both candidate-worker
+containers exist and prove their selected paths are isolated and non-conflicting;
+do not assume the cluster-level `running` state means either worker is doing
+embedding.
