@@ -318,8 +318,7 @@ def _redamon_yaml_chunks(
                         text += f"\nCommand: {code}"
                     if comment:
                         text += f"\nNote: {comment}"
-                    text, truncated = _truncate_redamon_structured(text, max_chars)
-                    output.append((f"{binary} — {function_type}", text, f"{binary}:{function_type}", truncated, None))
+                    output.append((f"{binary} — {function_type}", text, f"{binary}:{function_type}", False, None))
             return output
 
         value = yaml.safe_load(raw)
@@ -396,9 +395,8 @@ def _redamon_yaml_chunks(
                 content += f"\n\n{label}:\n{block['code'].strip()}"
                 if block["payloads"]:
                     content += f"\nPayloads: {block['payloads']}"
-            content, truncated = _truncate_redamon_structured(content, max_chars)
             title = f"{template_id} — {name}" if name != str(template_id) else str(template_id)
-            return [(title, content, str(template_id), truncated, None)]
+            return [(title, content, str(template_id), False, None)]
 
         if not isinstance(value, dict) or "Name" not in value:
             raise ValueError("LOLBAS YAML has no Name")
@@ -443,8 +441,8 @@ def _redamon_yaml_chunks(
             if paths:
                 parts.append(f"Full Path: {'; '.join(paths)}")
             unique = f"{name}:{category}:{str(command)[:50]}"
-            content, truncated = _truncate_redamon_structured("\n".join(parts), max_chars)
-            output.append((title, content, unique, truncated, None))
+            content = "\n".join(parts)
+            output.append((title, content, unique, False, None))
         return output
     except (yaml.YAMLError, UnicodeError) as exc:
         if document.source_name == "nuclei":
@@ -492,12 +490,6 @@ def _as_text(value: object) -> str:
     if value is None:
         return ""
     return value.strip() if isinstance(value, str) else str(value).strip()
-
-
-def _truncate_redamon_structured(text: str, max_chars: int) -> tuple[str, bool]:
-    if len(text) // 4 <= max_chars // 4:
-        return text, False
-    return text[:max_chars].rsplit(" ", 1)[0] + "...", True
 
 
 def _payload_text(value: object) -> str:
@@ -574,11 +566,10 @@ def _estimated_tokens(text: str) -> int:
 
 
 def _structured_chunks(document: SourceDocument, limit: int) -> list[tuple[str, str, bool]]:
-    content = document.text
-    if _estimated_tokens(content) <= limit // 4:
-        return [(content, document.title, False)]
-    content = content[:limit].rsplit(" ", 1)[0] + "..."
-    return [(content, document.title, True)]
+    # RedAmon stores each structured record whole. Its embedder tokenizer may
+    # truncate model input, but that must not truncate the searchable source
+    # text persisted alongside the vector.
+    return [(document.text, document.title, False)]
 
 
 def _markdown_chunks(text: str, limit: int) -> list[tuple[str, str, bool]]:

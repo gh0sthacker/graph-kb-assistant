@@ -62,10 +62,10 @@ def _vuln(cve_id: str, published: str) -> dict[str, object]:
 
 
 class NVDProviderTests(unittest.TestCase):
-    def test_oversized_nvd_content_uses_redamon_atomic_chunk_truncation(self) -> None:
+    def test_oversized_nvd_content_is_preserved_for_search_and_storage(self) -> None:
         source = {"cve": {"descriptions": [{"lang": "en", "value": "word " * 600}]}}
         content, _metadata = _redamon_search_text(source)
-        expected = ("word " * 600)[:1920].rsplit(" ", 1)[0] + "..."
+        expected = "word " * 600
         self.assertEqual(content, expected)
 
     def test_nvd_search_text_matches_pinned_redamon_chunk_normalization(self) -> None:

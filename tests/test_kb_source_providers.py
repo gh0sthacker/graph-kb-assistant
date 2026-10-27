@@ -105,6 +105,16 @@ class ArchiveProviderFixtureTests(unittest.TestCase):
             hashlib.sha256(b"lolbas:Fixture:LOLBAS:fixture.exe /safe").hexdigest()[:16],
         )
 
+        long_lolbas = SourceDocument.create(
+            source_name="lolbas", source_id="yml/OSBinaries/Long.yml", title="Long",
+            text=("Name: Long\nCommands:\n  - Category: LOLBAS\n    Command: fixture.exe\n"
+                  "    Description: " + ("full-record " * 300) + "\n"),
+        )
+        long_chunk = chunk_document(long_lolbas)[0]
+        self.assertGreater(len(long_chunk.text), 1920)
+        self.assertEqual(long_chunk.text.count("full-record"), 300)
+        self.assertNotIn("chunk_truncated", long_chunk.metadata)
+
         notice = SourceDocument.create(
             source_name="gtfobins", source_id="NOTICE:license", title="License",
             text="License terms", metadata={"document_role": "license_notice"},
@@ -774,6 +784,64 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         restored = _source_document_from_record(row)
         self.assertEqual(restored, document)
 
+    def test_rechunk_restores_oversized_nvd_text_from_retained_raw_record(self) -> None:
+        description = ("evidence " * 300) + "NVD_COMPLETE_TAIL"
+        raw_source = json.dumps({
+            "cve": {"descriptions": [{"lang": "en", "value": description}]},
+        }, separators=(",", ":"))
+        clipped = description[:1920].rsplit(" ", 1)[0] + "..."
+        document = SourceDocument.create(
+            source_name="nvd", source_id="CVE-2026-12345", title="CVE-2026-12345",
+            text=clipped, metadata={"cve_id": "CVE-2026-12345"}, raw_source_text=raw_source,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-nvd-rechunk-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(
+                chunk_document(document), "1" * 64, sources=(document,),
+            )
+            result = rechunk_index(index, project_root=Path(__file__).resolve().parents[1])
+            stored = index.get_source("nvd", "CVE-2026-12345")
+            hits = index.search("NVD_COMPLETE_TAIL", top_k=1)
+            with index.connect() as connection:
+                stored_chunk_text = connection.execute(
+                    "SELECT text FROM chunks WHERE source_name='nvd' AND source_id='CVE-2026-12345'",
+                ).fetchone()[0]
+
+        self.assertEqual(result["chunks"], 1)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["text"], description)
+        self.assertEqual(stored["content_sha256"], hashlib.sha256(description.encode()).hexdigest())
+        self.assertEqual(len(hits), 1)
+        self.assertTrue(stored_chunk_text.endswith("NVD_COMPLETE_TAIL"))
+
+    def test_rechunk_restores_gtfobins_suffix_in_stable_chunk_id(self) -> None:
+        document = SourceDocument.create(
+            source_name="gtfobins", source_id="_gtfobins/ld.so", title="ld",
+            text="---\nfunctions:\n  suid:\n    - description: Read a file\n---\n",
+            metadata={"binary_name": "ld", "filename": "ld.so"},
+        )
+        legacy_chunk_id = hashlib.sha256(b"gtfobins:ld:suid").hexdigest()[:16]
+        expected_chunk_id = hashlib.sha256(b"gtfobins:ld.so:suid").hexdigest()[:16]
+
+        with tempfile.TemporaryDirectory(prefix="bb-assistant-kb-gtfobins-rechunk-") as temporary:
+            index = KBIndex(Path(temporary) / "index.sqlite3")
+            index.replace_snapshot(
+                chunk_document(document), "2" * 64, sources=(document,),
+            )
+            result = rechunk_index(index, project_root=Path(__file__).resolve().parents[1])
+            stored = index.get_source("gtfobins", "_gtfobins/ld.so")
+            with index.connect() as connection:
+                chunk_ids = connection.execute(
+                    "SELECT chunk_id FROM chunks WHERE source_name='gtfobins'",
+                ).fetchall()
+
+        self.assertEqual(result["chunks"], 1)
+        self.assertEqual([row[0] for row in chunk_ids], [expected_chunk_id])
+        self.assertNotEqual(expected_chunk_id, legacy_chunk_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["metadata"]["binary_name"], "ld.so")
+
     def test_redamon_chunking_keeps_atomic_records_and_heading_based_markdown(self) -> None:
         structured = SourceDocument.create(
             source_name="nuclei", source_id="template.yaml", title="Template",
@@ -782,15 +850,13 @@ class VendoredToolDocsSnapshotTests(unittest.TestCase):
         )
         structured_chunks = chunk_document(structured)
         self.assertEqual(len(structured_chunks), 1)
-        self.assertTrue(structured_chunks[0].metadata["chunk_truncated"])
+        self.assertNotIn("chunk_truncated", structured_chunks[0].metadata)
         self.assertTrue(structured_chunks[0].text.startswith("Demo template (info)\n\n"))
-        self.assertTrue(structured_chunks[0].text.endswith("..."))
+        self.assertTrue(structured_chunks[0].text.endswith(("description " * 500).rstrip()))
+        self.assertGreater(len(structured_chunks[0].text), 1920)
         self.assertFalse(structured_chunks[0].metadata["source_span_exact"])
         self.assertEqual(structured_chunks[0].end_char, len(structured.text))
-        self.assertEqual(
-            structured_chunks[0].chunk_sha256,
-            "fb83ad3a6823a3980d52e742c4054ed7fe1a2c06e64aa483289823719d7e997e",
-        )
+        self.assertEqual(structured_chunks[0].chunk_sha256, hashlib.sha256(structured_chunks[0].text.encode()).hexdigest())
 
         markdown_text = (
             "# Guide\n\nIntro\n\n## First\n\nShort section.\n\n"

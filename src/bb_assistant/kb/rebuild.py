@@ -457,10 +457,16 @@ def rechunk_index(
                     connection.commit()
                     continue
                 chunks: list[CanonicalChunk] = []
+                normalized_documents: list[SourceDocument] = []
                 for row in rows:
                     record = dict(row)
                     record["metadata"] = json.loads(record.pop("metadata_json"))
-                    document = _source_document_from_record(record)
+                    original_document = _source_document_from_record(record)
+                    document = _restore_stored_source_document(original_document)
+                    if (document.text != row["text"]
+                            or document.content_sha256 != row["content_sha256"]
+                            or document.metadata != original_document.metadata):
+                        normalized_documents.append(document)
                     chunks.extend(chunk_document(document, max_chars=max_chars, overlap_chars=overlap_chars))
                 for chunk in chunks:
                     metadata_json = json.dumps(chunk.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -502,6 +508,14 @@ def rechunk_index(
                             "INSERT OR REPLACE INTO kb_rechunk_fts_ids(chunk_id,fts_rowid) VALUES(?,?)",
                             (chunk.chunk_id, cursor.lastrowid),
                         )
+                for document in normalized_documents:
+                    connection.execute(
+                        "UPDATE source_documents SET content_sha256=?,text=?,metadata_json=? "
+                        "WHERE source_name=? AND source_id=?",
+                        (document.content_sha256, document.text,
+                         json.dumps(document.metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                         document.source_name, document.source_id),
+                    )
                 last_id = rows[-1]["source_id"]
                 connection.execute(
                     "INSERT INTO kb_meta(key,value) VALUES('rechunk_progress_family',?) "
@@ -669,6 +683,83 @@ def _source_document_from_record(value: dict[str, object]) -> SourceDocument:
     elif hashlib.sha256(document.raw_source_text.encode("utf-8")).hexdigest() != document.raw_source_sha256:
         raise ValueError(f"snapshot raw source hash mismatch: {document.source_name}/{document.source_id}")
     return document
+
+
+def _restore_stored_source_document(document: SourceDocument) -> SourceDocument:
+    """Repair previously clipped NVD text and GTFOBins IDs during rechunk.
+
+    Older snapshots clipped NVD text before persistence, although they retained
+    the complete upstream JSON. They can also contain GTFOBins names derived
+    with ``Path.stem`` instead of RedAmon's suffix-only ``.md`` removal. Recover
+    both from stored provenance without a new network fetch.
+    """
+    text = document.text
+    metadata = dict(document.metadata)
+    if document.source_name == "gtfobins":
+        filename = metadata.get("filename")
+        if isinstance(filename, str) and filename:
+            binary_name = filename[:-3] if filename.endswith(".md") else filename
+            metadata["binary_name"] = binary_name
+    if document.source_name == "nvd" and document.raw_source_text is not None:
+        try:
+            raw_record = json.loads(document.raw_source_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"stored NVD source record is invalid JSON: {document.source_id}") from exc
+        if not isinstance(raw_record, Mapping):
+            raise ValueError(f"stored NVD source record is not an object: {document.source_id}")
+        from .nvd import _redamon_search_text
+
+        text, _metadata = _redamon_search_text(raw_record)
+    if text == document.text and metadata == document.metadata:
+        return document
+    return SourceDocument.create(
+        source_name=document.source_name,
+        source_id=document.source_id,
+        title=document.title,
+        text=text,
+        source_url=document.source_url,
+        source_locator=document.source_locator,
+        source_revision=document.source_revision,
+        license_id=document.license_id,
+        attribution=document.attribution,
+        metadata=metadata,
+        raw_source_text=document.raw_source_text,
+    )
+
+
+def _restore_nvd_search_text(document: SourceDocument) -> SourceDocument:
+    """Rebuild NVD search text from its retained raw API record when rechunking.
+
+    Older candidate indexes persisted the provider's clipped text even though
+    they retained the complete NVD JSON. This repairs those rows without a new
+    network fetch and keeps the raw payload and its digest unchanged.
+    """
+    if document.source_name != "nvd" or document.raw_source_text is None:
+        return document
+    try:
+        raw_record = json.loads(document.raw_source_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"stored NVD source record is invalid JSON: {document.source_id}") from exc
+    if not isinstance(raw_record, Mapping):
+        raise ValueError(f"stored NVD source record is not an object: {document.source_id}")
+    from .nvd import _redamon_search_text
+
+    text, _metadata = _redamon_search_text(raw_record)
+    if text == document.text:
+        return document
+    return SourceDocument.create(
+        source_name=document.source_name,
+        source_id=document.source_id,
+        title=document.title,
+        text=text,
+        source_url=document.source_url,
+        source_locator=document.source_locator,
+        source_revision=document.source_revision,
+        license_id=document.license_id,
+        attribution=document.attribution,
+        metadata=document.metadata,
+        raw_source_text=document.raw_source_text,
+    )
 
 
 def _validate_coverage_report(
