@@ -354,7 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 count = index.rebuild_embeddings(
                     embedder, batch_size=args.batch_size, progress_callback=report_progress,
-                    before_batch_callback=thermal.check,
+                    before_batch_callback=thermal.check_sustained,
                 )
             except ThermalLimitReached as exc:
                 print(

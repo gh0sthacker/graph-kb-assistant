@@ -68,6 +68,46 @@ class ThermalMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "stopping embedding"):
                 monitor.check()
 
+    def test_check_sustained_ignores_single_hot_spike(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sensor = Path(directory) / "temp"
+            sensor.write_text("65000\n", encoding="ascii")
+            readings = iter(("80000\n", "65000\n", "66000\n", "67000\n"))
+            clock = FakeClock(on_sleep=lambda _now: sensor.write_text(next(readings), encoding="ascii"))
+            result = ThermalMonitor(sensor).check_sustained(
+                over_limit_samples=3,
+                sample_interval_seconds=1,
+                sleep=clock.sleep,
+            )
+            self.assertEqual(result, 67.0)
+            self.assertEqual(clock.now, 4.0)
+
+    def test_check_sustained_stops_after_three_consecutive_hot_readings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sensor = Path(directory) / "temp"
+            sensor.write_text("80000\n", encoding="ascii")
+            clock = FakeClock()
+            with self.assertRaises(ThermalLimitReached):
+                ThermalMonitor(sensor).check_sustained(
+                    over_limit_samples=3,
+                    sample_interval_seconds=1,
+                    sleep=clock.sleep,
+                )
+            self.assertEqual(clock.now, 2.0)
+
+    def test_check_sustained_fails_closed_on_sensor_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            monitor = ThermalMonitor(Path(directory) / "missing")
+            with self.assertRaisesRegex(RuntimeError, "sensor is unavailable"):
+                monitor.check_sustained(sleep=lambda _seconds: self.fail("must not retry sensor errors"))
+
+    def test_check_remains_an_instantaneous_limit_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            sensor = Path(directory) / "temp"
+            sensor.write_text("80000\n", encoding="ascii")
+            with self.assertRaises(ThermalLimitReached):
+                ThermalMonitor(sensor).check()
+
     def test_waits_for_full_cool_dwell(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             sensor = Path(directory) / "temp"

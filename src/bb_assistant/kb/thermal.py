@@ -33,6 +33,41 @@ class ThermalMonitor:
             )
         return celsius
 
+    def check_sustained(
+        self,
+        *,
+        over_limit_samples: int = 3,
+        sample_interval_seconds: float = 1.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> float:
+        """Return a safe reading unless the limit is reached repeatedly.
+
+        Isolated hot readings are tolerated, but sensor/configuration errors
+        propagate immediately so the embedding process fails closed.
+        """
+        if sample_interval_seconds <= 0:
+            raise ValueError("sample_interval_seconds must be positive")
+        if over_limit_samples < 1:
+            raise ValueError("over_limit_samples must be positive")
+
+        consecutive_over_limit = 0
+        consecutive_below_limit = 0
+        temperature = 0.0
+        while True:
+            try:
+                temperature = self.check()
+            except ThermalLimitReached:
+                consecutive_below_limit = 0
+                consecutive_over_limit += 1
+                if consecutive_over_limit >= over_limit_samples:
+                    raise
+            else:
+                consecutive_over_limit = 0
+                consecutive_below_limit += 1
+                if consecutive_below_limit >= over_limit_samples:
+                    return temperature
+            sleep(sample_interval_seconds)
+
     def wait_for_cool_dwell(
         self,
         *,
