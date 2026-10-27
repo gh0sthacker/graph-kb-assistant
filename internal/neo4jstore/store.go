@@ -73,6 +73,29 @@ func ConfigFromEnv() (Config, error) {
 	return cfg, nil
 }
 
+// ConfigFromRequiredEnvPrefix reads an explicitly configured Neo4j endpoint
+// from a caller-owned environment namespace. It intentionally applies no
+// localhost or credential defaults so an optional store cannot silently bind
+// to the application's primary graph database.
+func ConfigFromRequiredEnvPrefix(prefix string) (Config, error) {
+	if !regexp.MustCompile(`^BB_ASSISTANT_[A-Z0-9_]+$`).MatchString(prefix) {
+		return Config{}, errors.New("Neo4j environment prefix is invalid")
+	}
+	cfg := Config{
+		URI:      strings.TrimSpace(os.Getenv(prefix + "_URI")),
+		Username: strings.TrimSpace(os.Getenv(prefix + "_USERNAME")),
+		Password: os.Getenv(prefix + "_PASSWORD"),
+		Database: strings.TrimSpace(os.Getenv(prefix + "_DATABASE")),
+	}
+	if cfg.URI == "" || cfg.Username == "" || cfg.Password == "" || cfg.Database == "" {
+		return Config{}, errors.New("Neo4j endpoint settings are required")
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
 func (c Config) Validate() error {
 	parsed, err := url.Parse(c.URI)
 	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -165,6 +188,89 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// DeleteProject removes every graph projection row for one exact project key.
+// Callers must hold the project's exclusive maintenance lease and unregister
+// it only after this succeeds. Deletes are committed in bounded batches so a
+// large capture history does not require one unbounded transaction.
+func (s *Store) DeleteProject(ctx context.Context, projectKey string) error {
+	if s == nil || s.driver == nil {
+		return errors.New("Neo4j store is unavailable")
+	}
+	if !projectKeyPattern.MatchString(projectKey) {
+		return errors.New("Neo4j project key is invalid")
+	}
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: s.database})
+	defer session.Close(ctx)
+	deleteBatches := func(query, errorMessage string) error {
+		for {
+			result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+				result, runErr := tx.Run(ctx, query, map[string]any{
+					"project_key": projectKey, "limit": writeBatchSize,
+				})
+				if runErr != nil {
+					return nil, errors.New(errorMessage)
+				}
+				if !result.Next(ctx) {
+					if result.Err() != nil {
+						return nil, errors.New(errorMessage)
+					}
+					return nil, errors.New(errorMessage)
+				}
+				deleted, valueOK := result.Record().Get("deleted")
+				if !valueOK {
+					return nil, errors.New(errorMessage)
+				}
+				if _, consumeErr := result.Consume(ctx); consumeErr != nil {
+					return nil, errors.New(errorMessage)
+				}
+				count, ok := deleted.(int64)
+				if !ok || count < 0 || count > writeBatchSize {
+					return nil, errors.New(errorMessage)
+				}
+				return count, nil
+			})
+			if err != nil {
+				return err
+			}
+			deleted, ok := result.(int64)
+			if !ok {
+				return errors.New(errorMessage)
+			}
+			if deleted == 0 {
+				return nil
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+	}
+	if err := deleteBatches(`
+		MATCH (n:GraphRecord {project_key: $project_key})
+		WITH n LIMIT $limit
+		DETACH DELETE n
+		RETURN count(n) AS deleted`, "Neo4j project graph could not be purged"); err != nil {
+		return err
+	}
+	if err := deleteBatches(`
+		MATCH (n:GraphImport {project_key: $project_key})
+		WITH n LIMIT $limit
+		DELETE n
+		RETURN count(n) AS deleted`, "Neo4j project import markers could not be purged"); err != nil {
+		return err
+	}
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, runErr := tx.Run(ctx, "MATCH (n:GraphProject {project_key: $project_key}) DELETE n", map[string]any{"project_key": projectKey})
+		if runErr != nil {
+			return nil, errors.New("Neo4j project metadata could not be purged")
+		}
+		if _, runErr = result.Consume(ctx); runErr != nil {
+			return nil, errors.New("Neo4j project metadata could not be purged")
+		}
+		return nil, nil
+	})
+	return err
 }
 
 type preparedRecord struct {

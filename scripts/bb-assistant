@@ -7,13 +7,16 @@ requested_backend="${BB_ASSISTANT_GRAPH_BACKEND:-}"
 requested_data_home="${BB_ASSISTANT_DATA_HOME:-}"
 requested_vault_key="${BB_ASSISTANT_VAULT_KEY:-}"
 requested_runtime_env_file="${BB_ASSISTANT_RUNTIME_ENV_FILE:-}"
+requested_kb_neo4j_env_file="${BB_ASSISTANT_KB_NEO4J_ENV_FILE:-}"
 env_file="${BB_ASSISTANT_NEO4J_ENV_FILE:-$data_home/bb-graph-assistant/neo4j.env}"
 command_name="${1:-}"
 needs_neo4j_config=1
+needs_kb_neo4j_config=1
 
 case "$command_name" in
   status|version)
     needs_neo4j_config=0
+    needs_kb_neo4j_config=0
     ;;
 esac
 if [[ "$requested_backend" == "sqlite" ]]; then
@@ -45,6 +48,17 @@ fi
 runtime_backend="${BB_ASSISTANT_GRAPH_BACKEND:-}"
 runtime_data_home="${BB_ASSISTANT_DATA_HOME:-}"
 runtime_vault_key="${BB_ASSISTANT_VAULT_KEY:-}"
+kb_data_home="${requested_data_home:-${runtime_data_home:-${neo4j_data_home:-$data_home/bb-graph-assistant}}}"
+kb_neo4j_env_file="${requested_kb_neo4j_env_file:-${BB_ASSISTANT_KB_NEO4J_ENV_FILE:-$kb_data_home/kb-neo4j.env}}"
+if [[ -f "$kb_neo4j_env_file" ]]; then
+  set -a
+  # This private file must contain only the separately provisioned KB endpoint.
+  . "$kb_neo4j_env_file"
+  set +a
+elif [[ "$needs_kb_neo4j_config" == "1" && "${BB_ASSISTANT_KB_LEXICAL_ENGINE:-}" == "neo4j-lucene" ]]; then
+  printf 'Dedicated KB Neo4j environment file not found: %s\n' "$kb_neo4j_env_file" >&2
+  exit 1
+fi
 
 if [[ -n "$requested_backend" ]]; then
   export BB_ASSISTANT_GRAPH_BACKEND="$requested_backend"
@@ -68,5 +82,27 @@ elif [[ -n "$neo4j_vault_key" ]]; then
   export BB_ASSISTANT_VAULT_KEY="$neo4j_vault_key"
 fi
 export BB_ASSISTANT_GRAPH_BACKEND="${BB_ASSISTANT_GRAPH_BACKEND:-neo4j}"
+if [[ -z "${BB_ASSISTANT_KB_PYTHON:-}" ]]; then
+  kb_python="$runtime_data_home/kb-models-venv/bin/python"
+  if [[ -x "$kb_python" ]]; then
+    export BB_ASSISTANT_KB_PYTHON="$kb_python"
+  elif command -v python3.11 >/dev/null 2>&1; then
+    export BB_ASSISTANT_KB_PYTHON="$(command -v python3.11)"
+  else
+    export BB_ASSISTANT_KB_PYTHON="$(command -v python3)"
+  fi
+fi
+export BB_ASSISTANT_KB_MODELS="${BB_ASSISTANT_KB_MODELS:-1}"
+export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
 cd "$repo_root"
+if [[ -n "${BB_ASSISTANT_BINARY:-}" ]]; then
+  if [[ ! -x "$BB_ASSISTANT_BINARY" ]]; then
+    printf 'configured BB_ASSISTANT_BINARY is not executable: %s\n' "$BB_ASSISTANT_BINARY" >&2
+    exit 1
+  fi
+  exec "$BB_ASSISTANT_BINARY" "$@"
+fi
+if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  exec go run -buildvcs=true ./cmd/bb-assistant "$@"
+fi
 exec go run ./cmd/bb-assistant "$@"

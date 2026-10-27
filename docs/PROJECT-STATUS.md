@@ -1,5 +1,442 @@
 # Project status and known limitations
 
+## Architecture follow-up — bounded Caido cycle, receipts and route-family v3 — 2026-10-27 — LOCAL, NOT DEPLOYED
+
+- Added `caido-sync --once` for one inventory cycle. It exits nonzero on an
+  inventory or per-project failure instead of sleeping/retrying indefinitely;
+  it still performs bounded writes to the selected local project and must only
+  run after scope/project preflight.
+- Every cycle now emits a structured operational receipt for all configured
+  origins. The receipt records pages, cursor/limit state, graph drain, response
+  refresh and fidelity caveats; `coverage_complete` remains false because the
+  MCP source lacks a stable snapshot token and expected total.
+- Added `route-family-v3`: exact case-preserving static words and strong ID
+  shapes can group; percent-encoded and unknown segments remain ungrouped.
+  Existing endpoint/evidence IDs are unchanged and v1/v2 readers remain
+  supported. Operation backfill previews now use the same v3 classifier.
+- Added a CT108 Go cutover/recovery runbook and marked old Python/`bbassist`/`/opt`
+  setup examples as historical compatibility paths. The sync unit now caps
+  page/body work per poll. `--once` and synthetic tests do not prove live
+  Caido completeness, runtime compatibility, restart/replay or real-project
+  backup/restore. CT108 has not been changed in this work slice.
+
+## Candidate-only KB embed resumed — 2026-10-26 21:41 UTC — IN PROGRESS
+
+- Fixed commit `a1eff94` passed its focused local CLI tests and CI run
+  [40406247224](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40406247224).
+- Deployed `cli.py` and the embedding systemd unit to CT108; both remote file
+  hashes match the workspace. The root-owned environment file selects the
+  isolated `kb/candidates/full-20261026-1936/index.sqlite3` path.
+- A negative runtime check against the live `kb/index.sqlite3` was rejected by
+  the new guard before the database was opened. The corrected candidate-only
+  unit is started manually and enabled for boot so it resumes the same gated
+  candidate job after a CT restart. Its process uses
+  one thread, batch size 2, a 20% CPU quota, a 3 GiB memory cap, and the
+  ten-minute cool-dwell gate below 70 C.
+- At the latest sample the process was active at 0.2% CPU and 0.4% memory,
+  while the package temperature read 77 C. Read-only candidate counts were
+  215,382 chunks and 38,775 vectors, unchanged; the worker is waiting and has
+  not resumed embedding. VM112 remains paused and the active index is intact.
+
+## KB embed destination safety correction — 2026-10-26 21:36 UTC — PARTIAL
+
+- A fresh PVE check confirmed VM112 paused. In CT108, the embed unit is
+  inactive and disabled with no process; the package sensor read 75 C.
+- The installed unit's expanded command targeted the live
+  `kb/index.sqlite3`, contrary to older status notes that called it a
+  candidate-only worker. The isolated full-profile candidate exists, but the
+  incorrect unit was not started and the active database was not changed.
+- Local CLI now rejects embedding unless an existing
+  `kb/candidates/<id>/index.sqlite3` is selected before any writable index is
+  opened. The unit now reads its candidate path from a protected environment
+  file. Focused CLI tests pass; see the later deployment note above.
+- At this 21:36 check, the 75 C reading exceeded the 70 C gate. The corrected
+  worker and its later 77 C gated state are recorded above.
+
+## KB maximum-coverage candidate — 2026-10-26 20:24 UTC — IN PROGRESS
+
+- The isolated `full`-profile candidate is at snapshot
+  `098d8605cfefa503ad9d226d617d74b5b37dd16a781855283ad733e929a43b39`:
+  seven source families are `DONE`, with 207,878 source documents and 208,950
+  content chunks (208,960 stored rows including 10 notice rows). Its current
+  E5-large-v2 vector count is 38,882/208,950 (18.6%); the vector staging marker
+  is still present, so semantic readiness is false. The active application index
+  remains unchanged.
+- Candidate embedding runs only on CT108. Its single-thread worker remains
+  active behind the 70 C / ten-minute cool-dwell gate. CT108's `coretemp
+  Package id 0` sensor read 89 C at 20:23 UTC and 55 C at 20:28 UTC. Those
+  samples are five minutes apart, so they do not establish the required
+  ten-minute cool dwell; the worker remains in its gate. VM112 remains paused
+  and the Kali embedding unit remains disabled.
+- These seven-family counts are the selected RedAmon `full`-profile target,
+  not proof that the candidate equals the installed RedAmon corpus. The
+  installed VM112 profile is `cpu-lite`; exact corpus and query parity remain
+  open. Keep the candidate isolated until vectors finish, integrity checks and
+  fixed-query comparisons pass, and the active RedAmon snapshot reference is
+  available.
+
+## KB max-fill work resumed on Proxmox — 2026-10-26 19:34 UTC — IN PROGRESS
+
+- The selected completeness target is RedAmon's pinned seven-family `full`
+  profile, rather than the installed VM112 `cpu-lite` snapshot. CT108 already
+  contains that seven-family corpus: 207,878 source documents, 209,036 stored
+  chunks (209,026 content chunks), and 38,888 content vectors. Semantic
+  coverage is incomplete; exact RedAmon parity remains unproven.
+- A read-only preflight found all seven current source revisions match their
+  pins. The old source-manifest digest is stale because current legal/notice
+  metadata was added later; the existing per-source chunk counts are also
+  inaccurate for ToolDocs and OWASP. The existing source index was not rebuilt.
+- `rechunk_index` now recomputes per-source document/chunk counts from stored
+  source and chunk rows. Its focused 17-test provider/rechunk suite passed.
+- Started the resumable E5 embedding service on CT108, with one thread, batch
+  size 2, 20% CPU quota, 3 GiB memory cap, and a ten-minute cool-down gate below
+  70 C. It began in a low-resource thermal wait (13.7 MiB RSS, 88 ms CPU); no
+  vectors had been added at that check. It will publish readiness only after
+  all content chunks are covered. Kali is not running the workload; VM112 stays
+  paused.
+- Next: verify progress and thermal state; deploy the coverage reconciliation
+  change, create an isolated corrected full-profile candidate from the stored
+  sources, then validate candidate counts and same-query behavior before
+  promoting it. Keep parity `PARTIAL` until RedAmon corpus and query receipts
+  match.
+
+## Installed RedAmon reference identified read-only — 2026-10-26 — PARTIAL
+
+- The authoritative reference is VM112 on the Proxmox host (not a RedAmon
+  service on Proxmox2). VM112 remains paused as the user requested. Its
+  qcow2 was inspected via a read-only `qemu-nbd` attachment; it was then
+  unmounted and disconnected without resuming the VM.
+- Its installed RedAmon checkout is `e1dfdff671b7e76d3a002eeba37b01d92cb949e1`
+  plus four local modifications. `.last_ingest` records profile `cpu-lite`
+  from 2026-10-19. That profile contains `tool_docs`, `gtfobins`, and `lolbas`.
+  The local checkout changes the installed embedder to E5-base-v2 at pinned
+  revision `f52bf8ec8c7124536f0efb74aca902b2995e5bcd`.
+- The deployed FAISS artifact has 2,449 IDs and is consistent with 768-d
+  vectors. The current Assistant KB instead has seven source families and
+  E5-large-v2 vectors (38,888/209,026); this is a confirmed profile/model
+  mismatch, not an identity claim.
+- A byte-verified copy of the RedAmon Neo4j store was made on PVE. A
+  network-isolated Neo4j 5.26 clone exited with code 3 before queries became
+  available (`OOMKilled=false`; server log: shutdown requested). The original
+  VM112/DB has not been started or modified. Exact document/chunk digests and
+  same-query ranking still need to be obtained from a queryable isolated copy.
+- See [`KB-CT108-PARITY.md`](KB-CT108-PARITY.md) for the detailed evidence.
+  Keep KB parity `PARTIAL`; RedAmon-compatible source-specific chunking is now
+  implemented and covered by offline fixtures, but the CT108 candidate has not
+  yet been re-chunked. The candidate embedding unit is inactive/disabled after
+  the latest operator stop, and VM112 remains paused. Full vector coverage,
+  deployed corpus hashes, and same-query receipts remain open.
+
+## KB source-coverage integrity fix deployed to CT108 — 2026-10-26 18:46 UTC — PARTIAL
+
+- CI run [40380086566](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40380086566)
+  passed Go tests, `go vet`, Python tests, and secret scanning for PR head
+  `8251a859d519806afe710944b45e97521bf1564b`. The verified Linux amd64
+  artifact was the tested PR merge build `44c6468fd07fcac54693de7c786094c456345184`,
+  version `0.1.0-go-dev+44c6468fd07f`, SHA-256
+  `8861baa0366d888f603048d9c27d49f1edf49e470edf1b8b0dd45c82cb7dd065`.
+- Installed the binary atomically at `/usr/local/bin/bb-assistant` in CT108;
+  retained the previous executable as
+  `/usr/local/bin/bb-assistant.before-8251a85`. Restarted only
+  `graph-kb-assistant.service`. The service is active, `/api/health` reports
+  `ok` and the new version, and a read-only MCP `bb_kb_stats` call succeeds.
+- The integrity guard now reports the active KB snapshot as `PARTIAL` instead
+  of trusting its invalid `DONE` coverage summary. It preserves KB search.
+  Stats still show 207,878 documents, 209,026 content chunks, 38,888 vectors,
+  and `vector_ready=false`; no source rebuild or embedding ran. VM112 remains
+  paused. RedAmon corpus and same-query result parity remain unproven.
+
+## Selected dead-letter replay — 2026-10-26 14:17 UTC — IMPLEMENTED, RUNTIME APPLY PENDING
+
+- Added `projection-replay`: dry-run by default; apply requires explicit
+  revision IDs, validates their stored normalized payloads and digests, holds
+  the exclusive project lease, refuses unrelated pending/leased work, and
+  performs one bounded attempt per named job without resetting attempt history.
+- Synthetic Go tests and `go vet ./...` pass. This code has not yet been
+  deployed or applied to the registered Juice Shop project; its runtime DLQ
+  state remains the last observed two jobs at attempt 8.
+- A read-only CT108 check after the Caido project deletion still found the old
+  Graph Assistant project registration and graph. Deleting the Caido source
+  project does not delete Graph Assistant's independent local graph; new
+  ingestion from that deleted Caido project will stop until another project
+  is registered.
+
+## CT108 thermal guard deployment — 2026-10-26 12:08 UTC — PARTIAL
+
+- CI run [40319814131](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40319814131) passed Go tests/vet, Python tests, and secret scanning for commit `eb4d078`.
+- Deployed only `src/bb_assistant/kb/cli.py`, `src/bb_assistant/kb/thermal.py`, and the embedding systemd unit from commit `5b89ad6` to CT108. Bundle SHA-256 was `a4b92c1fe85fbd92c1318d867c6b0a7c3442ce869988ef94de6c380d65843089`; all three installed file hashes match the checked-in versions.
+- The CT108 unit was reloaded with `systemctl daemon-reload`; embedding remains `inactive` and `disabled`. Its stop threshold is now 70 C, CPU quota 20%, one thread, batch size 2, and ten-minute cool-dwell gate. Existing KB/app services were not restarted; the app `/api/health` still returned HTTP 200.
+- PVE and CT108 both exposed the same Intel `coretemp` package sensor during this check (64 C). A read-only dwell attempt began at 12:08:58 UTC and aborted on its second sample at 85 C; embedding was not started. A new SSH connection to PVE was denied, so the current temperature and subsequent dwell cannot be verified from this session. No vectors were generated. The 170,138-vector gap and RedAmon parity remain open.
+
+## CT108 HTTP MCP deployment and Hermes check — 2026-10-26 11:48 UTC — PARTIAL
+
+- Commit `ba4b52e` adds the official Go SDK Streamable HTTP MCP handler at
+  `/mcp`, mounted beside the existing web UI. Local `go test ./...`,
+  `go vet ./...`, binary build, and `git diff --check` passed. GitHub CI run
+  [40317184288](https://github.com/gh0sthacker/graph-kb-assistant/actions/runs/40317184288)
+  passed its Python, Go, and secret-scan jobs.
+- The 25 MB build was installed on CT108 as `/usr/local/bin/bb-assistant` via
+  a temporary HTTP transfer restricted to the PVE host, then atomically
+  renamed into place. Its SHA-256 is
+  `6ef9bc14a69fe135f304a71b18e37fa813dbc5a3c048887bb46b6a4051a442be` on
+  both build host and CT108. The transfer listener was stopped immediately.
+  `graph-kb-assistant.service` is active and its loopback `/api/health` returns
+  HTTP 200 after restart.
+- A live MCP initialize negotiated protocol `2025-06-18`; `tools/list` returned
+  all 15 tools. The Kali Hermes profile's existing SSH-backed stdio server
+  reconnected to CT108 in 2.7 seconds, discovered all 15 tools, and a remote
+  `bb_kb_stats` call returned structured content. No model request or capture
+  body was used. The app domain resolves from Kali to `192.168.2.154`; both UI
+  and `/mcp` correctly return HTTP 401 without Nginx credentials.
+- The KB embed service remains inactive. PVE package samples ranged from 61°C
+  to 91°C during one-minute observations, including 91°C at 11:57:36 UTC; the
+  required 10-minute below-70°C dwell is not established, so no embedding job
+  was started. A brief CT/PVE sensor mismatch also needs a fresh consistent
+  dwell check. Full RedAmon data/vector/query parity and live Caido
+  intake/runtime remain unverified; overall delivery is still `PARTIAL`.
+- A fresh read-only `bb_kb_stats` call over Hermes' SSH MCP route identifies
+  snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`:
+  source coverage is `DONE` across seven configured families (207,878
+  documents, 209,026 content chunks), but only 38,888/209,026 chunks have E5
+  vectors and `vector_ready=false`. This live status supersedes older vector
+  counts below; it does not prove equality with an identified deployed RedAmon
+  snapshot or query results. A read-only live `bb_kb_search` query returned
+  three cited hits with source hashes and rank scores from that snapshot; this
+  verifies the current lexical retrieval path, not semantic-vector parity.
+
+## Current loopback runtime check — 2026-10-26 07:22 UTC — PARTIAL
+
+- The Go web process is running on `127.0.0.1:8765`. Read-only requests to
+  `/` and `/api/projects` returned HTTP 200. `/api/health` is not a registered
+  route and returned 404; this is not evidence that the app is unhealthy.
+- This verifies loopback serving and route registration only. It does not
+  verify access from a separate client, authenticated proxy behavior, a full
+  graph/evidence interaction, or the Hermes gateway's current MCP handshake.
+  Overall runtime coverage remains `PARTIAL`.
+
+## Fresh Hermes gateway and MCP check — 2026-10-26 07:30 UTC — PARTIAL
+
+- `./scripts/run-hermes mcp test bb_assistant` connected to the current
+  checkout's stdio launcher in 5.9 seconds and discovered the expected 15
+  allowlisted tools, including consultation resume. This starts a fresh local
+  MCP child; it made no model request and read no capture body.
+- The older Hermes gateway was then restarted with
+  `./scripts/run-hermes gateway restart --detach` without `--yes`; Hermes
+  stopped it cleanly and started a fresh background gateway. A subsequent
+  `gateway status --deep --full` confirmed it running. Hermes reports that it
+  is manually running, not installed as a system service. No MCP child had yet
+  spawned inside the new gateway at the process check; the separate discovery
+  above verifies the current checkout launcher. No model request or capture
+  body read occurred. Overall Hermes runtime coverage remains `PARTIAL`.
+
+## Local KB parity receipt export — 2026-10-26 — PARTIAL
+
+- Added `bb-assistant-kb parity-export`, which validates a completed snapshot,
+  confirms that a read-only index points at the same snapshot, requires fully
+  published E5 vectors, and runs the pinned public query fixture before
+  writing a private local receipt. Snapshot family digests and counts are
+  verified against the canonical exported records; the command refuses an
+  active SQLite WAL rather than reading around the writer.
+- The synthetic exporter path passes, including refusal while vectors are
+  incomplete. No active KB index, model, RedAmon deployment, or external query
+  was used. This makes local evidence exportable; it does not close exact KB
+  identity: the deployed RedAmon snapshot and its query receipt are still
+  unavailable, and local SQLite backends may produce different rankings.
+
+## Current read-only runtime check (2026-10-26 01:53 EDT) — PARTIAL
+
+- The configured KB index was read through SQLite's standard read-only mode
+  while its existing embedding worker was present. It contains 207,878 source
+  documents and 209,036 total chunks (209,026 content chunks), with 31,264
+  stored E5 vectors. Source coverage is `DONE`; vector staging targets the
+  current snapshot, but the published vector-ready metadata is not set. The
+  active worker is making progress, so no duplicate embedder was started.
+- A concurrent-reader check initially used SQLite `immutable=1`, which ignores
+  normal writer coordination and returned a malformed-database error while the
+  embedder was active. Repeating the narrow metadata/count queries with a
+  WAL-aware read-only connection succeeded. This was not evidence of database
+  corruption; no repair or write operation was run.
+- The current shell has no user-systemd D-Bus session, so unit enablement and
+  restart policy were not verified in this check. Runtime coverage and exact
+  RedAmon snapshot/query parity remain `PARTIAL`.
+- From the application host, the configured Proxmox2 LAN route at
+  `http://192.168.1.148:8765/` returned HTTP 401 without credentials for both
+  the UI and `/api/projects`, confirming that the authenticated proxy is
+  reachable through the hairpin route. A separate client device is still
+  needed to verify the user-to-app path end-to-end.
+
+### Vector progress follow-up (2026-10-26 01:59 EDT)
+
+- The existing embedder process remained running. A WAL-aware, read-only count
+  advanced from 31,264 to 31,648 vectors; the full content denominator remains
+  209,026. The vector-ready snapshot is still unpublished.
+- The complete Python suite passed after the KB parity gate and pinned query
+  fixture changes: 173 tests and 8 subtests. These are local synthetic/unit
+  checks, not RedAmon deployment parity evidence.
+
+## Current synthetic app acceptance and KB status (2026-10-25 20:03 EDT)
+
+- `go test ./internal/webui -run '^TestBrowserAcceptanceFixture$' -count=1 -v
+  -timeout=45m` passed in 961.72s. The fixture exercised two exact synthetic
+  HTTP captures through graph navigation and comparison, redacted evidence
+  selection, operator acceptance, consultation resume, and Hermes candidate
+  persistence. The fixture was stopped by its coordinator marker and its
+  temporary project data was cleaned up by Go's test harness.
+- Hermes `gpt-6-luna` via `openai-codex` completed the consultation through an
+  isolated temporary profile with only the five consultation tools enabled.
+  The final read-only resume confirmed comparison
+  `KWo6ChfttQG-OKwIJHTsS7kHijC-jddIBtY2LAS4gew`, proposal
+  `iwAqxy1DuEUBECeKf95LzgI3BdGo0FqYRC4H45YGuwQ`, validation receipt
+  `P0iyzbUV3Zf4wdi3ppB8k0PHaBR67JsC5HeWDaxGYg8`, and candidate
+  `sWAxrq6nWMa24P1YkTvTozEyvAiOCyvWdI2Ub43y5r4` version 1 in `candidate`
+  state. All four redacted, integrity-verified evidence references and the
+  exact comparison were cited. The candidate describes only synthetic
+  differences; it is not reproduced or verified and makes no claim of
+  vulnerability, impact, causality, ownership, tenant isolation, or actor
+  context.
+- The managed Hermes profile now uses `trust: full` only for its local
+  `bb_assistant` MCP server, with the existing 15-tool allowlist preserved.
+  The app's accepted-consultation review and reference-validation gates remain
+  in force. `scripts/setup-hermes` now upgrades its own marked profile to this
+  setting; a temporary managed-profile check and `git diff --check` passed.
+- Read-only KB status at this check: 162,398 chunks across six source
+  families, 8,352/162,390 eligible E5 vectors, `coverage_state=PARTIAL`, and
+  no published vector-ready snapshot. The single active resumable embedder is
+  PID 1143696; do not start a duplicate. It had entered a stopped state despite
+  the transient service reporting active; resuming that same process advanced
+  the durable vector count from 8,224 to 8,352. ExploitDB is absent and the
+  exact deployed RedAmon snapshot/profile is still unknown. KB parity remains
+  `PARTIAL`.
+
+## KB parity update (2026-10-25 19:28 EDT) — PARTIAL at that check
+
+- Committed and pushed `fe6a290` (`feat(kb): add RedAmon metadata search filters`).
+  The live KB search/MCP contract now accepts validated `min_cvss` and
+  `severity` filters. They are applied after the merged FTS/vector candidate
+  pool, and chunks without those metadata fields remain eligible, matching
+  RedAmon's null-tolerant filter behavior. `go test ./internal/kb
+  ./internal/mcpserver` and `git diff --check` pass.
+- The active index remains snapshot
+  `0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216` with
+  162,398 chunks across six families and `PARTIAL` source coverage. At this
+  check 7,648 of 162,390 eligible content chunks have E5 vectors; no complete
+  vector snapshot is published. The single resumable worker (PID 1130154) is
+  confirmed running. It is CPU-bound on the Ryzen 5 3500U (about four cores at
+  full use); do not start a duplicate job.
+- ExploitDB is still absent while reuse rights for its dataset remain
+  unresolved. RedAmon source declares it in `full`, but its installed profile
+  defaults to `lite`; there is no verified deployed RedAmon snapshot to compare
+  against. Therefore source/content equality and search-result equality remain
+  unproven. Do not claim that the KB is identical yet.
+- The official Exploit Database Terms restrict copying/reproduction of its
+  Service content without express written permission, while its pinned GitLab
+  repository carries GPL-2.0-or-later. The dataset-specific relationship
+  between these terms remains unresolved, so keep the existing import gate in
+  place pending an authoritative dataset-specific resolution.
+
+## RedAmon KB parity re-check (2026-10-25 23:22 UTC) — PARTIAL
+
+- Compared this checkout with RedAmon upstream master at
+  `4585b3442cf3c6e075fca5d3b512a8f47be501b6`. Its pinned source revisions
+  (GTFOBins, LOLBAS, OWASP, ExploitDB, Nuclei) and E5/BGE model revisions match
+  this project's manifest and adapters. The upstream `full` profile lists all
+  seven families; its checked-in Makefile sets NVD to 730 days, and its
+  `kb_config.yaml` says full ignores the standard CVSS floor. This project's
+  730-day, zero-floor NVD settings therefore match that source configuration.
+  The upstream Wiki page instead says 90 days/CVSS 7, contradicting the source
+  config and Makefile; do not treat that Wiki table as the profile authority.
+  RedAmon's default installed profile is `lite`, so the deployment's selected
+  profile still must be identified before claiming equality with a live
+  RedAmon installation.
+- The installed index was re-chunked from its 161,240 stored source documents
+  using the corrected RedAmon-compatible chunker, without fetching new data.
+  Its new snapshot is
+  `0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216`, with
+  162,398 chunks in both `chunks` and FTS5 across six families; `quick_check`
+  returned `ok`. It still has no ExploitDB rows and 7,392 of 162,390 eligible
+  E5 vectors at the latest read-only count. Coverage is
+  `PARTIAL` and the vector snapshot is unpublished, so semantic retrieval is
+  not ready. The ExploitDB provider is
+  implemented but the source is still excluded while its dataset reuse terms
+  are unresolved.
+- The previous resumable vector process (PID 1121967) repeatedly entered
+  Linux's stopped state (`T`) even while its transient systemd unit reported
+  active/running. It was stopped cleanly before re-chunking. A single new
+  resumable worker (PID 1130154 at last check) was started against the new
+  snapshot; it had not committed its first batch yet. The cause of the previous
+  process's repeated stops is not yet identified.
+  Resuming the existing worker increased the stored count from 6,752 to 7,072;
+  a later 64-row batch brought it to 7,392 before the process stopped again.
+  A 256-row batch experiment committed one batch in 5:54 but left the next
+  batch uncommitted after a further 2:36; the 64-row worker committed 64 in
+  2:12. These samples cover different chunk lengths, so the throughput
+  comparison is inconclusive. Monitor the same process and durable vector
+  count; do not start a duplicate worker. The index remains readable through
+  its available lexical path while vector publication is incomplete.
+- No deployed RedAmon instance was found on Proxmox2: its read-only inventory
+  showed one Kali VM and no LXC guests; the current VM's Docker inventory
+  contains only the Neo4j container. Therefore a byte/content comparison with
+  RedAmon's actual live database is still unavailable. Search behavior also
+  remains unproven as identical: this app uses SQLite FTS5 while RedAmon uses
+  Neo4j/Lucene, despite matching model revisions and ranking constants.
+- KB parity remains `PARTIAL`. Required next evidence: identify the RedAmon
+  deployment/profile or obtain its comparable manifest; resolve ExploitDB
+  reuse rights; finish and publish all E5 vectors; then compare source/chunk
+  digests and retrieval results against that exact reference.
+
+## KB parity checkpoint (2026-10-25)
+
+- The configured target is RedAmon's declared `full` profile: ToolDocs, GTFOBins,
+  LOLBAS, OWASP, ExploitDB, NVD, and Nuclei. The local RedAmon checkout's
+  default is `lite`; its deployed profile/snapshot is unknown, so equality to a
+  live RedAmon database has not been demonstrated.
+- Retrieval constants and model revisions are aligned with RedAmon: E5
+  embeddings, BGE cross-encoder over 30 candidates, RRF `k=60`, matching source
+  boosts, sigmoid rerank mapping, and MMR `lambda=0.65`. The local full-text
+  analyzer still differs (SQLite FTS5 vs Neo4j/Lucene), and end-to-end result
+  parity has not been measured.
+- The current local snapshot is `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`:
+  161,240 documents and 162,398 chunks across six families; ExploitDB has no
+  rows. It has 6,688 of 162,398 E5 vectors, is marked `PARTIAL`, and has no
+  published vector-ready snapshot. `quick_check` passed.
+- ExploitDB import is still unresolved: the pinned repository license is
+  GPL-2.0-or-later, while the official website Terms restrict reproduction of
+  Service content without express written permission. The dataset-specific
+  rights question is not settled by the repository license alone ([pinned
+  repository license](https://gitlab.com/exploit-database/exploitdb/-/blob/6a57361db10b709c4b4f339c09ee250acc2d8aac/LICENSE.md),
+  [official Terms](https://www.exploit-db.com/terms)).
+- Therefore the KB is not yet identical to the declared RedAmon full profile.
+  Keep parity `PARTIAL` until source coverage, vectors, and retrieval behavior
+  are matched and the RedAmon comparison snapshot is identified.
+
+## Current KB/runtime state (2026-10-25 22:41 UTC)
+
+- Read-only inspection of the active index reports snapshot
+  `b5141fa0e4ae3a65d2f5807f2885488c524ea41a4a86f91f7ad6479e095c2ff3`,
+  161,240 source documents, 162,398 chunks, and 6,752 vectors. All vectors are
+  staged for `intfloat/e5-large-v2`; no ready snapshot marker is published.
+  Source families are GTFOBins (479), LOLBAS (244), Nuclei (13,403), NVD
+  (146,940), OWASP (130), and ToolDocs (44). ExploitDB has no imported rows.
+  SQLite `quick_check` passed and coverage is `PARTIAL`.
+- The web service was restarted from the merged checkout and returned HTTP 200
+  on loopback. Hermes `mcp test bb_assistant` initially timed out while the
+  background embedder saturated CPU; with hook approval explicitly enabled, the
+  configured stdio server connected in 2.4 seconds and exposed all 15 selected
+  tools. Hermes status confirms the requested `gpt-6-luna` model and ChatGPT or
+  Codex Subscription provider. The already-running gateway process still has
+  its earlier MCP child in memory and needs a reconnect/restart before that
+  process uses the updated binary.
+- A resumable E5 job is active as a low-priority user service. It has added 64
+  vectors since its launch, reaching 6,752/162,390 eligible content chunks;
+  complete vector generation and an
+  end-to-end retrieval comparison remain outstanding. The exact deployed
+  RedAmon corpus snapshot is also unknown, so corpus and result identity cannot
+  yet be established.
+- On this checkout, the focused KB tests passed (25 tests, 3 subtests), the
+  complete Python suite passed (159 tests, 8 subtests), and Go
+  `internal/kb`, `internal/mcpserver`, and `cmd/bb-assistant` tests passed.
+  The integration was committed and pushed as merge commit `a0fbfce`.
+
 ## Current delivery checkpoint (2026-10-25, bounded historical graph repair)
 
 - A browser walkthrough through the LAN address loaded the running app and
@@ -2344,4 +2781,707 @@ This repository is an early public alpha. The following boundaries are deliberat
   one program and checking its current authorization, exact origin, rate/budget,
   allowed methods, and stop conditions before any target traffic.
 
+## RedAmon KB parity audit (2026-10-25) — PARTIAL
+
+- The user's requirement is parity with the pinned RedAmon full-profile KB,
+  including its source corpus and retrieval behavior. The index file format
+  may be rebuilt for this application; that does not reduce the corpus or
+  retrieval-parity requirement.
+- The current implementation does **not** meet that requirement. The latest
+  verified snapshot is partial: 14,300 documents / 16,961 chunks across the
+  declared families; ToolDocs, GTFOBins, LOLBAS, WSTG and Nuclei are done,
+  NVD is partial, and ExploitDB is blocked by unresolved dataset terms.
+- Source-aware chunking is now implemented locally: structured records remain
+  atomic and are clipped at RedAmon's 480-token character estimate;
+  ToolDocs/WSTG Markdown is grouped by H2 headings, small sections can merge,
+  and oversized sections split on paragraphs. Chunks retain exact source
+  spans, use no overlap, and mark clipped records. The schema is v2, so v1
+  snapshots must be exported again before import. Focused provider and CLI
+  tests pass. This matches the upstream strategy while keeping stored text an
+  exact source substring for citation integrity.
+- At the initial-audit checkpoint, search was SQLite FTS5 only; the active environment had no
+  sentence-transformers, PyTorch or FAISS package. The actual lexical path now
+  overfetches candidates, applies RedAmon's top-5, RRF (`k=60`), per-source
+  boosts and source/title MMR (`lambda=0.65`). The ranking module accepts
+  vector ranks and cross-encoder scores and has deterministic fixtures, but no
+  vector embeddings are stored or produced and BGE reranking is not wired into
+  live search. Therefore these implemented stages do not yet make retrieval
+  parity.
+- At the initial-audit checkpoint, the running product used the Go read-only KB index, not the Python CLI
+  search path. The Go MCP runtime now also filters `license_notice` rows,
+  overfetches candidate chunks, and applies top-5, single-list RRF-equivalent
+  scoring, source boosts and the same source/title MMR proxy. A dedicated Go
+  fixture confirms a term present only in a license notice is not returned.
+  The focused Go KB, MCP facade, and managed-app tests pass.
+  At that checkpoint the live Go path had no vector candidate provider or BGE reranker, so
+  the two-list RRF and cross-encoder stages remain unimplemented at runtime.
+- A new full-profile build is running in a disposable directory, not against
+  the application's private index. It uses the 730-day NVD window without a
+  CVSS floor. It began before the chunk-schema update, so it can establish
+  source-coverage evidence but its v1 snapshot must be re-exported to use the
+  new chunker. At this checkpoint it has not produced a final snapshot; the
+  unauthenticated NVD provider applies a 6.5-second minimum between requests.
+  No coverage is inferred from an in-progress build.
+- The source comparison used the pinned RedAmon checkout
+  `cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`. Next acceptance requires a
+  completed eligible full-profile snapshot with reconciled per-family
+  coverage and deterministic
+  retrieval fixtures covering vector/full-text fusion, boosts, reranking,
+  MMR, top-k, and citation provenance. FTS-only or synthetic-test success is
+  not KB parity.
+
+## Earlier local delivery checkpoint (2026-10-25, verified runtime state)
+
+- The installed local UI's read-only `/api/runtime-capabilities` endpoint
+  returned HTTP 200. Before the later service restart, it reported
+  `evidence_vault_key_state=verified`; the current process after restart
+  reports `configured_not_verified`. The vault key is configured, but its
+  ability to decrypt the existing vault has not been confirmed in this process.
+  No existing capture body or project database was opened to check it.
+- The current imported KB snapshot is
+  `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`, with
+  161,240 documents and 162,413 chunks. Six source families are `done`; the
+  only source-coverage blocker is ExploitDB reuse terms. Therefore this is not
+  exact full-corpus parity with RedAmon.
+- E5 vectorization is actively running and restartable. The latest read-only
+  SQLite count is 1,856/162,413 stored vectors; `vector_snapshot_id` is not
+  published for this partial generation, so vector search is not ready yet.
+- Verification after the latest embedding-order optimization: all 19 Python
+  KB CLI/ranking/provider tests passed, as did `go test -count=1
+  ./internal/kb ./internal/mcpserver`. These tests use fixtures; they do not
+  establish complete vector search or access to real target traffic.
+- KB code commit `3e7ec26` and this status update commit are pushed to
+  `codex/consultation-empty-comparisons`. The app's broader delivery remains
+  `PARTIAL`: the plan's synthetic graph/evidence/consultation paths are
+  implemented, but project-data completeness, external client reachability,
+  and real-target readiness have not been established here.
+
+### Runtime KB wiring correction — 2026-10-25
+
+- Inspection of the active web and Hermes MCP processes found they were
+  defaulting to the older nested 222 MB index and had no local model-worker
+  executable configured. The 161,240-document RedAmon-compatible snapshot was
+  in a separate 2.1 GB index. The web service and Hermes profile now both point
+  to that snapshot and the already-installed pinned-model Python runtime; both
+  processes were restarted and their non-secret environment settings verified.
+- The local UI root and LAN proxy returned HTTP 200 after the web restart.
+  Hermes reconnected to `bb_assistant` and discovered all 15 allowed tools.
+  A temporary-project MCP search over the imported NVD snapshot returned
+  relevant CVEs and non-null BGE rerank scores. E5 vector scores were absent,
+  as expected while the vector snapshot is incomplete.
+- That verification read only KB source material; no existing project
+  exchange, Caido record, or external target was opened. The 730-day NVD
+  content and source manifest remain `PARTIAL` because ExploitDB terms are
+  unresolved.
+- After a temporary database-lock error at a batch commit, the resumable
+  builder retained all durable rows and resumed from 2,624 with batches of
+  32. At this checkpoint it had stored 2,720/162,413 vectors; the build is
+  still incomplete and the published vector snapshot marker remains absent.
+
 Contributors should preserve explicit `PARTIAL` and `BLOCKED` states whenever data, coverage, or source provenance is missing.
+
+### Earlier RedAmon KB parity checkpoint — 2026-10-25 (PARTIAL)
+
+- The approved architecture v2 treats KB expansion as deferred for the core
+  HTTP-evidence → graph → navigation/comparison → Hermes workflow. The user
+  separately requested that this application's KB match the pinned RedAmon
+  full-profile KB; this parity work is therefore tracked as an explicit
+  additional requirement and is not represented as complete.
+- The imported local snapshot is
+  `694d8fd3d69dd3135961ebd0ab150be2a95b2298cd8cb40e4a65149c3ade12d2`:
+  161,240 documents and 162,413 chunks. NVD completed its 730-day profile
+  (146,938 CVEs plus two source notices); ToolDocs, GTFOBins, LOLBAS, OWASP,
+  and Nuclei report `done`. The source coverage manifest reports `PARTIAL`
+  solely because ExploitDB is blocked pending express dataset-reuse rights.
+- RedAmon-normalized NVD text, the 480-token clipping rule, 2,000-record
+  provider pages, and live Go retrieval fusion/reranking are implemented in
+  the commits above. ExploitDB has not been copied into the KB because its
+  dataset terms remain unresolved; a repository's code license does not grant
+  rights to copy the dataset. No exact-corpus-parity claim should be made
+  unless those rights are obtained.
+- The local E5 vector build is currently resumable and running against the
+  imported snapshot. At the latest read-only progress check it had stored
+  1,088 of 162,413 content vectors. The generation is not ready for vector
+  search until every vector has been stored and the snapshot marker is
+  published. This in-progress count is a checkpoint, not a completion claim.
+- A full 730-day NVD refresh was fetched and reconciled (146,938 expected,
+  fetched, and parsed records; 77 pages at 2,000 per page); raw CVE JSON is
+  preserved in the local snapshot while model-facing chunks use RedAmon's
+  normalized text. Completion of vector generation and a local Go search
+  smoke check remain outstanding.
+
+### KB parity follow-up — 2026-10-25
+
+- Implemented the live Go retrieval path for E5 vector candidates plus FTS5,
+  RedAmon-compatible RRF (`k=60`), the seven configured source boosts, BGE
+  cross-encoder reranking of the top 30 candidates, sigmoid-normalized rerank
+  scores, and source/title MMR (`lambda=0.65`) for up to five results. Vector
+  use is bound to the imported snapshot ID, pinned E5 model, and 1024 dimensions;
+  lexical fallback remains explicit when vectors/models are missing.
+- Added an offline Go-to-Python model worker and an opt-in integration smoke
+  test. It passed with the local pinned E5/BGE weights: E5 returned 1024 finite
+  dimensions and BGE returned one finite score. The Python KB suite (15 tests),
+  NVD provider suite (8 tests), and Go `internal/kb`/`internal/mcpserver` suites
+  passed at this checkpoint.
+- Added a CPU-only private model-runtime setup script and documented the
+  snapshot/vector rebuild steps. Model weights remain local runtime files and
+  are not committed.
+- E5 vector builds now commit completed batches and resume after interruption.
+  The Go path treats a generation as ready only after all content chunks for
+  the current snapshot have vectors; a partial build cannot enter search.
+- The first full 730-day NVD refresh was terminated before it could save a
+  batch. A new run is in progress using RedAmon's 2,000-record page size and
+  6.5-second unauthenticated spacing, with per-page progress and private batch
+  output. It also includes the offset-less publication-date adapter fix. The
+  last verified corpus remains the earlier
+  `PARTIAL` snapshot until the new fetch, v2 re-chunk, import, vector build,
+  and Go stats check finish. ExploitDB remains `BLOCKED` pending resolution of
+  dataset-specific reuse terms; the KB is therefore not identical to RedAmon
+  yet. The pinned source corpus and retrieval settings are the parity target,
+  while snapshot schema and index storage remain application-owned.
+
+### Chunking parity correction — 2026-10-25 (PARTIAL)
+
+- A full offline comparison against RedAmon's checked-out `ChunkStrategy`
+  covered all 161,240 documents currently stored in the local snapshot. The
+  corrected Graph Assistant chunker produced 162,398 chunks with zero
+  text/title mismatches against that algorithm. This verifies chunk algorithm
+  parity for the current document set only; it does not establish source-set,
+  active-profile, vector, or query-result parity.
+- The installed SQLite index has now been rebuilt from the corrected chunker:
+  161,240 source documents and 162,398 chunks. SQLite `quick_check` is `ok`,
+  there are no foreign-key violations, and the FTS row count matches the chunk
+  count. The rebuild now batches and checkpoints by source ID, persists its
+  cursor and fails closed in Python and Go while incomplete, so it can resume
+  after the command's runtime limit without exposing a partial index.
+- The embedding process was stopped cleanly at 6,560/162,413 vectors because
+  it was embedding the stale chunk snapshot. Its staging marker is not a ready
+  vector snapshot; vector retrieval is unavailable until the corrected index
+  is installed and embedding completes.
+- The first full-index refresh attempt was interrupted before changing the
+  snapshot marker: its single SQLite rollback journal reached 878 MB while the
+  transaction was still preparing writes. SQLite recovered the original index
+  on reopen (162,413 chunks and 6,560 vectors remain). The maintenance command
+  has since been changed to bounded resumable transactions, sets a durable
+  marker, and makes Python/Go readers fail closed during an incomplete refresh.
+- Source-set parity remains `PARTIAL`: the index contains six populated
+  families, while ExploitDB remains blocked by unresolved dataset reuse terms.
+  The checked-out RedAmon profile defaults to `lite`; the parity target in the
+  project plan is `full`, and the active deployed RedAmon snapshot has not been
+  identified. No exact KB parity claim is justified yet.
+- Code changes now use RedAmon's actual section trimming/merging, paragraph
+  splitting, structured truncation/title behavior, and explicit exact-vs-
+  covering source-span metadata. Full Python test suite passes (157 tests plus
+  8 subtests); focused Go KB, MCP and app tests pass. The `bb-assistant-kb
+  rechunk` maintenance command rebuilds chunks directly from stored source
+  documents without network fetches. The app has been restarted against the
+  repaired index. Vector search remains unavailable: only 6,496 of 162,398
+  chunks have vectors and the vector snapshot is not ready. Next:
+  finish embedding, resolve the ExploitDB dataset-rights blocker, identify the
+  exact deployed RedAmon profile/snapshot, and complete retrieval-parity
+  checks before claiming that the KB is identical.
+
+### KB parity live checkpoint — 2026-10-25 20:08 EDT (PARTIAL)
+
+- Rechecked the pinned RedAmon checkout at `cf1b9e92`: its `full` profile is
+  `tool_docs`, `gtfobins`, `lolbas`, `owasp`, `exploitdb`, `nvd`, and `nuclei`.
+  Its config default is `lite`; the project parity requirement remains the
+  explicitly selected `full` profile.
+- The installed Graph Assistant snapshot is still `0b7bc15e70d9d676732ff0cb6988ff1cfd386a2c3ec0703170386c1825f99216`:
+  161,240 documents and 162,398 chunks across six families. `exploitdb` is
+  absent. A bounded filename search in the RedAmon checkout and local app
+  cache/data roots found no ExploitDB dataset file to import; this does not
+  identify or rule out a separately deployed RedAmon snapshot.
+- The resumable E5 job is live as PID 1143696 under
+  `graph-kb-assistant-kb-embed-post-rechunk.service`. A read-only count shows
+  8,416/162,398 vectors (5.18%); `vector_snapshot_id` is unpublished, so
+  vector search is not ready. The service has one automatic restart after a
+  SIGKILL; its current cgroup has no memory limit and reports no OOM kills, so
+  the cause of that exit is not established. No duplicate embedder was started.
+- Exact source-set parity is being installed from a validated seven-family
+  staging snapshot. The pinned ExploitDB CSV was fetched and staged; import into
+  the active index is in progress. The live RedAmon data snapshot and
+  comparative retrieval-result evidence remain unverified. KB parity is still
+  `PARTIAL`; do not describe it as identical until the active-index check and
+  query-result comparison pass.
+
+### ExploitDB metadata-feed parity correction — 2026-10-25 20:08 EDT
+
+- Rechecked the pinned official GitLab README and LICENSE at revision
+  `6a57361db10b709c4b4f339c09ee250acc2d8aac`. The README states that the
+  repository project is GPLv2. The source manifest now records that pinned
+  evidence for the metadata-only `files_exploits.csv` import; the provider
+  stores the pinned README and LICENSE notice records and never fetches PoC
+  files. The corpus is runtime data and remains outside Git.
+- The upstream RedAmon client emits ExploitDB search text as description plus
+  its optional platform, type, publication date, and normalized codes. The
+  Graph Assistant provider now uses that same rendering instead of indexing
+  its internal JSON representation. The existing CSV fixture also verifies
+  duplicate-row behavior, allowlisted fields, and the resulting RedAmon text.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p
+  test_kb_source_providers.py -v` passed (15 tests). This verifies the local
+  provider behavior only. The pinned ExploitDB feed is staged in the validated
+  seven-family snapshot; active-index replacement and exact RedAmon snapshot
+  and retrieval parity are still pending.
+
+### RedAmon KB import progress — 2026-10-25 20:32 EDT
+
+- The seven-family staged snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049` contains 207,878 source documents and 209,036 canonical chunks, with every configured source reporting `done`. The snapshot passed the importer’s hash/schema validation in read-only mode.
+- The first active import was stopped after identifying a quadratic FTS5 existence check on the unindexed `chunk_id` column. SQLite recovered the original six-family snapshot (`0b7bc15e...`, 161,240 documents, 162,398 chunks, 8,416 staged vectors); no partial replacement was published.
+- Snapshot replacement now rebuilds the FTS5 projection in a linear pass instead of checking each incoming row against the unindexed FTS column. The focused provider/index suite passed (15 tests).
+- The retry completed and the active index now reports snapshot `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, `DONE`, 7 families, 207,878 source documents, and 209,036 chunks. It retained 8,416 embeddings, but has no published vector snapshot marker; vector search is not ready. SQLite `quick_check`, the deployed RedAmon data snapshot, and representative retrieval-result parity remain unverified. Do not call the KB identical until those checks pass.
+
+### Active RedAmon KB verification — 2026-10-25 20:49 EDT
+
+- The active snapshot is `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`: coverage `DONE`, 7 families, 207,878 source documents and 209,036 chunks. `PRAGMA quick_check` returned `ok`; FTS5 row count equals the chunk count (209,036). The earlier importer's rollback journal is absent.
+- A local lexical smoke query for `SQL injection authentication bypass` returned three ExploitDB records. This confirms the installed FTS path can retrieve the newly imported family; it does not compare ranking with RedAmon.
+- The managed `graph-kb-assistant-kb-embed-full.service` is active with zero restarts. It has stored 8,736 vectors; the staging model is `intfloat/e5-large-v2`, 1,024 dimensions, bound to the active snapshot. The vector-ready marker remains unpublished, so search is still lexical-only.
+- Source family names match RedAmon's pinned `full` profile. Its deployed data snapshot is absent from this checkout; exact content equality and representative result/rank parity against that deployment remain open. KB parity remains `PARTIAL`.
+
+### Active KB runtime and strict parity checkpoint — 2026-10-25 20:56 EDT
+
+- Confirmed the running Graph Assistant process has `BB_ASSISTANT_KB_INDEX` set
+  to `/home/max/.local/share/bb-graph-assistant/kb/index.sqlite3`, the installed
+  seven-family full snapshot. The separate five-family index under
+  `.../graph-kb-assistant/kb/` is not selected by this process. The active
+  index reports `DONE`, 207,878 source documents, and 209,036 chunks.
+- Restarted the resumable E5 job against this explicitly selected full index.
+  It is active under PID 1198105 with zero automatic restarts and has embedded
+  9,184/209,026 content chunks; `vector_ready=false`. On this CPU-only Ryzen 5
+  3500U host, the observed short-window rate was 128 vectors/minute. The full
+  vector snapshot is therefore not ready for semantic retrieval yet.
+- Rechecked RedAmon's retrieval implementation: pinned E5/BGE revisions and
+  RRF, source boosts, rerank-pool, sigmoid, and MMR defaults match the Graph
+  Assistant implementation. Keyword candidates do not yet have proven parity:
+  RedAmon uses Neo4j Lucene full-text, while Graph Assistant uses SQLite
+  FTS5/BM25. The RedAmon checkout defaults to `lite`, and no separate active
+  RedAmon corpus snapshot was found in the reachable runtime inventory.
+- Exact deployed-corpus equality and representative same-snapshot result/rank
+  comparison remain open. Do not report the KB as identical; status remains
+  `PARTIAL` until vectors are complete and the source/query parity gaps are
+  resolved or explicitly measured against an available RedAmon snapshot.
+
+### RedAmon parity correction — 2026-10-25 (current session)
+
+- Confirmed the earlier conclusion was only component-level similarity, not
+  KB identity. The active service still uses the full seven-family snapshot
+  `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049` with
+  207,878 source documents and 209,036 total chunks (209,026 content chunks).
+  The latest authoritative stats show 9,824/209,026 vectors; a single
+  resumable CPU embedding process is still running. Semantic search is not
+  ready until all vectors match the active snapshot.
+- Tightened known retrieval differences: lexical queries now use RedAmon-style
+  sanitized terms without SQLite prefix expansion; BM25 gives title and body
+  equal weights; lexical and vector candidates are collected globally before
+  source allowlists are applied. Focused ranking tests passed: Python 14/14
+  and Go `internal/kb` plus `internal/mcpserver`.
+- These changes do not make FTS5 equivalent to RedAmon's Neo4j Lucene, and the
+  SQLite vector index is not the same storage/search implementation as its
+  FAISS index. No deployed RedAmon corpus snapshot or same-query result fixture
+  is available here; exact source-byte and rank/output parity are therefore
+  still unverified. Do not call the KB identical. Next: finish vectors, then
+  compare against a pinned RedAmon corpus/query fixture and close or document
+  any remaining engine-specific differences.
+- A read-only corpus-wide chunker comparison then fed every active source
+  document through both this project's canonical chunker and the actual
+  `ChunkStrategy` from pinned RedAmon checkout `cf1b9e926a2af4420f5a894e7c8ddd225968c9d2`.
+  All 207,878 documents and 209,036 stored chunks matched on chunk count,
+  title, and text (zero differences). This proves chunking parity for the
+  active stored document text; it does not prove the stored source text is
+  byte-identical to RedAmon's deployed corpus.
+
+### LAN access and resumable embedding — 2026-10-25 21:25 EDT
+
+- Proxmox2 is `192.168.1.148`; the Kali guest is `10.10.10.10`. The prior
+  persistent LAN DNAT sent port 8765 to the guest's unauthenticated UI port
+  8766. Its `/api/projects` response included `project_key`. Updated
+  `/etc/iptables/rules.v4` and `/usr/local/sbin/graph-assistant-lan-nat` on
+  Proxmox2 so LAN clients from `192.168.1.0/24` reach the Basic Auth proxy at
+  guest port 8765. `netfilter-persistent reload` and the idempotent NAT script
+  both completed; persistent DNAT, hairpin, MASQUERADE, and FORWARD rules now
+  target port 8765. Backups of both host files were retained.
+- Read-only hairpin verification from the guest through
+  `192.168.1.148:8765` returned `401` for unauthenticated `/api/projects` and
+  `200` for the authenticated Graph Explorer page and one-project API result.
+  No project key was printed. The entry URL for clients on the Proxmox2 LAN is
+  `http://192.168.1.148:8765/`; a separate physical LAN client has not yet
+  been used for a direct check.
+- Added a `graph-user` Basic Auth account to the guest proxy; its password is
+  delivered to the owner out of this project-status file. The user-level web
+  app and authenticated proxy units are active under the lingering `max`
+  systemd user manager.
+- The embedding process had received an external clean stop in shell/transient
+  sessions. Replaced that launch with enabled user unit
+  `graph-kb-assistant-kb-embed.service` (`Restart=on-failure`, batch size 64).
+  It has remained active through two 25-second checks with zero restarts. The
+  latest count is 10,656/209,026 content vectors; `vector_ready` is still
+  false. These steps do not establish end-to-end RedAmon retrieval parity.
+
+### Resume KB vector generation and strict identity requirement — 2026-10-25 21:32 EDT
+
+- The user clarified that RedAmon KB identity is a required outcome. The prior
+  architecture description of a compatible rebuild from pinned sources is not
+  sufficient evidence for that requirement.
+- The embedding unit was found inactive and disabled. Re-enabled and started
+  the resumable user service against the active seven-family snapshot. It was
+  still running with zero restarts after 70 seconds; the read-only index count
+  advanced from 10,848 to 10,912 of 209,026 content chunks. The vector-ready
+  marker remains unpublished, so vector retrieval is not ready.
+- Exact chunker behavior is verified for all 207,878 documents in the current
+  snapshot, but source bytes are not compared to RedAmon's deployed corpus.
+  The local RedAmon checkout contains source configuration, not its deployed
+  corpus snapshot or FAISS index. Current retrieval remains SQLite FTS5 plus a
+  SQLite vector store rather than RedAmon's Neo4j Lucene plus FAISS. Therefore
+  corpus and query/rank identity remain unverified; do not claim the KB is
+  identical until a pinned RedAmon deployment snapshot or export is available
+  and same-query parity has been measured.
+
+### KB parity follow-up — 2026-10-25 21:38 EDT
+
+- Confirmed the only running Neo4j container is the Graph Assistant deployment
+  (`deploy/neo4j/compose.yaml`); the checked-out RedAmon source contains no
+  deployed KB snapshot or FAISS index. Thus no local reference corpus/query
+  fixture is available for exact parity comparison.
+- Rechecked the active full snapshot read-only: seven families, 207,878 source
+  documents, 209,036 chunks, 11,296/209,026 content vectors, `vector_ready=false`.
+- The E5 generation service was stopped at 21:36 and its user unit is now
+  masked (`/home/max/.config/systemd/user/graph-kb-assistant-kb-embed.service`
+  points to `/dev/null`). The user journal records the stop but not its caller;
+  there has been no vector-count progress since 11,296. Do not claim semantic
+  retrieval readiness. This checkpoint supersedes the preceding entry's
+  statement that the service is active.
+- The strict parity gate is now explicit in `docs/ARCHITECTURE-V2-PROPOSAL.md`:
+  same deployed source snapshot/content and same ordered query results/score
+  components are required; differing search backends must pass the fixture or
+  be replaced/adapted. Delivery remains `PARTIAL`.
+
+### KB vector generation resumed — 2026-10-25 21:45 EDT
+
+- The masked user unit had no surviving unit file after its `/dev/null` mask
+  was removed. Recreated it with the verified local CLI/index path, pinned
+  venv, 8-thread CPU settings, batch size 64, and failure restart policy; the
+  user service is enabled and active with zero restarts.
+- A read-only follow-up confirmed progress from 11,296 to 11,488 of 209,026
+  content vectors. `vector_ready` remains false. The caller for the prior stop
+  is still unknown; this service checkpoint does not establish KB parity.
+
+### KB vector progress — 2026-10-25 21:56 EDT — PARTIAL
+
+- Read the installed index through a read-only SQLite snapshot while the
+  resumable embedding unit was active (`ActiveState=active`, `SubState=running`,
+  `NRestarts=0`). The snapshot contains 207,878 documents, 209,036 chunks, and
+  12,512 vectors from `intfloat/e5-large-v2` at 1,024 dimensions; only 12,512
+  of 209,026 content chunks are embedded. Semantic readiness is incomplete.
+- The seven source-family counts are stable at tool_docs 44, gtfobins 479,
+  lolbas 244, OWASP 130, ExploitDB 46,638, NVD 146,940, and nuclei 13,403.
+  These are counts for the installed snapshot, not proof that its source text
+  equals the active RedAmon deployment. No deployed RedAmon snapshot or fixed
+  query fixture has been made available, so exact content and retrieval parity
+  remain `PARTIAL`.
+
+### Synthetic browser acceptance — 2026-10-25 21:55 EDT — PARTIAL
+
+- Ran `TestBrowserAcceptanceFixture` with its temporary SQLite graph backend
+  and two encrypted synthetic HTTP exchanges. The test completed successfully
+  (`go test ./internal/webui -run '^TestBrowserAcceptanceFixture$' -count=1
+  -v -timeout=11m`; 387.959s). The temporary fixture was stopped and its
+  browser tab closed afterward.
+- In the actual embedded web UI, selected the operation and loaded its bounded
+  graph, set a baseline, selected the second capture, and compared exact stored
+  request and response bytes. The UI showed differing request and response
+  hashes and first-byte offsets. Opened the exact stored HTTP message and
+  verified that the packet preview redacted its synthetic Authorization value.
+- Saved the redacted consultation packet, reloaded the page, and resumed that
+  session by ID. The exact question, evidence reference, and redacted excerpt
+  were restored; the session remained unaccepted, so Hermes access stayed
+  blocked pending operator review. No model was called.
+- This verifies a synthetic SQLite-backed browser path, not Neo4j deployment,
+  real-project completeness, accepted Hermes/model execution, or candidate
+  creation and recovery. The graph and project UI correctly report `PARTIAL`.
+  These paths remain open acceptance criteria.
+- KB parity is still `PARTIAL`: the preceding checkpoint's incomplete vector
+  coverage and missing deployed RedAmon corpus/query fixture have not changed.
+
+### Neo4j-backed synthetic browser acceptance — 2026-10-25 22:03 EDT — PARTIAL
+
+- Re-ran `TestBrowserAcceptanceFixture` against a disposable Neo4j 2026.10.0
+  container on a loopback ephemeral port. The fixture inserted only its two
+  encrypted synthetic HTTP exchanges; the test passed in 99.292s. The browser
+  tab, test server, temporary project, and container were stopped and removed.
+- In the real embedded UI, selected the operation, loaded both request nodes
+  from Neo4j, chose a baseline and compared the exact stored request and
+  response bytes. The comparison returned the expected differing hashes and
+  first-byte offsets, matching the SQLite-backed browser check.
+- The Neo4j fixture displayed `Value index unavailable · direct graph only`.
+  Its test setup writes the graph using incremental projection and does not run
+  the full field-value-index rebuild; the UI correctly reported partial graph
+  coverage for that incremental-only project. Separately, updated and ran
+  `TestNeo4jFieldValueTraversalIntegrationOnEphemeralPort` against the same
+  disposable Neo4j version/ephemeral-port setup. It now performs
+  `RebuildProjectSnapshot` for two synthetic projects, then verifies indexed
+  cross-capture traversal, project isolation, the published generation, and
+  bounded neighborhood read-back; it passed in 23.37s. This verifies the
+  storage rebuild/traversal path, but not the expanded browser rendering after
+  a maintenance rebuild.
+- This proves the disposable Neo4j-backed browser navigation and exact
+  comparison path only. Accepted Hermes access, model execution, candidate
+  save/recovery, production service state, and full project coverage remain
+  unverified. KB identity remains `PARTIAL` as recorded above.
+
+### Neo4j browser after full snapshot rebuild — 2026-10-26 — PARTIAL
+
+- Extended the opt-in browser fixture so its Neo4j mode now runs the same
+  locked `RebuildProjectSnapshot` maintenance path used by the production
+  backfill command after the two synthetic projection jobs complete.
+- Re-ran the embedded-browser acceptance fixture against a disposable local
+  Neo4j instance (`TestBrowserAcceptanceFixture`, 150.54s, PASS). In the UI,
+  the selected route reported `Value correlation expanded · 6 path nodes`; the
+  bounded slice showed 15 nodes / 14 edges and described the full traversal as
+  31 nodes / 36 edges. The app rendered two linked captures and field
+  occurrences after full rebuild. The separate storage integration test also
+  verified cross-project isolation and the published generation.
+- This closes the synthetic browser coverage gap for Neo4j full-rebuild value
+  correlation. It does not establish real-project coverage, accepted Hermes
+  access/model execution, candidate save/recovery through Hermes, production
+  service readiness, or RedAmon KB identity; the overall project and KB remain
+  `PARTIAL`.
+
+### Current application, CI and KB runtime check — 2026-10-26 06:48 UTC — PARTIAL
+
+- Pushed `9a625af` (`ci: scan application branch for secrets`) to the active
+  development branch. The branch now runs the pinned Gitleaks scan on PRs and
+  `main` pushes, with narrowly fingerprinted synthetic test fixtures. The
+  current checkout scan reported no leaks; workflow YAML parsing and
+  `git diff --check` passed. The Go and Python suites were not rerun for this
+  workflow-only change.
+- The running app answered HTTP 200 for its loopback UI and local projects API.
+  The configured LAN proxy answered HTTP 401 without credentials, confirming
+  the proxy/authentication gate is reachable from this host; authenticated
+  access from a separate client remains unverified.
+- A read-only KB stats query reported the active full snapshot
+  `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`, with
+  207,878 source documents, 209,036 chunks and source coverage `DONE`. It had
+  34,272 of 209,026 content vectors at 06:49 UTC; `vector_ready` remains false.
+  The existing embedding process (PID 1229966 at this check) was live, so no
+  duplicate job was started. The systemd user bus was unavailable in the
+  default shell environment; connecting through `/run/user/1000/bus` showed
+  the app and embedding units enabled and active.
+- KB delivery remains `PARTIAL`: a deployed RedAmon snapshot and its fixed
+  query-result receipt are still unavailable, and the local SQLite FTS5
+  backend is not demonstrated equivalent to RedAmon's Neo4j Lucene backend.
+- `bb_kb_stats` now reports total and embedded content chunks plus the staging
+  model, snapshot and dimensions. `vector_ready` also requires a compatible
+  vector for every content chunk. Synthetic partial/staging/readiness checks
+  and `go test ./internal/kb ./internal/mcpserver -count=1` passed; the code
+  change did not mutate the live KB or invoke a model.
+- Restarted the app service from this checkout after commit `066a1b5`. The
+  local UI and projects API returned HTTP 200; the projection worker reported
+  `idle`, while startup explicitly left Neo4j connectivity `not_checked`. A
+  separate MCP protocol fixture now verifies that `bb_kb_stats` exposes the
+  staging counters and target metadata to the harness.
+
+### Neo4j runtime snapshot verification — 2026-10-26 07:10 UTC — PARTIAL
+
+- `neo4j-check` connected to the configured local Neo4j database and confirmed
+  the required constraints/indexes (`state=ready`). `neo4j-backfill
+  --verify-only` then compared a consistent read-only local BehaviorGraph
+  snapshot against Neo4j. Its local and Neo4j snapshot digests matched
+  (`state=verified`) across 1,400 source records, 115,136 entities, 117,050
+  assertions, and 1,400 analysis cards. The check held the normal project
+  maintenance lock and did not rebuild or import graph data.
+- This verifies storage parity for the currently selected local project, not
+  completeness of its Caido source history: coverage remains
+  `source_sync_not_assessed`. No Caido intake was started.
+- After the service restart, its systemd unit remained active with zero
+  restarts, and the loopback UI and projects API both returned HTTP 200.
+- The active KB snapshot still has source coverage `DONE`; the existing E5
+  worker is live with 35,296 of 209,026 content vectors. `vector_ready=false`.
+  RedAmon deployed snapshot and query-result parity remain unavailable, so KB
+  identity and overall delivery remain `PARTIAL`.
+
+## Proxmox CT 108 deployment recheck — 2026-10-26 10:06 UTC — PARTIAL
+
+- The application, Nginx and Neo4j are enabled and active in existing LXC
+  container 108 on Proxmox `pve`. `/api/health` returned `{"status":"ok"}`;
+  `neo4j-check` returned `state=ready`; one project is registered. CT 108 has
+  a 128 GiB root disk and starts with Proxmox.
+- Proxmox `vmbr0` is `192.168.1.147/24` with gateway `192.168.1.1`; CT 108
+  receives `192.168.2.154/24` by DHCP. Both are private addresses, not a
+  directly assigned public IP. The current `192.168.1.147:8765` forward is
+  restricted to source `192.168.1.0/24`; a separate client from that LAN has
+  not completed an end-to-end check. A public IP requires an address and route
+  from the router/ISP; this host's current bridge configuration does not have
+  one to assign to CT 108.
+- The copied KB index contains 209,036 chunks from seven completed source
+  families and 38,880 E5 vectors for 209,026 eligible content chunks.
+  `vector_ready=false`, so semantic KB retrieval is still partial. The
+  previously failing relocated Python venv and embedding unit were repaired;
+  Torch and Sentence Transformers import successfully. A single worker
+  advanced the durable count but reached 90–91 C at a 50% CPU quota. It was
+  stopped and disabled; app and Neo4j remain running. Do not resume indexing
+  until a lower safe thermal limit is established.
+- The local Kali app service and KB worker are disabled, and its Neo4j
+  container is exited; the source data and migration archive remain available
+  for rollback. Neo4j's copied data passed its offline consistency check.
+- Current local checkout verification: `go test ./...`, `go vet ./...` and
+  `git diff --check` passed. GitHub's latest `main` CI run passed its Go,
+  Python and Gitleaks jobs. Existing project data has not been validated with
+  live target traffic or a live Hermes model request. Exact content/query
+  equality with the active RedAmon deployment remains unproven.
+
+## Direct DHCP access check — 2026-10-26 10:51 UTC — PARTIAL
+
+- CT 108 `net0` is bridged to `vmbr0` with DHCP and no VLAN tag. It receives
+  `192.168.2.154/24` from DHCP server `192.168.2.1`. Proxmox `pve` itself has
+  `192.168.1.147/24` with gateway `192.168.1.1`. A captured natural renewal
+  showed the DHCP reply from the same source MAC returned by ARP for
+  `192.168.1.1`; the lease is valid, though it is in a different private
+  subnet. CT 103/114 have recent leases from `192.168.1.1`.
+- On the current network, `bb-graph-assistant.myzone.su` resolves to
+  `192.168.2.154`; the direct UI URL is
+  `http://bb-graph-assistant.myzone.su/`. The first check of port 80 returned
+  the generic Nginx welcome page,
+  not the application; this was corrected by making the app vhost the port-80
+  default and disabling Nginx's generic default site (a private backup was
+  kept). Unauthenticated requests from Kali now receive the app's Basic Auth
+  challenge. The active vhost is now tracked at
+  `deploy/nginx/graph-kb-assistant.conf`. Using the existing `graph` Basic
+  Auth account from CT 114 returned HTTP 200 and the `Graph Explorer — BB Graph
+  Assistant` UI title; authenticated `/api/health` also returned 200. The
+  browser flow on the user's workstation has not yet been verified.
+  Direct `/api/health` from CT 114 (`192.168.1.132`) and from `pve` reaches
+  Nginx and receives the same 401 challenge, confirming routed access from the
+  `192.168.1.x` network without DNAT.
+- Disabled and stopped `graph-kb-assistant-nat.service` on `pve`; its
+  application-specific iptables rules were removed. The direct CT URL still
+  responds, while the old `192.168.1.147:8765` endpoint no longer accepts
+  connections. The DHCP lease was not altered. HTTPS on port 443 is not
+  listening; the current deployment is private-LAN HTTP plus authenticated
+  API, not a public HTTPS service.
+- The app, Nginx and Neo4j remain active. At the time of this check, semantic
+  vectors are incomplete and RedAmon snapshot/query parity is unverified, so
+  the overall delivery remains `PARTIAL`.
+
+## Go MCP KB manifest-freshness reporting — 2026-10-26 — PARTIAL
+
+- The production Go `bb_kb_stats` response now reports the pinned source
+  manifest SHA-256, the current `sources.yaml` SHA-256, and whether they match.
+  Older indexes fall back to the immutable snapshot manifest; an unavailable
+  hash remains unknown (`null`). The systemd service templates configure the
+  current manifest path. This signal does not prove source coverage validity,
+  vector completeness, or RedAmon parity.
+- Commit `bf7b26b` is pushed to
+  `codex/consultation-empty-comparisons`. Local `go test ./...`, `go vet ./...`,
+  focused KB/MCP tests, and the full GitHub CI run passed.
+- CT108 has not been redeployed with this Go change. Runtime verification of
+  the new fields and source-manifest freshness remains outstanding; KB vector
+  coverage and exact RedAmon corpus/query parity remain `PARTIAL`.
+
+## Commit-pinned runtime artifact and deployed MCP smoke — 2026-10-26 — PARTIAL
+
+- Commit `b8f9281` adds a Linux amd64 runtime artifact and `SHA256SUMS` to the
+  successful Go CI job; CI run `40325178532` passed Go tests, `go vet`, Python
+  tests, Gitleaks, version stamping, and artifact upload. Downloaded the
+  pull-request artifact, verified its checksum, and ran its binary: it reports
+  `0.1.0-go-dev+b1887f20c910`, matching the tested synthetic PR merge revision.
+  Setup documentation distinguishes PR merge artifacts from exact `main`
+  push artifacts. Documentation correction is commit `f3b9015`.
+- `./scripts/run-hermes mcp test bb_assistant` connected to deployed CT108 over
+  the configured restricted SSH stdio transport and discovered all 15
+  allowlisted tools. This only verifies MCP initialization and tool discovery;
+  no project data, KB tool, capture content, or model was queried.
+- The new Go binary has not been installed on CT108. Direct HTTP to
+  `192.168.2.154` reaches the Basic Auth boundary (`401` without credentials);
+  the configured hostname did not resolve from this shell. Authenticated UI
+  browser flow and post-deployment runtime version remain unverified. KB
+  indexing/parity is being handled separately and was not changed by this
+  check; delivery remains `PARTIAL`.
+
+## CT108 current Go deployment and LAN smoke — 2026-10-26 — PARTIAL
+
+- Deployed the Linux amd64 artifact for commit `895ac465832e291fdc0755363d5c50d43cfb0b86`
+  to `/usr/local/bin/bb-assistant` in existing LXC CT 108. The prior executable
+  is retained as `/usr/local/bin/bb-assistant.before-895ac46` for rollback.
+  The installed artifact reports `0.1.0-go-dev+895ac465832e` and SHA-256
+  `58aa5cd713363e4e86d1b85b2318c80d346fb0edbe53ce63279270b5a19e42b9`.
+- Restarted `graph-kb-assistant.service`; it is active with zero restarts.
+  Read-only checks against the deployed runtime returned `neo4j-check=ready`,
+  HTTP 200 for the authenticated Graph Explorer page and `/api/health`, and
+  one project from `/api/projects`. A dedicated `graph-demo` Basic Auth account
+  was added; its credential was delivered directly and is intentionally not
+  recorded here.
+- Direct address for clients with a route to the private LAN is
+  `http://192.168.2.154/`; unauthenticated traffic receives the expected
+  `401`. No NAT/port-forwarding rules were added. The CT remains on DHCP and
+  the app, Neo4j, and Nginx run there; no KB embedding or model process was
+  started.
+- The deployed Go status remains `PARTIAL`: one registered project has 1,400
+  captures, 1,398 applied projection jobs and two dead-letter jobs. Historical
+  source completeness and active-target behavior remain unverified. KB vectors
+  and exact RedAmon corpus/query parity remain outside this deployment change.
+
+## CT108 runtime secret-path fix — 2026-10-26 — PARTIAL
+
+- Fixed the tracked systemd unit by removing a stale explicit runtime-env path.
+  The launcher now reads `runtime.env` from the configured data home, where the
+  existing mode-0600 vault file is present. Deployed the corrected unit to CT
+  108, retained a private rollback copy, daemon-reloaded and restarted the
+  service; it is active with zero restarts.
+- Authenticated, read-only LAN checks after restart returned HTTP 200 for
+  `/api/health`, `/api/surface` (131 operations, partial coverage), `/api/graph`
+  (3 entities, 2 edges, 1 card; incomplete), `/api/evidence` (source integrity
+  verified; 446-byte encrypted request; parse partial), and
+  `/api/compare` (two exact references compared; request available and unequal;
+  response unavailable). Runtime capabilities report the vault key as
+  verified. Capture bodies were not printed or sent to a model.
+- `projection-reconcile --dry-run --include-dead-letter` found matching local
+  and Neo4j snapshot hashes, zero missing records, and two conflicting
+  dead-letter records. No reconciliation writes were made. Those conflicts and
+  the unavailable response evidence remain data-quality gaps; overall delivery
+  stays `PARTIAL`.
+
+## KB candidate re-chunk and thermal-gated continuation — 2026-10-26 21:13 UTC — PARTIAL
+
+- Commits `2c86ced`, `d6340ba`, `6f1ea2e`, and `5eb90f4` are pushed; CI run
+  `40400476932` passed. Focused local KB verification passed 65 tests and 3
+  subtests, plus `compileall` and `git diff --check`. Commit `5eb90f4`'s tested
+  Nuclei canonicalizer is deployed to CT108.
+- The isolated candidate at
+  `kb/candidates/full-20261026-1936/index.sqlite3` completed re-chunking:
+  207,878 documents, seven source families, and 215,382 content chunks.
+  Coverage reports `DONE`, but current source-manifest match is false. It has
+  38,775 E5 vectors and 176,607 missing vectors; `vector_ready=false`. A raw
+  bounded fallback was used for 5,960 Nuclei chunks whose YAML exceeded the
+  configured parser size limit. The active index is unchanged (209,036 stored
+  chunks, 209,026 content chunks, 38,888 vectors).
+- Comparing the stored-manifest revision `274c622` with current
+  `sources.yaml` found one change only: a stricter clarification of the
+  ExploitDB terms-basis wording. Source families, URLs, revisions, and filters
+  are unchanged in that diff. The historical digest is retained, not manually
+  overwritten.
+- The candidate-only CT108 embed service is active and enabled, but its
+  thermal gate is waiting. At the latest CT-visible sample the sensor read
+  82 C and the process used 0.0% CPU. It will only load the model after a
+  continuous ten-minute dwell below 70 C. VM112 remains paused; no duplicate
+  worker was started.
+- A later CT-visible sample at 21:16 UTC read 93 C. The candidate unit remains
+  active/running and its process remains at 0.0% CPU; the thermal gate is still
+  holding model loading. This supersedes the 82 C sample above.
+- A PVE check then found VM112 running; `ps` showed 58.2% lifetime-average CPU
+  for its KVM process (not an instantaneous utilization reading). Per the
+  user's existing instruction to pause VM112 temporarily, `qm suspend 112`
+  completed and `qm status 112` confirmed `paused`. Subsequent CT-visible
+  samples fell to 87 C and 82 C. A ten-minute dwell below 70 C is not yet
+  established. The candidate service remains active behind its thermal gate;
+  the KB index and VM disks were not modified.
+- At 21:22 UTC the CT sensor read 84 C while VM112 remained paused. A brief
+  PVE `top` sample showed 93.2% CPU idle, 940 MiB free RAM, and 8,182/8,192
+  MiB swap in use. The separate Neo4j parity clone was not started under this
+  thermal/memory state.
+- At 21:28 UTC the CT-visible sensor read 85 C with VM112 still paused; the
+  ten-minute dwell below 70 C had not begun.
+- A read-only candidate `PRAGMA quick_check` did not return within the check
+  window, so database integrity is not yet confirmed.
+  Candidate source-manifest freshness, vector completion, query receipts, and
+  exact RedAmon corpus parity remain open. Keep the candidate unpromoted until
+  these checks pass.

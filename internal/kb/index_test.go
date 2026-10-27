@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +46,9 @@ func TestOpenIndexReadsPythonCompatibleFTSIndexReadOnly(t *testing.T) {
 	}
 	if stats.SourceFamilies != 1 || stats.SourceDocuments != 1 || stats.Chunks != 1 {
 		t.Fatalf("Stats() counts = %d families, %d documents, %d chunks; want 1/1/1", stats.SourceFamilies, stats.SourceDocuments, stats.Chunks)
+	}
+	if stats.TotalContentChunks != 1 || stats.EmbeddedContentChunks != 0 || stats.VectorReady {
+		t.Fatalf("Stats() vector progress = %d/%d ready:%v; want 0/1 not ready", stats.EmbeddedContentChunks, stats.TotalContentChunks, stats.VectorReady)
 	}
 	if stats.CoverageReportHash == nil || *stats.CoverageReportHash != strings.Repeat("2", 64) || !stats.ReferenceMaterialIsUntrusted {
 		t.Fatalf("Stats() lost coverage provenance or untrusted-reference marker: %+v", stats)
@@ -118,6 +124,909 @@ func TestOpenIndexReadsPythonCompatibleFTSIndexReadOnly(t *testing.T) {
 	}
 }
 
+func TestSearchUsesSnapshotBoundLuceneCandidates(t *testing.T) {
+	content := "A synthetic corpus binds chunk identity to its source snapshot."
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	createPythonCompatibleIndexWithChunkID(t, indexPath, content, digestHex(content), digestHex(content), strings.Repeat("a", 16))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	provider := &fakeLuceneCandidateProvider{candidates: []LuceneCandidate{{
+		ChunkID: strings.Repeat("a", 16), SnapshotID: strings.Repeat("1", 64), SourceName: "synthetic", Score: 2.5,
+	}}}
+	index.SetLuceneCandidateProvider(provider)
+	result, err := index.Search(context.Background(), "CVE-2025/42", SearchOptions{TopK: 5, SourceNames: []string{"synthetic"}})
+	if err != nil {
+		t.Fatalf("Lucene Search(): %v", err)
+	}
+	if provider.query != "CVE-2025/42" || provider.snapshotID != strings.Repeat("1", 64) || provider.limit != 30 ||
+		!reflect.DeepEqual(provider.sources, []string{"synthetic"}) || provider.includeSupplemental {
+		t.Fatalf("Lucene request = query:%q snapshot:%q limit:%d sources:%v supplemental:%v", provider.query, provider.snapshotID, provider.limit, provider.sources, provider.includeSupplemental)
+	}
+	if result.LexicalEngine != LexicalEngineNeo4j || len(result.Hits) != 1 || result.Hits[0].ChunkID != strings.Repeat("a", 16) || result.Hits[0].BM25 != 2.5 {
+		t.Fatalf("Lucene result engine/hit = %q/%+v", result.LexicalEngine, result.Hits)
+	}
+}
+
+func TestConfigureSQLiteClosesPreviousLuceneProvider(t *testing.T) {
+	content := "A synthetic corpus binds chunk identity to its source snapshot."
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	provider := &fakeLuceneCandidateProvider{}
+	index.SetLuceneCandidateProvider(provider)
+	if err := index.ConfigureLexicalEngine(LexicalEngineSQLite); err != nil {
+		t.Fatal(err)
+	}
+	if provider.closeCalls != 1 || index.lucene != nil || index.lexicalEngine != LexicalEngineSQLite {
+		t.Fatalf("sqlite reconfiguration = closeCalls:%d provider:%v engine:%q", provider.closeCalls, index.lucene, index.lexicalEngine)
+	}
+}
+
+type fakeLuceneCandidateProvider struct {
+	candidates          []LuceneCandidate
+	query               string
+	snapshotID          string
+	limit               int
+	sources             []string
+	includeSupplemental bool
+	closeCalls          int
+}
+
+func (p *fakeLuceneCandidateProvider) Search(_ context.Context, query, snapshotID string, limit int, sources []string, includeSupplemental bool) ([]LuceneCandidate, error) {
+	p.query, p.snapshotID, p.limit = query, snapshotID, limit
+	p.sources = append([]string(nil), sources...)
+	p.includeSupplemental = includeSupplemental
+	return append([]LuceneCandidate(nil), p.candidates...), nil
+}
+
+func (p *fakeLuceneCandidateProvider) Close() error { p.closeCalls++; return nil }
+
+func TestStatsAndSearchDowngradeStaleDoneCoverageCounts(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic stale coverage fixture"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE kb_meta SET value='DONE' WHERE key='coverage_state'`); err == nil {
+		_, err = db.Exec(`UPDATE kb_meta SET value=? WHERE key='source_coverage'`,
+			`[{"source_name":"synthetic","state":"done","document_count":1,"chunk_count":2}]`)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare stale DONE coverage metadata: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	stats, err := index.Stats(context.Background())
+	if err != nil || stats.CoverageState != "PARTIAL" {
+		t.Fatalf("Stats() coverage = %q, %v; want PARTIAL", stats.CoverageState, err)
+	}
+	result, err := index.Search(context.Background(), "synthetic", SearchOptions{})
+	if err != nil || result.CoverageState != "PARTIAL" || len(result.Hits) != 1 {
+		t.Fatalf("Search() coverage/hits = %q/%d, %v; want PARTIAL/1", result.CoverageState, len(result.Hits), err)
+	}
+}
+
+func TestStatsReportsStagedVectorProgressAndFailsClosed(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic second chunk for embedding progress"
+	firstContent := "synthetic source content"
+	createPythonCompatibleIndex(t, indexPath, firstContent, digestHex(firstContent), digestHex(firstContent))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("b", 64)
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "synthetic", "document-1", "Second chunk", 0,
+		len(content), `{}`, digestHex(content), digestHex(content), "bb-kb-chunk-v1", content)
+	if err == nil {
+		_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+			chunk_id TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+			model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+			(?,?,1024,zeroblob(4096)),(?,?,512,zeroblob(2048))`,
+			strings.Repeat("a", 64), "intfloat/e5-large-v2", secondID, "intfloat/e5-large-v2")
+	}
+	const snapshotID = "1111111111111111111111111111111111111111111111111111111111111111"
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+			('vector_model','intfloat/e5-large-v2'),
+			('vector_dimensions','1024'),
+			('vector_snapshot_id',?),
+			('vector_staging_model','intfloat/e5-large-v2'),
+			('vector_staging_dimensions','1024'),
+			('vector_staging_snapshot_id',?)`, snapshotID, snapshotID)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare partial vector fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.TotalContentChunks != 2 || stats.EmbeddedContentChunks != 1 || stats.EmbeddedChunks != 2 {
+		t.Fatalf("Stats() staged vector counts = %+v; want 1/2 compatible content vectors and 2 stored vectors", stats)
+	}
+	if stats.EmbeddingTargetModel == nil || *stats.EmbeddingTargetModel != "intfloat/e5-large-v2" ||
+		stats.EmbeddingTargetSnapshotID == nil || *stats.EmbeddingTargetSnapshotID != snapshotID || stats.EmbeddingTargetDimensions != 1024 {
+		t.Fatalf("Stats() staged target = model:%v snapshot:%v dimensions:%d", stats.EmbeddingTargetModel, stats.EmbeddingTargetSnapshotID, stats.EmbeddingTargetDimensions)
+	}
+	if stats.VectorReady {
+		t.Fatal("Stats() marked an incomplete vector snapshot ready")
+	}
+}
+
+func TestStatsReportsSourceManifestFreshnessAndUnknownState(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "source manifest freshness fixture"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+
+	manifestPath := filepath.Join(t.TempDir(), "sources.yaml")
+	manifest := []byte("sources:\n  - name: synthetic\n")
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("INSERT INTO kb_meta(key,value) VALUES('source_manifest_sha256',?)", digestHex(string(manifest)))
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("set source manifest hash: %v", err)
+	}
+	t.Setenv("BB_ASSISTANT_KB_SOURCE_MANIFEST", manifestPath)
+
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = index.Close() }()
+
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.SourceManifestSHA256 == nil || stats.CurrentSourceManifestSHA256 == nil ||
+		*stats.SourceManifestSHA256 != digestHex(string(manifest)) ||
+		*stats.CurrentSourceManifestSHA256 != digestHex(string(manifest)) ||
+		stats.SourceManifestMatchesCurrent == nil || !*stats.SourceManifestMatchesCurrent {
+		t.Fatalf("matching source manifest status = pinned:%v current:%v matches:%v", stats.SourceManifestSHA256, stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+
+	if err := os.WriteFile(manifestPath, []byte("sources: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() after manifest change error = %v", err)
+	}
+	if stats.SourceManifestMatchesCurrent == nil || *stats.SourceManifestMatchesCurrent {
+		t.Fatalf("changed source manifest was not marked stale: pinned:%v current:%v matches:%v", stats.SourceManifestSHA256, stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+
+	t.Setenv("BB_ASSISTANT_KB_SOURCE_MANIFEST", filepath.Join(t.TempDir(), "missing.yaml"))
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	index, err = OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err = index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() with unavailable current manifest error = %v", err)
+	}
+	if stats.CurrentSourceManifestSHA256 != nil || stats.SourceManifestMatchesCurrent != nil {
+		t.Fatalf("unavailable current manifest must remain unknown: current:%v matches:%v", stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+}
+
+func TestStatsFallsBackToPinnedSnapshotManifestForOlderIndex(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "older index freshness fixture"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	pinnedManifest := "sources:\n  - name: old\n"
+	currentManifest := "sources:\n  - name: current\n"
+	currentPath := filepath.Join(t.TempDir(), "sources.yaml")
+	if err := os.WriteFile(currentPath, []byte(currentManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshotID := writeMinimalSnapshotManifest(t, filepath.Join(filepath.Dir(indexPath), "snapshots"), digestHex(pinnedManifest))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("UPDATE kb_meta SET value=? WHERE key='snapshot_id'", snapshotID)
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("set old snapshot id: %v", err)
+	}
+	t.Setenv("BB_ASSISTANT_KB_SOURCE_MANIFEST", currentPath)
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = index.Close() }()
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.SourceManifestSHA256 == nil || *stats.SourceManifestSHA256 != digestHex(pinnedManifest) ||
+		stats.CurrentSourceManifestSHA256 == nil || *stats.CurrentSourceManifestSHA256 != digestHex(currentManifest) ||
+		stats.SourceManifestMatchesCurrent == nil || *stats.SourceManifestMatchesCurrent {
+		t.Fatalf("snapshot fallback freshness = pinned:%v current:%v matches:%v", stats.SourceManifestSHA256, stats.CurrentSourceManifestSHA256, stats.SourceManifestMatchesCurrent)
+	}
+}
+
+func writeMinimalSnapshotManifest(t *testing.T, snapshotsRoot, sourceManifestSHA256 string) string {
+	t.Helper()
+	emptyHash := digestHex("")
+	identity := map[string]any{
+		"source_manifest_sha256":        sourceManifestSHA256,
+		"source_documents_sha256":       emptyHash,
+		"chunks_sha256":                 emptyHash,
+		"source_coverage_report_sha256": (*string)(nil),
+		"chunk_schema":                  ChunkSchema,
+		"max_chars":                     1200,
+		"overlap_chars":                 100,
+	}
+	canonical, err := canonicalJSON(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotID := digestHex(string(canonical))
+	root := filepath.Join(snapshotsRoot, snapshotID)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "source-documents.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "chunks.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		SchemaVersion: 1, SnapshotID: snapshotID, SnapshotDir: snapshotID,
+		SourceManifestSHA256: sourceManifestSHA256, SourceDocumentsSHA256: emptyHash, ChunksSHA256: emptyHash,
+		ChunkSchema: ChunkSchema, MaxChars: 1200, OverlapChars: 100, SourceCount: 1,
+		ExportComplete: true, SourceCoverageState: "unverified", SourceCoverageReport: []byte("null"),
+	}
+	payload, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return snapshotID
+}
+
+func TestSearchDoesNotReturnLicenseNoticeOnlyMatches(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "ordinary authentication reference content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice := "rarequestermonly"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, strings.Repeat("b", 64), "synthetic", "NOTICE:license", "License", 0,
+		len(notice), `{"document_role":"license_notice"}`, digestHex(notice), digestHex(notice), "bb-kb-chunk-v1", notice)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`,
+			strings.Repeat("b", 64), "synthetic", "License", notice)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("add synthetic license-only row: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "rarequestermonly", SearchOptions{})
+	if err != nil || len(result.Hits) != 0 {
+		t.Fatalf("license-only search = %d hits, %v; want no hits", len(result.Hits), err)
+	}
+}
+
+func TestKBReadsFailClosedWhileRechunkMarkerIsPresent(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic source content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO kb_meta(key,value) VALUES('rechunk_target_snapshot_id',?)`, strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	ctx := context.Background()
+	stats, err := index.Stats(ctx)
+	if err != nil || stats.MaintenanceState == nil || *stats.MaintenanceState != strings.Repeat("b", 64) {
+		t.Fatalf("Stats maintenance state = %+v, %v", stats.MaintenanceState, err)
+	}
+	if _, err := index.Search(ctx, "synthetic", SearchOptions{TopK: 5}); err == nil {
+		t.Fatal("Search succeeded while the KB snapshot was only partially refreshed")
+	}
+	if _, err := index.GetSource(ctx, "synthetic", "document-1", 512); err == nil {
+		t.Fatal("GetSource succeeded while the KB snapshot was only partially refreshed")
+	}
+}
+
+func TestSearchUsesCompleteTermsLikeRedAmonFullText(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "authentication guidance for the synthetic application needle"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{query: "auth", want: 0},
+		{query: "authentication", want: 1},
+		{query: strings.Repeat("absent ", 39) + "needle", want: 1},
+	} {
+		result, err := index.Search(context.Background(), test.query, SearchOptions{TopK: 5})
+		if err != nil || len(result.Hits) != test.want {
+			t.Fatalf("Search(%q) = %d hits, %v; want %d", test.query, len(result.Hits), err, test.want)
+		}
+	}
+}
+
+func TestSearchSanitizesLucenePunctuationLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "CVE 2024 descriptive record for reference 12345"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "CVE-2024-12345", SearchOptions{TopK: 5})
+	if err != nil || len(result.Hits) != 1 {
+		t.Fatalf("Search(CVE-2024-12345) = %d hits, %v; want one Lucene-sanitized match", len(result.Hits), err)
+	}
+}
+
+func TestSearchHonorsLuceneBooleanOperatorsAndSingleCharacterTerms(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "C is a programming language with alpha beta examples"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("d", 64)
+	secondText := "alpha appears without the other term"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "synthetic", "document-2", "Alpha only", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, secondID, "synthetic", "Alpha only", secondText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("add synthetic boolean-operator document: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{query: "alpha AND beta", want: 1},
+		{query: "C++", want: 1},
+	} {
+		result, err := index.Search(context.Background(), test.query, SearchOptions{TopK: 5})
+		if err != nil || len(result.Hits) != test.want {
+			t.Fatalf("Search(%q) = %d hits, %v; want %d", test.query, len(result.Hits), err, test.want)
+		}
+	}
+}
+
+func TestVectorCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "first vector candidate content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("c", 64)
+	secondText := "source-filtered vector candidate"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "other", "document-2", "Other source", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+		('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(first, second float32) []byte {
+		vector := make([]byte, 1024*4)
+		binary.LittleEndian.PutUint32(vector[0:], math.Float32bits(first))
+		binary.LittleEndian.PutUint32(vector[4:], math.Float32bits(second))
+		return vector
+	}
+	_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+		(?,?,1024,?),(?,?,1024,?)`, strings.Repeat("a", 64), "intfloat/e5-large-v2", encode(1, 0),
+		secondID, "intfloat/e5-large-v2", encode(0.8, 0.6))
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare vector source-filter fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	index.SetRetrievalModels(&syntheticRetrievalModels{queryVector: queryVector})
+	tx, err := index.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ids, _, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1, false)
+	if mode != "hybrid" || len(ids) != 1 || ids[0] != strings.Repeat("a", 64) {
+		t.Fatalf("unfiltered global top-1 candidates = %#v (%s); want the highest-ranked source before metadata filtering", ids, mode)
+	}
+}
+
+func TestVectorCandidatesUseFaissInnerProductOrdering(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "first normalized vector candidate"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("c", 64)
+	secondText := "second vector candidate"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, secondID, "other", "document-2", "Other source", 0,
+		len(secondText), `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+		('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(first, second float32) []byte {
+		vector := make([]byte, 1024*4)
+		binary.LittleEndian.PutUint32(vector[0:], math.Float32bits(first))
+		binary.LittleEndian.PutUint32(vector[4:], math.Float32bits(second))
+		return vector
+	}
+	_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+		(?,?,1024,?),(?,?,1024,?)`, strings.Repeat("a", 64), "intfloat/e5-large-v2", encode(0.8, 0.6),
+		secondID, "intfloat/e5-large-v2", encode(0.9, 0.9))
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare FAISS inner-product fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	index.SetRetrievalModels(&syntheticRetrievalModels{queryVector: queryVector})
+	tx, err := index.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	ids, scores, mode := index.vectorCandidates(context.Background(), tx, "synthetic query", 1, false)
+	if mode != "hybrid" || len(ids) != 1 || ids[0] != secondID || math.Abs(scores[secondID]-0.9) > 1e-6 {
+		t.Fatalf("FAISS-style inner-product top-1 = %#v (%s, %v); want second candidate at 0.9", ids, mode, scores)
+	}
+}
+
+func TestFullTextCandidatesApplySourceFilterAfterGlobalTopKLikeRedAmon(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "baseline fixture without the search term"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < 31 && err == nil; n++ {
+		id := digestHex("other-" + string(rune('a'+n)))
+		text := strings.Repeat("needle ", 12)
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "other", "other-"+string(rune('a'+n)), "Other source", 0,
+			len(text), `{}`, digestHex(text), digestHex(text), "bb-kb-chunk-v2", text)
+		if err == nil {
+			_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "other", "Other source", text)
+		}
+	}
+	wantedID := digestHex("wanted")
+	wantedText := "needle"
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, wantedID, "wanted", "wanted-document", "Wanted source", 0,
+			len(wantedText), `{}`, digestHex(wantedText), digestHex(wantedText), "bb-kb-chunk-v2", wantedText)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, wantedID, "wanted", "Wanted source", wantedText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare source-filter FTS fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	result, err := index.Search(context.Background(), "needle", SearchOptions{TopK: 1, SourceNames: []string{"wanted"}})
+	if err != nil || len(result.Hits) != 0 {
+		t.Fatalf("source-filtered global fulltext top-30 = %d hits, %v; want empty after higher-ranked sources are excluded", len(result.Hits), err)
+	}
+}
+
+func TestSupplementalChunksAreOptInAndRemainSearchable(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	baseText := "baseline content without the supplemental query"
+	createPythonCompatibleIndex(t, indexPath, baseText, digestHex(baseText), digestHex(baseText))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := "WordPress plugin version detection synthetic template"
+	id := digestHex("supplemental")
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "nuclei", "wordpress-plugin-detect.yaml", "Raw template fallback", 0,
+		len(text), `{"canonicalization_fallback":"yaml_size_limit"}`, digestHex(text), digestHex(text), "bb-kb-chunk-v2", text)
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "nuclei", "Raw template fallback", text)
+	}
+	excludedText := "Rendered Nuclei parser rejected template retained as a supplemental reference"
+	excludedID := digestHex("redamon-excluded-rendered-nuclei")
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, excludedID, "nuclei", "Rendered rejected template", "Rendered rejected template", 0,
+			len(excludedText), `{"redamon_excluded_reason":"yaml_parser_policy"}`, digestHex(excludedText), digestHex(excludedText), "bb-kb-chunk-v2", excludedText)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, excludedID, "nuclei", "Rendered rejected template", excludedText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare supplemental fixture: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+
+	defaultResult, err := index.Search(context.Background(), "WordPress plugin version detection", SearchOptions{TopK: 5})
+	if err != nil || len(defaultResult.Hits) != 0 || defaultResult.SupplementalIncluded {
+		t.Fatalf("default search = %d hits, supplemental:%v, err:%v; want no fallback hits", len(defaultResult.Hits), defaultResult.SupplementalIncluded, err)
+	}
+	supplementalResult, err := index.Search(context.Background(), "WordPress plugin version detection", SearchOptions{TopK: 5, IncludeSupplemental: true})
+	if err != nil || len(supplementalResult.Hits) != 1 || supplementalResult.Hits[0].SourceID != "wordpress-plugin-detect.yaml" || !supplementalResult.SupplementalIncluded {
+		t.Fatalf("supplemental search = %+v, err:%v; want the opt-in fallback chunk", supplementalResult, err)
+	}
+	excludedDefault, err := index.Search(context.Background(), "Rendered Nuclei parser rejected template", SearchOptions{TopK: 5})
+	if err != nil || len(excludedDefault.Hits) != 0 {
+		t.Fatalf("default rendered-parser search = %d hits, %v; want excluded", len(excludedDefault.Hits), err)
+	}
+	excludedOptIn, err := index.Search(context.Background(), "Rendered Nuclei parser rejected template", SearchOptions{TopK: 5, IncludeSupplemental: true})
+	foundExcluded := false
+	for _, hit := range excludedOptIn.Hits {
+		foundExcluded = foundExcluded || hit.ChunkID == excludedID
+	}
+	if err != nil || !foundExcluded {
+		t.Fatalf("opt-in rendered-parser search = %+v, %v; want retained canonical chunk", excludedOptIn.Hits, err)
+	}
+	baseline, err := index.Search(context.Background(), "baseline content without the supplemental query", SearchOptions{TopK: 5})
+	if err != nil || len(baseline.Hits) != 1 || baseline.Hits[0].SourceID != "document-1" {
+		t.Fatalf("normal core search = %+v, %v; want baseline core chunk", baseline.Hits, err)
+	}
+}
+
+func TestSearchAppliesCVSSAndSeverityAfterFusedCandidatePool(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	baseText := "needle baseline document without NVD metadata"
+	createPythonCompatibleIndex(t, indexPath, baseText, digestHex(baseText), digestHex(baseText))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertChunk := func(id, sourceID, title, text, metadata string, searchable bool) {
+		t.Helper()
+		_, insertErr := db.Exec(`INSERT INTO chunks(
+			chunk_id,source_name,source_id,title,start_char,end_char,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "nvd", sourceID, title, 0, len(text), metadata,
+			digestHex(text), digestHex(text), "bb-kb-chunk-v2", text)
+		if insertErr != nil {
+			t.Fatalf("insert synthetic NVD chunk: %v", insertErr)
+		}
+		if searchable {
+			if _, insertErr = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`, id, "nvd", title, text); insertErr != nil {
+				t.Fatalf("insert synthetic FTS row: %v", insertErr)
+			}
+		}
+	}
+
+	exactID := strings.Repeat("b", 64)
+	belowID := strings.Repeat("c", 64)
+	wrongSeverityID := strings.Repeat("d", 64)
+	vectorBelowID := strings.Repeat("e", 64)
+	vectorNullID := strings.Repeat("f", 64)
+	insertChunk(exactID, "cve-exact", "Exact boundary", "needle NVD exact CVSS boundary", `{"cvss_score":7.0,"severity":"high"}`, true)
+	insertChunk(belowID, "cve-below", "Below boundary", "needle NVD below CVSS boundary", `{"cvss_score":6.99,"severity":"high"}`, true)
+	insertChunk(wrongSeverityID, "cve-medium", "Wrong severity", "needle NVD wrong severity", `{"cvss_score":9.8,"severity":"medium"}`, true)
+	insertChunk(vectorBelowID, "cve-vector-below", "Vector below", "semantic-only low CVSS vector candidate", `{"cvss_score":6.5,"severity":"high"}`, false)
+	insertChunk(vectorNullID, "cve-vector-null", "Vector null", "semantic-only null CVSS vector candidate", `{"cvss_score":null,"severity":null}`, false)
+	if _, err := db.Exec(`CREATE TABLE chunk_embeddings(
+		chunk_id TEXT PRIMARY KEY,model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+		('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64)); err != nil {
+		t.Fatal(err)
+	}
+	encodeVector := func(score float32) []byte {
+		vector := make([]byte, 1024*4)
+		binary.LittleEndian.PutUint32(vector, math.Float32bits(score))
+		return vector
+	}
+	if _, err := db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+		(?,?,1024,?),(?,?,1024,?)`, vectorBelowID, "intfloat/e5-large-v2", encodeVector(1.0),
+		vectorNullID, "intfloat/e5-large-v2", encodeVector(0.9)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	index.SetRetrievalModels(&syntheticRetrievalModels{queryVector: queryVector})
+	minCVSS := 7.0
+	result, err := index.Search(context.Background(), "needle", SearchOptions{
+		TopK: 10, MinCVSS: &minCVSS, Severity: "high",
+	})
+	if err != nil {
+		t.Fatalf("filtered Search() error = %v", err)
+	}
+	if result.SnapshotID != strings.Repeat("1", 64) || result.CoverageState != "PARTIAL" || result.CoverageReportHash != strings.Repeat("2", 64) {
+		t.Fatalf("filtered Search() lost snapshot coverage provenance: %+v", result)
+	}
+	got := make(map[string]bool, len(result.Hits))
+	for _, hit := range result.Hits {
+		got[hit.ChunkID] = true
+	}
+	if !got[strings.Repeat("a", 64)] || !got[exactID] || !got[vectorNullID] {
+		t.Fatalf("filters excluded a non-NVD or inclusive/null candidate: %#v", got)
+	}
+	if got[belowID] || got[wrongSeverityID] || got[vectorBelowID] {
+		t.Fatalf("filters retained a below-boundary, wrong-severity, or vector-only excluded candidate: %#v", got)
+	}
+}
+
+func TestSearchValidatesOptionalCVSSAndSeverityFilters(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "synthetic filter validation content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	ctx := context.Background()
+	for _, value := range []float64{-0.01, 10.01, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if _, err := index.Search(ctx, "synthetic", SearchOptions{MinCVSS: &value}); err == nil {
+			t.Errorf("Search accepted invalid min_cvss %v", value)
+		}
+	}
+	for _, value := range []string{"Critical", " high", "high ", "severe", strings.Repeat("x", maximumSeverityFilterBytes+1)} {
+		if _, err := index.Search(ctx, "synthetic", SearchOptions{Severity: value}); err == nil {
+			t.Errorf("Search accepted invalid severity %q", value)
+		}
+	}
+	for _, value := range []float64{0, 10} {
+		if _, err := index.Search(ctx, "synthetic", SearchOptions{MinCVSS: &value}); err != nil {
+			t.Errorf("Search rejected valid min_cvss %v: %v", value, err)
+		}
+	}
+}
+
+type syntheticRetrievalModels struct {
+	queryVector []float32
+	rerankCalls int
+}
+
+func (m *syntheticRetrievalModels) EmbedQuery(context.Context, string) ([]float32, error) {
+	return m.queryVector, nil
+}
+
+func (m *syntheticRetrievalModels) Rerank(_ context.Context, _ string, texts []string) ([]float64, error) {
+	m.rerankCalls++
+	scores := make([]float64, len(texts))
+	for n := range scores {
+		scores[n] = float64(n)
+	}
+	return scores, nil
+}
+
+func TestSearchUsesPythonCompatibleVectorCandidatesAndReranker(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "first semantic candidate content"
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+	db, err := sql.Open("sqlite", indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := strings.Repeat("c", 64)
+	secondText := "second semantic candidate with different content"
+	_, err = db.Exec(`INSERT INTO chunks(
+		chunk_id,source_name,source_id,title,start_char,end_char,source_locator,source_url,source_revision,
+		license_id,attribution,metadata_json,source_sha256,chunk_sha256,chunk_schema,text
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, secondID, "synthetic", "document-2", "Different guide", 0,
+		len(secondText), nil, nil, nil, nil, nil, `{}`, digestHex(secondText), digestHex(secondText), "bb-kb-chunk-v2", secondText)
+	if err == nil {
+		_, err = db.Exec(`CREATE TABLE chunk_embeddings(
+			chunk_id TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+			model_name TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)`)
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO kb_meta(key,value) VALUES
+			('vector_model','intfloat/e5-large-v2'),('vector_dimensions','1024'),('vector_snapshot_id',?)`, strings.Repeat("1", 64))
+	}
+	encode := func(values []float32) []byte {
+		result := make([]byte, len(values)*4)
+		for n, value := range values {
+			binary.LittleEndian.PutUint32(result[n*4:], math.Float32bits(value))
+		}
+		return result
+	}
+	vectorA, vectorB := make([]float32, 1024), make([]float32, 1024)
+	vectorA[0], vectorA[1], vectorB[0] = 0.8, 0.6, 1
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES
+			(?,?,1024,?),(?,?,1024,?)`, strings.Repeat("a", 64), "intfloat/e5-large-v2", encode(vectorA),
+			secondID, "intfloat/e5-large-v2", encode(vectorB))
+	}
+	if err == nil {
+		_, err = db.Exec(`INSERT INTO chunk_search(chunk_id,source_name,title,text) VALUES(?,?,?,?)`,
+			secondID, "synthetic", "Different guide", secondText)
+	}
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("prepare synthetic vector index: %v", err)
+	}
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	queryVector := make([]float32, 1024)
+	queryVector[0] = 1
+	models := &syntheticRetrievalModels{queryVector: queryVector}
+	index.SetRetrievalModels(models)
+	result, err := index.Search(context.Background(), "zzsemanticquery", SearchOptions{TopK: 2})
+	if err != nil {
+		t.Fatalf("vector Search() error = %v", err)
+	}
+	if result.RetrievalMode != "hybrid" || len(result.Hits) != 2 {
+		t.Fatalf("vector Search() mode/hits = %q/%d", result.RetrievalMode, len(result.Hits))
+	}
+	if result.Hits[0].ChunkID != strings.Repeat("a", 64) || models.rerankCalls != 1 {
+		t.Fatalf("reranked vector results = first:%q calls:%d; want reranker to change the vector order", result.Hits[0].ChunkID, models.rerankCalls)
+	}
+	if result.Hits[0].VectorScore == nil || *result.Hits[0].VectorScore < 0.79 || result.Hits[0].RerankScore == nil || *result.Hits[0].RerankScore != 1 {
+		t.Fatalf("vector/rerank provenance = %+v", result.Hits[0])
+	}
+	stats, err := index.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.EmbeddedChunks != 2 || stats.TotalContentChunks != 2 || stats.EmbeddedContentChunks != 2 || stats.EmbeddingModel == nil || !stats.VectorReady {
+		t.Fatalf("embedding status = %+v", stats)
+	}
+}
+
 func TestOpenIndexDoesNotCreateMissingIndex(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "missing", "index.sqlite3")
 	if _, err := OpenIndex(indexPath); err == nil {
@@ -128,7 +1037,41 @@ func TestOpenIndexDoesNotCreateMissingIndex(t *testing.T) {
 	}
 }
 
+func TestRankFullTextHitsUsesRedAmonBoostsDiversityAndTopK(t *testing.T) {
+	hits := []Hit{
+		{ChunkID: "a", SourceName: "tool_docs", Title: "Authentication Guide"},
+		{ChunkID: "b", SourceName: "tool_docs", Title: "Authentication Guide duplicate"},
+		{ChunkID: "c", SourceName: "gtfobins", Title: "Linux privilege escalation"},
+		{ChunkID: "d", SourceName: "nvd", Title: "CVE record"},
+	}
+	ranked := rankFullTextHits(hits, 2)
+	if len(ranked) != 2 || ranked[0].ChunkID != "a" || ranked[1].ChunkID != "c" {
+		t.Fatalf("rankFullTextHits() IDs = %#v, want [a c]", []string{ranked[0].ChunkID, ranked[1].ChunkID})
+	}
+	if ranked[0].RankScore <= ranked[1].RankScore || ranked[1].RankScore <= 0 {
+		t.Fatalf("rankFullTextHits() scores = %f, %f", ranked[0].RankScore, ranked[1].RankScore)
+	}
+}
+
+func TestKBChunkSimilarityMatchesSourceAndTitleProxy(t *testing.T) {
+	similar := kbChunkSimilarity(
+		Hit{SourceName: "owasp", Title: "Session authentication testing"},
+		Hit{SourceName: "owasp", Title: "Session authentication checks"},
+	)
+	different := kbChunkSimilarity(
+		Hit{SourceName: "owasp", Title: "Session authentication testing"},
+		Hit{SourceName: "nvd", Title: "Kernel memory corruption"},
+	)
+	if similar <= different || similar > 1 || different < 0 {
+		t.Fatalf("similarity values = %f and %f", similar, different)
+	}
+}
+
 func createPythonCompatibleIndex(t *testing.T, path, content, sourceHash, chunkHash string) {
+	createPythonCompatibleIndexWithChunkID(t, path, content, sourceHash, chunkHash, strings.Repeat("a", 64))
+}
+
+func createPythonCompatibleIndexWithChunkID(t *testing.T, path, content, sourceHash, chunkHash, chunkID string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -162,7 +1105,6 @@ func createPythonCompatibleIndex(t *testing.T, path, content, sourceHash, chunkH
 	metadata := `{"kind":"fixture","revision":7}`
 	const snapshotID = "1111111111111111111111111111111111111111111111111111111111111111"
 	const reportHash = "2222222222222222222222222222222222222222222222222222222222222222"
-	const chunkID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	coverage := `[{"source_name":"synthetic","state":"partial"}]`
 	inserts := []struct {
 		statement string

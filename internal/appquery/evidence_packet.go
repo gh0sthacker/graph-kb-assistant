@@ -85,7 +85,7 @@ func (s *Service) BuildEvidencePacket(ctx context.Context, request EvidencePacke
 	if err != nil || strings.TrimSpace(question) == "" || publicdata.Validate(map[string]string{"question": question}) != nil {
 		return EvidencePacket{}, queryError(ErrorInvalidInput, "evidence packet question is invalid after redaction", err)
 	}
-	ref, ok := s.projects[request.ProjectKey]
+	ref, ok := s.projectRef(request.ProjectKey)
 	if !ok {
 		return EvidencePacket{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
 	}

@@ -20,7 +20,10 @@ classifiers = [
 dependencies = ["cryptography>=42"]
 
 [project.optional-dependencies]
-kb = ["PyYAML>=6"]
+kb = ["PyYAML>=6", "numpy>=1.26"]
+kb-ml = ["PyYAML>=6", "numpy>=1.26", "sentence-transformers>=5,<6", "faiss-cpu>=1.7.0"]
+kb-neo4j = ["neo4j>=6,<7"]
+kb-reference = ["PyYAML>=6", "httpx>=0.28,<1"]
 mcp = ["mcp>=2,<3"]
 test = ["pytest>=8"]
 

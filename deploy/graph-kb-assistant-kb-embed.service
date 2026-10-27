@@ -1,0 +1,36 @@
+[Unit]
+Description=Graph KB Assistant E5 embedding build
+After=network-online.target
+ConditionPathExists=/etc/graph-kb-assistant/kb-embed.env
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=max
+Group=max
+WorkingDirectory=/home/max/bb/graph-kb-assistant
+Environment=HOME=/home/max
+Environment=XDG_DATA_HOME=/home/max/.local/share
+Environment=PYTHONPATH=/home/max/bb/graph-kb-assistant/src
+EnvironmentFile=/etc/graph-kb-assistant/kb-embed.env
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=OMP_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=TOKENIZERS_PARALLELISM=false
+# PVE i3-N305 Tjunction is 105 C. Keep a 25 C package-temperature margin;
+# resume only after a separate 10-minute stable-below-80 C observation.
+ExecStart=/home/max/.local/share/bb-graph-assistant/kb-models-venv/bin/python -u -m bb_assistant.kb.cli embed --batch-size 2 --threads 1 --thermal-sensor /sys/class/hwmon --stop-temperature-c 80
+Restart=no
+CPUQuota=40%
+MemoryMax=3584M
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+UMask=0077
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

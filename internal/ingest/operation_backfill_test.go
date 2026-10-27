@@ -82,6 +82,7 @@ func TestOperationBackfillProjectionReasonIsSpecificAndFixed(t *testing.T) {
 		{name: "unknown origin", hasEndpoint: true, endpointEntity: behaviorgraph.Record{"data": behaviorgraph.Record{"origin": "unknown", "method": "GET"}}, target: "https://example.invalid/api", want: operationBackfillReasonUnknownOrigin},
 		{name: "unknown method", hasEndpoint: true, endpointEntity: behaviorgraph.Record{"data": behaviorgraph.Record{"origin": "https://example.invalid", "method": "UNKNOWN"}}, target: "https://example.invalid/api", want: operationBackfillReasonUnknownMethod},
 		{name: "opaque route", hasEndpoint: true, endpointEntity: endpoint, target: "mailto:unclassified", want: operationBackfillReasonRouteOpaque},
+		{name: "encoded route is not grouped", hasEndpoint: true, endpointEntity: endpoint, target: "https://example.invalid/api/items/%34%32", want: operationBackfillReasonRouteEncoded},
 		{name: "route length limit", hasEndpoint: true, endpointEntity: endpoint, target: longTarget, want: operationBackfillReasonRoutePathTooLong},
 		{name: "operation missing after inputs are valid", hasEndpoint: true, endpointEntity: endpoint, target: "https://example.invalid/api", want: operationBackfillReasonMissingOperation},
 		{name: "all present fallback", operation: true, hasEndpoint: true, assertion: true, endpointEntity: endpoint, target: "https://example.invalid/api", want: operationBackfillReasonIncomplete},
@@ -252,6 +253,8 @@ func TestApplyHistoricalOperationBackfillRequiresPreviewDigestAndQueuesIdempoten
 	defer liveWriter.Close()
 	projectKey := projectStore.ProjectKey
 	exchange := projectionWorkerExchange(selected, "operation-backfill-apply-fixture", "")
+	exchange.Target = "https://api.fixture.invalid/api/items/42"
+	exchange.RequestRaw = []byte("GET /api/items/42 HTTP/1.1\r\nHost: api.fixture.invalid\r\n\r\n")
 	pageWriter, err := OpenPageWriter(ctx, projectStore)
 	if err != nil {
 		t.Fatal(err)

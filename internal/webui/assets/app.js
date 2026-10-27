@@ -1247,7 +1247,7 @@ function renderConsultationCandidate(session) {
   }
   for (const candidate of candidates) {
     const item = el("div", "context-label-item candidate-record");
-    item.append(el("strong", "", `State: ${candidate.state} · ${candidate.candidate_id} · version ${candidate.version}`));
+    item.append(el("strong", "", `State: ${candidate.state} · ${candidate.candidate_id} · version ${candidate.candidate_version}`));
     item.append(el("div", "", `Evidence reference IDs: ${(candidate.citations || []).map(citation => citation.evidence_reference_id).join(", ") || "none"}`));
     item.append(el("div", "", `Comparison IDs: ${(candidate.comparison_ids || []).join(", ") || "none"}`));
     elements.candidateList.append(item);

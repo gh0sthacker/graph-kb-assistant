@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+data_home="${XDG_DATA_HOME:-${HOME:?HOME must be set}/.local/share}"
+data_root="${BB_ASSISTANT_DATA_HOME:-$data_home/bb-graph-assistant}"
+env_file="${BB_ASSISTANT_KB_NEO4J_ENV_FILE:-$data_root/kb-neo4j.env}"
+command_name="${1:-}"
+
+if [[ -f "$env_file" ]]; then
+  set -a
+  # This private, owner-managed file contains only the separate KB endpoint.
+  . "$env_file"
+  set +a
+elif [[ "$command_name" == "publish-lucene" ]]; then
+  printf 'Dedicated KB Neo4j environment file not found: %s\n' "$env_file" >&2
+  exit 1
+fi
+
+if [[ -z "${BB_ASSISTANT_KB_PYTHON:-}" ]]; then
+  kb_python="$data_root/kb-models-venv/bin/python"
+  if [[ -x "$kb_python" ]]; then
+    export BB_ASSISTANT_KB_PYTHON="$kb_python"
+  elif command -v python3.11 >/dev/null 2>&1; then
+    export BB_ASSISTANT_KB_PYTHON="$(command -v python3.11)"
+  else
+    export BB_ASSISTANT_KB_PYTHON="$(command -v python3)"
+  fi
+fi
+
+export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
+cd "$repo_root"
+exec "$BB_ASSISTANT_KB_PYTHON" -m bb_assistant.kb.cli "$@"

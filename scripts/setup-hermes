@@ -74,6 +74,20 @@ def upgrade_managed_profile(existing: str) -> str:
          if lines[index].startswith("  ") and not lines[index].startswith("    ") and lines[index].strip()),
         len(lines),
     )
+    trust_lines = [
+        index for index in range(server_start, server_end)
+        if lines[index].rstrip("\r\n") in ("    trust: untrusted", "    trust: full")
+    ]
+    if len(trust_lines) > 1:
+        raise SystemExit(f"Managed Hermes server trust setting is ambiguous: {config_path}")
+    trust_updated = False
+    if trust_lines and lines[trust_lines[0]].rstrip("\r\n") == "    trust: untrusted":
+        # The app's accepted-session review and candidate validation are the
+        # write gates. This first-party server has a fixed local tool allowlist
+        # and no target-traffic capability, so don't add a second Hermes
+        # approval prompt for each consultation write.
+        lines[trust_lines[0]] = "    trust: full\n"
+        trust_updated = True
     tools_headers = [
         index for index in range(server_start, server_end)
         if lines[index].rstrip("\r\n") == "    tools:"
@@ -127,7 +141,7 @@ def upgrade_managed_profile(existing: str) -> str:
 
     missing_tools = [name for name in tools if name not in set(tool_names)]
     if not missing_tools:
-        return existing
+        return "".join(lines) if trust_updated else existing
     for name in missing_tools:
         desired_index = tools.index(name)
         next_item = next(
@@ -202,7 +216,7 @@ lines = [
     f"      BB_ASSISTANT_DATA_HOME: {quote(data_root)}",
     *([f"      BB_ASSISTANT_KB_INDEX: {quote(kb_index)}"] if kb_index else []),
     "    supports_parallel_tool_calls: false",
-    "    trust: untrusted",
+    "    trust: full",
     "    tools:",
     "      include:",
     *[f"        - {name}" for name in tools],

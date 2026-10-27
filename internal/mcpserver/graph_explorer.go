@@ -8,19 +8,20 @@ import (
 	"bb-graph-assistant/internal/appquery"
 )
 
-// GraphExplorerProjects returns one page of project identities from the local
-// registry. It does not open project databases before the user selects one.
+// GraphExplorerProjects returns one page from the current local registry
+// snapshot. It does not open project databases before the user selects one.
 func (t *Tools) GraphExplorerProjects(ctx context.Context, afterProjectKey string, limit int) (map[string]any, error) {
 	if limit < 1 || limit > maxProjectPageSize {
 		return nil, errors.New("project page limit must be between 1 and 200")
 	}
+	projects := t.projectRefs()
 	start := 0
 	if afterProjectKey != "" {
 		if !projectKeyPattern.MatchString(afterProjectKey) {
 			return nil, errors.New("project cursor has an invalid format")
 		}
 		found := false
-		for index, ref := range t.projects {
+		for index, ref := range projects {
 			key, _ := ref.StorageKey()
 			if key == afterProjectKey {
 				start, found = index+1, true
@@ -31,9 +32,9 @@ func (t *Tools) GraphExplorerProjects(ctx context.Context, afterProjectKey strin
 			return nil, errors.New("project cursor is not in the local catalog")
 		}
 	}
-	end := min(start+limit, len(t.projects))
+	end := min(start+limit, len(projects))
 	rows := make([]map[string]any, 0, end-start)
-	for _, ref := range t.projects[start:end] {
+	for _, ref := range projects[start:end] {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -47,11 +48,11 @@ func (t *Tools) GraphExplorerProjects(ctx context.Context, afterProjectKey strin
 		})
 	}
 	var next any
-	if end < len(t.projects) && end > start {
-		next, _ = t.projects[end-1].StorageKey()
+	if end < len(projects) && end > start {
+		next, _ = projects[end-1].StorageKey()
 	}
 	return map[string]any{
-		"projects": rows, "project_count": len(rows), "total_project_count": len(t.projects),
+		"projects": rows, "project_count": len(rows), "total_project_count": len(projects),
 		"next_after_project_key": next, "scope": "registered local project identities; project data is read after selection",
 	}, nil
 }

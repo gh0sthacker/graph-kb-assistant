@@ -33,6 +33,60 @@ func TestRouteFamilyV1WithReasonUsesFixedCodes(t *testing.T) {
 	}
 }
 
+func TestRouteFamilyV2ConservativelyGroupsOnlyKnownPathsAndStrongIDs(t *testing.T) {
+	for _, test := range []struct {
+		name, target, wantFamily, wantReason string
+	}{
+		{name: "numeric id", target: "https://fixture.invalid/api/items/42", wantFamily: "/api/items/{value}"},
+		{name: "uuid id", target: "https://fixture.invalid/api/items/550e8400-e29b-41d4-a716-446655440000", wantFamily: "/api/items/{value}"},
+		{name: "unknown slug is not guessed", target: "https://fixture.invalid/api/items/alice", wantReason: "ambiguous_segment"},
+		{name: "unknown static route is not merged", target: "https://fixture.invalid/api/custom-report", wantReason: "ambiguous_segment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			family, reason := RouteFamilyV2WithReason(test.target)
+			if family != test.wantFamily || reason != test.wantReason {
+				t.Fatalf("RouteFamilyV2WithReason() = %q, %q; want %q, %q", family, reason, test.wantFamily, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestRouteFamilyV3PreservesStaticSpellingAndRejectsEscapedAliases(t *testing.T) {
+	for _, test := range []struct {
+		name, target, wantFamily, wantReason string
+	}{
+		{name: "static path preserves case", target: "https://fixture.invalid/API/Items/42", wantFamily: "/API/Items/{value}"},
+		{name: "numeric identifiers group", target: "https://fixture.invalid/api/items/987654", wantFamily: "/api/items/{value}"},
+		{name: "uuid identifiers group", target: "https://fixture.invalid/api/items/550e8400-e29b-41d4-a716-446655440000", wantFamily: "/api/items/{value}"},
+		{name: "object id identifiers group", target: "https://fixture.invalid/api/items/507f1f77bcf86cd799439011", wantFamily: "/api/items/{value}"},
+		{name: "long hex identifiers group", target: "https://fixture.invalid/api/items/abcdef0123456789abcdef0123456789", wantFamily: "/api/items/{value}"},
+		{name: "ulid identifiers group", target: "https://fixture.invalid/api/items/01ARZ3NDEKTSV4RRFFQ69G5FAV", wantFamily: "/api/items/{value}"},
+		{name: "encoded unreserved static alias is rejected", target: "https://fixture.invalid/%61pi/items/42", wantReason: "encoded_segment"},
+		{name: "encoded identifier alias is rejected", target: "https://fixture.invalid/api/items/%34%32", wantReason: "encoded_segment"},
+		{name: "encoded separator is rejected", target: "https://fixture.invalid/api/items/a%2Fb", wantReason: "encoded_segment"},
+		{name: "unknown static word is rejected", target: "https://fixture.invalid/api/custom-report", wantReason: "ambiguous_segment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			family, reason := RouteFamilyV3WithReason(test.target)
+			if family != test.wantFamily || reason != test.wantReason {
+				t.Fatalf("RouteFamilyV3WithReason() = %q, %q; want %q, %q", family, reason, test.wantFamily, test.wantReason)
+			}
+		})
+	}
+
+	lower, reason := RouteFamilyV3WithReason("https://fixture.invalid/api/items/42")
+	if reason != "" {
+		t.Fatalf("lowercase route reason = %q", reason)
+	}
+	upper, reason := RouteFamilyV3WithReason("https://fixture.invalid/API/items/42")
+	if reason != "" {
+		t.Fatalf("uppercase route reason = %q", reason)
+	}
+	if lower == upper {
+		t.Fatalf("case-distinct static routes merged: %q", lower)
+	}
+}
+
 func TestSplitMessagePreservesHTTP2PseudoHeaders(t *testing.T) {
 	raw := []byte("GET /items?id=1 HTTP/2\r\n:method: GET\r\n:scheme: https\r\n:authority: fixture.invalid\r\n:path: /items?id=1\r\naccept: application/json\r\n\r\n")
 	headers, body, boundary, complete := splitMessage(raw)

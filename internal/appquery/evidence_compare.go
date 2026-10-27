@@ -65,7 +65,7 @@ func (s *Service) CompareCaptureMessages(ctx context.Context, request CaptureCom
 	if ctx == nil || validateCaptureComparisonRequest(request) != nil {
 		return CaptureComparison{}, queryError(ErrorInvalidInput, "capture comparison request is invalid", nil)
 	}
-	ref, ok := s.projects[request.ProjectKey]
+	ref, ok := s.projectRef(request.ProjectKey)
 	if !ok {
 		return CaptureComparison{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
 	}
