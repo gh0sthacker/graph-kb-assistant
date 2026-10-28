@@ -110,6 +110,15 @@ func TestFullGraphCursorRoundTripsThroughAppQueryHTTPAndMCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create synthetic project: %v", err)
 	}
+	for _, row := range []struct {
+		requestID, observationID, method, route string
+	}{
+		{"surface-get-1", strings.Repeat("1", 64), "GET", "/items"},
+		{"surface-get-2", strings.Repeat("2", 64), "GET", "/items"},
+		{"surface-post-1", strings.Repeat("3", 64), "POST", "/submit"},
+	} {
+		insertGraphCursorSurfaceRow(t, ctx, projectStore, ref, row.requestID, row.observationID, row.method, row.route)
+	}
 	if err := projectStore.Close(); err != nil {
 		t.Fatalf("close synthetic project: %v", err)
 	}
@@ -159,9 +168,22 @@ func TestFullGraphCursorRoundTripsThroughAppQueryHTTPAndMCP(t *testing.T) {
 	if countSourceRefs(t, firstMCP, ownerID) != graphCursorFixtureProvenanceLimit {
 		t.Fatalf("first MCP page did not stop at the exact provenance page limit")
 	}
+	surfaceMCP := callMCPTool(t, server, 4, "bb_surface_map", map[string]any{"project_key": projectKey}, false)
+	if firstMCP["total_operations"] != surfaceMCP["total_operations"] || firstMCP["total_observations"] != surfaceMCP["total_observations"] ||
+		firstMCP["total_operations"] != float64(2) || firstMCP["total_observations"] != float64(3) {
+		t.Fatalf("graph slice totals (%v, %v) do not match surface map totals (%v, %v)",
+			firstMCP["total_operations"], firstMCP["total_observations"], surfaceMCP["total_operations"], surfaceMCP["total_observations"])
+	}
+	if note, _ := firstMCP["totals_coverage_note"].(string); !strings.Contains(note, "local structural indexes") {
+		t.Fatalf("graph slice totals have no local-index coverage note: %q", note)
+	}
 	arguments["cursor"] = firstMCPCursor
 	finalMCP := callGraphSliceMCP(t, server, 2, arguments, false)
 	assertFinalGraphPage(t, finalMCP, ownerID)
+	if finalMCP["total_operations"] != surfaceMCP["total_operations"] || finalMCP["total_observations"] != surfaceMCP["total_observations"] {
+		t.Fatalf("continued graph slice totals (%v, %v) do not match surface map totals (%v, %v)",
+			finalMCP["total_operations"], finalMCP["total_observations"], surfaceMCP["total_operations"], surfaceMCP["total_observations"])
+	}
 	replayedMCP := callGraphSliceMCP(t, server, 3, arguments, false)
 	if replayedMCP["result_id"] != finalMCP["result_id"] {
 		t.Fatalf("MCP cursor replay returned a different accepted page")
@@ -210,6 +232,10 @@ func graphHTTPPage(t *testing.T, handler http.Handler, projectKey, seedID, curso
 }
 
 func callGraphSliceMCP(t *testing.T, server *Server, id int, arguments map[string]any, initialize bool) map[string]any {
+	return callMCPTool(t, server, id, "bb_graph_slice", arguments, initialize)
+}
+
+func callMCPTool(t *testing.T, server *Server, id int, name string, arguments map[string]any, initialize bool) map[string]any {
 	t.Helper()
 	encodedArgs, err := json.Marshal(arguments)
 	if err != nil {
@@ -220,10 +246,10 @@ func callGraphSliceMCP(t *testing.T, server *Server, id int, arguments map[strin
 		input.WriteString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}` + "\n")
 		input.WriteString(`{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}` + "\n")
 	}
-	input.WriteString(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"bb_graph_slice","arguments":%s}}`, id, encodedArgs) + "\n")
+	input.WriteString(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, id, name, encodedArgs) + "\n")
 	var output bytes.Buffer
 	if err := server.Serve(context.Background(), strings.NewReader(input.String()), &output); err != nil {
-		t.Fatalf("serve MCP cursor call: %v", err)
+		t.Fatalf("serve MCP tool call: %v", err)
 	}
 	scanner := bufio.NewScanner(strings.NewReader(output.String()))
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
@@ -232,7 +258,7 @@ func callGraphSliceMCP(t *testing.T, server *Server, id int, arguments map[strin
 		lines = append(lines, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil || len(lines) == 0 {
-		t.Fatalf("read MCP cursor response: lines=%d err=%v", len(lines), err)
+		t.Fatalf("read MCP tool response: lines=%d err=%v", len(lines), err)
 	}
 	var response struct {
 		Result struct {
@@ -244,12 +270,26 @@ func callGraphSliceMCP(t *testing.T, server *Server, id int, arguments map[strin
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &response); err != nil {
-		t.Fatalf("decode MCP cursor response: %v", err)
+		t.Fatalf("decode MCP tool response: %v", err)
 	}
 	if response.Error != nil || response.Result.IsError || response.Result.StructuredContent == nil {
-		t.Fatalf("MCP graph cursor call failed: error=%v result=%#v", response.Error, response.Result)
+		t.Fatalf("MCP %s call failed: error=%v result=%#v", name, response.Error, response.Result)
 	}
 	return response.Result.StructuredContent
+}
+
+func insertGraphCursorSurfaceRow(t *testing.T, ctx context.Context, projectStore *store.ProjectStore, ref project.CaidoProjectRef, requestID, observationID, method, route string) {
+	t.Helper()
+	if _, err := projectStore.Database.DB().ExecContext(ctx,
+		`INSERT INTO captures(observation_id,caido_instance_id,caido_project_id,request_id,request_sha256,request_size,request_vault_ref,parse_state)
+		 VALUES(?,?,?,?,?,0,'fixture-vault-ref','complete')`, observationID, ref.InstanceID, ref.ProjectID, requestID, strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("insert synthetic capture: %v", err)
+	}
+	if _, err := projectStore.Database.DB().ExecContext(ctx,
+		`INSERT INTO capture_search(observation_id,method,host,port,route,response_status,request_content_type,response_content_type,field_names_json,header_names_json)
+		 VALUES(?,?,?,?,?,200,'','application/json','[]','[]')`, observationID, method, "api.fixture", 443, route); err != nil {
+		t.Fatalf("insert synthetic capture search row: %v", err)
+	}
 }
 
 func cursorFromPage(t *testing.T, payload map[string]any) string {

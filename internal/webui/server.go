@@ -761,7 +761,11 @@ func localRequestGate(next http.Handler) http.Handler {
 			sameOrigin = true
 		}
 		_, allowedPost := sameOriginPostRoutes[r.URL.Path]
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && allowedPost && sameOrigin) {
+		if r.Method == http.MethodPost && allowedPost && !sameOrigin {
+			writeError(w, http.StatusForbidden, "Origin required for local mutation")
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !(r.Method == http.MethodPost && allowedPost) {
 			w.Header().Set("Allow", "GET, HEAD, POST")
 			writeError(w, http.StatusMethodNotAllowed, "unsupported local graph explorer method")
 			return
