@@ -998,8 +998,8 @@ class KBIndex:
         batch_encoder = getattr(embedder, "embed_documents_batch", None)
         if not isinstance(model_name, str) or not model_name or not callable(batch_encoder):
             raise TypeError("embedder must expose model_name and embed_documents_batch")
-        if not 1 <= batch_size <= 2:
-            raise ValueError("embedding batch_size must be between 1 and 2 for CPU safety")
+        if not 1 <= batch_size <= 32:
+            raise ValueError("embedding batch_size must be between 1 and 32")
         if self.read_only:
             raise ValueError("KB index is read-only")
         sources, exclude_sources = _normalize_embedding_source_filter(sources, exclude_sources)
