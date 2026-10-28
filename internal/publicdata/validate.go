@@ -7,21 +7,27 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 var (
-	sensitiveValueMarkers             = [...]string{"password", "passwd", "api_key", "api-key", "apikey", "access_token", "access-token", "accesstoken", "refresh_token", "refresh-token", "refreshtoken", "csrf_token", "csrf-token", "csrftoken", "session", "cookie", "secret", "authorization", "token", "jwt", "email", "phone", "mobile", "ssn", "credential", "private_key", "private-key", "privatekey", "private key", "bearer", "eyj", "-----begin", "@"}
+	strongSensitiveValueMarkers       = [...]string{"password", "passwd", "api_key", "api-key", "apikey", "access_token", "access-token", "accesstoken", "refresh_token", "refresh-token", "refreshtoken", "csrf_token", "csrf-token", "csrftoken", "session_id", "session-id", "session_cookie", "session-cookie", "session_key", "session-key", "secret_key", "secret-key", "authorization", "jwt", "phone", "mobile", "ssn", "credential", "private_key", "private-key", "privatekey", "private key", "bearer", "eyj", "-----begin"}
+	weakSensitiveAssignmentPattern    = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?:session|token|cookie|secret|email)(?:[_-]?(?:id|cookie|key))?["']?\s*[=:]\s*\S`)
+	credentialAlphabetPattern         = regexp.MustCompile(`^[A-Za-z0-9._~+/=-]+$`)
+	hexCredentialPattern              = regexp.MustCompile(`^[A-Fa-f0-9]{16,}$`)
+	authorizationSchemePattern        = regexp.MustCompile(`(?i)^(?:bearer|basic|digest|negotiate)(?:\s|$)`)
 	secretAssignmentPattern           = regexp.MustCompile(`(?i)\b([A-Za-z0-9_-]*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session(?:[_-]?(?:id|cookie|key))?|cookie|secret(?:[_-]?key)?|authorization|token|jwt))\b["']?\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&;,"']+)`)
 	jsonSecretAssignmentPattern       = regexp.MustCompile(`(?i)"([A-Za-z0-9_-]*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session(?:[_-]?(?:id|cookie|key))?|cookie|secret(?:[_-]?key)?|authorization|token|jwt))"\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s}\]]+)`)
 	sensitivePIIAssignmentPattern     = regexp.MustCompile(`(?i)\b[A-Za-z0-9_-]*(email|phone|mobile|ssn|credential|private[_-]?key)\b["']?\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&;,"']+)`)
 	jsonSensitivePIIAssignmentPattern = regexp.MustCompile(`(?i)"[A-Za-z0-9_-]*(email|phone|mobile|ssn|credential|private[_-]?key)"\s*:\s*("(?:\\.|[^"\\])*"|[^,\s}\]]+)`)
 	secretOtherValuePattern           = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
 	sensitiveHeaderPattern            = regexp.MustCompile(`(?i)(authorization|cookie|token|secret|password|passwd|credential|api[_-]?key|session|csrf|xsrf)`)
-	headerFieldPattern                = regexp.MustCompile(`(?im)^([A-Za-z0-9-]{1,128}):[ \t]*([^\r\n]*)`)
+	headerFieldPattern                = regexp.MustCompile(`(?im)^([A-Za-z0-9-]{1,128}):[ 	]*([^\r\n]*)`)
 	privateKeyBlockPattern            = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
 	privateKeys                       = map[string]struct{}{
 		"raw": {}, "body": {}, "headers": {}, "header_values": {}, "request_body": {},
@@ -183,27 +189,40 @@ func emptyOrRedacted(value any) bool {
 
 func containsSecretLikeValue(value string) bool {
 	// Most graph strings are routes, names, opaque IDs, or bounded shape
-	// metadata. Run the backtracking assignment detectors only when one of
-	// their mandatory ASCII markers is present. This keeps validation linear
-	// for large safe strings without weakening detection of any pattern below.
+	// metadata. Run the backtracking assignment detectors only when a strong
+	// marker, an assignment-position weak marker, or a known credential pattern
+	// is present. This keeps validation linear for large safe strings.
 	if !hasSensitiveValueMarker(value) {
 		return false
+	}
+	for _, match := range headerFieldPattern.FindAllStringSubmatchIndex(value, -1) {
+		if len(match) >= 6 && match[2] >= 0 && match[3] >= 0 && match[4] >= 0 && match[5] >= 0 &&
+			sensitiveHeaderPattern.MatchString(value[match[2]:match[3]]) {
+			headerValue := strings.TrimSpace(value[match[4]:match[5]])
+			if headerValue != "" && !strings.EqualFold(headerValue, "[REDACTED]") && !strings.EqualFold(headerValue, "<REDACTED>") {
+				return true
+			}
+		}
 	}
 	if secretOtherValuePattern.MatchString(value) {
 		return true
 	}
 	for _, item := range []struct {
-		pattern   *regexp.Regexp
-		valueFrom int
-		valueTo   int
+		pattern        *regexp.Regexp
+		keyFrom        int
+		keyTo          int
+		valueFrom      int
+		valueTo        int
+		checkBareValue bool
 	}{
-		{secretAssignmentPattern, 4, 5}, {jsonSecretAssignmentPattern, 4, 5},
-		{sensitivePIIAssignmentPattern, 4, 5}, {jsonSensitivePIIAssignmentPattern, 4, 5},
+		{secretAssignmentPattern, 2, 3, 4, 5, true}, {jsonSecretAssignmentPattern, 2, 3, 4, 5, true},
+		{sensitivePIIAssignmentPattern, 2, 3, 4, 5, false}, {jsonSensitivePIIAssignmentPattern, 2, 3, 4, 5, false},
 	} {
 		for _, match := range item.pattern.FindAllStringSubmatchIndex(value, -1) {
-			if len(match) <= item.valueTo || match[item.valueFrom] < 0 || match[item.valueTo] < 0 {
+			if len(match) <= item.valueTo || match[item.keyFrom] < 0 || match[item.keyTo] < 0 || match[item.valueFrom] < 0 || match[item.valueTo] < 0 {
 				return true
 			}
+			key := value[match[item.keyFrom]:match[item.keyTo]]
 			assignmentValue := strings.Trim(value[match[item.valueFrom]:match[item.valueTo]], `"'`)
 			for range 3 {
 				decoded, err := url.QueryUnescape(assignmentValue)
@@ -211,6 +230,9 @@ func containsSecretLikeValue(value string) bool {
 					break
 				}
 				assignmentValue = decoded
+			}
+			if item.checkBareValue && !isSensitiveAssignmentValue(key, assignmentValue) {
+				continue
 			}
 			if !strings.EqualFold(assignmentValue, "[REDACTED]") && !strings.EqualFold(assignmentValue, "<REDACTED>") {
 				return true
@@ -222,10 +244,13 @@ func containsSecretLikeValue(value string) bool {
 
 func hasSensitiveValueMarker(value string) bool {
 	lower := strings.ToLower(value)
-	for _, marker := range sensitiveValueMarkers {
+	for _, marker := range strongSensitiveValueMarkers {
 		if strings.Contains(lower, marker) {
 			return true
 		}
+	}
+	if weakSensitiveAssignmentPattern.MatchString(value) || secretOtherValuePattern.MatchString(value) {
+		return true
 	}
 	// regexp's case-insensitive matching also treats a few non-ASCII runes as
 	// simple folds of ASCII letters. Preserve that conservative behavior when a
@@ -236,4 +261,58 @@ func hasSensitiveValueMarker(value string) bool {
 		}
 	}
 	return false
+}
+
+func isSensitiveAssignmentValue(key, value string) bool {
+	normalizedKey := strings.ReplaceAll(strings.ToLower(key), "-", "_")
+	switch normalizedKey {
+	case "session", "token", "cookie", "jwt", "secret", "authorization":
+		value = strings.TrimSpace(strings.Trim(value, `"'`))
+		if normalizedKey == "authorization" && authorizationSchemePattern.MatchString(value) {
+			return true
+		}
+		return looksLikeCredential(value)
+	default:
+		return true
+	}
+}
+
+func looksLikeCredential(value string) bool {
+	value = strings.TrimSpace(strings.Trim(value, `"'`))
+	if len(value) < 12 || strings.IndexFunc(value, unicode.IsSpace) >= 0 || !credentialAlphabetPattern.MatchString(value) {
+		return false
+	}
+	if hexCredentialPattern.MatchString(value) {
+		return true
+	}
+	frequencies := make(map[rune]int)
+	var lower, upper, digit, other bool
+	for _, character := range value {
+		frequencies[character]++
+		switch {
+		case character >= 'a' && character <= 'z':
+			lower = true
+		case character >= 'A' && character <= 'Z':
+			upper = true
+		case character >= '0' && character <= '9':
+			digit = true
+		default:
+			other = true
+		}
+	}
+	if len(frequencies) < 6 {
+		return false
+	}
+	entropy := 0.0
+	for _, count := range frequencies {
+		probability := float64(count) / float64(len(value))
+		entropy -= probability * math.Log2(probability)
+	}
+	classes := 0
+	for _, present := range []bool{lower, upper, digit, other} {
+		if present {
+			classes++
+		}
+	}
+	return entropy >= 3.2 && classes >= 2
 }

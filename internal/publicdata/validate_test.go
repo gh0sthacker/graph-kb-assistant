@@ -13,7 +13,7 @@ func TestValidateJSONRejectsPrivateAndSecretLikeGraphData(t *testing.T) {
 		{"private request field", `{"raw_request":"GET /private HTTP/1.1"}`},
 		{"secret assignment", `{"description":"password=secret-value"}`},
 		{"prefixed secret assignment", `{"description":"client_secret=opaque-value"}`},
-		{"session assignment", `{"description":"session=opaque-value"}`},
+		{"session assignment", `{"description":"session=8f14e45fceea167a5a36dedd4bea2543"}`},
 		{"secret key assignment", `{"description":"secret_key=opaque-value"}`},
 		{"bearer credential", `{"description":"Authorization: Bearer abcdefghijklmnop"}`},
 		{"unsafe url query", `{"url":"https://example.test/path?user=alice"}`},
@@ -54,10 +54,74 @@ func TestValidateAllowsRedactedValuesAndShapeOnlyUrls(t *testing.T) {
 	}
 }
 
+func TestRedactTextPreservesProseWithSensitiveWords(t *testing.T) {
+	for _, input := range []string{
+		"QA test session: verify consultation review readback; no model submission.",
+		"the token: rotate later",
+		"email me when ready",
+		`{"session":"review later"}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			redacted, spans, err := RedactText(input)
+			if err != nil {
+				t.Fatalf("RedactText() error = %v", err)
+			}
+			if redacted != input || len(spans) != 0 {
+				t.Fatalf("prose changed: got %q with spans %#v", redacted, spans)
+			}
+			if err := Validate(map[string]string{"excerpt": redacted}); err != nil {
+				t.Fatalf("ordinary prose failed validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestRedactTextPreservesDetectionOfCredentialValues(t *testing.T) {
+	privateKey := "-----BEGIN PRIVATE KEY-----\\nsecret-private-material\\n-----END PRIVATE KEY-----"
+	for _, test := range []struct {
+		name   string
+		input  string
+		secret string
+	}{
+		{"opaque session id", "session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"},
+		{"bearer JWT", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc"},
+		{"JSON authorization", `{"authorization":"Basic dXNlcjpzZWNyZXQ="}`, "dXNlcjpzZWNyZXQ="},
+		{"JSON access token", `{"access_token":"ya29.a0AfH6"}`, "ya29.a0AfH6"},
+		{"password assignment", "password: hunter2", "hunter2"},
+		{"PEM private key", privateKey, "secret-private-material"},
+		{"cookie header", "Cookie: sid=abc123", "sid=abc123"},
+		{"Set-Cookie header", "Set-Cookie: sid=abc123", "sid=abc123"},
+		{"api key assignment", "api_key=ya29.a0AfH6", "ya29.a0AfH6"},
+		{"composite session id", "session_id=verify", "verify"},
+		{"composite session cookie", "session_cookie=verify", "verify"},
+		{"private key assignment", "private_key=short", "short"},
+		{"credential assignment", "credential=short", "short"},
+		{"refresh token assignment", "refresh_token=short", "short"},
+		{"CSRF token assignment", "csrf_token=short", "short"},
+		{"passwd assignment", "passwd=short", "short"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			redacted, _, err := RedactText(test.input)
+			if err != nil {
+				t.Fatalf("RedactText() error = %v", err)
+			}
+			if strings.Contains(redacted, test.secret) {
+				t.Fatalf("secret %q survived redaction: %s", test.secret, redacted)
+			}
+			if err := Validate(map[string]string{"excerpt": redacted}); err != nil {
+				t.Fatalf("redacted secret failed validation: %v", err)
+			}
+			if err := Validate(map[string]string{"excerpt": test.input}); err == nil {
+				t.Fatalf("secret-bearing input passed validation: %q", test.input)
+			}
+		})
+	}
+}
+
 func TestRedactTextRemovesSensitiveValuesAndReportsOriginalByteSpans(t *testing.T) {
 	input := "GET /items?access_token=query-secret HTTP/1.1\r\n" +
 		"Authorization: Basic dXNlcjpzZWNyZXQ=\r\nCookie: session=header-secret\r\n\r\n" +
-		`{"password":"body-secret","session":"session-secret","secret_key":"key-secret","email":"max@example.test","id":"42"}`
+		`{"password":"body-secret","session":"8f14e45fceea167a5a36dedd4bea2543","secret_key":"key-secret","email":"max@example.test","id":"42"}`
 	redacted, spans, err := RedactText(input)
 	if err != nil {
 		t.Fatalf("RedactText() error = %v", err)

@@ -34,18 +34,26 @@ func RedactText(input string) (string, []TextRedactionSpan, error) {
 		}
 	}
 	for _, assignment := range []struct {
-		pattern   *regexp.Regexp
-		valueFrom int
-		valueTo   int
-		rule      string
+		pattern        *regexp.Regexp
+		keyFrom        int
+		keyTo          int
+		valueFrom      int
+		valueTo        int
+		checkBareValue bool
+		rule           string
 	}{
-		{secretAssignmentPattern, 4, 5, "credential-assignment"},
-		{jsonSecretAssignmentPattern, 4, 5, "credential-assignment"},
-		{sensitivePIIAssignmentPattern, 4, 5, "personal-data-assignment"},
-		{jsonSensitivePIIAssignmentPattern, 4, 5, "personal-data-assignment"},
+		{secretAssignmentPattern, 2, 3, 4, 5, true, "credential-assignment"},
+		{jsonSecretAssignmentPattern, 2, 3, 4, 5, true, "credential-assignment"},
+		{sensitivePIIAssignmentPattern, 2, 3, 4, 5, false, "personal-data-assignment"},
+		{jsonSensitivePIIAssignmentPattern, 2, 3, 4, 5, false, "personal-data-assignment"},
 	} {
 		for _, match := range assignment.pattern.FindAllStringSubmatchIndex(input, -1) {
-			if len(match) <= assignment.valueTo || match[assignment.valueFrom] < 0 || match[assignment.valueTo] <= match[assignment.valueFrom] {
+			if len(match) <= assignment.valueTo || match[assignment.keyFrom] < 0 || match[assignment.keyTo] < 0 || match[assignment.valueFrom] < 0 || match[assignment.valueTo] <= match[assignment.valueFrom] {
+				continue
+			}
+			key := input[match[assignment.keyFrom]:match[assignment.keyTo]]
+			value := input[match[assignment.valueFrom]:match[assignment.valueTo]]
+			if assignment.checkBareValue && !isSensitiveAssignmentValue(key, value) {
 				continue
 			}
 			start, end := match[assignment.valueFrom], match[assignment.valueTo]
