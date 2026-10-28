@@ -199,11 +199,12 @@
         </header>
         <p class="maintenance-note">Preview reads and decrypts bounded historical request bytes locally to build missing operation links. It does not read responses, contact Caido, or send data to Hermes. Applying a ready preview writes graph bundles, then advances the selected project's ordered Neo4j outbox through those bundles. Earlier queued graph events in this project may be applied first. If Neo4j is unavailable, the local graph stays committed and the outbox remains retryable.</p>
         <div class="maintenance-fields">
-          <label for="operation-backfill-max-captures">Maximum captures<input id="operation-backfill-max-captures" type="number" min="1" max="20000" value="5000"></label>
+          <label for="operation-backfill-max-captures">Captures per page<input id="operation-backfill-max-captures" type="number" min="1" max="200" value="100"></label>
           <label for="operation-backfill-max-bytes">Maximum request bytes<input id="operation-backfill-max-bytes" type="number" min="1048576" max="1073741824" value="536870912"></label>
         </div>
         <div class="maintenance-actions">
-          <button class="tool-button" id="operation-backfill-preview" type="button" disabled>Preview only</button>
+          <button class="tool-button" id="operation-backfill-preview" type="button" disabled>Preview first page</button>
+          <button class="tool-button" id="operation-backfill-next" type="button" hidden disabled>Continue preview</button>
           <button class="tool-button" id="operation-backfill-apply" type="button" disabled>Apply exact preview</button>
         </div>
         <p class="maintenance-status" id="operation-backfill-status" role="status" aria-live="polite">Select a project, then request an explicit preview.</p>

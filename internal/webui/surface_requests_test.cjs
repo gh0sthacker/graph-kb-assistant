@@ -74,7 +74,7 @@ function createApp() {
   const source = fs.readFileSync(path.join(__dirname, "assets/app.js"), "utf8");
   assert.match(source, /\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/);
   vm.runInContext(source.replace(/\nvoid loadRuntimeCapabilities\(\);\nloadProjects\(\);\s*$/, "") +
-    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, saveContextAnnotation, updateContextAnnotationControl, moveContextEvidence, selectedContextEvidenceReferenceIDs, orderedContextEvidenceReferenceIDs, resumeConsultationByID, acceptConsultationReview, saveConsultationCandidate, continueConsultationCandidateProposal, updateCandidateControl, renderConsultationCandidate, operationBackfillSkipReasonDetails, renderOperationBackfillPreview, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
+    "\nglobalThis.app = { state, elements, selectProject, clearProjectView, loadSurface, mergeGraphPages, loadGraph, openEvidence, selectEvidenceSide, addCurrentEvidenceSpan, removeEvidencePacketSelection, clearEvidencePacketDraft, previewEvidencePacket, setComparisonBaseline, openComparison, attachComparisonToConsultation, formatCaptureComparison, displayTitle, displaySubtitle, safeDetails, nodeLabels, relationLabels, saveOperationAlias, renderInspector, renderConsultationContext, saveContextAnnotation, updateContextAnnotationControl, moveContextEvidence, selectedContextEvidenceReferenceIDs, orderedContextEvidenceReferenceIDs, resumeConsultationByID, acceptConsultationReview, saveConsultationCandidate, continueConsultationCandidateProposal, updateCandidateControl, renderConsultationCandidate, operationBackfillSkipReasonDetails, renderOperationBackfillPreview, previewOperationBackfill, continueOperationBackfill, updateGraphMoreControl, clickGraphMore: () => elements.graphMore.listeners.click?.() };", context);
   const app = context.app;
   app.state.projects = ["A", "B"].map(project_key => ({ project_key, display_name: project_key }));
   return { ...app, requests };
@@ -122,12 +122,48 @@ test("operation backfill preview explains safe skip categories without echoing u
     skipped_no_operation_reasons: { request_line_malformed: 2, cross_origin_request_target: 1, canonical_assertion_missing: 2, canonical_origin_unknown: 1, canonical_route_path_too_long: 2, attacker_supplied_reason: 99 },
   });
   const text = renderedText(app.elements.operationBackfillResult);
-  assert.ok(text.includes("No safe operation · Request line does not have three HTTP fields: 2"));
-  assert.ok(text.includes("No safe operation · Absolute request target does not match the captured origin: 1"));
-  assert.ok(text.includes("No safe operation · Canonical operation link was not produced: 2"));
-  assert.ok(text.includes("No safe operation · Operation origin could not be normalized: 1"));
-  assert.ok(text.includes("No safe operation · Route exceeds the safe grouping length: 2"));
+  assert.ok(text.includes("No safe operation · Request line does not have three HTTP fields (this page): 2"));
+  assert.ok(text.includes("No safe operation · Absolute request target does not match the captured origin (this page): 1"));
+  assert.ok(text.includes("No safe operation · Canonical operation link was not produced (this page): 2"));
+  assert.ok(text.includes("No safe operation · Operation origin could not be normalized (this page): 1"));
+  assert.ok(text.includes("No safe operation · Route exceeds the safe grouping length (this page): 2"));
   assert.equal(text.includes("attacker_supplied_reason"), false);
+});
+
+test("operation backfill continues exact pages and keeps aggregate scan progress visible", async () => {
+  const app = createApp();
+  app.state.projectKey = "a".repeat(64);
+  app.elements.operationBackfillMaxCaptures.value = "1";
+  app.elements.operationBackfillMaxBytes.value = "1048576";
+
+  const firstRequest = app.previewOperationBackfill();
+  assert.equal(app.requests.length, 1);
+  const firstBody = JSON.parse(app.requests[0].body);
+  assert.equal(firstBody.max_captures, 1);
+  assert.equal("cursor" in firstBody, false);
+  app.requests[0].resolve({
+    state: "partial", coverage_state: "complete", write_mode: "preview_only", historical_captures: 2,
+    scanned: 1, scanned_total: 1, page_number: 1, truncated: true, next_cursor: "signed-cursor-1",
+    totals: { scanned: 1, eligible_captures: 1, request_bytes: 64 },
+  });
+  await firstRequest;
+  assert.equal(app.elements.operationBackfillNext.hidden, false);
+  assert.ok(app.elements.operationBackfillStatus.textContent.includes("scanned 1 of 2"));
+
+  const secondRequest = app.continueOperationBackfill();
+  assert.equal(app.requests.length, 2);
+  const secondBody = JSON.parse(app.requests[1].body);
+  assert.equal(secondBody.cursor, "signed-cursor-1");
+  app.requests[1].resolve({
+    state: "ready", coverage_state: "complete", write_mode: "preview_only", historical_captures: 2,
+    scanned: 1, scanned_total: 2, page_number: 2, truncated: false, scan_complete: true,
+    totals: { scanned: 2, eligible_captures: 2, request_bytes: 128 },
+  });
+  await secondRequest;
+  assert.equal(app.elements.operationBackfillNext.hidden, true);
+  assert.equal(app.elements.operationBackfillApply.disabled, true);
+  assert.ok(app.elements.operationBackfillStatus.textContent.includes("Full scan complete: 2 of 2 captures across 2 pages"));
+  assert.ok(renderedText(app.elements.operationBackfillResult).includes("Eligible captures (cumulative): 2"));
 });
 
 test("navigation assertions have readable graph relationship labels", () => {
