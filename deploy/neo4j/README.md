@@ -45,6 +45,12 @@ docker compose --env-file "$NEO4J_ENV_FILE" -f deploy/neo4j/compose.yaml up -d
 BB_ASSISTANT_NEO4J_ENV_FILE="$NEO4J_ENV_FILE" ./scripts/bb-assistant neo4j-check
 ```
 
+`neo4j-check` without flags is read-only: it verifies connectivity and checks
+required schema through `SHOW CONSTRAINTS` and `SHOW INDEXES`. It does not
+create missing schema. To initialize or repair the schema, explicitly run
+`BB_ASSISTANT_NEO4J_ENV_FILE="$NEO4J_ENV_FILE" ./scripts/bb-assistant neo4j-check --ensure-schema`;
+that flag performs DDL.
+
 The application does not print credentials. Backfill a selected project from
 its validated SQLite BehaviorGraph and require a read-back digest match:
 

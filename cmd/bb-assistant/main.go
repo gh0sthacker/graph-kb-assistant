@@ -233,14 +233,30 @@ func syncNeo4j(args []string) error {
 	return syncErr
 }
 
+type neo4jCheckStore interface {
+	CheckSchema(context.Context) error
+	EnsureSchema(context.Context) error
+	Close(context.Context) error
+}
+
 func checkNeo4j(args []string) error {
+	return checkNeo4jWithFactory(args, func(ctx context.Context, cfg neo4jstore.Config) (neo4jCheckStore, error) {
+		return neo4jstore.New(ctx, cfg)
+	})
+}
+
+func checkNeo4jWithFactory(
+	args []string,
+	newStore func(context.Context, neo4jstore.Config) (neo4jCheckStore, error),
+) error {
 	flags := flag.NewFlagSet("neo4j-check", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
+	ensureSchema := flags.Bool("ensure-schema", false, "create missing Neo4j schema; without this flag, only inspect schema read-only")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("usage: bb-assistant neo4j-check")
+		return errors.New("usage: bb-assistant neo4j-check [--ensure-schema]")
 	}
 	cfg, err := neo4jstore.ConfigFromEnv()
 	if err != nil {
@@ -248,12 +264,17 @@ func checkNeo4j(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	graphStore, err := neo4jstore.New(ctx, cfg)
+	graphStore, err := newStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer graphStore.Close(context.Background())
-	if err := graphStore.EnsureSchema(ctx); err != nil {
+	if *ensureSchema {
+		err = graphStore.EnsureSchema(ctx)
+	} else {
+		err = graphStore.CheckSchema(ctx)
+	}
+	if err != nil {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
@@ -402,18 +423,27 @@ func backupProject(args []string) error {
 	var selectedKeys stringListFlag
 	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
 	root := flags.String("data-root", "", "private assistant data root")
-	output := flags.String("output", "", "new archive path outside the project directory")
+	output := flags.String("output", "", "new archive path outside the project directory (optional with --dry-run)")
 	maxBytes := flags.Int64("max-bytes", 0, "required maximum uncompressed project bytes")
 	maxFiles := flags.Int("max-files", 0, "required maximum project file count")
+	dryRun := flags.Bool("dry-run", false, "show the bounded archive plan without writing an archive")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) || *output == "" || *maxBytes <= 0 || *maxFiles <= 0 {
-		return errors.New("usage: bb-assistant project-backup --project-key <sha256> --output <new-archive> --max-bytes <positive> --max-files <positive> [--data-root path]")
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) || (!*dryRun && *output == "") || *maxBytes <= 0 || *maxFiles <= 0 {
+		return errors.New("usage: bb-assistant project-backup --project-key <sha256> --max-bytes <positive> --max-files <positive> [--output <new-archive>] [--dry-run] [--data-root path]; --output is required unless --dry-run is set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
-	report, err := projectbackup.Backup(ctx, *root, selectedKeys[0], *output, projectbackup.Limits{MaxBytes: *maxBytes, MaxFiles: *maxFiles})
+	limits := projectbackup.Limits{MaxBytes: *maxBytes, MaxFiles: *maxFiles}
+	if *dryRun {
+		plan, err := projectbackup.Plan(ctx, *root, selectedKeys[0], *output, limits)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(plan)
+	}
+	report, err := projectbackup.Backup(ctx, *root, selectedKeys[0], *output, limits)
 	if err != nil {
 		return err
 	}

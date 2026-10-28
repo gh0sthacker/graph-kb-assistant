@@ -12,6 +12,9 @@ Start Neo4j using the private configuration described in [deploy/neo4j](deploy/n
 ./scripts/bb-assistant serve
 ```
 
+`neo4j-check` is read-only by default; use `neo4j-check --ensure-schema` only
+when you explicitly intend to create missing constraints and indexes.
+
 Open `http://127.0.0.1:8765/`. To run the durable projection worker for selected registered projects, pass each project key explicitly with `--project-key <sha256>`. Without project keys, `serve` runs the web UI only. MCP clients launch the separate stdio server with `./scripts/bb-assistant-mcp`; both launchers read the same private runtime configuration. The managed server does not start Caido intake or call a model. Runtime data and credentials stay outside this repository.
 
 In the graph inspector, **Focus on direct relationships** narrows the display to the selected node and its immediate neighbors from the already-loaded graph. **All nodes** restores that graph slice. Focusing changes only the view; it does not reread Caido or change graph coverage.
