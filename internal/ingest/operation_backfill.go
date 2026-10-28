@@ -3,16 +3,21 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
@@ -23,6 +28,9 @@ import (
 const (
 	DefaultOperationBackfillMaxCaptures       = 5000
 	MaximumOperationBackfillMaxCaptures       = 20000
+	DefaultOperationBackfillPageSize          = 100
+	MaximumOperationBackfillPageSize          = 200
+	MaximumOperationBackfillCursorBytes       = 4096
 	DefaultOperationBackfillMaxBytes          = int64(512 << 20)
 	MaximumOperationBackfillMaxBytes          = int64(1 << 30)
 	operationBackfillBundleSources            = 900
@@ -51,12 +59,44 @@ const (
 	operationBackfillReasonInvalidMethod      = "request_method_invalid"
 )
 
-var ErrOperationBackfillCandidateChanged = errors.New("operation backfill preview changed")
-
 type OperationBackfillOptions struct {
 	MaxCaptures int
 	MaxBytes    int64
+	Paginated   bool
+	Cursor      string
 }
+
+type OperationBackfillTotals struct {
+	Scanned                    int            `json:"scanned"`
+	RequestBytes               int64          `json:"request_bytes"`
+	EligibleCaptures           int            `json:"eligible_captures"`
+	SkippedUnmapped            int            `json:"skipped_unmapped"`
+	SkippedOversized           int            `json:"skipped_oversized"`
+	SkippedNoOperation         int            `json:"skipped_no_operation"`
+	SkippedNoOperationReasons  map[string]int `json:"skipped_no_operation_reasons"`
+	EndpointIdentityMismatches int            `json:"endpoint_identity_mismatches"`
+}
+
+type operationBackfillCursor struct {
+	Version          int                     `json:"version"`
+	ProjectKey       string                  `json:"project_key"`
+	Fingerprint      string                  `json:"fingerprint"`
+	GraphFingerprint string                  `json:"graph_fingerprint"`
+	AfterRequestID   string                  `json:"after_request_id"`
+	HistoricalTotal  int                     `json:"historical_total"`
+	PageNumber       int                     `json:"page_number"`
+	MaxCaptures      int                     `json:"max_captures"`
+	MaxBytes         int64                   `json:"max_bytes"`
+	Totals           OperationBackfillTotals `json:"totals"`
+}
+
+var (
+	ErrOperationBackfillCandidateChanged = errors.New("operation backfill preview changed")
+	ErrOperationBackfillCursorStale      = errors.New("operation backfill preview cursor is stale")
+	operationBackfillCursorKeyOnce       sync.Once
+	operationBackfillCursorKey           []byte
+	operationBackfillCursorKeyErr        error
+)
 
 type OperationBackfillSample struct {
 	ID          string `json:"id"`
@@ -74,6 +114,11 @@ type OperationBackfillPreview struct {
 	WriteMode                  string                    `json:"write_mode"`
 	HistoricalCaptures         int                       `json:"historical_captures"`
 	Scanned                    int                       `json:"scanned"`
+	ScannedTotal               int                       `json:"scanned_total"`
+	Totals                     OperationBackfillTotals   `json:"totals"`
+	PageNumber                 int                       `json:"page_number,omitempty"`
+	NextCursor                 string                    `json:"next_cursor,omitempty"`
+	ScanComplete               bool                      `json:"scan_complete"`
 	RequestBytes               int64                     `json:"request_bytes"`
 	EligibleCaptures           int                       `json:"eligible_captures"`
 	OperationGroups            int                       `json:"operation_groups"`
@@ -123,46 +168,103 @@ func PreviewHistoricalOperationBackfill(
 		!selected.Database.ReadOnly() || maintenance == nil || !maintenance.CoversExclusiveDirectory(selected.Directory) {
 		return OperationBackfillPreview{}, errors.New("operation backfill preview requires a read-only project and matching maintenance lease")
 	}
-	if options.MaxCaptures == 0 {
+	if options.Paginated {
+		if options.MaxCaptures == 0 {
+			options.MaxCaptures = DefaultOperationBackfillPageSize
+		}
+		if options.MaxCaptures < 1 || options.MaxCaptures > MaximumOperationBackfillPageSize || len(options.Cursor) > MaximumOperationBackfillCursorBytes {
+			return OperationBackfillPreview{}, errors.New("operation backfill page limits or cursor are invalid")
+		}
+	} else if options.MaxCaptures == 0 {
 		options.MaxCaptures = DefaultOperationBackfillMaxCaptures
 	}
 	if options.MaxBytes == 0 {
 		options.MaxBytes = DefaultOperationBackfillMaxBytes
 	}
-	if options.MaxCaptures < 1 || options.MaxCaptures > MaximumOperationBackfillMaxCaptures ||
+	if (!options.Paginated && (options.MaxCaptures < 1 || options.MaxCaptures > MaximumOperationBackfillMaxCaptures)) ||
 		options.MaxBytes < 1<<20 || options.MaxBytes > MaximumOperationBackfillMaxBytes {
 		return OperationBackfillPreview{}, errors.New("operation backfill preview limits are invalid")
 	}
 
+	pageCursor := operationBackfillCursor{
+		Version: 1, ProjectKey: selected.ProjectKey, PageNumber: 1,
+		MaxCaptures: options.MaxCaptures, MaxBytes: options.MaxBytes,
+		Totals: OperationBackfillTotals{SkippedNoOperationReasons: map[string]int{}},
+	}
+	var inventoryFingerprint string
+	var hasMoreRows bool
+	if options.Paginated && options.Cursor != "" {
+		var decodeErr error
+		pageCursor, decodeErr = decodeOperationBackfillCursor(options.Cursor)
+		if decodeErr != nil || pageCursor.ProjectKey != selected.ProjectKey || pageCursor.MaxCaptures != options.MaxCaptures || pageCursor.MaxBytes != options.MaxBytes {
+			return OperationBackfillPreview{}, ErrOperationBackfillCursorStale
+		}
+	}
+
 	preview := OperationBackfillPreview{
-		ProjectKey: selected.ProjectKey, WriteMode: "preview_only",
+		ProjectKey: selected.ProjectKey, WriteMode: "preview_only", PageNumber: pageCursor.PageNumber,
 		OperationSamples: []OperationBackfillSample{}, SkippedNoOperationReasons: map[string]int{},
 	}
-	reader, err := behaviorgraph.OpenReader(ctx, selected.BehaviorGraphPath, selected.ProjectKey, selected.BehaviorReceiptPath)
-	if err != nil {
-		return preview, errors.New("active local graph could not be read for operation preview")
+	var rows []historicalOperationBackfillRow
+	var total int
+	var err error
+	if options.Paginated {
+		var after string
+		if options.Cursor != "" {
+			after = pageCursor.AfterRequestID
+		}
+		rows, total, inventoryFingerprint, hasMoreRows, err = listHistoricalOperationBackfillPage(
+			ctx, selected.Database.DB(), after, options.MaxCaptures,
+		)
+	} else {
+		rows, total, err = listHistoricalOperationBackfillRows(ctx, selected.Database.DB(), options.MaxCaptures)
 	}
-	snapshot, snapshotErr := reader.Snapshot()
-	readerCloseErr := reader.Close()
-	if snapshotErr != nil || readerCloseErr != nil {
-		return preview, errors.New("active local graph snapshot could not be read and closed cleanly")
-	}
-	cardsByCapture, entityIDs, assertionIDs, err := indexOperationBackfillSnapshot(snapshot)
 	if err != nil {
 		return preview, err
 	}
-	rows, total, err := listHistoricalOperationBackfillRows(ctx, selected.Database.DB(), options.MaxCaptures)
-	if err != nil {
-		return preview, err
+	if options.Paginated && options.Cursor != "" &&
+		(pageCursor.HistoricalTotal != total || pageCursor.Fingerprint != inventoryFingerprint) {
+		return OperationBackfillPreview{}, ErrOperationBackfillCursorStale
 	}
+	pageCursor.HistoricalTotal = total
+	pageCursor.Fingerprint = inventoryFingerprint
 	preview.HistoricalCaptures = total
-	if total > options.MaxCaptures {
+	if !options.Paginated && total > options.MaxCaptures {
 		preview.Truncated = true
 	}
 
-	additions := make([]operationBackfillAddition, 0, len(rows))
+	rowLimit := len(rows)
+	if options.Paginated && rowLimit > options.MaxCaptures {
+		rowLimit = options.MaxCaptures
+		hasMoreRows = true
+	}
+	captureIDs := make([]string, 0, rowLimit)
+	for _, row := range rows[:rowLimit] {
+		captureIDs = append(captureIDs, row.observationID)
+	}
+	graphReader, err := behaviorgraph.OpenOperationBackfillReader(ctx, selected.BehaviorGraphPath, selected.ProjectKey, selected.BehaviorReceiptPath)
+	if err != nil {
+		return preview, errors.New("active local graph could not be opened for operation preview")
+	}
+	defer graphReader.Close()
+	graphFingerprint, err := graphReader.Fingerprint()
+	if err != nil {
+		return preview, errors.New("active local graph fingerprint could not be read for operation preview")
+	}
+	if options.Paginated && options.Cursor != "" && pageCursor.GraphFingerprint != graphFingerprint {
+		return OperationBackfillPreview{}, ErrOperationBackfillCursorStale
+	}
+	pageCursor.GraphFingerprint = graphFingerprint
+	cardsByCapture, err := graphReader.CardsByCapture(ctx, captureIDs)
+	if err != nil {
+		return preview, errors.New("active local graph operation cards could not be indexed")
+	}
+
+	lastProcessedRequestID := pageCursor.AfterRequestID
+	byteBudgetStopped := false
+	additions := make([]operationBackfillAddition, 0, rowLimit)
 	var bytesRead int64
-	for _, row := range rows {
+	for _, row := range rows[:rowLimit] {
 		if err := ctx.Err(); err != nil {
 			return preview, err
 		}
@@ -170,22 +272,26 @@ func PreviewHistoricalOperationBackfill(
 		card, exists := cardsByCapture[row.observationID]
 		if !exists {
 			preview.SkippedUnmapped++
+			lastProcessedRequestID = row.requestID
 			continue
 		}
 		refs, ok := operationBackfillRecords(card["source_refs"])
 		if !ok || len(refs) != 1 {
 			preview.SkippedUnmapped++
+			lastProcessedRequestID = row.requestID
 			continue
 		}
 		endpointID, endpointData, ok := operationBackfillCardEndpoint(card)
 		if !ok {
 			preview.SkippedUnmapped++
+			lastProcessedRequestID = row.requestID
 			continue
 		}
 		origin, _ := endpointData["origin"].(string)
 		captured, readErr := ReadCaptureMessageForGraphRebuild(ctx, selected, row.requestID, "request")
 		if errors.Is(readErr, ErrCaptureContextLimit) {
 			preview.SkippedOversized++
+			lastProcessedRequestID = row.requestID
 			continue
 		}
 		if readErr != nil {
@@ -194,6 +300,8 @@ func PreviewHistoricalOperationBackfill(
 		if captured.TotalSize > options.MaxBytes-bytesRead {
 			clear(captured.Data)
 			preview.Truncated = true
+			preview.Scanned--
+			byteBudgetStopped = true
 			break
 		}
 		bytesRead += captured.TotalSize
@@ -202,6 +310,7 @@ func PreviewHistoricalOperationBackfill(
 		if !validTarget {
 			clear(captured.Data)
 			countOperationBackfillNoOperation(&preview, skipReason)
+			lastProcessedRequestID = row.requestID
 			continue
 		}
 		exchange := caido.HttpExchange{
@@ -223,6 +332,7 @@ func PreviewHistoricalOperationBackfill(
 			countOperationBackfillNoOperation(&preview, operationBackfillProjectionReason(
 				foundOperation, projectedEndpoint, foundEndpoint, foundAssertion, target,
 			))
+			lastProcessedRequestID = row.requestID
 			continue
 		}
 		assertionSubject, _ := assertion["subject"].(string)
@@ -238,12 +348,44 @@ func PreviewHistoricalOperationBackfill(
 		if operationID == "" || assertionID == "" {
 			return preview, errors.New("canonical operation projection returned an invalid identity")
 		}
-		addition := operationBackfillAddition{source: refs[0], operation: operation, assertion: assertion}
-		if !entityIDs[projectedEndpointID] {
-			addition.endpoint = projectedEndpoint
-		}
+		addition := operationBackfillAddition{source: refs[0], endpoint: projectedEndpoint, operation: operation, assertion: assertion}
 		additions = append(additions, addition)
 		preview.EligibleCaptures++
+		lastProcessedRequestID = row.requestID
+	}
+
+	entityCandidates := make(map[string]struct{}, len(additions)*2)
+	assertionCandidates := make(map[string]struct{}, len(additions))
+	for _, addition := range additions {
+		for _, record := range []behaviorgraph.Record{addition.operation, addition.endpoint} {
+			if record == nil {
+				continue
+			}
+			id, _ := record["id"].(string)
+			entityCandidates[id] = struct{}{}
+		}
+		id, _ := addition.assertion["id"].(string)
+		assertionCandidates[id] = struct{}{}
+	}
+	entityCandidateIDs := make([]string, 0, len(entityCandidates))
+	for id := range entityCandidates {
+		entityCandidateIDs = append(entityCandidateIDs, id)
+	}
+	assertionCandidateIDs := make([]string, 0, len(assertionCandidates))
+	for id := range assertionCandidates {
+		assertionCandidateIDs = append(assertionCandidateIDs, id)
+	}
+	existingEntityIDs, existingAssertionIDs, err := graphReader.LookupIDs(ctx, entityCandidateIDs, assertionCandidateIDs)
+	if err != nil {
+		return preview, errors.New("active local graph identities could not be checked for operation preview")
+	}
+	for index := range additions {
+		if additions[index].endpoint != nil {
+			endpointID, _ := additions[index].endpoint["id"].(string)
+			if existingEntityIDs[endpointID] {
+				additions[index].endpoint = nil
+			}
+		}
 	}
 
 	bundles, err := buildOperationBackfillBundles(selected.ProjectKey, additions)
@@ -270,7 +412,7 @@ func PreviewHistoricalOperationBackfill(
 		for _, assertion := range assertions {
 			id, _ := assertion["id"].(string)
 			assertionIDsCandidate[id] = struct{}{}
-			if !assertionIDs[id] {
+			if !existingAssertionIDs[id] {
 				newAssertions[id] = struct{}{}
 			}
 		}
@@ -279,12 +421,12 @@ func PreviewHistoricalOperationBackfill(
 	preview.AssertionLinks = len(assertionIDsCandidate)
 	preview.NewAssertionLinks = len(newAssertions)
 	for id := range endpointIDs {
-		if !entityIDs[id] {
+		if !existingEntityIDs[id] {
 			preview.NewEndpointEntities++
 		}
 	}
 	for id, operation := range operationIDs {
-		if !entityIDs[id] {
+		if !existingEntityIDs[id] {
 			preview.NewOperationGroups++
 		}
 		data, _ := operationBackfillRecord(operation["data"])
@@ -297,10 +439,49 @@ func PreviewHistoricalOperationBackfill(
 	if len(preview.OperationSamples) > 10 {
 		preview.OperationSamples = preview.OperationSamples[:10]
 	}
-	finalizeOperationBackfillCoverage(&preview)
-	preview.CandidateSHA256, err = operationBackfillDigest(bundles)
-	if err != nil {
-		return preview, err
+	if options.Paginated {
+		if byteBudgetStopped || hasMoreRows {
+			preview.Truncated = true
+		}
+		addOperationBackfillTotals(&pageCursor.Totals, preview)
+		preview.Totals = cloneOperationBackfillTotals(pageCursor.Totals)
+		preview.ScannedTotal = preview.Totals.Scanned
+		preview.PageNumber = pageCursor.PageNumber
+		if preview.Truncated || preview.ScannedTotal < total {
+			if lastProcessedRequestID == pageCursor.AfterRequestID {
+				return OperationBackfillPreview{}, errors.New("operation backfill page made no cursor progress")
+			}
+			pageCursor.AfterRequestID = lastProcessedRequestID
+			pageCursor.PageNumber++
+			preview.NextCursor, err = encodeOperationBackfillCursor(pageCursor)
+			if err != nil {
+				return OperationBackfillPreview{}, errors.New("operation backfill continuation cursor could not be created")
+			}
+		}
+		preview.ScanComplete = preview.NextCursor == "" && preview.ScannedTotal == total
+	} else {
+		preview.ScannedTotal = preview.Scanned
+		preview.Totals = operationBackfillPageTotals(preview)
+		preview.ScanComplete = !preview.Truncated && preview.ScannedTotal == total
+	}
+	if options.Paginated {
+		aggregate := preview
+		aggregate.EligibleCaptures = preview.Totals.EligibleCaptures
+		aggregate.SkippedUnmapped = preview.Totals.SkippedUnmapped
+		aggregate.SkippedOversized = preview.Totals.SkippedOversized
+		aggregate.SkippedNoOperation = preview.Totals.SkippedNoOperation
+		aggregate.EndpointIdentityMismatches = preview.Totals.EndpointIdentityMismatches
+		aggregate.Truncated = !preview.ScanComplete
+		finalizeOperationBackfillCoverage(&aggregate)
+		preview.State, preview.CoverageState = aggregate.State, aggregate.CoverageState
+	} else {
+		finalizeOperationBackfillCoverage(&preview)
+	}
+	if !options.Paginated || (options.Cursor == "" && preview.NextCursor == "") {
+		preview.CandidateSHA256, err = operationBackfillDigest(bundles)
+		if err != nil {
+			return preview, err
+		}
 	}
 	return preview, nil
 }
@@ -490,6 +671,190 @@ func listHistoricalOperationBackfillRows(ctx context.Context, db *sql.DB, limit 
 		return nil, 0, errors.New("historical operation backfill inventory could not be completed")
 	}
 	return result, total, nil
+}
+
+func listHistoricalOperationBackfillPage(
+	ctx context.Context,
+	db *sql.DB,
+	after string,
+	limit int,
+) ([]historicalOperationBackfillRow, int, string, bool, error) {
+	if db == nil || limit < 1 || limit > MaximumOperationBackfillPageSize || len(after) > 512 {
+		return nil, 0, "", false, errors.New("historical operation backfill page request is invalid")
+	}
+	inventory, err := db.QueryContext(ctx, `SELECT c.request_id,c.observation_id,c.current_revision_id,
+		cr.request_sha256,cr.request_size FROM captures c
+		JOIN capture_revision_registry r ON r.observation_id=c.observation_id AND r.revision_id=c.current_revision_id
+		JOIN capture_revisions cr ON cr.observation_id=c.observation_id AND cr.revision_id=c.current_revision_id
+		WHERE r.source_kind='historical' ORDER BY c.request_id`)
+	if err != nil {
+		return nil, 0, "", false, errors.New("historical operation backfill inventory could not be fingerprinted")
+	}
+	hash := sha256.New()
+	total := 0
+	for inventory.Next() {
+		var requestID, observationID, revisionID, requestHash string
+		var requestSize int64
+		if err := inventory.Scan(&requestID, &observationID, &revisionID, &requestHash, &requestSize); err != nil {
+			_ = inventory.Close()
+			return nil, 0, "", false, errors.New("historical operation backfill inventory is malformed")
+		}
+		encoded, err := json.Marshal([]any{requestID, observationID, revisionID, requestHash, requestSize})
+		if err != nil {
+			_ = inventory.Close()
+			return nil, 0, "", false, errors.New("historical operation backfill inventory could not be fingerprinted")
+		}
+		_, _ = hash.Write(encoded)
+		_, _ = hash.Write([]byte{'\n'})
+		total++
+	}
+	if err := inventory.Err(); err != nil {
+		_ = inventory.Close()
+		return nil, 0, "", false, errors.New("historical operation backfill inventory could not be completed")
+	}
+	if err := inventory.Close(); err != nil {
+		return nil, 0, "", false, errors.New("historical operation backfill inventory could not be closed")
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT c.request_id,c.observation_id FROM captures c
+		JOIN capture_revision_registry r ON r.observation_id=c.observation_id AND r.revision_id=c.current_revision_id
+		WHERE r.source_kind='historical' AND c.request_id>? ORDER BY c.request_id LIMIT ?`, after, limit+1)
+	if err != nil {
+		return nil, 0, "", false, errors.New("historical operation backfill page could not be read")
+	}
+	defer rows.Close()
+	page := make([]historicalOperationBackfillRow, 0, limit+1)
+	for rows.Next() {
+		var row historicalOperationBackfillRow
+		if err := rows.Scan(&row.requestID, &row.observationID); err != nil {
+			return nil, 0, "", false, errors.New("historical operation backfill page is malformed")
+		}
+		page = append(page, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, "", false, errors.New("historical operation backfill page could not be completed")
+	}
+	fingerprint := hex.EncodeToString(hash.Sum(nil))
+	return page, total, fingerprint, len(page) > limit, nil
+}
+
+func operationBackfillPageTotals(preview OperationBackfillPreview) OperationBackfillTotals {
+	return OperationBackfillTotals{
+		Scanned: preview.Scanned, RequestBytes: preview.RequestBytes, EligibleCaptures: preview.EligibleCaptures,
+		SkippedUnmapped: preview.SkippedUnmapped, SkippedOversized: preview.SkippedOversized,
+		SkippedNoOperation:         preview.SkippedNoOperation,
+		SkippedNoOperationReasons:  cloneOperationBackfillReasonCounts(preview.SkippedNoOperationReasons),
+		EndpointIdentityMismatches: preview.EndpointIdentityMismatches,
+	}
+}
+
+func addOperationBackfillTotals(totals *OperationBackfillTotals, preview OperationBackfillPreview) {
+	if totals == nil {
+		return
+	}
+	totals.Scanned += preview.Scanned
+	totals.RequestBytes += preview.RequestBytes
+	totals.EligibleCaptures += preview.EligibleCaptures
+	totals.SkippedUnmapped += preview.SkippedUnmapped
+	totals.SkippedOversized += preview.SkippedOversized
+	totals.SkippedNoOperation += preview.SkippedNoOperation
+	totals.EndpointIdentityMismatches += preview.EndpointIdentityMismatches
+	if totals.SkippedNoOperationReasons == nil {
+		totals.SkippedNoOperationReasons = map[string]int{}
+	}
+	for reason, count := range preview.SkippedNoOperationReasons {
+		totals.SkippedNoOperationReasons[reason] += count
+	}
+}
+
+func cloneOperationBackfillTotals(totals OperationBackfillTotals) OperationBackfillTotals {
+	totals.SkippedNoOperationReasons = cloneOperationBackfillReasonCounts(totals.SkippedNoOperationReasons)
+	return totals
+}
+
+func cloneOperationBackfillReasonCounts(reasons map[string]int) map[string]int {
+	copyReasons := make(map[string]int, len(reasons))
+	for reason, count := range reasons {
+		copyReasons[reason] = count
+	}
+	return copyReasons
+}
+
+func encodeOperationBackfillCursor(data operationBackfillCursor) (string, error) {
+	operationBackfillCursorKeyOnce.Do(func() {
+		operationBackfillCursorKey = make([]byte, 32)
+		_, operationBackfillCursorKeyErr = rand.Read(operationBackfillCursorKey)
+	})
+	if operationBackfillCursorKeyErr != nil {
+		return "", operationBackfillCursorKeyErr
+	}
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return "", err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, operationBackfillCursorKey)
+	_, _ = mac.Write([]byte(encoded))
+	token := encoded + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if len(token) > MaximumOperationBackfillCursorBytes {
+		return "", errors.New("operation backfill cursor exceeds its size limit")
+	}
+	return token, nil
+}
+
+func decodeOperationBackfillCursor(token string) (operationBackfillCursor, error) {
+	var data operationBackfillCursor
+	if len(token) == 0 || len(token) > MaximumOperationBackfillCursorBytes {
+		return data, errors.New("operation backfill cursor is outside its size limit")
+	}
+	operationBackfillCursorKeyOnce.Do(func() {
+		operationBackfillCursorKey = make([]byte, 32)
+		_, operationBackfillCursorKeyErr = rand.Read(operationBackfillCursorKey)
+	})
+	if operationBackfillCursorKeyErr != nil {
+		return data, operationBackfillCursorKeyErr
+	}
+	encoded, signature, ok := strings.Cut(token, ".")
+	if !ok || encoded == "" || signature == "" || strings.Contains(signature, ".") {
+		return data, errors.New("operation backfill cursor format is invalid")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil {
+		return data, errors.New("operation backfill cursor signature is invalid")
+	}
+	mac := hmac.New(sha256.New, operationBackfillCursorKey)
+	_, _ = mac.Write([]byte(encoded))
+	if !hmac.Equal(sig, mac.Sum(nil)) {
+		return data, errors.New("operation backfill cursor signature is invalid")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return data, errors.New("operation backfill cursor payload is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&data); err != nil {
+		return data, errors.New("operation backfill cursor payload is malformed")
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return data, errors.New("operation backfill cursor payload has trailing data")
+	}
+	fingerprint, fingerprintErr := hex.DecodeString(data.Fingerprint)
+	graphFingerprint, graphFingerprintErr := hex.DecodeString(data.GraphFingerprint)
+	if data.Version != 1 || !validOperationBackfillCursorProjectKey(data.ProjectKey) || len(fingerprint) != sha256.Size || len(graphFingerprint) != sha256.Size ||
+		data.AfterRequestID == "" || len(data.AfterRequestID) > 512 || data.HistoricalTotal < 1 ||
+		data.PageNumber < 2 || data.MaxCaptures < 1 || data.MaxCaptures > MaximumOperationBackfillPageSize ||
+		data.MaxBytes < 1<<20 || data.MaxBytes > MaximumOperationBackfillMaxBytes ||
+		data.Totals.Scanned < 1 || data.Totals.Scanned > data.HistoricalTotal || data.Totals.RequestBytes < 0 ||
+		data.Totals.EligibleCaptures < 0 || data.Totals.SkippedUnmapped < 0 || data.Totals.SkippedOversized < 0 ||
+		data.Totals.SkippedNoOperation < 0 || data.Totals.EndpointIdentityMismatches < 0 || fingerprintErr != nil || graphFingerprintErr != nil {
+		return data, errors.New("operation backfill cursor payload is invalid")
+	}
+	return data, nil
+}
+
+func validOperationBackfillCursorProjectKey(value string) bool {
+	return len(value) == 64 && strings.Trim(value, "0123456789abcdef") == ""
 }
 
 func indexOperationBackfillSnapshot(snapshot behaviorgraph.Record) (map[string]behaviorgraph.Record, map[string]bool, map[string]bool, error) {

@@ -1,9 +1,11 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,6 +128,122 @@ func TestOperationBackfillPreviewJSONDoesNotExposeBundles(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "sensitive fixture value") || strings.Contains(string(encoded), "raw_request") {
 		t.Fatalf("preview JSON exposed an in-memory bundle: %s", encoded)
+	}
+}
+
+func TestOperationBackfillPagesContinueExactlyWithCumulativeTotals(t *testing.T) {
+	ctx := context.Background()
+	selected, writable, liveWriter := newLiveTailFixture(t)
+	liveWriter.Close()
+	tx, err := writable.Database.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 1400; index++ {
+		requestID := fmt.Sprintf("page-%04d", index)
+		observationID := fmt.Sprintf("%064x", index+1)
+		revisionID := fmt.Sprintf("%064x", index+1401)
+		requestHash := strings.Repeat("a", 64)
+		vaultRef := observationID + ".request." + requestHash + ".bba"
+		if _, err := tx.ExecContext(ctx, `INSERT INTO captures(
+			observation_id,caido_instance_id,caido_project_id,request_id,request_sha256,request_size,current_revision_id,request_vault_ref,parse_state
+		) VALUES(?,?,?,?,?,?,?,?,?)`, observationID, selected.InstanceID, selected.ProjectID, requestID, requestHash, 64, revisionID, vaultRef, "parsed"); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert capture fixture %q: %v", requestID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at) VALUES(?,?,?,?)`, revisionID, observationID, "historical", "2026-10-28T00:00:00Z"); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert revision registry fixture %q: %v", requestID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO capture_revisions(
+			revision_id,observation_id,request_sha256,request_size,request_vault_ref,request_wire_fidelity,response_wire_fidelity,first_seen_at
+		) VALUES(?,?,?,?,?,?,?,?)`, revisionID, observationID, requestHash, 64, vaultRef, "source_bytes", "unknown", "2026-10-28T00:00:00Z"); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert capture revision fixture %q: %v", requestID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Dir(filepath.Dir(writable.Directory))
+	maintenance, err := projectlock.Acquire(ctx, writable.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer maintenance.Close()
+	graphWriter, err := behaviorgraph.OpenWriter(ctx, writable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graphWriter.ImportBundle(ctx, behaviorgraph.Record{
+		"schema_version": json.Number("1"), "program": writable.ProjectKey,
+		"sources": []behaviorgraph.Record{}, "entities": []behaviorgraph.Record{},
+		"assertions": []behaviorgraph.Record{}, "cards": []behaviorgraph.Record{},
+	}); err != nil {
+		t.Fatalf("initialize empty graph fixture: %v", err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	captureDBPath := filepath.Join(writable.Directory, "graph.sqlite3")
+	captureDBBefore, err := os.ReadFile(captureDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphDBBefore, err := os.ReadFile(writable.BehaviorGraphPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readonly, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, selected, dataRoot, maintenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+
+	options := OperationBackfillOptions{MaxCaptures: 100, Paginated: true}
+	var cursor string
+	var pages []OperationBackfillPreview
+	for range 15 {
+		options.Cursor = cursor
+		page, err := PreviewHistoricalOperationBackfill(ctx, readonly, maintenance, options)
+		if err != nil {
+			t.Fatalf("preview page %d: %v", len(pages)+1, err)
+		}
+		pages = append(pages, page)
+		cursor = page.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+	if len(pages) != 14 {
+		t.Fatalf("preview returned %d pages, want 14", len(pages))
+	}
+	for index, page := range pages {
+		wantScanned := (index + 1) * 100
+		if page.HistoricalCaptures != 1400 || page.Scanned != 100 || page.ScannedTotal != wantScanned || page.Totals.Scanned != wantScanned ||
+			page.Totals.SkippedUnmapped != wantScanned || page.WriteMode != "preview_only" {
+			t.Fatalf("page %d totals are not exact: %+v", index+1, page)
+		}
+		if (index < len(pages)-1) != (page.NextCursor != "") || page.Truncated != (index < len(pages)-1) {
+			t.Fatalf("page %d continuation/truncation mismatch: truncated=%t next=%t", index+1, page.Truncated, page.NextCursor != "")
+		}
+		if page.CandidateSHA256 != "" {
+			t.Fatalf("paged preview exposed a page-only candidate digest: %q", page.CandidateSHA256)
+		}
+	}
+	if last := pages[len(pages)-1]; !last.ScanComplete || last.ScannedTotal != 1400 || last.State != "empty" || last.CoverageState != "partial" {
+		t.Fatalf("final page did not report complete scan with cumulative gaps: %+v", last)
+	}
+	captureDBAfter, err := os.ReadFile(captureDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphDBAfter, err := os.ReadFile(writable.BehaviorGraphPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(captureDBBefore, captureDBAfter) || !bytes.Equal(graphDBBefore, graphDBAfter) {
+		t.Fatal("read-only operation-backfill preview changed the capture or graph database")
 	}
 }
 

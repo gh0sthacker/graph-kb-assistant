@@ -441,6 +441,7 @@ type operationBackfillRequest struct {
 	MaxCaptures     int    `json:"max_captures,omitempty"`
 	MaxRequestBytes int64  `json:"max_request_bytes,omitempty"`
 	CandidateSHA256 string `json:"candidate_sha256,omitempty"`
+	Cursor          string `json:"cursor,omitempty"`
 }
 
 func decodeOperationBackfillRequest(w http.ResponseWriter, r *http.Request, applying bool) (operationBackfillRequest, ingest.OperationBackfillOptions, bool) {
@@ -462,16 +463,21 @@ func decodeOperationBackfillRequest(w http.ResponseWriter, r *http.Request, appl
 		writeError(w, http.StatusBadRequest, "operation backfill request must contain one JSON object")
 		return operationBackfillRequest{}, ingest.OperationBackfillOptions{}, false
 	}
+	maxCapturesLimit := ingest.MaximumOperationBackfillMaxCaptures
+	if !applying {
+		maxCapturesLimit = ingest.MaximumOperationBackfillPageSize
+	}
 	if !projectKeyPattern.MatchString(request.ProjectKey) ||
-		request.MaxCaptures < 0 || request.MaxCaptures > ingest.MaximumOperationBackfillMaxCaptures ||
+		request.MaxCaptures < 0 || request.MaxCaptures > maxCapturesLimit ||
 		request.MaxRequestBytes < 0 || request.MaxRequestBytes > ingest.MaximumOperationBackfillMaxBytes ||
 		(request.MaxRequestBytes != 0 && request.MaxRequestBytes < 1<<20) ||
-		(applying && !captureRevisionRegex.MatchString(request.CandidateSHA256)) ||
+		len(request.Cursor) > ingest.MaximumOperationBackfillCursorBytes ||
+		(applying && (request.Cursor != "" || !captureRevisionRegex.MatchString(request.CandidateSHA256))) ||
 		(!applying && request.CandidateSHA256 != "") {
-		writeError(w, http.StatusBadRequest, "operation backfill project, limits, or candidate digest are invalid")
+		writeError(w, http.StatusBadRequest, "operation backfill project, limits, cursor, or candidate digest are invalid")
 		return operationBackfillRequest{}, ingest.OperationBackfillOptions{}, false
 	}
-	options := ingest.OperationBackfillOptions{MaxCaptures: request.MaxCaptures, MaxBytes: request.MaxRequestBytes}
+	options := ingest.OperationBackfillOptions{MaxCaptures: request.MaxCaptures, MaxBytes: request.MaxRequestBytes, Paginated: !applying, Cursor: request.Cursor}
 	return request, options, true
 }
 
@@ -484,6 +490,10 @@ func operationBackfillPreviewHandler(api operationBackfillAPI) http.HandlerFunc 
 		ctx, cancel := context.WithTimeout(r.Context(), maintenanceTimeout)
 		defer cancel()
 		result, err := api.PreviewOperationBackfill(ctx, request.ProjectKey, options)
+		if errors.Is(err, ingest.ErrOperationBackfillCursorStale) {
+			writeError(w, http.StatusConflict, "preview cursor is invalid or stale; restart the preview")
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "bounded operation preview could not be completed; project data was not changed")
 			return

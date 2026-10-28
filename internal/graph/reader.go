@@ -58,6 +58,7 @@ type Record map[string]any
 // allocation.
 type Reader struct {
 	db                   *sql.DB
+	graphPath            string
 	program              string
 	schema               int
 	receiptRoot          string
@@ -75,6 +76,18 @@ type Reader struct {
 // OpenReader opens a project-local BehaviorGraph read-only. The receipt root
 // constrains which source files may be hashed for freshness information.
 func OpenReader(ctx context.Context, path, program, receiptRoot string) (*Reader, error) {
+	reader, err := openGraphReader(path, program, receiptRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := reader.load(ctx); err != nil {
+		_ = reader.Close()
+		return nil, err
+	}
+	return reader, nil
+}
+
+func openGraphReader(path, program, receiptRoot string) (*Reader, error) {
 	if !graphDigestPattern.MatchString(program) {
 		return nil, errors.New("selected graph project key is invalid")
 	}
@@ -105,16 +118,11 @@ func OpenReader(ctx context.Context, path, program, receiptRoot string) (*Reader
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	reader := &Reader{
-		db: db, program: program, receiptRoot: root,
+	return &Reader{
+		db: db, graphPath: absolute, program: program, receiptRoot: root,
 		entities: make(map[string]Record), assertions: make(map[string]Record),
 		sourceByPair: make(map[string]Record),
-	}
-	if err := reader.load(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return reader, nil
+	}, nil
 }
 
 // OpenReaderFromSnapshot applies the same schema, provenance, privacy, receipt,
@@ -234,7 +242,250 @@ func snapshotRecordList(value any) ([]Record, bool) {
 	}
 }
 
-// Close releases the read-only graph connection.
+// OperationBackfillReader reads only the graph records needed for a bounded
+// operation-backfill preview. It keeps the graph database read-only and avoids
+// decoding unrelated graph payloads on every preview page.
+type OperationBackfillReader struct {
+	reader *Reader
+}
+
+func OpenOperationBackfillReader(ctx context.Context, path, program, receiptRoot string) (*OperationBackfillReader, error) {
+	reader, err := openGraphReader(path, program, receiptRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := reader.loadMetadata(ctx); err != nil {
+		_ = reader.Close()
+		return nil, err
+	}
+	return &OperationBackfillReader{reader: reader}, nil
+}
+
+func (r *OperationBackfillReader) Fingerprint() (string, error) {
+	if r == nil || r.reader == nil || r.reader.graphPath == "" {
+		return "", errors.New("operation backfill graph reader is unavailable")
+	}
+	hash := sha256.New()
+	for _, suffix := range []string{"", "-wal"} {
+		path := r.reader.graphPath + suffix
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			_, _ = fmt.Fprintf(hash, "%s:missing\n", suffix)
+			continue
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return "", errors.New("operation backfill graph fingerprint is unavailable")
+		}
+		_, _ = fmt.Fprintf(hash, "%s:%d:%d:%d\n", suffix, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm())
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (r *OperationBackfillReader) Close() error {
+	if r == nil || r.reader == nil {
+		return nil
+	}
+	return r.reader.Close()
+}
+
+func (r *OperationBackfillReader) CardsByCapture(ctx context.Context, captureIDs []string) (map[string]Record, error) {
+	if r == nil || r.reader == nil || len(captureIDs) > 1000 {
+		return nil, errors.New("operation backfill graph lookup is invalid")
+	}
+	cards := make(map[string]Record, len(captureIDs))
+	wanted := make(map[string]bool, len(captureIDs))
+	for _, id := range captureIDs {
+		if !graphDigestPattern.MatchString(id) || wanted[id] {
+			return nil, errors.New("operation backfill capture identities are invalid")
+		}
+		wanted[id] = true
+	}
+	if len(wanted) == 0 {
+		return cards, nil
+	}
+	for start := 0; start < len(captureIDs); start += 200 {
+		end := min(start+200, len(captureIDs))
+		args := make([]any, 0, end-start)
+		for _, id := range captureIDs[start:end] {
+			args = append(args, id)
+		}
+		query := "SELECT id,payload FROM cards WHERE json_extract(payload,'$.capture_id') IN (" + sqlitePlaceholders(len(args)) + ") ORDER BY id"
+		rows, err := r.reader.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, errors.New("operation backfill graph cards could not be read")
+		}
+		for rows.Next() {
+			var dbID, payload string
+			if err := rows.Scan(&dbID, &payload); err != nil || len(payload) > maxRecordBytes {
+				_ = rows.Close()
+				return nil, errors.New("operation backfill graph card is malformed")
+			}
+			card, err := decodeRecord(payload)
+			if err != nil || card["id"] != dbID {
+				_ = rows.Close()
+				return nil, errors.New("operation backfill graph card identity is invalid")
+			}
+			captureID, _ := card["capture_id"].(string)
+			if !wanted[captureID] || cards[captureID] != nil {
+				_ = rows.Close()
+				return nil, errors.New("operation backfill graph card identities conflict")
+			}
+			cards[captureID] = card
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, errors.New("operation backfill graph cards could not be completed")
+		}
+		if err := rows.Close(); err != nil {
+			return nil, errors.New("operation backfill graph cards could not be closed")
+		}
+	}
+	if len(cards) == 0 {
+		return cards, nil
+	}
+
+	sourcesByID := make(map[string]Record)
+	expectedSources := make(map[string]Record)
+	for _, card := range cards {
+		refs, ok := snapshotRecordList(card["source_refs"])
+		if !ok {
+			return nil, errors.New("operation backfill graph card provenance is malformed")
+		}
+		for _, ref := range refs {
+			if err := validateSource(ref); err != nil {
+				return nil, errors.New("operation backfill graph card provenance is invalid")
+			}
+			id := sourceRefDigest(ref)
+			expectedSources[id] = ref
+		}
+	}
+	sourceIDs := make([]string, 0, len(expectedSources))
+	for id := range expectedSources {
+		sourceIDs = append(sourceIDs, id)
+	}
+	sort.Strings(sourceIDs)
+	for start := 0; start < len(sourceIDs); start += 200 {
+		end := min(start+200, len(sourceIDs))
+		args := make([]any, 0, end-start)
+		for _, id := range sourceIDs[start:end] {
+			args = append(args, id)
+		}
+		query := "SELECT id,payload FROM sources WHERE id IN (" + sqlitePlaceholders(len(args)) + ") ORDER BY id"
+		rows, err := r.reader.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, errors.New("operation backfill graph sources could not be read")
+		}
+		for rows.Next() {
+			var dbID, payload string
+			if err := rows.Scan(&dbID, &payload); err != nil || len(payload) > maxRecordBytes {
+				_ = rows.Close()
+				return nil, errors.New("operation backfill graph source is malformed")
+			}
+			source, err := decodeRecord(payload)
+			if err != nil || sourceRefDigest(source) != dbID || validateSource(source) != nil {
+				_ = rows.Close()
+				return nil, errors.New("operation backfill graph source identity is invalid")
+			}
+			sourcesByID[dbID] = source
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, errors.New("operation backfill graph sources could not be completed")
+		}
+		if err := rows.Close(); err != nil {
+			return nil, errors.New("operation backfill graph sources could not be closed")
+		}
+	}
+	if len(sourcesByID) != len(expectedSources) {
+		return nil, errors.New("operation backfill graph card references an undeclared source")
+	}
+	sourceByPair := make(map[string]Record, len(sourcesByID))
+	for _, source := range sourcesByID {
+		key := sourcePair(source)
+		if _, exists := sourceByPair[key]; !exists {
+			sourceByPair[key] = source
+		}
+	}
+	endpointIDs := make([]string, 0, len(cards))
+	for captureID, card := range cards {
+		if card["program"] != r.reader.program || validateCard(card, sourceByPair, r.reader.program) != nil || validatePublic(card) != nil {
+			return nil, errors.New("operation backfill graph card failed validation")
+		}
+		if endpointID := nestedString(card, "endpoint", "id"); endpointID != "" {
+			endpointIDs = append(endpointIDs, endpointID)
+		}
+		if captureID == "" {
+			return nil, errors.New("operation backfill graph card has no capture identity")
+		}
+	}
+	entityIDs, _, err := r.LookupIDs(ctx, endpointIDs, nil)
+	if err != nil {
+		return nil, errors.New("operation backfill graph card endpoint identities could not be checked")
+	}
+	for _, endpointID := range endpointIDs {
+		if !entityIDs[endpointID] {
+			return nil, errors.New("operation backfill graph card references an unknown endpoint")
+		}
+	}
+	return cards, nil
+}
+
+func (r *OperationBackfillReader) LookupIDs(ctx context.Context, entityIDs, assertionIDs []string) (map[string]bool, map[string]bool, error) {
+	if r == nil || r.reader == nil || len(entityIDs)+len(assertionIDs) > 2000 {
+		return nil, nil, errors.New("operation backfill graph identity lookup is invalid")
+	}
+	entities, err := r.lookupIDs(ctx, "entities", entityIDs, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	assertions, err := r.lookupIDs(ctx, "assertions", assertionIDs, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	return entities, assertions, nil
+}
+
+func (r *OperationBackfillReader) lookupIDs(ctx context.Context, table string, ids []string, assertion bool) (map[string]bool, error) {
+	found := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if !graphIDPattern.MatchString(id) || (assertion && !strings.HasPrefix(id, "assertion-")) {
+			return nil, errors.New("operation backfill graph identity is invalid")
+		}
+	}
+	for start := 0; start < len(ids); start += 500 {
+		end := min(start+500, len(ids))
+		args := make([]any, 0, end-start)
+		for _, id := range ids[start:end] {
+			args = append(args, id)
+		}
+		query := "SELECT id FROM " + table + " WHERE id IN (" + sqlitePlaceholders(len(args)) + ")"
+		rows, err := r.reader.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, errors.New("operation backfill graph identities could not be read")
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil || !graphIDPattern.MatchString(id) {
+				_ = rows.Close()
+				return nil, errors.New("operation backfill graph identity is malformed")
+			}
+			found[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, errors.New("operation backfill graph identities could not be completed")
+		}
+		if err := rows.Close(); err != nil {
+			return nil, errors.New("operation backfill graph identities could not be closed")
+		}
+	}
+	return found, nil
+}
+
+func sqlitePlaceholders(count int) string {
+	return strings.TrimRight(strings.Repeat("?,", count), ",")
+}
+
 func (r *Reader) Close() error {
 	if r == nil || r.db == nil {
 		return nil
@@ -391,9 +642,8 @@ func (r *Reader) ObservationIDsByVariantSignatures(requestSignature, responseSig
 	return observationIDs, truncated, nil
 }
 
-func (r *Reader) load(ctx context.Context) error {
-	var schemaVersion string
-	var program string
+func (r *Reader) loadMetadata(ctx context.Context) error {
+	var schemaVersion, program string
 	metadata, err := r.db.QueryContext(ctx, "SELECT key,value FROM metadata ORDER BY key")
 	if err != nil {
 		return errors.New("BehaviorGraph metadata is unavailable")
@@ -443,6 +693,13 @@ func (r *Reader) load(ctx context.Context) error {
 		if err := r.requireTable(ctx, "entity_source_refs"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (r *Reader) load(ctx context.Context) error {
+	if err := r.loadMetadata(ctx); err != nil {
+		return err
 	}
 
 	var totalBytes int64

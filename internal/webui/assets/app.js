@@ -18,7 +18,7 @@ const state = {
   evidence: null, evidenceRequestId: 0, evidenceTrigger: null, packetPreviewRequestId: 0,
   evidencePacketDraft: { projectKey: "", question: "", selections: [] }, comparisonBaseline: null, comparison: null,
   evidencePacketPreview: null, consultation: null,
-  operationBackfillPreview: null, operationBackfillRequestId: 0,
+  operationBackfillPreview: null, operationBackfillContinuation: null, operationBackfillRequestId: 0,
   consultationCreateKey: "", contextAnnotationKey: "", consultationResumeRequestId: 0,
   contextEvidenceReferences: [], contextEvidenceAccepted: false, contextFlowOrder: [],
 };
@@ -29,7 +29,7 @@ const elements = {
   operationBackfillOpen: $("#operation-backfill-open"), operationBackfillDialog: $("#operation-backfill-dialog"),
   operationBackfillClose: $("#operation-backfill-close"), operationBackfillMaxCaptures: $("#operation-backfill-max-captures"),
   operationBackfillMaxBytes: $("#operation-backfill-max-bytes"), operationBackfillPreview: $("#operation-backfill-preview"),
-  operationBackfillApply: $("#operation-backfill-apply"), operationBackfillStatus: $("#operation-backfill-status"),
+  operationBackfillNext: $("#operation-backfill-next"), operationBackfillApply: $("#operation-backfill-apply"), operationBackfillStatus: $("#operation-backfill-status"),
   operationBackfillResult: $("#operation-backfill-result"),
   graphCanvas: $("#graph-canvas"), graphScene: $("#graph-scene"), canvasEmpty: $("#canvas-empty"),
   emptyTitle: $("#canvas-empty-title"), emptyCopy: $("#canvas-empty-copy"), graphState: $("#graph-state"),
@@ -213,7 +213,10 @@ async function postJSON(path, body) {
 function clearOperationBackfillPreview(message = "Select a project, then request an explicit preview.") {
   state.operationBackfillRequestId++;
   state.operationBackfillPreview = null;
+  state.operationBackfillContinuation = null;
   elements.operationBackfillPreview.disabled = !state.projectKey;
+  elements.operationBackfillNext.disabled = true;
+  elements.operationBackfillNext.hidden = true;
   elements.operationBackfillApply.disabled = true;
   elements.operationBackfillStatus.textContent = message;
   elements.operationBackfillResult.replaceChildren();
@@ -223,9 +226,9 @@ function clearOperationBackfillPreview(message = "Select a project, then request
 function operationBackfillOptions() {
   const maxCaptures = Number(elements.operationBackfillMaxCaptures.value);
   const maxRequestBytes = Number(elements.operationBackfillMaxBytes.value);
-  if (!Number.isInteger(maxCaptures) || maxCaptures < 1 || maxCaptures > 20000 ||
+  if (!Number.isInteger(maxCaptures) || maxCaptures < 1 || maxCaptures > 200 ||
       !Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1048576 || maxRequestBytes > 1073741824) {
-    throw new Error("Choose limits within 1–20,000 captures and 1 MiB–1 GiB.");
+    throw new Error("Choose limits within 1–200 captures per page and 1 MiB–1 GiB.");
   }
   return { max_captures: maxCaptures, max_request_bytes: maxRequestBytes };
 }
@@ -260,63 +263,122 @@ function operationBackfillSkipReasonDetails(reasons) {
 }
 
 function renderOperationBackfillPreview(result) {
+  const totals = result.totals && typeof result.totals === "object" ? result.totals : result;
+  const historical = Number(result.historical_captures || 0);
+  const scannedTotal = Number(result.scanned_total ?? result.scanned ?? 0);
   const details = [
     ["State", result.state], ["Coverage", result.coverage_state || "unknown"],
-    ["Scanned", result.scanned], ["Eligible captures", result.eligible_captures],
-    ["New operations", result.new_operation_groups], ["New endpoint entities", result.new_endpoint_entities],
-    ["New links", result.new_assertion_links],
-    ["Skipped", Number(result.skipped_unmapped || 0) + Number(result.skipped_oversized || 0) + Number(result.skipped_no_operation || 0)],
-    ["Legacy endpoint ID differences", Number(result.endpoint_identity_mismatches || 0)],
-    ["Request bytes inspected", formatBytes(result.request_bytes)],
+    ["Scanned this page", result.scanned], ["Scanned total", `${scannedTotal} / ${historical}`],
+    ["Eligible captures (cumulative)", totals.eligible_captures],
+    ["Skipped unmapped (cumulative)", totals.skipped_unmapped],
+    ["Skipped oversized (cumulative)", totals.skipped_oversized],
+    ["No safe operation (cumulative)", totals.skipped_no_operation],
+    ["New operations (this page)", result.new_operation_groups],
+    ["New endpoint entities (this page)", result.new_endpoint_entities],
+    ["New links (this page)", result.new_assertion_links],
+    ["Skipped (cumulative)", Number(totals.skipped_unmapped || 0) + Number(totals.skipped_oversized || 0) + Number(totals.skipped_no_operation || 0)],
+    ["Legacy endpoint ID differences (this page)", Number(result.endpoint_identity_mismatches || 0)],
+    ["Endpoint ID differences (cumulative)", totals.endpoint_identity_mismatches],
+    ["Request bytes (cumulative)", formatBytes(totals.request_bytes)],
   ];
   const list = el("ul");
   for (const [label, value] of details) list.append(el("li", "", `${label}: ${value ?? "—"}`));
+  for (const [label, count] of operationBackfillSkipReasonDetails(totals.skipped_no_operation_reasons)) {
+    list.append(el("li", "", `No safe operation · ${label} (cumulative): ${count}`));
+  }
   for (const [label, count] of operationBackfillSkipReasonDetails(result.skipped_no_operation_reasons)) {
-    list.append(el("li", "", `No safe operation · ${label}: ${count}`));
+    list.append(el("li", "", `No safe operation · ${label} (this page): ${count}`));
   }
   if (Array.isArray(result.operation_samples) && result.operation_samples.length) {
-    list.append(el("li", "", `Samples: ${result.operation_samples.map(sample => `${sample.method || "?"} ${sample.route_family || "/"}`).join(" · ")}`));
+    list.append(el("li", "", `Samples (this page): ${result.operation_samples.map(sample => `${sample.method || "?"} ${sample.route_family || "/"}`).join(" · ")}`));
   }
   if (result.candidate_sha256) list.append(el("li", "", `Preview digest: ${String(result.candidate_sha256).slice(0, 12)}…`));
   elements.operationBackfillResult.replaceChildren(list);
   elements.operationBackfillResult.hidden = false;
 }
 
+function showOperationBackfillPage(result, projectKey, options, requestId) {
+  if (requestId !== state.operationBackfillRequestId || state.projectKey !== projectKey) return;
+  const pageNumber = Number(result.page_number) || 1;
+  state.operationBackfillPreview = null;
+  renderOperationBackfillPreview(result);
+  elements.operationBackfillApply.disabled = true;
+  if (result.next_cursor) {
+    state.operationBackfillContinuation = { projectKey, options, cursor: result.next_cursor, pageNumber };
+    elements.operationBackfillNext.hidden = false;
+    elements.operationBackfillNext.disabled = false;
+    elements.operationBackfillStatus.textContent = `Page ${pageNumber}: scanned ${result.scanned_total} of ${result.historical_captures}. Continue to inspect the next exact page; preview makes no project-data changes.`;
+    return;
+  }
+  elements.operationBackfillNext.disabled = true;
+  elements.operationBackfillNext.hidden = true;
+  const paged = pageNumber > 1;
+  state.operationBackfillContinuation = null;
+  const ready = !paged && result.state === "ready" && !!result.candidate_sha256 && Number(result.eligible_captures) > 0;
+  if (ready) state.operationBackfillPreview = { projectKey, options, result };
+  elements.operationBackfillApply.disabled = !ready;
+  if (paged && result.scan_complete) {
+    elements.operationBackfillStatus.textContent = `Full scan complete: ${result.scanned_total} of ${result.historical_captures} captures across ${pageNumber} pages. Paged previews are read-only and cannot be applied as a partial candidate.`;
+  } else if (ready) {
+    elements.operationBackfillStatus.textContent = result.coverage_state === "partial"
+      ? "Candidate is fully scanned but coverage is partial. Review excluded captures, then explicitly apply only the eligible records."
+      : "Ready. Review the counts, then explicitly apply this exact preview.";
+  } else {
+    elements.operationBackfillStatus.textContent = result.state === "partial"
+      ? "Preview is partial; it cannot be applied. Continue with the cursor or restart with revised limits."
+      : "No operation changes are ready to apply.";
+  }
+}
+
+async function requestOperationBackfillPage(projectKey, options, cursor = "") {
+  const requestId = ++state.operationBackfillRequestId;
+  elements.operationBackfillPreview.disabled = true;
+  elements.operationBackfillNext.disabled = true;
+  elements.operationBackfillApply.disabled = true;
+  elements.operationBackfillStatus.textContent = cursor
+    ? "Inspecting the next bounded historical-request page locally…"
+    : "Inspecting the first bounded historical-request page locally…";
+  try {
+    const body = { project_key: projectKey, ...options };
+    if (cursor) body.cursor = cursor;
+    const result = await postJSON("/api/maintenance/operation-backfill/preview", body);
+    showOperationBackfillPage(result, projectKey, options, requestId);
+  } catch (error) {
+    if (requestId !== state.operationBackfillRequestId || state.projectKey !== projectKey) return;
+    if (error.status === 409) state.operationBackfillContinuation = null;
+    elements.operationBackfillNext.disabled = true;
+    elements.operationBackfillNext.hidden = true;
+    elements.operationBackfillStatus.textContent = error.status === 409
+      ? "The project changed or the cursor is stale. Restart the preview from page one."
+      : `Preview failed: ${error.message}`;
+  } finally {
+    if (requestId === state.operationBackfillRequestId && state.projectKey === projectKey) {
+      elements.operationBackfillPreview.disabled = false;
+      elements.operationBackfillNext.disabled = !state.operationBackfillContinuation;
+    }
+  }
+}
+
 async function previewOperationBackfill() {
   if (!state.projectKey) return;
   const projectKey = state.projectKey;
-  const requestId = ++state.operationBackfillRequestId;
   let options;
   try { options = operationBackfillOptions(); } catch (error) {
     elements.operationBackfillStatus.textContent = error.message;
     return;
   }
   state.operationBackfillPreview = null;
-  elements.operationBackfillPreview.disabled = true;
-  elements.operationBackfillApply.disabled = true;
-  elements.operationBackfillStatus.textContent = "Inspecting bounded historical request metadata locally…";
+  state.operationBackfillContinuation = null;
   elements.operationBackfillResult.replaceChildren();
   elements.operationBackfillResult.hidden = true;
-  try {
-    const result = await postJSON("/api/maintenance/operation-backfill/preview", { project_key: projectKey, ...options });
-    if (requestId !== state.operationBackfillRequestId || state.projectKey !== projectKey) return;
-    state.operationBackfillPreview = { projectKey, options, result };
-    renderOperationBackfillPreview(result);
-    const ready = result.state === "ready" && !!result.candidate_sha256 && Number(result.eligible_captures) > 0;
-    elements.operationBackfillApply.disabled = !ready;
-    elements.operationBackfillStatus.textContent = ready
-      ? result.coverage_state === "partial"
-        ? "Candidate is fully scanned but coverage is partial. Review excluded captures, then explicitly apply only the eligible records."
-        : "Ready. Review the counts, then explicitly apply this exact preview."
-      : result.state === "partial"
-        ? "Preview is partial; it cannot be applied. Reduce the limits or resolve the reported coverage gaps."
-        : "No operation changes are ready to apply.";
-  } catch (error) {
-    if (requestId !== state.operationBackfillRequestId || state.projectKey !== projectKey) return;
-    elements.operationBackfillStatus.textContent = `Preview failed: ${error.message}`;
-  } finally {
-    if (requestId === state.operationBackfillRequestId && state.projectKey === projectKey) elements.operationBackfillPreview.disabled = false;
-  }
+  elements.operationBackfillNext.hidden = true;
+  await requestOperationBackfillPage(projectKey, options);
+}
+
+async function continueOperationBackfill() {
+  const continuation = state.operationBackfillContinuation;
+  if (!continuation || continuation.projectKey !== state.projectKey) return;
+  await requestOperationBackfillPage(continuation.projectKey, continuation.options, continuation.cursor);
 }
 
 async function applyOperationBackfill() {
@@ -2798,6 +2860,7 @@ elements.operationBackfillOpen.addEventListener("click", () => {
 elements.operationBackfillClose.addEventListener("click", () => elements.operationBackfillDialog.close());
 elements.operationBackfillDialog.addEventListener("close", () => elements.operationBackfillOpen.focus());
 elements.operationBackfillPreview.addEventListener("click", () => { void previewOperationBackfill(); });
+elements.operationBackfillNext.addEventListener("click", () => { void continueOperationBackfill(); });
 elements.operationBackfillApply.addEventListener("click", () => { void applyOperationBackfill(); });
 elements.operationBackfillMaxCaptures.addEventListener("input", () => clearOperationBackfillPreview("Limits changed; request a new preview before applying."));
 elements.operationBackfillMaxBytes.addEventListener("input", () => clearOperationBackfillPreview("Limits changed; request a new preview before applying."));

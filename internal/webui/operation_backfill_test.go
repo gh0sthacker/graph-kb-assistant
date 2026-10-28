@@ -14,19 +14,21 @@ import (
 
 type operationBackfillFixture struct {
 	*explorerAPIFixture
-	previewCalls int
-	applyCalls   int
-	preview      ingest.OperationBackfillPreview
-	apply        ingest.OperationBackfillApplyResult
-	err          error
-	projectKey   string
-	digest       string
+	previewCalls   int
+	applyCalls     int
+	preview        ingest.OperationBackfillPreview
+	previewOptions ingest.OperationBackfillOptions
+	apply          ingest.OperationBackfillApplyResult
+	err            error
+	projectKey     string
+	digest         string
 }
 
 func (f *operationBackfillFixture) PreviewOperationBackfill(_ context.Context, projectKey string, options ingest.OperationBackfillOptions) (ingest.OperationBackfillPreview, error) {
 	f.previewCalls++
 	f.projectKey = projectKey
-	if options.MaxCaptures != 25 || options.MaxBytes != 1<<20 {
+	f.previewOptions = options
+	if options.MaxCaptures < 1 || options.MaxCaptures > ingest.MaximumOperationBackfillPageSize || options.MaxBytes != 1<<20 {
 		return ingest.OperationBackfillPreview{}, context.Canceled
 	}
 	return f.preview, f.err
@@ -76,6 +78,39 @@ func TestOperationBackfillPreviewIsBoundedNoStoreAndOmitsBundles(t *testing.T) {
 	}
 	if result["candidate_sha256"] != digest || strings.Contains(response.Body.String(), "must-not-escape") || strings.Contains(response.Body.String(), "bundles") {
 		t.Fatalf("preview response exposed an unexpected value: %s", response.Body.String())
+	}
+}
+
+func TestOperationBackfillPreviewCarriesCursorAndCumulativeTotals(t *testing.T) {
+	key := strings.Repeat("a", 64)
+	api := &operationBackfillFixture{
+		explorerAPIFixture: &explorerAPIFixture{},
+		preview: ingest.OperationBackfillPreview{
+			ProjectKey: key, State: "partial", WriteMode: "preview_only", HistoricalCaptures: 1400,
+			Scanned: 100, ScannedTotal: 100, PageNumber: 1, Truncated: true, NextCursor: "signed-page-cursor",
+			Totals: ingest.OperationBackfillTotals{Scanned: 100, EligibleCaptures: 12},
+		},
+	}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/maintenance/operation-backfill/preview", strings.NewReader(
+		`{"project_key":"`+key+`","max_captures":100,"max_request_bytes":1048576,"cursor":"prior-page-cursor"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !api.previewOptions.Paginated || api.previewOptions.Cursor != "prior-page-cursor" || api.previewOptions.MaxCaptures != 100 {
+		t.Fatalf("status=%d options=%+v body=%s", response.Code, api.previewOptions, response.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["historical_captures"] != float64(1400) || result["scanned_total"] != float64(100) || result["next_cursor"] != "signed-page-cursor" || result["write_mode"] != "preview_only" {
+		t.Fatalf("paginated preview response omitted continuation totals: %s", response.Body.String())
 	}
 }
 
