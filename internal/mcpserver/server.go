@@ -573,13 +573,17 @@ func (t *Tools) getKBSource(ctx context.Context, args kbGetSourceArgs) (kb.Sourc
 }
 
 type getCaptureArgs struct {
-	ProjectKey string `json:"project_key"`
-	RequestID  string `json:"request_id"`
+	ProjectKey    string `json:"project_key"`
+	RequestID     string `json:"request_id"`
+	ObservationID string `json:"observation_id,omitempty"`
 }
 
 func (t *Tools) getCapture(ctx context.Context, args getCaptureArgs) (map[string]any, error) {
+	if args.ObservationID != "" || strings.HasPrefix(args.RequestID, "observation-") {
+		return nil, errors.New("request_id is required; observation ids are not accepted by bb_get_capture. Pass the request_id from bb_search_captures")
+	}
 	if !projectKeyPattern.MatchString(args.ProjectKey) || args.RequestID == "" || len(args.RequestID) > 512 {
-		return nil, errors.New("capture identity is invalid")
+		return nil, errors.New("capture identity is invalid: pass project_key (64-character hex) and request_id (Caido request ID)")
 	}
 	ref, ok := t.projectRef(args.ProjectKey)
 	if !ok {
@@ -733,6 +737,7 @@ func (t *Tools) listProjects(ctx context.Context, args listProjectsArgs) (map[st
 }
 
 type searchCapturesArgs struct {
+	ProjectKey        string   `json:"project_key,omitempty"`
 	ProjectKeys       []string `json:"project_keys"`
 	Text              string   `json:"text,omitempty"`
 	Method            string   `json:"method,omitempty"`
@@ -748,8 +753,9 @@ type searchCapturesArgs struct {
 }
 
 func (t *Tools) searchCaptures(ctx context.Context, args searchCapturesArgs) (map[string]any, error) {
-	if len(args.ProjectKeys) == 0 || len(args.ProjectKeys) > capturesearch.MaximumProjects {
-		return nil, errors.New("select between 1 and 20 registered projects")
+	projectKeys, err := captureSearchProjectKeys(args)
+	if err != nil {
+		return nil, err
 	}
 	limit := defaultCapturePageSize
 	if args.Limit != nil {
@@ -758,14 +764,14 @@ func (t *Tools) searchCaptures(ctx context.Context, args searchCapturesArgs) (ma
 	if limit < 1 || limit > 100 {
 		return nil, errors.New("capture result limit must be between 1 and 100")
 	}
-	refs := make([]project.CaidoProjectRef, 0, len(args.ProjectKeys))
-	seen := make(map[string]struct{}, len(args.ProjectKeys))
-	for _, key := range args.ProjectKeys {
+	refs := make([]project.CaidoProjectRef, 0, len(projectKeys))
+	seen := make(map[string]struct{}, len(projectKeys))
+	for _, key := range projectKeys {
 		if !projectKeyPattern.MatchString(key) {
-			return nil, errors.New("project key has an invalid format")
+			return nil, errors.New("project key has an invalid format; pass one 64-character lowercase hex key per project")
 		}
 		if _, exists := seen[key]; exists {
-			return nil, errors.New("a project may appear only once in the selection")
+			return nil, errors.New("project_keys must not contain the same project twice")
 		}
 		seen[key] = struct{}{}
 		ref, ok := t.projectRef(key)
@@ -819,6 +825,22 @@ func (t *Tools) searchCaptures(ctx context.Context, args searchCapturesArgs) (ma
 	return resultValue, nil
 }
 
+// captureSearchProjectKeys normalizes the singular project_key convenience
+// alias and the project_keys list into one selection, rejecting ambiguity.
+func captureSearchProjectKeys(args searchCapturesArgs) ([]string, error) {
+	if args.ProjectKey != "" && len(args.ProjectKeys) != 0 {
+		return nil, errors.New("pass either project_key (one project key) or project_keys (a list), not both")
+	}
+	keys := args.ProjectKeys
+	if args.ProjectKey != "" {
+		keys = []string{args.ProjectKey}
+	}
+	if len(keys) == 0 || len(keys) > capturesearch.MaximumProjects {
+		return nil, errors.New("select between 1 and 20 projects: pass project_key (one key) or project_keys (a list of up to 20 keys)")
+	}
+	return keys, nil
+}
+
 type surfaceMapArgs struct {
 	ProjectKey string `json:"project_key"`
 	Filter     string `json:"filter,omitempty"`
@@ -861,6 +883,7 @@ type graphNeighborhoodArgs struct {
 	ProjectKey string   `json:"project_key"`
 	SeedIDs    []string `json:"seed_ids"`
 	Cursor     string   `json:"cursor,omitempty"`
+	MaxDepth   *int     `json:"max_depth,omitempty"`
 }
 
 func (t *Tools) graphSlice(ctx context.Context, args graphSliceArgs) (map[string]any, error) {
@@ -1009,12 +1032,47 @@ func decodeObject(encoded json.RawMessage, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) && validArgumentName(typeErr.Field) {
+			return errors.New(`argument "` + typeErr.Field + `" has an invalid value type`)
+		}
+		if field, ok := unknownArgumentField(err); ok {
+			return errors.New(`argument "` + field + `" is not accepted; check the tool input schema`)
+		}
 		return errors.New("tool arguments are invalid")
 	}
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return errors.New("tool arguments contain trailing data")
 	}
 	return nil
+}
+
+func validArgumentName(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z', char >= 'A' && char <= 'Z', char >= '0' && char <= '9',
+			char == '_', char == '-', char == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func unknownArgumentField(err error) (string, bool) {
+	const prefix = "json: unknown field "
+	message := err.Error()
+	if !strings.HasPrefix(message, prefix) {
+		return "", false
+	}
+	field := strings.Trim(message[len(prefix):], `"`)
+	if !validArgumentName(field) {
+		return "", false
+	}
+	return field, true
 }
 
 func decodeOne(encoded []byte, destination any) error {
@@ -1099,6 +1157,27 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		return value
 	}
 	projectString := stringSchema(64, map[string]any{"pattern": "^[a-f0-9]{64}$"})
+	projectStringWith := func(description string) map[string]any {
+		return stringSchema(64, map[string]any{"pattern": "^[a-f0-9]{64}$", "description": description})
+	}
+	captureSearchSchema := objectSchema(map[string]any{
+		"project_key": projectStringWith("Single project key (64 lowercase hex characters). Pass either project_key or project_keys, never both."),
+		"project_keys": map[string]any{
+			"type": "array", "items": projectStringWith("Project key (64 lowercase hex characters)."),
+			"minItems": 1, "maxItems": 20,
+			"description": "One to twenty project keys. Pass either project_keys or project_key, never both.",
+		},
+		"text": stringSchema(4096, nil), "method": stringSchema(16, nil), "host": stringSchema(253, nil),
+		"route": stringSchema(2048, nil), "status": map[string]any{"type": "integer", "minimum": 100, "maximum": 599},
+		"field_name": stringSchema(256, nil), "request_signature": stringSchema(64, map[string]any{"pattern": "^[a-f0-9]{64}$"}),
+		"response_signature": stringSchema(64, map[string]any{"pattern": "^[a-f0-9]{64}$"}),
+		"since":              stringSchema(64, nil), "until": stringSchema(64, nil),
+		"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+	})
+	captureSearchSchema["anyOf"] = []map[string]any{
+		{"required": []string{"project_key"}},
+		{"required": []string{"project_keys"}},
+	}
 	catalog := []toolSpec{
 		{
 			Name: "bb_list_projects", Title: "List registered local projects",
@@ -1110,16 +1189,8 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		},
 		{
 			Name: "bb_search_captures", Title: "Search saved HTTP captures",
-			Description: "Search structural metadata in explicitly selected local Caido projects. Returns bounded fields and exact request provenance, never request or response values. Follow graph_seed_id with bb_graph_slice for linked behavior context.",
-			InputSchema: objectSchema(map[string]any{
-				"project_keys": map[string]any{"type": "array", "items": projectString, "minItems": 1, "maxItems": 20},
-				"text":         stringSchema(4096, nil), "method": stringSchema(16, nil), "host": stringSchema(253, nil),
-				"route": stringSchema(2048, nil), "status": map[string]any{"type": "integer", "minimum": 100, "maximum": 599},
-				"field_name": stringSchema(256, nil), "request_signature": stringSchema(64, map[string]any{"pattern": "^[a-f0-9]{64}$"}),
-				"response_signature": stringSchema(64, map[string]any{"pattern": "^[a-f0-9]{64}$"}),
-				"since":              stringSchema(64, nil), "until": stringSchema(64, nil),
-				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
-			}, "project_keys"), Annotations: readOnly(),
+			Description: "Search structural metadata in explicitly selected local Caido projects. Argument names: pass exactly one of project_keys (array of 1-20 project keys) or project_key (a single project key); project_key is an accepted alias for a one-project selection, and passing both is rejected. Optional filters: text, method, host, route, status, field_name, request_signature, response_signature, since, until, limit. Returns bounded fields and exact request provenance, never request or response values. Follow graph_seed_id with bb_graph_slice for linked behavior context.",
+			InputSchema: captureSearchSchema, Annotations: readOnly(),
 		},
 		{
 			Name: "bb_surface_map", Title: "Search local operations in one project",
@@ -1133,7 +1204,7 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		},
 		{
 			Name: "bb_graph_slice", Title: "Read a bounded behavior graph slice",
-			Description: "Read a bounded slice from one explicitly selected local project's BehaviorGraph with capture provenance, source hashes, integrity, and coverage gaps. Also returns total_operations and total_observations, matching bb_surface_map with an empty filter; these counts cover deduplicated records in local structural indexes, not Caido project totals. If next_cursor is returned, pass it back with the same project, seed_ids, and budgets to continue rendered omissions and resumable assertion, frontier, analysis-card, and provenance branches in the pinned Neo4j generation. Queue and provenance cursor caps remain explicitly partial. Local receipt paths and unsafe source locators are redacted; endpoint routes are preserved. Captured relationships do not prove causality, vulnerability, or impact.",
+			Description: "Read a bounded slice from one explicitly selected local project's BehaviorGraph with capture provenance, source hashes, integrity, and coverage gaps. Argument names: project_key (one project key), seed_ids (array of graph entity IDs), optional cursor, max_nodes, max_edges, and max_depth (0-6). This is the tool that supports traversal depth; bb_graph_neighborhood is fixed at one hop. Also returns total_operations and total_observations, matching bb_surface_map with an empty filter; these counts cover deduplicated records in local structural indexes, not Caido project totals. If next_cursor is returned, pass it back with the same project, seed_ids, and budgets to continue rendered omissions and resumable assertion, frontier, analysis-card, and provenance branches in the pinned Neo4j generation. Queue and provenance cursor caps remain explicitly partial. Local receipt paths and unsafe source locators are redacted; endpoint routes are preserved. Captured relationships do not prove causality, vulnerability, or impact.",
 			InputSchema: objectSchema(map[string]any{
 				"project_key": projectString,
 				"seed_ids":    map[string]any{"type": "array", "items": stringSchema(maxGraphSeedIDBytes, map[string]any{"minLength": 1}), "minItems": 1, "maxItems": maxGraphSeedIDs},
@@ -1145,10 +1216,14 @@ func toolCatalog(includeRaw bool) []toolSpec {
 		},
 		{
 			Name: "bb_graph_neighborhood", Title: "Read direct graph relationships",
-			Description: "Read one bounded one-hop page for up to 20 selected graph entities in one local project. If next_cursor is returned, pass it back with the same project_key and seed_ids to continue within the pinned graph generation; reload the first page if the cursor is stale. Returns structural relationships and available capture references with partial-coverage limits; raw request/response bytes are not included and relationships do not prove causality or vulnerability. Use bb_graph_slice when you need deeper traversal and full evidence/card closure.",
+			Description: "Read one bounded one-hop page for up to 20 selected graph entities in one local project. Argument names: project_key (one project key), seed_ids (array of graph entity IDs), optional cursor, and optional max_depth. This tool is fixed at one hop: max_depth=1 is accepted, and any other value is rejected with a clear error because only bb_graph_slice supports configurable max_depth (0-6). If next_cursor is returned, pass it back with the same project_key and seed_ids to continue within the pinned graph generation; reload the first page if the cursor is stale. Returns structural relationships and available capture references with partial-coverage limits; raw request/response bytes are not included and relationships do not prove causality or vulnerability. Use bb_graph_slice when you need deeper traversal and full evidence/card closure.",
 			InputSchema: objectSchema(map[string]any{
-				"project_key": projectString,
+				"project_key": projectStringWith("Single project key (64 lowercase hex characters). These tools take project_key, not project_keys."),
 				"cursor":      stringSchema(4096, map[string]any{"minLength": 1}),
+				"max_depth": map[string]any{
+					"type": "integer", "minimum": 1, "maximum": 6,
+					"description": "One hop is fixed for this tool: only max_depth=1 is accepted. Other values return an error pointing to bb_graph_slice, which supports max_depth 0-6.",
+				},
 				"seed_ids": map[string]any{
 					"type": "array", "items": stringSchema(maxGraphSeedIDBytes, map[string]any{
 						"minLength": 1, "pattern": `^[a-z][a-z0-9_]*-[a-f0-9]{64}$`,
@@ -1187,10 +1262,10 @@ func toolCatalog(includeRaw bool) []toolSpec {
 	}
 	catalog = append(catalog, toolSpec{
 		Name: "bb_get_capture", Title: "Read a redacted capture summary",
-		Description: "Read one exact Caido request ID from one explicitly selected local project. Returns structural metadata, graph provenance, and capture fidelity; no raw request or response values are included. Live-tail bytes remain in Caido.",
+		Description: "Read one exact Caido capture from one explicitly selected local project. Argument names: project_key (one project key) and request_id (the Caido request ID returned by bb_search_captures hits[].request_id); both are required. Graph observation ids are not request ids: request_id values starting with observation-, and an observation_id argument, are rejected with a clear explanation instead of a lookup failure. Returns structural metadata, graph provenance, and capture fidelity; no raw request or response values are included. Live-tail bytes remain in Caido.",
 		InputSchema: objectSchema(map[string]any{
-			"project_key": projectString,
-			"request_id":  stringSchema(512, map[string]any{"minLength": 1}),
+			"project_key": projectStringWith("Single project key (64 lowercase hex characters). This tool takes project_key, not project_keys."),
+			"request_id":  stringSchema(512, map[string]any{"minLength": 1, "description": "Caido request ID from bb_search_captures hits[].request_id. Graph observation ids (observation-<hex>) and observation_id are not accepted."}),
 		}, "project_key", "request_id"), Annotations: readOnly(),
 	})
 	catalog = append(catalog, consultationToolCatalog()...)
