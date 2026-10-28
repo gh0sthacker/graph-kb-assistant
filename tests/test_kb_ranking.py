@@ -387,6 +387,52 @@ class RetrievalRankingTests(unittest.TestCase):
             self.assertEqual(resumed.rebuild_embeddings(embedder, batch_size=1), 2)
             self.assertTrue(resumed.stats()["vector_ready"])
 
+    def test_partial_vectors_respect_policy_and_search_only_nonempty_vectors(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="tool_docs", source_id="alpha.md", title="Alpha",
+                text="alpha", metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="nvd", source_id="CVE-2026-0002", title="Bravo",
+                text="bravo " * 20, metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        with tempfile.TemporaryDirectory(prefix="bb-kb-partial-vector-test-") as temporary:
+            path = Path(temporary) / "index.sqlite3"
+            all_policy = KBIndex(path, embedder=_FixtureEmbedder())
+            all_policy.replace_snapshot(chunks, "a" * 64, sources=documents)
+            with self.assertRaisesRegex(RuntimeError, "synthetic interrupted"):
+                all_policy.rebuild_embeddings(_FailOnSecondBatchEmbedder(), batch_size=1)
+            self.assertFalse(all_policy.stats()["vector_ready"])
+
+            with all_policy.connect() as connection:
+                meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+                connection.execute(
+                    "INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
+                    (chunks[1].chunk_id, meta["vector_staging_model"], 2, b""),
+                )
+
+            with patch.dict("os.environ", {"KB_VECTOR_POLICY": "min_share=0.5"}):
+                partial_policy = KBIndex(path, embedder=_FixtureEmbedder())
+            stats = partial_policy.stats()
+            ranked_ids, scores = partial_policy._vector_search("semantic-only", top_k=2)
+            with partial_policy.connect() as connection:
+                meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+
+        self.assertTrue(stats["vector_ready"])
+        self.assertTrue(stats["vector_partial"])
+        self.assertEqual(stats["vector_coverage_by_source"]["tool_docs"], {"chunks": 1, "vectors": 1})
+        self.assertEqual(stats["vector_coverage_by_source"]["nvd"], {"chunks": 1, "vectors": 0})
+        self.assertEqual(ranked_ids, [chunks[0].chunk_id])
+        self.assertEqual(set(scores), {chunks[0].chunk_id})
+        self.assertEqual(meta["vector_partial"], "true")
+        self.assertEqual(
+            meta["vector_coverage_by_source"],
+            '{"nvd":{"chunks":1,"vectors":0},"tool_docs":{"chunks":1,"vectors":1}}',
+        )
+
     def test_rrf_combines_ranks_and_ignores_duplicate_ids_within_one_list(self) -> None:
         scores = reciprocal_rank_fusion(
             ["a", "b", "a"], ["b", "a", "c"], rrf_k=60,
