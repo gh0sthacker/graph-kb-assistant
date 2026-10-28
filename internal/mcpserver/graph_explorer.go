@@ -92,6 +92,12 @@ func (t *Tools) GraphExplorerNeighborhoodPage(ctx context.Context, projectKey st
 }
 
 func (t *Tools) graphNeighborhood(ctx context.Context, args graphNeighborhoodArgs) (map[string]any, error) {
+	// The direct view is fixed at one hop. Accept max_depth=1 as the explicit,
+	// truthful spelling of that behavior; anything else must point the caller
+	// at the tool that actually supports configurable depth.
+	if args.MaxDepth != nil && *args.MaxDepth != 1 {
+		return nil, errors.New("max_depth is not supported by bb_graph_neighborhood: it always reads exactly one hop (max_depth=1). Use bb_graph_slice with max_depth 0-6 for configurable traversal")
+	}
 	return t.GraphExplorerNeighborhoodPage(ctx, args.ProjectKey, args.SeedIDs, args.Cursor)
 }
 
