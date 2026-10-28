@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import types
 import unittest
 from pathlib import Path
 import sqlite3
+import struct
 import tempfile
 from unittest.mock import patch
 
@@ -432,6 +434,104 @@ class RetrievalRankingTests(unittest.TestCase):
             meta["vector_coverage_by_source"],
             '{"nvd":{"chunks":1,"vectors":0},"tool_docs":{"chunks":1,"vectors":1}}',
         )
+
+    def test_required_source_policy_tracks_family_coverage_and_searches_only_stored_vectors(self) -> None:
+        documents = (
+            SourceDocument.create(
+                source_name="nvd", source_id="CVE-2026-0001", title="NVD",
+                text="nvd record", metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="nuclei", source_id="template.yaml", title="Nuclei",
+                text="id: synthetic-template\ninfo:\n  name: Synthetic Nuclei Template\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/safe\"",
+                metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="owasp", source_id="guide-a.md", title="OWASP A",
+                text="owasp first guide", metadata={"document_role": "content"},
+            ),
+            SourceDocument.create(
+                source_name="owasp", source_id="guide-b.md", title="OWASP B",
+                text="owasp second guide", metadata={"document_role": "content"},
+            ),
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        chunks_by_source = {chunk.source_name: [] for chunk in chunks}
+        for chunk in chunks:
+            chunks_by_source[chunk.source_name].append(chunk)
+        self.assertEqual({name: len(items) for name, items in chunks_by_source.items()}, {
+            "nvd": 1, "nuclei": 1, "owasp": 2,
+        })
+
+        embedder = _FixtureEmbedder()
+        with tempfile.TemporaryDirectory(prefix="bb-kb-required-source-policy-test-") as temporary:
+            path = Path(temporary) / "index.sqlite3"
+            with patch.dict("os.environ", {"KB_VECTOR_POLICY": "required_sources=nuclei,owasp:min=0.5"}):
+                index = KBIndex(path, embedder=embedder)
+            index.replace_snapshot(chunks, "a" * 64, sources=documents)
+            vector_chunks = [
+                *chunks_by_source["nuclei"], chunks_by_source["owasp"][0],
+            ]
+            with index.connect() as connection:
+                connection.executemany(
+                    "INSERT INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
+                    (
+                        (chunk.chunk_id, embedder.model_name, 2, struct.pack("<2f", 0.0, 1.0))
+                        for chunk in vector_chunks
+                    ),
+                )
+                connection.executemany(
+                    "INSERT INTO kb_meta(key,value) VALUES(?,?)",
+                    (
+                        ("vector_staging_model", embedder.model_name),
+                        ("vector_staging_dimensions", "2"),
+                        ("vector_staging_snapshot_id", "a" * 64),
+                    ),
+                )
+
+            too_strict = KBIndex(
+                path, embedder=embedder,
+                vector_policy="required_sources=nuclei,owasp:min=0.99",
+            )
+            default_minimum = KBIndex(
+                path, embedder=embedder,
+                vector_policy="required_sources=nuclei,owasp",
+            )
+            accepted = KBIndex(
+                path, embedder=embedder,
+                vector_policy="required_sources=nuclei,owasp:min=0.5",
+            )
+            all_policy = KBIndex(path, vector_policy="all")
+            min_share = KBIndex(path, vector_policy="min_share=0.1")
+            strict_stats = too_strict.stats()
+            default_stats = default_minimum.stats()
+            accepted_stats = accepted.stats()
+            all_stats = all_policy.stats()
+            min_share_stats = min_share.stats()
+            ranked_ids, _ = accepted._vector_search("semantic-only", top_k=10)
+            with accepted.connect() as connection:
+                meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+
+        self.assertFalse(strict_stats["vector_ready"])
+        self.assertFalse(default_stats["vector_ready"])
+        self.assertTrue(accepted_stats["vector_ready"])
+        self.assertFalse(all_stats["vector_ready"])
+        self.assertTrue(min_share_stats["vector_ready"])
+        self.assertEqual(accepted_stats["vector_excluded_sources"], ["nvd"])
+        self.assertEqual(accepted_stats["vector_active_sources"], ["nuclei", "owasp"])
+        coverage_by_source = accepted_stats["vector_coverage_by_source"]
+        assert isinstance(coverage_by_source, dict)
+        self.assertEqual(set(coverage_by_source), {"nvd", "nuclei", "owasp"})
+        self.assertEqual(coverage_by_source["nvd"], {"chunks": 1, "vectors": 0})
+        self.assertEqual(coverage_by_source["owasp"], {"chunks": 2, "vectors": 1})
+        self.assertEqual(
+            set(ranked_ids),
+            {chunks_by_source["nuclei"][0].chunk_id, chunks_by_source["owasp"][0].chunk_id},
+        )
+        self.assertNotIn(chunks_by_source["nvd"][0].chunk_id, ranked_ids)
+        self.assertNotIn(chunks_by_source["owasp"][1].chunk_id, ranked_ids)
+        self.assertEqual(json.loads(str(meta["vector_excluded_sources"])), ["nvd"])
+        self.assertEqual(json.loads(str(meta["vector_active_sources"])), ["nuclei", "owasp"])
 
     def test_rrf_combines_ranks_and_ignores_duplicate_ids_within_one_list(self) -> None:
         scores = reciprocal_rank_fusion(
