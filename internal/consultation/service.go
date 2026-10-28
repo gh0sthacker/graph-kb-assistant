@@ -91,9 +91,12 @@ type Service struct {
 
 type Session struct {
 	ID                    string                  `json:"consultation_id"`
+	SessionID             string                  `json:"session_id,omitempty"`
 	ProjectKey            string                  `json:"project_key"`
 	Version               int                     `json:"version"`
 	Question              string                  `json:"question"`
+	ContentWithheld       bool                    `json:"content_withheld"`
+	WithheldFields        []string                `json:"withheld_fields"`
 	State                 string                  `json:"state"`
 	ReviewAccepted        bool                    `json:"review_accepted"`
 	ReviewAcceptedVersion int                     `json:"review_accepted_version,omitempty"`
@@ -436,7 +439,8 @@ func (s *Service) CreateSession(ctx context.Context, request appquery.EvidencePa
 	}
 	now := time.Now().UTC()
 	session := Session{
-		ID: id, ProjectKey: request.ProjectKey, Version: 1, Question: packet.Question, State: SessionOpen,
+		ID: id, SessionID: id, ProjectKey: request.ProjectKey, Version: 1, Question: packet.Question,
+		WithheldFields: []string{}, State: SessionOpen,
 		Evidence: packet, References: references, ContextAnnotations: []ContextAnnotation{}, Comparisons: []ComparisonRecord{}, Proposals: []ProposalRecord{},
 		Receipts: []ValidationReceipt{}, Candidates: []CandidateVersion{}, CreatedAt: now, UpdatedAt: now,
 	}
@@ -513,7 +517,7 @@ func (s *Service) AcceptReview(ctx context.Context, projectKey, sessionID string
 		if decodeSafe(encoded, &replay) != nil {
 			return Session{}, ErrStoreUnavailable
 		}
-		return replay, nil
+		return assistantVisible(replay), nil
 	}
 	session, err := s.loadSession(ctx, projectKey, sessionID)
 	if err != nil {
@@ -529,7 +533,7 @@ func (s *Service) AcceptReview(ctx context.Context, projectKey, sessionID string
 	if err != nil {
 		return Session{}, err
 	}
-	return session, nil
+	return assistantVisible(session), nil
 }
 
 // RecordContextAnnotation appends a pseudonymous analyst label to exact
@@ -1215,8 +1219,26 @@ func hasAvailableEvidence(session Session, requestID, revisionID string) bool {
 }
 
 func assistantVisible(session Session) Session {
+	session.SessionID = session.ID
 	if session.ReviewAccepted {
+		session.ContentWithheld = false
+		session.WithheldFields = []string{}
 		return session
+	}
+	session.ContentWithheld = true
+	session.WithheldFields = []string{
+		"question",
+		"evidence.question",
+		"evidence.question_redactions",
+		"evidence.evidence[].excerpt",
+		"evidence.evidence[].sha256",
+		"evidence.evidence[].redactions",
+		"evidence_references[].sha256",
+		"context_annotations",
+		"comparisons",
+		"proposals",
+		"validation_receipts",
+		"candidates",
 	}
 	session.Question = ""
 	session.Evidence.Question = ""
@@ -1414,6 +1436,19 @@ func digestJSON(value any) (string, error) {
 }
 
 func encodeSafe(value any) ([]byte, error) {
+	// The session_id alias is output-only: publicdata classifies that key as private.
+	// The canonical ID is validated separately and the alias is re-derived on reads.
+	switch session := value.(type) {
+	case Session:
+		session.SessionID = ""
+		value = session
+	case *Session:
+		if session != nil {
+			copy := *session
+			copy.SessionID = ""
+			value = copy
+		}
+	}
 	encoded, err := json.Marshal(value)
 	if err != nil || len(encoded) > 256<<10 {
 		return nil, ErrInvalidInput

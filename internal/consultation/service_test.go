@@ -265,6 +265,43 @@ func TestConsultationCyclePersistsReferencesAndResumesAfterRestart(t *testing.T)
 	if created.ReviewAccepted || created.Question != "" || created.Evidence.Question != "" || created.Evidence.Evidence[0].Excerpt != "" {
 		t.Fatalf("unreviewed create response exposed content: %#v", created)
 	}
+	createdJSON, err := json.Marshal(created)
+	if err != nil {
+		t.Fatalf("marshal unreviewed session: %v", err)
+	}
+	var createdPayload map[string]any
+	if err := json.Unmarshal(createdJSON, &createdPayload); err != nil {
+		t.Fatalf("decode unreviewed session: %v", err)
+	}
+	if createdPayload["consultation_id"] != created.ID || createdPayload["session_id"] != created.ID {
+		t.Fatalf("session identifiers are not compatible: %#v", createdPayload)
+	}
+	if createdPayload["content_withheld"] != true {
+		t.Fatalf("unreviewed session does not mark hidden content: %#v", createdPayload)
+	}
+	withheldFields, ok := createdPayload["withheld_fields"].([]any)
+	if !ok || len(withheldFields) == 0 {
+		t.Fatalf("unreviewed session omits hidden field names: %#v", createdPayload["withheld_fields"])
+	}
+	withheld := make(map[string]bool, len(withheldFields))
+	for _, field := range withheldFields {
+		if name, ok := field.(string); ok {
+			withheld[name] = true
+		}
+	}
+	wantWithheldFields := []string{
+		"question", "evidence.question", "evidence.question_redactions",
+		"evidence.evidence[].excerpt", "evidence.evidence[].sha256", "evidence.evidence[].redactions",
+		"evidence_references[].sha256", "context_annotations", "comparisons", "proposals", "validation_receipts", "candidates",
+	}
+	if len(withheldFields) != len(wantWithheldFields) {
+		t.Fatalf("unreviewed session withheld field count = %d; want %d: %#v", len(withheldFields), len(wantWithheldFields), withheldFields)
+	}
+	for _, field := range wantWithheldFields {
+		if !withheld[field] {
+			t.Errorf("unreviewed session does not identify withheld field %q: %#v", field, withheldFields)
+		}
+	}
 	operatorPreview, err := service.ReviewSession(ctx, projectKey, created.ID)
 	if err != nil || operatorPreview.Question == "" || operatorPreview.Evidence.Evidence[0].Excerpt == "" {
 		t.Fatalf("operator preview=%#v err=%v", operatorPreview, err)
@@ -279,6 +316,21 @@ func TestConsultationCyclePersistsReferencesAndResumesAfterRestart(t *testing.T)
 	assistantSession, err := service.Resume(ctx, projectKey, created.ID)
 	if err != nil || !assistantSession.ReviewAccepted || assistantSession.Question == "" || assistantSession.Evidence.Evidence[0].Excerpt == "" {
 		t.Fatalf("post-review assistant session=%#v err=%v", assistantSession, err)
+	}
+	acceptedJSON, err := json.Marshal(assistantSession)
+	if err != nil {
+		t.Fatalf("marshal accepted session: %v", err)
+	}
+	var acceptedPayload map[string]any
+	if err := json.Unmarshal(acceptedJSON, &acceptedPayload); err != nil {
+		t.Fatalf("decode accepted session: %v", err)
+	}
+	acceptedWithheld, ok := acceptedPayload["withheld_fields"].([]any)
+	if acceptedPayload["content_withheld"] != false || !ok || len(acceptedWithheld) != 0 {
+		t.Fatalf("accepted session still marks content as hidden: %#v", acceptedPayload)
+	}
+	if acceptedPayload["session_id"] != acceptedPayload["consultation_id"] {
+		t.Fatalf("accepted session identifiers diverged: %#v", acceptedPayload)
 	}
 	if created.References[0].ID == created.References[0].SHA256 || created.References[0].ID == created.References[0].RevisionID {
 		t.Fatal("evidence reference is not an opaque server-issued identifier")

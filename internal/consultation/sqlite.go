@@ -465,6 +465,8 @@ func (d *sessionDB) readSession(ctx context.Context, projectKey, sessionID strin
 	if decodeSafe(evidenceJSON, &session.Evidence) != nil || decodeSafe(referencesJSON, &session.References) != nil {
 		return Session{}, ErrStoreUnavailable
 	}
+	session.SessionID = session.ID
+	session.WithheldFields = []string{}
 	session.CreatedAt = time.Unix(0, createdAt).UTC()
 	session.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	var acceptedVersion, acceptedAt int64
@@ -898,7 +900,9 @@ func validateStoredSession(session Session) error {
 	if session.ReviewAccepted != !session.ReviewAcceptedAt.IsZero() || session.ReviewAccepted != (session.ReviewAcceptedVersion > 0) {
 		return errors.New("consultation review state is inconsistent")
 	}
-	if err := publicdata.Validate(session); err != nil {
+	validationView := session
+	validationView.SessionID = ""
+	if err := publicdata.Validate(validationView); err != nil {
 		return err
 	}
 	selections := make([]appquery.EvidencePacketSelection, 0, len(session.Evidence.Evidence))

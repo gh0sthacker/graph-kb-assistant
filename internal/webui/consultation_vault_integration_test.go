@@ -171,6 +171,21 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	if created.Question != "" || created.Evidence.Evidence[0].Excerpt != "" {
 		t.Fatal("creation response exposed unreviewed question or evidence")
 	}
+	if created.SessionID != created.ID || !created.ContentWithheld || len(created.WithheldFields) == 0 {
+		t.Fatalf("creation response omitted session aliases or withheld markers: %#v", created)
+	}
+	pendingResumeResponse := serveLocalGET(handler, "/api/consultation/session?project_key="+projectKey+"&session_id="+created.ID)
+	if pendingResumeResponse.Code != http.StatusOK {
+		t.Fatalf("pre-review resume status=%d body=%s", pendingResumeResponse.Code, pendingResumeResponse.Body.String())
+	}
+	var pendingResume consultation.Session
+	if err := json.Unmarshal(pendingResumeResponse.Body.Bytes(), &pendingResume); err != nil {
+		t.Fatalf("decode pre-review session: %v", err)
+	}
+	if pendingResume.SessionID != created.ID || !pendingResume.ContentWithheld || len(pendingResume.WithheldFields) == 0 ||
+		pendingResume.Question != "" || pendingResume.Evidence.Question != "" || pendingResume.Evidence.Evidence[0].Excerpt != "" {
+		t.Fatalf("pre-review API resume omitted markers or exposed hidden content: %#v", pendingResume)
+	}
 	if len(created.References) != 2 {
 		t.Fatalf("created evidence references=%d, want both exact selected revisions", len(created.References))
 	}
@@ -229,6 +244,9 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 	}
 	if !accepted.ReviewAccepted || accepted.Version != 3 || len(accepted.ContextAnnotations) != 1 || strings.Contains(acceptedResponse.Body.String(), "operator-review-secret") {
 		t.Fatalf("explicit review transition did not persist or returned raw evidence: %#v", accepted)
+	}
+	if accepted.SessionID != accepted.ID || accepted.ContentWithheld || accepted.WithheldFields == nil || len(accepted.WithheldFields) != 0 {
+		t.Fatalf("accepted response omitted session aliases or retained withheld markers: %#v", accepted)
 	}
 	compareBody, err := json.Marshal(map[string]any{
 		"project_key": projectKey, "session_id": created.ID, "expected_version": accepted.Version,

@@ -10,14 +10,26 @@ candidate versions. It does not import Caido traffic or call a model.
 
 The local web UI first builds a bounded redacted preview. Creating a session
 stores that packet, but its question and excerpts remain hidden from Hermes.
-Before review, MCP responses also omit the evidence hashes and redaction spans;
-comparison, proposal, validation, and candidate operations are rejected.
+Before review, assistant-visible session JSON sets `content_withheld` to `true`
+and lists hidden paths in `withheld_fields`. The path names are
+`question`, `evidence.question`, `evidence.question_redactions`,
+`evidence.evidence[].excerpt`, `evidence.evidence[].sha256`,
+`evidence.evidence[].redactions`, `evidence_references[].sha256`,
+`context_annotations`, `comparisons`, `proposals`, `validation_receipts`, and
+`candidates`. The question and evidence remain withheld; these markers do not
+change the review boundary. After acceptance, `content_withheld` is `false` and
+`withheld_fields` is an empty array. MCP responses also omit evidence hashes and
+redaction spans before review; comparison, proposal, validation, and candidate
+operations are rejected.
 
 The operator must inspect the saved packet in the local UI and explicitly
-accept it. That local-only transition is not an MCP tool. After acceptance,
-Hermes can resume the session with `bb_consult_resume` using the copied
-`project_key` and `session_id`. This allows access to the saved redacted packet;
-it does not send the packet automatically or select a model provider.
+accept it. That local-only transition is not an MCP tool. A session response
+exposes the same opaque identifier as both `consultation_id` (the existing name)
+and `session_id`. The consultation MCP tools accept either name; if a caller
+supplies both, they must have the same value. After acceptance, Hermes can
+resume the session with `bb_consult_resume` using `project_key` and either ID
+name. This allows access to the saved redacted packet; it does not send the
+packet automatically or select a model provider.
 
 The synthetic MCP lifecycle test injects a fixture analyst adapter at the
 model boundary. It receives only the accepted resume result and sanitized

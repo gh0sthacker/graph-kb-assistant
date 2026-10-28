@@ -317,6 +317,23 @@ func decodeConsultationJSON(w http.ResponseWriter, r *http.Request, destination 
 	return true
 }
 
+// The alias is preserved in the wire response, while the validator checks its
+// identical canonical consultation_id field (session_id is a private-value key).
+func consultationResponseValidationView(result any) any {
+	switch session := result.(type) {
+	case consultation.Session:
+		session.SessionID = ""
+		return session
+	case *consultation.Session:
+		if session != nil {
+			copy := *session
+			copy.SessionID = ""
+			return copy
+		}
+	}
+	return result
+}
+
 func writeConsultationResult(w http.ResponseWriter, result any, operationErr error) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
@@ -325,7 +342,8 @@ func writeConsultationResult(w http.ResponseWriter, result any, operationErr err
 		return
 	}
 	encoded, err := json.Marshal(result)
-	if err != nil || len(encoded) > maxGraphResponse || publicdata.ValidateJSON(encoded) != nil {
+	validationEncoded, validationErr := json.Marshal(consultationResponseValidationView(result))
+	if err != nil || validationErr != nil || len(encoded) > maxGraphResponse || publicdata.ValidateJSON(validationEncoded) != nil {
 		writeError(w, http.StatusServiceUnavailable, "consultation response failed the local data validation gate")
 		return
 	}

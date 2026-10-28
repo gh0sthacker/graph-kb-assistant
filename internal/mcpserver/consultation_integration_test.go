@@ -178,6 +178,16 @@ func TestMCPConsultationCycleSurvivesTransportAndRestart(t *testing.T) {
 		"idempotency_key": "mcp_create_session_0001",
 	})
 	sessionID := fixtureString(t, created, "consultation_id")
+	if fixtureString(t, created, "session_id") != sessionID {
+		t.Fatalf("created session aliases differ: %#v", created)
+	}
+	if created["content_withheld"] != true {
+		t.Fatalf("MCP create response does not mark hidden content: %#v", created)
+	}
+	createdWithheld, ok := created["withheld_fields"].([]any)
+	if !ok || len(createdWithheld) == 0 {
+		t.Fatalf("MCP create response omits hidden field names: %#v", created["withheld_fields"])
+	}
 	references := created["evidence_references"].([]any)
 	if len(references) != 2 {
 		t.Fatalf("created session evidence references = %d; want 2", len(references))
@@ -196,22 +206,51 @@ func TestMCPConsultationCycleSurvivesTransportAndRestart(t *testing.T) {
 	preReview := callMCPFixtureTool(t, server, 3, "bb_consult_resume", map[string]any{
 		"project_key": projectKey, "session_id": sessionID,
 	})
+	if preReview["consultation_id"] != sessionID || preReview["session_id"] != sessionID {
+		t.Fatalf("resumed session aliases differ: %#v", preReview)
+	}
 	preReviewEvidence := preReview["evidence"].(map[string]any)["evidence"].([]any)
 	if preReview["question"] != "" {
 		t.Fatal("MCP resume exposed an unreviewed question")
 	}
+	if preReview["content_withheld"] != true {
+		t.Fatalf("MCP resume does not mark hidden content: %#v", preReview)
+	}
+	preReviewWithheld, ok := preReview["withheld_fields"].([]any)
+	if !ok || len(preReviewWithheld) == 0 {
+		t.Fatalf("MCP resume omits hidden field names: %#v", preReview["withheld_fields"])
+	}
 	if excerpt, _ := preReviewEvidence[0].(map[string]any)["excerpt"].(string); excerpt != "" {
 		t.Fatal("MCP resume exposed an unreviewed evidence excerpt")
+	}
+	conflictResponses := serveFixtureRequests(t, server, map[string]any{
+		"jsonrpc": "2.0", "id": 30, "method": "tools/call",
+		"params": map[string]any{"name": "bb_consult_resume", "arguments": map[string]any{
+			"project_key": projectKey, "session_id": sessionID, "consultation_id": strings.Repeat("x", 43),
+		}},
+	})
+	conflictResult, ok := responseForID(t, conflictResponses, "30").Result.(map[string]any)
+	conflictContent, contentOK := conflictResult["content"].([]any)
+	if !ok || !contentOK || conflictResult["isError"] != true || len(conflictContent) != 1 {
+		t.Fatalf("conflicting session ID aliases were not rejected by MCP: %#v", conflictResult)
+	}
+	conflictMessage, _ := conflictContent[0].(map[string]any)["text"].(string)
+	if !strings.Contains(conflictMessage, "session_id and consultation_id must match") {
+		t.Fatalf("MCP conflict error is unclear: %q", conflictMessage)
 	}
 
 	if _, err := tools.AcceptReview(ctx, projectKey, sessionID, 1, "mcp_operator_accept_0001"); err != nil {
 		t.Fatalf("operator review acceptance: %v", err)
 	}
 	resumed := callMCPFixtureTool(t, server, 4, "bb_consult_resume", map[string]any{
-		"project_key": projectKey, "session_id": sessionID,
+		"project_key": projectKey, "consultation_id": sessionID,
 	})
 	if resumed["review_accepted"] != true || resumed["question"] == "" {
 		t.Fatalf("accepted session was not made available to Hermes: %#v", resumed)
+	}
+	resumedWithheld, ok := resumed["withheld_fields"].([]any)
+	if resumed["content_withheld"] != false || !ok || len(resumedWithheld) != 0 {
+		t.Fatalf("accepted session still marks content as hidden: %#v", resumed)
 	}
 
 	comparison := callMCPFixtureTool(t, server, 5, "bb_consult_compare", map[string]any{
@@ -273,6 +312,45 @@ func TestMCPConsultationCycleSurvivesTransportAndRestart(t *testing.T) {
 	if final["version"] != float64(6) || final["review_accepted"] != true || len(final["comparisons"].([]any)) != 1 ||
 		len(final["proposals"].([]any)) != 1 || len(final["validation_receipts"].([]any)) != 1 || len(final["candidates"].([]any)) != 1 {
 		t.Fatalf("MCP session did not resume its completed synthetic cycle after restart: %#v", final)
+	}
+}
+
+func TestConsultationToolCatalogDocumentsSessionAliases(t *testing.T) {
+	want := map[string]bool{
+		"bb_consult_compare": true, "bb_consult_record_proposal": true,
+		"bb_consult_validate_proposal": true, "bb_candidate_save": true, "bb_consult_resume": true,
+	}
+	for _, spec := range consultationToolCatalog() {
+		if !want[spec.Name] {
+			continue
+		}
+		schema := spec.InputSchema
+		properties, _ := schema["properties"].(map[string]any)
+		if _, ok := properties["session_id"]; !ok {
+			t.Errorf("tool %q schema omits session_id", spec.Name)
+		}
+		if _, ok := properties["consultation_id"]; !ok {
+			t.Errorf("tool %q schema omits consultation_id", spec.Name)
+		}
+		alternatives, ok := schema["anyOf"].([]any)
+		if !ok || len(alternatives) != 2 {
+			t.Errorf("tool %q schema does not require one session identifier alias: %#v", spec.Name, schema["anyOf"])
+		} else {
+			for index, alias := range []string{"session_id", "consultation_id"} {
+				clause, ok := alternatives[index].(map[string]any)
+				required, requiredOK := clause["required"].([]string)
+				if !ok || !requiredOK || len(required) != 1 || required[0] != alias {
+					t.Errorf("tool %q schema alias alternative %d = %#v; want required %q", spec.Name, index, alternatives[index], alias)
+				}
+			}
+		}
+		if !strings.Contains(spec.Description, "session_id") || !strings.Contains(spec.Description, "consultation_id") {
+			t.Errorf("tool %q description does not explain both session identifier names: %q", spec.Name, spec.Description)
+		}
+		delete(want, spec.Name)
+	}
+	if len(want) != 0 {
+		t.Errorf("consultation tools missing from the catalog: %v", want)
 	}
 }
 
