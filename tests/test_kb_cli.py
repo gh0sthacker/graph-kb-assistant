@@ -157,6 +157,23 @@ info:
         index.replace_snapshot(chunks, "f" * 64, sources=documents)
         return candidate
 
+    def _forty_chunk_candidate_index(self, root: Path) -> Path:
+        candidate = root / "data" / "kb" / "candidates" / "batch-test" / "index.sqlite3"
+        documents = tuple(
+            SourceDocument.create(
+                source_name="fixture",
+                source_id=f"fixture-{ordinal}",
+                title=f"Fixture {ordinal}",
+                text=f"Synthetic content chunk {ordinal}.",
+                metadata={"document_role": "content"},
+            )
+            for ordinal in range(40)
+        )
+        chunks = tuple(chunk for document in documents for chunk in chunk_document(document))
+        self.assertEqual(len(chunks), 40)
+        KBIndex(candidate).replace_snapshot(chunks, "d" * 64, sources=documents)
+        return candidate
+
     def _run_embed(self, candidate: Path, *filter_args: str) -> tuple[dict[str, Any], str]:
         output = io.StringIO()
         progress = io.StringIO()
@@ -225,3 +242,55 @@ info:
 
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("--sources and --exclude-sources cannot be used together", error.getvalue())
+
+    def test_batch_size_16_embeds_all_40_chunks_and_reports_total(self) -> None:
+        batch_sizes: list[int] = []
+
+        class RecordingEmbedder:
+            model_name = "synthetic-test-model"
+
+            def __init__(self, **kwargs) -> None:
+                pass
+
+            def embed_documents_batch(self, texts, *, batch_size: int):
+                batch_sizes.append(batch_size)
+                return [[1.0, 0.0] for _ in texts]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = self._forty_chunk_candidate_index(Path(temporary))
+            output = io.StringIO()
+            progress = io.StringIO()
+            with patch(
+                "bb_assistant.kb.embeddings.RedAmonEmbedder", RecordingEmbedder,
+            ), patch(
+                "bb_assistant.kb.thermal.ThermalMonitor", return_value=self._NoopThermalMonitor(),
+            ), redirect_stdout(output), redirect_stderr(progress):
+                exit_code = main([
+                    "--index-path", str(candidate), "embed", "--thermal-sensor", "unused-fixture-sensor",
+                    "--batch-size", "16",
+                ])
+            result = json.loads(output.getvalue())
+            stats = KBIndex(candidate, read_only=True).stats()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(batch_sizes, [16, 16, 16])
+        self.assertEqual(result["embedded_chunks"], 40)
+        self.assertEqual(progress.getvalue().strip(), "embedded 40/40 KB chunks")
+        self.assertTrue(stats["vector_storage_complete"])
+        self.assertEqual(
+            stats.get("vector_coverage_by_source"),
+            {"fixture": {"chunks": 40, "vectors": 40}},
+        )
+
+    def test_batch_size_33_is_rejected_with_valid_range(self) -> None:
+        error = io.StringIO()
+        with redirect_stderr(error), self.assertRaises(SystemExit) as raised:
+            main([
+                "--index-path", "/unused/candidate/index.sqlite3", "embed",
+                "--thermal-sensor", "unused-fixture-sensor", "--batch-size", "33",
+            ])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("invalid choice", error.getvalue())
+        self.assertIn("33", error.getvalue())
+        self.assertIn("32", error.getvalue())

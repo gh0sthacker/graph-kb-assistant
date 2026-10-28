@@ -185,8 +185,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="allow downloading the pinned E5 model; otherwise use local model files only",
     )
     embed.add_argument(
-        "--batch-size", type=int, default=2, choices=(1, 2),
-        help="CPU embedding batch size (1-2)",
+        "--batch-size", type=int, default=2, choices=tuple(range(1, 33)),
+        help="CPU embedding batch size (1-32)",
     )
     embed.add_argument("--threads", type=int, default=1, choices=(1,),
                        help="PyTorch CPU threads (fixed at 1 for thermal safety)")

@@ -60,8 +60,8 @@ class RedAmonEmbedder:
     def embed_documents_batch(self, texts: Sequence[str], *, batch_size: int = 2) -> list[list[float]]:
         if not texts:
             return []
-        if type(batch_size) is not int or not 1 <= batch_size <= 2:
-            raise ValueError("batch_size must be between 1 and 2 for CPU embedding")
+        if type(batch_size) is not int or not 1 <= batch_size <= 32:
+            raise ValueError("batch_size must be between 1 and 32 for CPU embedding")
         vectors = self._load().encode(
             [f"passage: {text}" for text in texts],
             normalize_embeddings=True,
