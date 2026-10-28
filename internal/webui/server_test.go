@@ -390,10 +390,11 @@ func TestEvidencePacketPreviewRejectsUnknownFieldsAndCrossOrigin(t *testing.T) {
 	tests := []struct {
 		name, body, origin string
 		wantStatus         int
+		wantError          string
 	}{
 		{name: "unknown field", body: strings.TrimSuffix(validBody, "}") + `,"raw":"secret"}`, origin: "http://127.0.0.1", wantStatus: http.StatusBadRequest},
 		{name: "cross origin", body: validBody, origin: "http://example.test", wantStatus: http.StatusForbidden},
-		{name: "missing origin", body: validBody, origin: "", wantStatus: http.StatusMethodNotAllowed},
+		{name: "missing origin", body: validBody, origin: "", wantStatus: http.StatusForbidden, wantError: "Origin required for local mutation"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -408,6 +409,9 @@ func TestEvidencePacketPreviewRejectsUnknownFieldsAndCrossOrigin(t *testing.T) {
 			handler.ServeHTTP(response, request)
 			if response.Code != test.wantStatus || api.lastPacketRequest.ProjectKey != "" {
 				t.Fatalf("status=%d request=%#v body=%s", response.Code, api.lastPacketRequest, response.Body.String())
+			}
+			if test.wantError != "" && !strings.Contains(response.Body.String(), test.wantError) {
+				t.Fatalf("missing-origin response body=%s, want %q", response.Body.String(), test.wantError)
 			}
 		})
 	}
@@ -843,7 +847,7 @@ func TestConsultationMutationsRejectMissingOrForeignOriginAndMalformedBodies(t *
 		body        string
 		want        int
 	}{
-		{name: "missing origin", contentType: "application/json", body: body, want: http.StatusMethodNotAllowed},
+		{name: "missing origin", contentType: "application/json", body: body, want: http.StatusForbidden},
 		{name: "foreign origin", origin: "http://evil.example", contentType: "application/json", body: body, want: http.StatusForbidden},
 		{name: "wrong media type", origin: "http://127.0.0.1", contentType: "text/plain", body: body, want: http.StatusUnsupportedMediaType},
 		{name: "unknown field", origin: "http://127.0.0.1", contentType: "application/json", body: strings.TrimSuffix(body, "}") + `,"unexpected":true}`, want: http.StatusBadRequest},

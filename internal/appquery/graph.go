@@ -92,6 +92,32 @@ func (r GraphResult) WireMap() map[string]any {
 	return r.Payload
 }
 
+const graphTotalsCoverageNote = "Global totals match bb_surface_map with an empty filter. Counts cover deduplicated records in the local structural indexes (historical and live) for this project; they are not Caido project totals."
+
+func attachGraphSurfaceTotals(ctx context.Context, selected *store.ProjectStore, payload map[string]any) error {
+	catalog, err := search.ReadSurfaceCatalog(ctx, selected, search.SurfaceCatalogRequest{Limit: search.DefaultSurfaceCatalogLimit})
+	if err != nil {
+		return queryError(ErrorSurfaceUnavailable, "local operation totals could not be read", err)
+	}
+	payload["total_operations"] = catalog.TotalOperations
+	payload["total_observations"] = catalog.TotalObservations
+	payload["totals_coverage_note"] = graphTotalsCoverageNote
+	return nil
+}
+
+func carryGraphSurfaceTotals(destination, source map[string]any) bool {
+	operations, hasOperations := source["total_operations"]
+	observations, hasObservations := source["total_observations"]
+	note, hasNote := source["totals_coverage_note"]
+	if !hasOperations || !hasObservations || !hasNote {
+		return false
+	}
+	destination["total_operations"] = operations
+	destination["total_observations"] = observations
+	destination["totals_coverage_note"] = note
+	return true
+}
+
 type ErrorCode string
 
 const (
@@ -357,6 +383,9 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 		if request.Cursor == "" {
 			payload, err = search.GraphSliceWithService(ctx, s.graph, selected, request.SeedIDs, budget.MaxNodes, budget.MaxEdges, budget.MaxDepth, request.Context)
 			if err == nil {
+				if totalsErr := attachGraphSurfaceTotals(ctx, selected, payload); totalsErr != nil {
+					return GraphResult{}, totalsErr
+				}
 				payload["continuation_scope"] = "rendered_and_native_candidate_branches"
 				branchSeeds := fullContinuationBranchSeeds(payload)
 				candidateLimits := graphCandidateLimitReached(payload)
@@ -407,6 +436,11 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 					return nil, nil, 0, queryError(ErrorGraphUnavailable, failureMessage, pageErr)
 				}
 				pagePayload["continuation_scope"] = "rendered_and_native_candidate_branches"
+				if !carryGraphSurfaceTotals(pagePayload, accumulated) {
+					if totalsErr := attachGraphSurfaceTotals(ctx, selected, pagePayload); totalsErr != nil {
+						return nil, nil, 0, totalsErr
+					}
+				}
 				if graphCandidateLimitReached(pagePayload) {
 					pagePayload["continuation_candidate_limits_reached"] = true
 					appendGraphLimitation(pagePayload, "This cursor continues rendered, assertion, frontier, card, and provenance branches. Candidate queues and provenance pages are bounded; remaining truncation stays explicit.")
