@@ -29,7 +29,8 @@ func RedactText(input string) (string, []TextRedactionSpan, error) {
 		if len(match) < 6 || match[2] < 0 || match[4] < 0 || match[5] <= match[4] {
 			continue
 		}
-		if sensitiveHeaderPattern.MatchString(input[match[2]:match[3]]) {
+		if sensitiveHeaderPattern.MatchString(input[match[2]:match[3]]) &&
+			isSensitiveHeaderValue(input[match[2]:match[3]], strings.TrimSpace(input[match[4]:match[5]])) {
 			spans = append(spans, TextRedactionSpan{Start: match[4], End: match[5], Rule: "sensitive-header"})
 		}
 	}
