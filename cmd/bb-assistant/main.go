@@ -2032,7 +2032,10 @@ func listProjects(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("usage: bb-assistant projects [--data-root path]")
 	}
-	projects, err := project.LoadProjectRefs(*root)
+	if err := requireConfiguredProjectRegistry(*root); err != nil {
+		return err
+	}
+	projects, err := project.LoadProjectRefsReadOnly(*root)
 	if err != nil {
 		return err
 	}
