@@ -21,6 +21,9 @@ func runtimeStatus(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("usage: bb-assistant status [--data-root path]")
 	}
+	if err := requireConfiguredProjectRegistry(*dataRoot); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	report, err := runtimeaudit.Build(ctx, *dataRoot, runtimeaudit.ConfiguredGraphBackend(), time.Now().UTC())

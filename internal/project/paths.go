@@ -19,8 +19,10 @@ var networkFilesystems = []string{
 // enforces that boundary when it opens a project database.
 func DataRoot() (string, error) {
 	var candidate string
+	configured := false
 	if value, ok := os.LookupEnv("BB_ASSISTANT_DATA_HOME"); ok {
 		candidate = expandHome(value)
+		configured = true
 	} else if value, ok := os.LookupEnv("XDG_DATA_HOME"); ok {
 		candidate = filepath.Join(expandHome(value), "bb-graph-assistant")
 	} else {
@@ -34,7 +36,21 @@ func DataRoot() (string, error) {
 	if err != nil {
 		return "", errors.New("could not resolve the private data root")
 	}
+	// The managed CT108 service keeps the project catalog one level below the
+	// shared bb-graph-assistant configuration directory. When no explicit root
+	// is configured, prefer that service catalog if it is the existing one.
+	if !configured && !projectRegistryExists(resolved) {
+		serviceRoot := filepath.Join(resolved, "graph-kb-assistant")
+		if serviceRoot, err = resolvePath(serviceRoot); err == nil && projectRegistryExists(serviceRoot) {
+			return serviceRoot, nil
+		}
+	}
 	return resolved, nil
+}
+
+func projectRegistryExists(root string) bool {
+	_, err := os.Lstat(filepath.Join(root, "projects", "registry.json"))
+	return err == nil
 }
 
 func expandHome(path string) string {

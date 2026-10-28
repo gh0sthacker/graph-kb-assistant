@@ -640,6 +640,150 @@ func TestRuntimeStatusCLIRejectsUnexpectedArguments(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusCLIUsesServiceDataRootWithoutDataHomeEnv(t *testing.T) {
+	unsetEnvForTest(t, "BB_ASSISTANT_DATA_HOME")
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	xdgDataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgDataHome)
+	serviceDataRoot := filepath.Join(xdgDataHome, "bb-graph-assistant", "graph-kb-assistant")
+	ref := project.CaidoProjectRef{InstanceID: "default-root-instance", ProjectID: "default-root-project"}
+	projectStore, err := store.CreateProject(t.Context(), ref, serviceDataRoot)
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	encoded, err := captureRuntimeStatus(t, nil)
+	if err != nil {
+		t.Fatalf("runtimeStatus() error = %v", err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		t.Fatalf("status output is not JSON: %v; output=%s", err, encoded)
+	}
+	if output["registered_projects"] != float64(1) {
+		t.Fatalf("status did not discover service project root: %+v", output)
+	}
+}
+
+func TestRuntimeStatusCLIUsesConfiguredDataHome(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	dataRoot := filepath.Join(t.TempDir(), "configured-private-data")
+	ref := project.CaidoProjectRef{InstanceID: "configured-root-instance", ProjectID: "configured-root-project"}
+	projectStore, err := store.CreateProject(t.Context(), ref, dataRoot)
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	t.Setenv("BB_ASSISTANT_DATA_HOME", dataRoot)
+
+	encoded, err := captureRuntimeStatus(t, nil)
+	if err != nil {
+		t.Fatalf("runtimeStatus() error = %v", err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		t.Fatalf("status output is not JSON: %v; output=%s", err, encoded)
+	}
+	if output["registered_projects"] != float64(1) {
+		t.Fatalf("status did not use BB_ASSISTANT_DATA_HOME: %+v", output)
+	}
+}
+
+func TestRuntimeStatusCLIExplainsMissingDataHomeWithoutCreatingPaths(t *testing.T) {
+	unsetEnvForTest(t, "BB_ASSISTANT_DATA_HOME")
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	xdgDataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgDataHome)
+	defaultRoot := filepath.Join(xdgDataHome, "bb-graph-assistant")
+	serviceRoot := filepath.Join(defaultRoot, "graph-kb-assistant")
+
+	_, err := captureRuntimeStatus(t, nil)
+	if err == nil {
+		t.Fatal("status silently accepted an uninitialized implicit data root")
+	}
+	for _, expected := range []string{"BB_ASSISTANT_DATA_HOME", serviceRoot} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Fatalf("status error %q does not explain %q", err, expected)
+		}
+	}
+	for _, path := range []string{defaultRoot, serviceRoot} {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("read-only status created %s (stat error %v)", path, statErr)
+		}
+	}
+}
+
+func TestProjectsListDoesNotCreateMissingDataRoot(t *testing.T) {
+	dataRoot := filepath.Join(t.TempDir(), "missing-private-data")
+	originalStdout := os.Stdout
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writeEnd
+	listErr := listProjects([]string{"--data-root", dataRoot})
+	closeErr := writeEnd.Close()
+	os.Stdout = originalStdout
+	encoded, readErr := io.ReadAll(readEnd)
+	_ = readEnd.Close()
+	if listErr != nil || closeErr != nil || readErr != nil {
+		t.Fatalf("listProjects() error = %v, close=%v, read=%v", listErr, closeErr, readErr)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		t.Fatalf("projects output is not JSON: %v; output=%s", err, encoded)
+	}
+	projects, ok := output["projects"].([]any)
+	if !ok || len(projects) != 0 {
+		t.Fatalf("projects output = %+v, want empty list", output)
+	}
+	if _, err := os.Lstat(dataRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only projects command created %s (stat error %v)", dataRoot, err)
+	}
+}
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	value, wasSet := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv(key, value)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
+
+func captureRuntimeStatus(t *testing.T, args []string) ([]byte, error) {
+	t.Helper()
+	originalStdout := os.Stdout
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	os.Stdout = writeEnd
+	statusErr := runtimeStatus(args)
+	closeErr := writeEnd.Close()
+	os.Stdout = originalStdout
+	encoded, readErr := io.ReadAll(readEnd)
+	_ = readEnd.Close()
+	if statusErr != nil {
+		return encoded, statusErr
+	}
+	if closeErr != nil {
+		return encoded, closeErr
+	}
+	return encoded, readErr
+}
+
 func TestProjectionWorkerCLIReportsEmptyQueueAsJSON(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "neo4j")
 	dataRoot := filepath.Join(t.TempDir(), "private-data")
