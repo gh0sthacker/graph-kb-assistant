@@ -71,6 +71,41 @@ def _parse_vector_policy(policy: str) -> tuple[str, float, tuple[str, ...]]:
     )
 
 
+def _normalize_embedding_source_filter(
+    sources: Sequence[str] | None,
+    exclude_sources: Sequence[str] | None,
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    if sources is not None and exclude_sources is not None:
+        raise ValueError("sources and exclude_sources cannot be used together")
+
+    def normalize(values: Sequence[str] | None, option: str) -> tuple[str, ...] | None:
+        if values is None:
+            return None
+        if isinstance(values, str):
+            raise ValueError(f"{option} must be a sequence of source family names")
+        normalized = tuple(value.strip() for value in values if isinstance(value, str))
+        if len(normalized) != len(values) or not normalized or any(
+            not re.fullmatch(r"[A-Za-z0-9_.-]+", value) for value in normalized
+        ):
+            raise ValueError(f"{option} must be a non-empty list of source family names")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError(f"{option} cannot contain duplicate source family names")
+        return normalized
+
+    return normalize(sources, "sources"), normalize(exclude_sources, "exclude_sources")
+
+
+def _embedding_source_filter_sql(
+    sources: tuple[str, ...] | None,
+    exclude_sources: tuple[str, ...] | None,
+) -> tuple[str, tuple[str, ...]]:
+    if sources is not None:
+        return " AND c.source_name IN (" + ",".join("?" for _ in sources) + ")", sources
+    if exclude_sources is not None:
+        return " AND c.source_name NOT IN (" + ",".join("?" for _ in exclude_sources) + ")", exclude_sources
+    return "", ()
+
+
 def _redamon_fulltext_expression(query: str) -> str:
     """Build the same unprefixed OR/Lucene-operator query RedAmon sends to Neo4j."""
     sanitized = re.sub(r'[+\-!(){}\[\]^"~*?:\\/]', " ", query)
@@ -925,6 +960,8 @@ class KBIndex:
         batch_size: int = 2,
         progress_callback: Callable[[int, int], None] | None = None,
         before_batch_callback: Callable[[], object] | None = None,
+        sources: Sequence[str] | None = None,
+        exclude_sources: Sequence[str] | None = None,
     ) -> int:
         from .worker_lock import embedding_worker_lock
 
@@ -936,6 +973,8 @@ class KBIndex:
                 batch_size=batch_size,
                 progress_callback=progress_callback,
                 before_batch_callback=before_batch_callback,
+                sources=sources,
+                exclude_sources=exclude_sources,
             )
 
     def _rebuild_embeddings_locked(
@@ -945,12 +984,15 @@ class KBIndex:
         batch_size: int = 2,
         progress_callback: Callable[[int, int], None] | None = None,
         before_batch_callback: Callable[[], object] | None = None,
+        sources: Sequence[str] | None = None,
+        exclude_sources: Sequence[str] | None = None,
     ) -> int:
         """Build snapshot-bound vectors in durable batches and publish when complete.
 
-        Completed batches survive process restarts. The ready snapshot marker is
-        written only after every content chunk has a matching vector, so readers
-        never mistake a partial generation for a ready index.
+        Completed batches survive process restarts. Source filters scope this
+        invocation's pending work and progress; the generation is published
+        only after every content chunk has a matching vector, so readers never
+        mistake a partial generation for a ready index.
         """
         model_name = getattr(embedder, "model_name", None)
         batch_encoder = getattr(embedder, "embed_documents_batch", None)
@@ -960,6 +1002,19 @@ class KBIndex:
             raise ValueError("embedding batch_size must be between 1 and 2 for CPU safety")
         if self.read_only:
             raise ValueError("KB index is read-only")
+        sources, exclude_sources = _normalize_embedding_source_filter(sources, exclude_sources)
+        source_filter_sql, source_filter_params = _embedding_source_filter_sql(sources, exclude_sources)
+        selected_embedding_count_sql = (
+            "SELECT count(*) FROM chunks c JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id "
+            "WHERE e.model_name=? "
+            "AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
+            + source_filter_sql
+        )
+        all_embedding_count_sql = (
+            "SELECT count(*) FROM chunks c JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id "
+            "WHERE e.model_name=? "
+            "AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
+        )
 
         with project_maintenance_lock(self.path.parent), self.connect(_maintenance_lock_held=True) as connection:
             meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
@@ -968,15 +1023,25 @@ class KBIndex:
                 raise ValueError("Cannot build embeddings without an imported KB snapshot")
             if meta.get("rechunk_target_snapshot_id"):
                 raise ValueError("Cannot build vectors while the KB index is being re-chunked")
+            content_total = int(connection.execute(
+                "SELECT count(*) FROM chunks c "
+                "WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
+            ).fetchone()[0])
             total = int(connection.execute(
-                "SELECT count(*) FROM chunks WHERE COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content'"
+                "SELECT count(*) FROM chunks c "
+                "WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"
+                + source_filter_sql,
+                source_filter_params,
             ).fetchone()[0])
             if total == 0:
+                if sources is not None or exclude_sources is not None:
+                    raise ValueError("KB source filter matches no content chunks to embed")
                 raise ValueError("KB snapshot contains no content chunks to embed")
             existing_count = int(connection.execute(
-                "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (model_name,),
+                selected_embedding_count_sql, (model_name, *source_filter_params),
             ).fetchone()[0])
-            if meta.get("vector_snapshot_id") == snapshot_id and meta.get("vector_model") == model_name and existing_count == total:
+            if (meta.get("vector_snapshot_id") == snapshot_id
+                    and meta.get("vector_model") == model_name and existing_count == total):
                 self._vector_inventory(connection, persist=True)
                 if progress_callback is not None:
                     progress_callback(total, total)
@@ -1013,6 +1078,7 @@ class KBIndex:
             self._vector_inventory(connection, persist=True)
             _commit_with_busy_retry(connection)
 
+        reported_progress: int | None = None
         while True:
             # Keep only the short SQLite read/write windows under the project
             # lease. CPU-bound model inference runs outside it; the vector
@@ -1028,29 +1094,36 @@ class KBIndex:
                     """SELECT c.chunk_id,c.text,c.source_name FROM chunks c
                        LEFT JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id AND e.model_name=?
                        WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
-                         AND e.chunk_id IS NULL
-                       ORDER BY length(c.text),c.chunk_id LIMIT ?""",
-                    (model_name, batch_size),
+                         AND e.chunk_id IS NULL"""
+                    + source_filter_sql
+                    + " ORDER BY length(c.text),c.chunk_id LIMIT ?",
+                    (model_name, *source_filter_params, batch_size),
                 ).fetchall()
                 staged_dimensions = meta.get("vector_staging_dimensions")
                 if staged_dimensions is not None:
                     dimensions = int(staged_dimensions)
                 if not rows:
                     embedded = int(connection.execute(
-                        "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (model_name,),
+                        selected_embedding_count_sql, (model_name, *source_filter_params),
                     ).fetchone()[0])
                     if dimensions == 0 or embedded != total:
                         raise ValueError("KB vector generation is incomplete")
-                    connection.executemany(
-                        "INSERT INTO kb_meta(key,value) VALUES(?,?) "
-                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        (("vector_model", model_name), ("vector_dimensions", str(dimensions)),
-                         ("vector_snapshot_id", snapshot_id)),
-                    )
-                    connection.execute(
-                        "DELETE FROM kb_meta WHERE key IN ('vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
-                    )
+                    all_embedded = int(connection.execute(
+                        all_embedding_count_sql, (model_name,),
+                    ).fetchone()[0])
+                    if all_embedded == content_total:
+                        connection.executemany(
+                            "INSERT INTO kb_meta(key,value) VALUES(?,?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                            (("vector_model", model_name), ("vector_dimensions", str(dimensions)),
+                             ("vector_snapshot_id", snapshot_id)),
+                        )
+                        connection.execute(
+                            "DELETE FROM kb_meta WHERE key IN ('vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
+                        )
                     self._vector_inventory(connection, persist=True)
+                    if progress_callback is not None and reported_progress != embedded:
+                        progress_callback(embedded, total)
                     return embedded
                 batch = [(row["chunk_id"], row["text"], row["source_name"]) for row in rows]
 
@@ -1100,10 +1173,11 @@ class KBIndex:
                 _commit_with_busy_retry(connection)
                 dimensions = next_dimensions
                 embedded = int(connection.execute(
-                    "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (model_name,),
+                    selected_embedding_count_sql, (model_name, *source_filter_params),
                 ).fetchone()[0])
             if progress_callback is not None:
                 progress_callback(embedded, total)
+                reported_progress = embedded
 
     def _vector_search(
         self, query: str, *, top_k: int, include_supplemental: bool = False,
