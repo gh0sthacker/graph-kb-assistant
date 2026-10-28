@@ -30,17 +30,45 @@ from .ranking import (
 logger = logging.getLogger(__name__)
 
 
-def _parse_vector_policy(policy: str) -> tuple[str, float]:
+def _parse_vector_policy(policy: str) -> tuple[str, float, tuple[str, ...]]:
     policy = policy.strip()
     if policy == "all":
-        return "all", 1.0
-    match = re.fullmatch(r"min_share=((?:0(?:\.\d+)?|\.\d+|1(?:\.0+)?))", policy)
-    if match is None:
-        raise ValueError("KB_VECTOR_POLICY must be 'all' or 'min_share=N' with 0 < N <= 1")
-    share = float(match.group(1))
-    if not 0 < share <= 1:
-        raise ValueError("KB_VECTOR_POLICY min_share must be greater than 0 and at most 1")
-    return "min_share", share
+        return "all", 1.0, ()
+
+    share_pattern = r"(?:0(?:\.\d+)?|\.\d+|1(?:\.0+)?)"
+    match = re.fullmatch(rf"min_share=({share_pattern})", policy)
+    if match is not None:
+        share = float(match.group(1))
+        if not 0 < share <= 1:
+            raise ValueError("KB_VECTOR_POLICY min_share must be greater than 0 and at most 1")
+        return "min_share", share, ()
+
+    if policy.startswith("required_sources="):
+        source_spec = policy[len("required_sources="):]
+        sources_spec, separator, minimum_spec = source_spec.partition(":min=")
+        if separator:
+            if ":min=" in minimum_spec:
+                raise ValueError("KB_VECTOR_POLICY required_sources accepts only one :min=N threshold")
+            match = re.fullmatch(share_pattern, minimum_spec)
+            if match is None:
+                raise ValueError("KB_VECTOR_POLICY required_sources min must be a number greater than 0 and at most 1")
+            minimum = float(match.group(0))
+        else:
+            if ":" in sources_spec:
+                raise ValueError("KB_VECTOR_POLICY required_sources threshold must use :min=N")
+            minimum = 1.0
+        if not 0 < minimum <= 1:
+            raise ValueError("KB_VECTOR_POLICY required_sources min must be greater than 0 and at most 1")
+        sources = tuple(source.strip() for source in sources_spec.split(","))
+        if not sources or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", source) for source in sources):
+            raise ValueError("KB_VECTOR_POLICY required_sources must be a comma-separated list of family names")
+        if len(sources) != len(set(sources)):
+            raise ValueError("KB_VECTOR_POLICY required_sources cannot contain duplicates")
+        return "required_sources", minimum, sources
+
+    raise ValueError(
+        "KB_VECTOR_POLICY must be 'all', 'min_share=N', or 'required_sources=A,B[:min=N]'"
+    )
 
 
 def _redamon_fulltext_expression(query: str) -> str:
@@ -183,7 +211,7 @@ class KBIndex:
         self._embedder = embedder
         self._reranker = reranker
         policy_value = vector_policy if vector_policy is not None else os.environ.get("KB_VECTOR_POLICY", "all")
-        self.vector_policy, self._vector_min_share = _parse_vector_policy(policy_value)
+        self.vector_policy, self._vector_min_share, self._vector_required_sources = _parse_vector_policy(policy_value)
         self._faiss_cache: tuple[tuple[str, str, int, bool, int], object, tuple[str, ...]] | None = None
         engine = os.environ.get("BB_ASSISTANT_KB_LEXICAL_ENGINE", "sqlite-fts5").strip()
         if engine not in {"sqlite-fts5", "neo4j-lucene"}:
@@ -300,11 +328,31 @@ class KBIndex:
         vector_count = sum(item["vectors"] for item in coverage.values())
         complete = bool(published and chunk_count > 0 and vector_count == chunk_count)
         partial = bool(0 < vector_count < chunk_count)
-        policy_generation_available = published or (self.vector_policy == "min_share" and staged)
-        policy_ready = bool(
-            policy_generation_available and chunk_count > 0 and vector_count > 0
-            and vector_count / chunk_count >= self._vector_min_share
+        policy_generation_available = published or (
+            self.vector_policy in {"min_share", "required_sources"} and staged
         )
+        if self.vector_policy == "all":
+            policy_ready = bool(
+                policy_generation_available and chunk_count > 0 and vector_count == chunk_count
+            )
+        elif self.vector_policy == "min_share":
+            policy_ready = bool(
+                policy_generation_available and chunk_count > 0 and vector_count > 0
+                and vector_count / chunk_count >= self._vector_min_share
+            )
+        else:
+            policy_ready = bool(policy_generation_available and all(
+                family in coverage
+                and coverage[family]["chunks"] > 0
+                and coverage[family]["vectors"] / coverage[family]["chunks"] >= self._vector_min_share
+                for family in self._vector_required_sources
+            ))
+        if self.vector_policy == "required_sources":
+            active_sources = list(self._vector_required_sources)
+            excluded_sources = sorted(set(coverage) - set(active_sources))
+        else:
+            active_sources = sorted(coverage)
+            excluded_sources = []
         if persist:
             connection.executemany(
                 "INSERT INTO kb_meta(key,value) VALUES(?,?) "
@@ -314,6 +362,12 @@ class KBIndex:
                         coverage, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                     )),
                     ("vector_partial", str(partial).lower()),
+                    ("vector_excluded_sources", json.dumps(
+                        excluded_sources, separators=(",", ":"), ensure_ascii=False,
+                    )),
+                    ("vector_active_sources", json.dumps(
+                        active_sources, separators=(",", ":"), ensure_ascii=False,
+                    )),
                 ),
             )
         return {
@@ -323,6 +377,8 @@ class KBIndex:
             "complete": complete,
             "partial": partial,
             "ready": policy_ready,
+            "active_sources": active_sources,
+            "excluded_sources": excluded_sources,
             "model_name": model_name or None,
             "dimensions": dimensions,
             "published": published,
@@ -595,7 +651,7 @@ class KBIndex:
             """)
             count = len(chunk_rows)
             connection.execute(
-                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','source_manifest_sha256','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions','vector_coverage_by_source','vector_partial')"
+                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','source_manifest_sha256','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions','vector_coverage_by_source','vector_partial','vector_excluded_sources','vector_active_sources')"
             )
             connection.executemany(
                 "INSERT INTO kb_meta(key,value) VALUES(?,?)",
@@ -856,6 +912,8 @@ class KBIndex:
             "vector_backend_available": vector_backend_available,
             "vector_ready": bool(vector_inventory["ready"]) and vector_backend_available,
             "vector_coverage_by_source": vector_inventory["coverage"],
+            "vector_excluded_sources": vector_inventory["excluded_sources"],
+            "vector_active_sources": vector_inventory["active_sources"],
             "vector_partial": vector_inventory["partial"],
             "maintenance_state": "rechunking" if meta.get("rechunk_target_snapshot_id") else None,
         }
