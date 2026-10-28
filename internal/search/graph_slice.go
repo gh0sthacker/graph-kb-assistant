@@ -27,6 +27,10 @@ const maxContinuationExcludedCardIDs = 10_000
 const maxContinuationExcludedEntitySourceRefs = 10_000
 const maxContinuationEntitySourceRefAnchors = 5_000
 
+// GraphContinuationSnapshotField carries the bounded native snapshot between
+// full-view cursor pages. Appquery removes it before constructing the wire reply.
+const GraphContinuationSnapshotField = "_graph_continuation_snapshot"
+
 var continuationEntityRecordIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
 
 var ErrAnalyticalGenerationChanged = errors.New("Neo4j graph generation changed during analytical continuation")
@@ -164,7 +168,14 @@ func graphSliceWithExclusions(ctx context.Context, service *graphaccess.Service,
 			slice["limitations"] = append(slice["limitations"].([]string), "Entity source references are deterministically sampled; the listed entities have incomplete provenance.")
 		}
 	}
-	return attachGraphProvenance(ctx, projectStore, slice)
+	page, err := attachGraphProvenance(ctx, projectStore, slice)
+	if err != nil {
+		return nil, err
+	}
+	if backend == "neo4j" {
+		page[GraphContinuationSnapshotField] = nativeSlice.Snapshot
+	}
+	return page, nil
 }
 
 // ContinueGraphSliceWithService adds one bounded set of omitted renderer or
@@ -228,7 +239,15 @@ func ContinueGraphSliceWithService(
 		return nil, ErrAnalyticalGenerationChanged
 	}
 
-	snapshot, counts, err := mergeAnalyticalSnapshots(projectStore.ProjectKey, accumulated, nextPage)
+	accumulatedSnapshot, err := continuationSnapshotPage(projectStore.ProjectKey, accumulated)
+	if err != nil {
+		return nil, err
+	}
+	nextSnapshot, err := continuationSnapshotPage(projectStore.ProjectKey, nextPage)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, counts, err := mergeAnalyticalSnapshots(projectStore.ProjectKey, accumulatedSnapshot, nextSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +296,12 @@ func ContinueGraphSliceWithService(
 	slice["entity_source_ref_limit"] = maxIntValue(accumulated["entity_source_ref_limit"], nextPage["entity_source_ref_limit"])
 	limitations := append(graphStringList(accumulated["limitations"]), graphStringList(nextPage["limitations"])...)
 	slice["limitations"] = uniqueStrings(limitations)
-	return attachGraphProvenance(ctx, projectStore, slice)
+	continued, err := attachGraphProvenance(ctx, projectStore, slice)
+	if err != nil {
+		return nil, err
+	}
+	continued[GraphContinuationSnapshotField] = snapshot
+	return continued, nil
 }
 
 const maxMergedContinuationBranches = 5_000
@@ -495,6 +519,44 @@ func analyticalContinuationTruncated(current, accumulated, nextPage map[string]a
 func graphPayloadFlag(payload map[string]any, key string) bool {
 	flag, _ := payload[key].(bool)
 	return flag
+}
+
+func continuationSnapshotPage(projectKey string, payload map[string]any) (map[string]any, error) {
+	if payload == nil {
+		return nil, errors.New("analytical graph continuation snapshot is missing")
+	}
+	var snapshot map[string]any
+	switch value := payload[GraphContinuationSnapshotField].(type) {
+	case behaviorgraph.Record:
+		snapshot = map[string]any(value)
+	case map[string]any:
+		snapshot = value
+	default:
+		return nil, errors.New("analytical graph continuation snapshot is missing")
+	}
+	if snapshot["program"] != projectKey || !continuationSchemaVersionTwo(snapshot["schema_version"]) {
+		return nil, errors.New("analytical graph continuation snapshot identity is inconsistent")
+	}
+	return map[string]any{
+		"project_key": projectKey,
+		"entities":    snapshot["entities"], "assertions": snapshot["assertions"],
+		"cards": snapshot["cards"], "sources": snapshot["sources"],
+	}, nil
+}
+
+func continuationSchemaVersionTwo(value any) bool {
+	switch version := value.(type) {
+	case json.Number:
+		return version.String() == "2"
+	case int:
+		return version == 2
+	case int64:
+		return version == 2
+	case float64:
+		return version == 2
+	default:
+		return false
+	}
 }
 
 func mergeAnalyticalSnapshots(projectKey string, pages ...map[string]any) (behaviorgraph.Record, map[string]int, error) {

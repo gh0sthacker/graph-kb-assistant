@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -401,7 +403,8 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 					if errors.Is(pageErr, search.ErrAnalyticalGenerationChanged) {
 						return nil, nil, 0, queryError(ErrorStaleCursor, "Neo4j project changed during graph continuation; reload the first page", pageErr)
 					}
-					return nil, nil, 0, queryError(ErrorGraphUnavailable, "full graph continuation page could not be read", pageErr)
+					failureMessage := graphContinuationFailureMessage(pageErr)
+					return nil, nil, 0, queryError(ErrorGraphUnavailable, failureMessage, pageErr)
 				}
 				pagePayload["continuation_scope"] = "rendered_and_native_candidate_branches"
 				if graphCandidateLimitReached(pagePayload) {
@@ -469,6 +472,7 @@ func prepareGraphPayload(payload map[string]any, version, coverage string) (map[
 	if err != nil {
 		return nil, queryError(ErrorGraphUnavailable, "graph result could not be prepared", err)
 	}
+	delete(prepared, search.GraphContinuationSnapshotField)
 	prepared["graph_version"] = version
 	prepared["coverage_note"] = coverage
 	redacted, paths, locators, err := redactSourcePaths(prepared)
@@ -735,6 +739,52 @@ func validateGraphRequest(request GraphRequest) error {
 		return errors.New("graph context is invalid or exceeds its limit")
 	}
 	return nil
+}
+
+func graphContinuationFailureMessage(err error) string {
+	const genericMessage = "full graph continuation page could not be read"
+	detail := graphContinuationDiagnostic(err)
+	log.Printf("graph continuation page failed: %s", detail)
+	if os.Getenv(graphContinuationDiagnosticsEnv) == "1" {
+		return genericMessage + " (internal error: " + detail + ")"
+	}
+	return genericMessage
+}
+
+const graphContinuationDiagnosticsEnv = "BB_ASSISTANT_GRAPH_CONTINUATION_DIAGNOSTICS"
+
+var (
+	graphDiagnosticSecretPattern      = regexp.MustCompile(`(?i)\b(password|passwd|token|secret|cookie|api[_-]?key|access[_-]?key)\b(?:\s*[:=]\s*|\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)`)
+	graphDiagnosticAuthPattern        = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization)\b\s*[:=]\s*(?:bearer\s+|basic\s+)?[^\s,;]+`)
+	graphDiagnosticBodyPattern        = regexp.MustCompile(`(?i)\b(request|response|raw)\s+body\b.*$`)
+	graphDiagnosticGenericBodyPattern = regexp.MustCompile(`(?i)\bbody\s*[:=].*$`)
+	graphDiagnosticURIPattern         = regexp.MustCompile(`(?i)\b(?:bolt|neo4j)(?:\+s(?:sc)?)?://[^\s,;]+|\bhttps?://[^\s,;]+`)
+)
+
+func graphContinuationDiagnostic(err error) string {
+	if err == nil {
+		return "unknown continuation error"
+	}
+	message := strings.Join(strings.Fields(err.Error()), " ")
+	if structured := strings.IndexAny(message, "{["); structured >= 0 {
+		message = strings.TrimSpace(message[:structured]) + " [REDACTED STRUCTURED DATA]"
+	}
+	message = graphDiagnosticBodyPattern.ReplaceAllString(message, "$1 body=[REDACTED]")
+	message = graphDiagnosticAuthPattern.ReplaceAllString(message, "$1=[REDACTED]")
+	message = graphDiagnosticSecretPattern.ReplaceAllString(message, "$1=[REDACTED]")
+	message = graphDiagnosticURIPattern.ReplaceAllString(message, "[REDACTED URI]")
+	if graphDiagnosticGenericBodyPattern.MatchString(message) {
+		message = graphDiagnosticGenericBodyPattern.ReplaceAllString(message, "body=[REDACTED]")
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "unavailable error detail"
+	}
+	runes := []rune(message)
+	if len(runes) > 512 {
+		message = string(runes[:512]) + "…"
+	}
+	return fmt.Sprintf("%T: %s", err, message)
 }
 
 func queryError(code ErrorCode, message string, cause error) *QueryError {
