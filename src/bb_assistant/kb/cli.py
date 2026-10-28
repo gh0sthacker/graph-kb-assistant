@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Sequence
 
@@ -107,6 +108,17 @@ def _configured_index_path(explicit_path: Path | None) -> Path | None:
     return Path(configured).expanduser().resolve() if configured else None
 
 
+def _parse_source_filter(value: str | None, option: str) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    sources = tuple(source.strip() for source in value.split(","))
+    if not sources or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", source) for source in sources):
+        raise ValueError(f"{option} must be a comma-separated list of source family names")
+    if len(sources) != len(set(sources)):
+        raise ValueError(f"{option} cannot contain duplicate source family names")
+    return sources
+
+
 def _embedding_candidate_index_path(explicit_path: Path | None) -> Path:
     """Require embedding to target an existing isolated candidate index.
 
@@ -166,6 +178,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     import_command.add_argument("snapshot_dir", type=Path, help="version directory containing manifest.json")
     embed = commands.add_parser("embed", help="build pinned E5 vectors for the imported snapshot")
+    embed.add_argument("--sources", help="comma-separated source families to embed exclusively")
+    embed.add_argument("--exclude-sources", help="comma-separated source families to leave unembedded")
     embed.add_argument(
         "--download-model", action="store_true",
         help="allow downloading the pinned E5 model; otherwise use local model files only",
@@ -210,6 +224,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parity_export.add_argument("--fixture", type=Path, required=True, help="pinned JSON query fixture")
     parity_export.add_argument("--output", type=Path, required=True, help="private local JSON receipt output path")
     args = parser.parse_args(argv)
+    if args.command == "embed":
+        if args.sources is not None and args.exclude_sources is not None:
+            parser.error("--sources and --exclude-sources cannot be used together")
+        try:
+            args.sources = _parse_source_filter(args.sources, "--sources")
+            args.exclude_sources = _parse_source_filter(args.exclude_sources, "--exclude-sources")
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.data_home is not None:
         os.environ["BB_ASSISTANT_DATA_HOME"] = str(args.data_home.expanduser().resolve())
@@ -355,6 +377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 count = index.rebuild_embeddings(
                     embedder, batch_size=args.batch_size, progress_callback=report_progress,
                     before_batch_callback=thermal.check_sustained,
+                    sources=args.sources, exclude_sources=args.exclude_sources,
                 )
             except ThermalLimitReached as exc:
                 print(
