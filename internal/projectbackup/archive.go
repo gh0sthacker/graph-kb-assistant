@@ -50,6 +50,31 @@ type Report struct {
 	ArchiveSHA256 string `json:"archive_sha256"`
 }
 
+// PlanReport describes the exact project files a bounded backup would include.
+// It contains names and sizes, but never file contents or file hashes.
+type PlanReport struct {
+	State           string          `json:"state"`
+	ProjectKey      string          `json:"project_key"`
+	ArchivePath     string          `json:"archive_path,omitempty"`
+	FileCount       int             `json:"file_count"`
+	TotalBytes      int64           `json:"total_bytes"`
+	MaxFiles        int             `json:"max_files"`
+	MaxBytes        int64           `json:"max_bytes"`
+	LimitsSatisfied bool            `json:"limits_satisfied"`
+	IncludedFiles   []PlannedFile   `json:"included_files"`
+	Excluded        []PlanExclusion `json:"excluded"`
+}
+
+type PlannedFile struct {
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
+}
+
+type PlanExclusion struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
 type archiveManifest struct {
 	Format     string                  `json:"format"`
 	Version    int                     `json:"version"`
@@ -141,6 +166,70 @@ func Backup(ctx context.Context, dataRoot, projectKey, archivePath string, limit
 		return Report{}, errors.New("completed archive could not be verified")
 	}
 	return Report{State: "complete", ProjectKey: projectKey, FileCount: len(files), TotalBytes: total, ArchiveSHA256: digest}, nil
+}
+
+// Plan inventories a project under a shared read lease. It never creates an
+// archive or the exclusive maintenance-lock file.
+func Plan(ctx context.Context, dataRoot, projectKey, archivePath string, limits Limits) (PlanReport, error) {
+	if ctx == nil || !validLimits(limits) || !projectKeyPattern.MatchString(projectKey) {
+		return PlanReport{}, errors.New("backup plan requires a project key and explicit positive limits")
+	}
+	refs, err := project.LoadProjectRefsReadOnly(dataRoot)
+	if err != nil {
+		return PlanReport{}, errors.New("project registry could not be read")
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return PlanReport{}, errors.New("project registry contains an invalid identity")
+		}
+		if key == projectKey {
+			copy := ref
+			selected = &copy
+			break
+		}
+	}
+	if selected == nil {
+		return PlanReport{}, errors.New("selected project is not registered locally")
+	}
+	projectDir, err := store.ProjectDirectory(*selected, dataRoot)
+	if err != nil {
+		return PlanReport{}, errors.New("selected project directory is unavailable")
+	}
+	checkedArchivePath := ""
+	if archivePath != "" {
+		checkedArchivePath, err = prepareNewFilePath(archivePath)
+		if err != nil {
+			return PlanReport{}, err
+		}
+		if pathWithin(projectDir, checkedArchivePath) {
+			return PlanReport{}, errors.New("backup archive must be outside the selected project directory")
+		}
+	}
+	lease, err := projectlock.AcquireRead(ctx, projectDir)
+	if err != nil {
+		return PlanReport{}, errors.New("project read lease could not be acquired")
+	}
+	defer lease.Close()
+	files, total, err := inventory(ctx, projectDir, limits)
+	if err != nil {
+		return PlanReport{}, err
+	}
+	included := make([]PlannedFile, len(files))
+	for i, file := range files {
+		included[i] = PlannedFile{Path: file.entry.Path, Bytes: file.entry.Size}
+	}
+	return PlanReport{
+		State: "dry_run", ProjectKey: projectKey, ArchivePath: checkedArchivePath, FileCount: len(files), TotalBytes: total,
+		MaxFiles: limits.MaxFiles, MaxBytes: limits.MaxBytes, LimitsSatisfied: true,
+		IncludedFiles: included,
+		Excluded: []PlanExclusion{
+			{Path: ".maintenance.lock", Reason: "live process lock is never archived"},
+			{Path: "project registry", Reason: "stored outside the selected project directory"},
+			{Path: "directories", Reason: "only files are archived; directories are recreated on restore"},
+		},
+	}, nil
 }
 
 // Restore validates the entire archive before extracting into a private

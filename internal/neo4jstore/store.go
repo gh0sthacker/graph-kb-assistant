@@ -37,6 +37,21 @@ var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var signatureDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var neo4jErrorCodePattern = regexp.MustCompile(`^Neo[.](ClientError|TransientError|DatabaseError)[.][A-Za-z0-9_.]+$`)
 
+var requiredConstraintNames = []string{
+	"graph_record_identity",
+	"graph_import_identity",
+	"graph_project_identity",
+}
+var requiredIndexNames = []string{
+	"graph_record_project_type",
+	"graph_record_project_kind",
+	"graph_record_project_card_endpoint",
+	"graph_record_project_card_capture",
+	"graph_record_project_request_signature",
+	"graph_record_project_response_signature",
+	"graph_record_project_field_equality",
+}
+
 var ErrSignatureIndexUnavailable = errors.New("Neo4j project signature index is unavailable")
 var ErrFieldValueIndexUnavailable = errors.New("Neo4j project field-value index is unavailable")
 var ErrProjectRebuildInProgress = errors.New("Neo4j project graph rebuild is in progress")
@@ -185,6 +200,70 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		}
 		if _, err := result.Consume(ctx); err != nil {
 			return errors.New("Neo4j graph schema could not be initialized")
+		}
+	}
+	return nil
+}
+
+// CheckSchema verifies the projection's required schema without modifying it.
+func (s *Store) CheckSchema(ctx context.Context) error {
+	if s == nil || s.driver == nil {
+		return errors.New("Neo4j store is unavailable")
+	}
+	session := s.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: s.database, AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+	return checkSchemaWithQueries(ctx, func(ctx context.Context, query string) ([]string, error) {
+		result, err := session.Run(ctx, query, nil)
+		if err != nil {
+			return nil, err
+		}
+		records, err := result.Collect(ctx)
+		if err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(records))
+		for _, record := range records {
+			value, ok := record.Get("name")
+			if !ok {
+				return nil, errors.New("Neo4j schema catalog omitted a name")
+			}
+			name, ok := value.(string)
+			if !ok || name == "" {
+				return nil, errors.New("Neo4j schema catalog returned an invalid name")
+			}
+			names = append(names, name)
+		}
+		return names, nil
+	})
+}
+
+func checkSchemaWithQueries(ctx context.Context, query func(context.Context, string) ([]string, error)) error {
+	if ctx == nil || query == nil {
+		return errors.New("Neo4j schema check is unavailable")
+	}
+	for _, check := range []struct {
+		statement string
+		required  []string
+	}{
+		{statement: "SHOW CONSTRAINTS YIELD name RETURN name", required: requiredConstraintNames},
+		{statement: "SHOW INDEXES YIELD name RETURN name", required: requiredIndexNames},
+	} {
+		names, err := query(ctx, check.statement)
+		if err != nil {
+			return errors.New("Neo4j graph schema could not be inspected")
+		}
+		present := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			present[name] = struct{}{}
+		}
+		var missing []string
+		for _, name := range check.required {
+			if _, ok := present[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("Neo4j graph schema is incomplete; missing: %s", strings.Join(missing, ", "))
 		}
 	}
 	return nil

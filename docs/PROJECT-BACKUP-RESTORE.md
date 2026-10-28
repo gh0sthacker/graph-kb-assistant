@@ -26,6 +26,22 @@ maintenance lease, records file hashes in a versioned manifest, writes a
 temporary archive with mode `0600`, and publishes it without replacing an
 existing path. The process lock file and global project registry are omitted.
 
+To inspect the exact file list and byte total before writing an archive, run
+`project-backup --dry-run` with the same project and limits. `--output` is
+optional in dry-run mode; if supplied, its destination is validated and shown
+but not created. The JSON plan lists included file paths and sizes and explains
+that the live lock, external project registry, and directory entries are
+excluded. Dry-run holds a shared read lease, does not create the lock file, and
+does not write an archive.
+
+```sh
+./scripts/bb-assistant project-backup \
+  --project-key <registered-project-sha256> \
+  --max-bytes 1073741824 \
+  --max-files 50000 \
+  --dry-run
+```
+
 ## Restore
 
 Restore into a new private runtime root. The project identity is retained and

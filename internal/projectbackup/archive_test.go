@@ -92,6 +92,56 @@ func TestBackupRestorePreservesProjectFilesAndIdentity(t *testing.T) {
 	}
 }
 
+func TestPlanInventoriesProjectWithoutWritingArchiveOrLock(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "source")
+	ref := project.CaidoProjectRef{InstanceID: "backup-fixture", ProjectID: "dry-run"}
+	selected, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	projectDir, key := selected.Directory, selected.ProjectKey
+	if err := selected.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, projectDir, "vault/planned.enc", []byte("synthetic plan payload"))
+	archivePath := filepath.Join(t.TempDir(), "must-not-be-created.tar")
+	lockPath := filepath.Join(projectDir, ".maintenance.lock")
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("fixture unexpectedly has a maintenance lock before dry-run: %v", err)
+	}
+
+	plan, err := Plan(ctx, root, key, archivePath, Limits{MaxBytes: 1 << 20, MaxFiles: 32})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.State != "dry_run" || plan.ProjectKey != key || plan.FileCount != len(plan.IncludedFiles) || plan.TotalBytes <= 0 || !plan.LimitsSatisfied {
+		t.Fatalf("plan report = %#v", plan)
+	}
+	included := make(map[string]int64, len(plan.IncludedFiles))
+	for _, file := range plan.IncludedFiles {
+		included[file.Path] = file.Bytes
+	}
+	if included["vault/planned.enc"] != int64(len("synthetic plan payload")) {
+		t.Fatalf("plan omitted the expected file and size: %#v", plan.IncludedFiles)
+	}
+	excluded := make(map[string]bool, len(plan.Excluded))
+	for _, item := range plan.Excluded {
+		excluded[item.Path] = true
+	}
+	for _, expected := range []string{".maintenance.lock", "project registry", "directories"} {
+		if !excluded[expected] {
+			t.Errorf("plan does not explain exclusion %q: %#v", expected, plan.Excluded)
+		}
+	}
+	if _, err := os.Lstat(archivePath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created an archive: %v", err)
+	}
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created a maintenance lock file: %v", err)
+	}
+}
+
 func TestRestoreRejectsTamperedMemberWithoutRegisteringProject(t *testing.T) {
 	ctx := context.Background()
 	sourceRoot := filepath.Join(t.TempDir(), "source")

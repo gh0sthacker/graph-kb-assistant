@@ -20,6 +20,7 @@ import (
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/ingest"
+	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
@@ -254,6 +255,76 @@ func TestProjectBackupCommandsRequireExplicitResourceBudgets(t *testing.T) {
 	}
 }
 
+type neo4jCheckStoreFixture struct {
+	checkCalls  int
+	ensureCalls int
+}
+
+func (f *neo4jCheckStoreFixture) CheckSchema(context.Context) error {
+	f.checkCalls++
+	return nil
+}
+
+func (f *neo4jCheckStoreFixture) EnsureSchema(context.Context) error {
+	f.ensureCalls++
+	return errors.New("fake Neo4j client rejected DDL")
+}
+
+func (*neo4jCheckStoreFixture) Close(context.Context) error { return nil }
+
+func TestNeo4jCheckDefaultsReadOnlyAndEnsuresOnlyExplicitly(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_NEO4J_URI", "bolt://neo4j.fixture.invalid:7687")
+	t.Setenv("BB_ASSISTANT_NEO4J_USERNAME", "fixture-user")
+	t.Setenv("BB_ASSISTANT_NEO4J_PASSWORD", "fixture-password")
+	t.Setenv("BB_ASSISTANT_NEO4J_DATABASE", "fixture")
+
+	readOnlyClient := &neo4jCheckStoreFixture{}
+	if err := checkNeo4jWithFactory(nil, func(context.Context, neo4jstore.Config) (neo4jCheckStore, error) {
+		return readOnlyClient, nil
+	}); err != nil {
+		t.Fatalf("default neo4j-check: %v", err)
+	}
+	if readOnlyClient.checkCalls != 1 || readOnlyClient.ensureCalls != 0 {
+		t.Fatalf("default neo4j-check calls: CheckSchema=%d EnsureSchema=%d; want 1 and 0 (fake EnsureSchema rejects DDL)", readOnlyClient.checkCalls, readOnlyClient.ensureCalls)
+	}
+
+	explicitClient := &neo4jCheckStoreFixture{}
+	if err := checkNeo4jWithFactory([]string{"--ensure-schema"}, func(context.Context, neo4jstore.Config) (neo4jCheckStore, error) {
+		return explicitClient, nil
+	}); err == nil || !strings.Contains(err.Error(), "rejected DDL") {
+		t.Fatalf("explicit --ensure-schema error = %v; want fake DDL rejection", err)
+	}
+	if explicitClient.ensureCalls != 1 || explicitClient.checkCalls != 0 {
+		t.Fatalf("explicit --ensure-schema calls: CheckSchema=%d EnsureSchema=%d; want 0 and 1", explicitClient.checkCalls, explicitClient.ensureCalls)
+	}
+}
+
+func TestNeo4jCheckHelpDescribesReadOnlyDefault(t *testing.T) {
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writeEnd
+	factoryCalled := false
+	helpErr := checkNeo4jWithFactory([]string{"--help"}, func(context.Context, neo4jstore.Config) (neo4jCheckStore, error) {
+		factoryCalled = true
+		return nil, nil
+	})
+	os.Stderr = originalStderr
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	helpOutput, err := io.ReadAll(readEnd)
+	_ = readEnd.Close()
+	if err != nil {
+		t.Fatalf("read --help output: %v", err)
+	}
+	if helpErr == nil || factoryCalled || !strings.Contains(string(helpOutput), "without this flag, only inspect schema read-only") {
+		t.Fatalf("neo4j-check help error=%v factoryCalled=%t output=%s", helpErr, factoryCalled, helpOutput)
+	}
+}
+
 func TestProjectBackupRestoreCLIEmitsRestoredIdentityAndCapabilitySummary(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
 	ctx := t.Context()
@@ -274,6 +345,26 @@ func TestProjectBackupRestoreCLIEmitsRestoredIdentityAndCapabilitySummary(t *tes
 	if err := os.WriteFile(filepath.Join(vault, "synthetic.enc"), []byte("opaque synthetic payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	lockPath := filepath.Join(projectDir, ".maintenance.lock")
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("fixture unexpectedly has a maintenance lock before dry-run: %v", err)
+	}
+	dryRunOutput := captureCommandStdout(t, func() error {
+		return backupProject([]string{"--data-root", sourceRoot, "--project-key", projectKey, "--dry-run", "--max-bytes", "1048576", "--max-files", "32"})
+	})
+	var planResult map[string]any
+	if err := json.Unmarshal(dryRunOutput, &planResult); err != nil || planResult["state"] != "dry_run" {
+		t.Fatalf("project-backup --dry-run output=%s err=%v", dryRunOutput, err)
+	}
+	includedFiles, includedOK := planResult["included_files"].([]any)
+	excludedItems, excludedOK := planResult["excluded"].([]any)
+	if !includedOK || len(includedFiles) == 0 || !excludedOK || len(excludedItems) == 0 {
+		t.Fatalf("dry-run plan omitted included/excluded file details: %#v", planResult)
+	}
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("project-backup --dry-run created a maintenance lock file: %v", err)
+	}
+
 	archive := filepath.Join(t.TempDir(), "round-trip.tar")
 	backupOutput := captureCommandStdout(t, func() error {
 		return backupProject([]string{"--data-root", sourceRoot, "--project-key", projectKey, "--output", archive, "--max-bytes", "1048576", "--max-files", "32"})
