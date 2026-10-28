@@ -19,6 +19,7 @@ var (
 	strongSensitiveValueMarkers       = [...]string{"password", "passwd", "api_key", "api-key", "apikey", "access_token", "access-token", "accesstoken", "refresh_token", "refresh-token", "refreshtoken", "csrf_token", "csrf-token", "csrftoken", "session_id", "session-id", "session_cookie", "session-cookie", "session_key", "session-key", "secret_key", "secret-key", "authorization", "jwt", "phone", "mobile", "ssn", "credential", "private_key", "private-key", "privatekey", "private key", "bearer", "eyj", "-----begin"}
 	weakSensitiveAssignmentPattern    = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])(?:session|token|cookie|secret|email)(?:[_-]?(?:id|cookie|key))?["']?\s*[=:]\s*\S`)
 	credentialAlphabetPattern         = regexp.MustCompile(`^[A-Za-z0-9._~+/=-]+$`)
+	bareKeyProseValuePattern          = regexp.MustCompile(`^[A-Za-z]+(?:[._-][A-Za-z]+)+$`)
 	hexCredentialPattern              = regexp.MustCompile(`^[A-Fa-f0-9]{16,}$`)
 	authorizationSchemePattern        = regexp.MustCompile(`(?i)^(?:bearer|basic|digest|negotiate)(?:\s|$)`)
 	secretAssignmentPattern           = regexp.MustCompile(`(?i)\b([A-Za-z0-9_-]*(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|csrf[_-]?token|session(?:[_-]?(?:id|cookie|key))?|cookie|secret(?:[_-]?key)?|authorization|token|jwt))\b["']?\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&;,"']+)`)
@@ -139,6 +140,11 @@ func walk(value any, parent string) error {
 				(normalized == "value" || normalized == "values") && !emptyOrRedacted(child) {
 				return errors.New("public data contains a private field value")
 			}
+			if isBareSensitiveKey(normalized) {
+				if text, ok := child.(string); ok && !emptyOrRedacted(child) && isSensitiveAssignmentValue(normalized, text) {
+					return errors.New("public data contains a secret-like value")
+				}
+			}
 			if err := walk(child, key); err != nil {
 				return err
 			}
@@ -196,12 +202,16 @@ func containsSecretLikeValue(value string) bool {
 		return false
 	}
 	for _, match := range headerFieldPattern.FindAllStringSubmatchIndex(value, -1) {
-		if len(match) >= 6 && match[2] >= 0 && match[3] >= 0 && match[4] >= 0 && match[5] >= 0 &&
-			sensitiveHeaderPattern.MatchString(value[match[2]:match[3]]) {
-			headerValue := strings.TrimSpace(value[match[4]:match[5]])
-			if headerValue != "" && !strings.EqualFold(headerValue, "[REDACTED]") && !strings.EqualFold(headerValue, "<REDACTED>") {
-				return true
-			}
+		if len(match) < 6 || match[2] < 0 || match[3] < 0 || match[4] < 0 || match[5] < 0 {
+			continue
+		}
+		sensitiveName := value[match[2]:match[3]]
+		headerValue := strings.TrimSpace(value[match[4]:match[5]])
+		if !sensitiveHeaderPattern.MatchString(sensitiveName) || !isSensitiveHeaderValue(sensitiveName, headerValue) {
+			continue
+		}
+		if headerValue != "" && !strings.EqualFold(headerValue, "[REDACTED]") && !strings.EqualFold(headerValue, "<REDACTED>") {
+			return true
 		}
 	}
 	if secretOtherValuePattern.MatchString(value) {
@@ -265,16 +275,64 @@ func hasSensitiveValueMarker(value string) bool {
 
 func isSensitiveAssignmentValue(key, value string) bool {
 	normalizedKey := strings.ReplaceAll(strings.ToLower(key), "-", "_")
-	switch normalizedKey {
-	case "session", "token", "cookie", "jwt", "secret", "authorization":
-		value = strings.TrimSpace(strings.Trim(value, `"'`))
-		if normalizedKey == "authorization" && authorizationSchemePattern.MatchString(value) {
-			return true
-		}
-		return looksLikeCredential(value)
-	default:
+	if !isBareSensitiveKey(normalizedKey) {
 		return true
 	}
+	value = strings.TrimSpace(strings.Trim(value, `"'`))
+	if normalizedKey == "authorization" && authorizationSchemePattern.MatchString(value) {
+		return true
+	}
+	return looksLikeCredential(value) || isOpaqueBareKeyValue(value)
+}
+
+// isBareSensitiveKey reports whether a normalized key is one of the short
+// sensitive names whose value may still be ordinary prose.
+func isBareSensitiveKey(normalizedKey string) bool {
+	switch normalizedKey {
+	case "session", "token", "cookie", "jwt", "secret", "authorization":
+		return true
+	default:
+		return false
+	}
+}
+
+// isSensitiveHeaderValue keeps the header rule strict, except for header names
+// that are a bare sensitive key: prose such as "session: review_later" reaches
+// this shape, so the value must look like credential material to qualify.
+func isSensitiveHeaderValue(name, value string) bool {
+	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "-", "_")
+	if !isBareSensitiveKey(normalized) {
+		return true
+	}
+	return isSensitiveAssignmentValue(normalized, value)
+}
+
+// isOpaqueBareKeyValue catches short or low-variety values under a bare
+// sensitive key that are still credential material: anything twelve or more
+// bytes long, anything containing a digit, or anything using characters
+// outside the word alphabet of letters, underscore, hyphen, and dot. Values
+// made of plain words joined by separators ("review_later",
+// "verify-consultation") keep their human-readable shape and are not treated as
+// secrets on length alone.
+func isOpaqueBareKeyValue(value string) bool {
+	value = strings.TrimSpace(strings.Trim(value, `"'`))
+	if value == "" || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+		return false
+	}
+	var digit, foreign bool
+	for index := 0; index < len(value); index++ {
+		switch character := value[index]; {
+		case character >= '0' && character <= '9':
+			digit = true
+		case character >= 'A' && character <= 'Z', character >= 'a' && character <= 'z', character == '_', character == '-', character == '.':
+		default:
+			foreign = true
+		}
+	}
+	if digit || foreign {
+		return true
+	}
+	return len(value) >= 12 && !bareKeyProseValuePattern.MatchString(value)
 }
 
 func looksLikeCredential(value string) bool {

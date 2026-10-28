@@ -59,7 +59,9 @@ func TestRedactTextPreservesProseWithSensitiveWords(t *testing.T) {
 		"QA test session: verify consultation review readback; no model submission.",
 		"the token: rotate later",
 		"email me when ready",
+		"session: review_later",
 		`{"session":"review later"}`,
+		`{"session":"review_later"}`,
 	} {
 		t.Run(input, func(t *testing.T) {
 			redacted, spans, err := RedactText(input)
@@ -178,5 +180,79 @@ func TestRedactTextRemovesCompleteQuotedCredentialsAndPIIAssignments(t *testing.
 	}
 	if err := Validate(map[string]string{"excerpt": redacted}); err != nil {
 		t.Fatalf("fully redacted text failed the public-data gate: %v", err)
+	}
+}
+
+func TestBareSensitiveKeysMaskShortOpaqueValues(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		input  string
+		secret string
+	}{
+		{"short opaque session", `{"session":"a1b2c3"}`, "a1b2c3"},
+		{"short opaque token", `{"token":"x9"}`, "x9"},
+		{"short opaque cookie", `{"cookie":"abc123"}`, "abc123"},
+		{"short opaque jwt", `{"jwt":"q7"}`, "q7"},
+		{"short opaque secret", `{"secret":"s3cr3t"}`, "s3cr3t"},
+		{"bearer authorization", `{"authorization":"Bearer abc"}`, "Bearer abc"},
+		{"long bare-key value without digits", `{"session":"abcdefghijkl"}`, "abcdefghijkl"},
+		{"value outside the word alphabet", `{"token":"abc/def"}`, "abc/def"},
+		{"composite session id", `{"session_id":"verify"}`, "verify"},
+		{"composite session cookie", `{"session_cookie":"verify"}`, "verify"},
+		{"composite api key", `{"api_key":"short"}`, "short"},
+		{"composite csrf token", `{"csrf_token":"short"}`, "short"},
+		{"password field", `{"password":"short"}`, "short"},
+		{"private key field", `{"private_key":"short"}`, "short"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			redacted, spans, err := RedactText(test.input)
+			if err != nil {
+				t.Fatalf("RedactText() error = %v", err)
+			}
+			if strings.Contains(redacted, test.secret) {
+				t.Fatalf("secret %q survived redaction: %s", test.secret, redacted)
+			}
+			if len(spans) == 0 {
+				t.Fatalf("redaction reported no spans for %q", test.input)
+			}
+			if !strings.Contains(redacted, "[REDACTED]") {
+				t.Fatalf("redacted text lost its placeholder: %s", redacted)
+			}
+			if err := ValidateJSON([]byte(test.input)); err == nil {
+				t.Fatalf("opaque value passed validation: %q", test.input)
+			}
+			if err := Validate(map[string]string{"excerpt": redacted}); err != nil {
+				t.Fatalf("redacted value failed the public-data gate: %v", err)
+			}
+		})
+	}
+}
+
+func TestBareSensitiveKeysPreserveOrdinaryProse(t *testing.T) {
+	for _, input := range []string{
+		"QA test session: verify consultation review readback; no model submission.",
+		"the token: rotate later",
+		"email me when ready",
+		"session: review_later",
+		`{"session":"review_later"}`,
+		`{"secret":"keep"}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			redacted, spans, err := RedactText(input)
+			if err != nil {
+				t.Fatalf("RedactText() error = %v", err)
+			}
+			if redacted != input || len(spans) != 0 {
+				t.Fatalf("prose changed: got %q with spans %#v", redacted, spans)
+			}
+			if err := Validate(map[string]string{"excerpt": input}); err != nil {
+				t.Fatalf("ordinary prose failed validation: %v", err)
+			}
+			if strings.HasPrefix(input, "{") {
+				if err := ValidateJSON([]byte(input)); err != nil {
+					t.Fatalf("ordinary JSON prose failed validation: %v", err)
+				}
+			}
+		})
 	}
 }
