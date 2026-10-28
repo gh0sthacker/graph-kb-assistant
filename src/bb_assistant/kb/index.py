@@ -14,7 +14,7 @@ import re
 import sqlite3
 import struct
 import time
-from typing import Callable, Iterable, Iterator, Mapping
+from typing import Callable, Iterable, Iterator, Mapping, Sequence, cast
 
 from ..paths import data_root, ensure_private_directory
 from ..project_lock import project_maintenance_lock, project_maintenance_read_lock
@@ -28,6 +28,20 @@ from .ranking import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_vector_policy(policy: str) -> tuple[str, float]:
+    policy = policy.strip()
+    if policy == "all":
+        return "all", 1.0
+    match = re.fullmatch(r"min_share=((?:0(?:\.\d+)?|\.\d+|1(?:\.0+)?))", policy)
+    if match is None:
+        raise ValueError("KB_VECTOR_POLICY must be 'all' or 'min_share=N' with 0 < N <= 1")
+    share = float(match.group(1))
+    if not 0 < share <= 1:
+        raise ValueError("KB_VECTOR_POLICY min_share must be greater than 0 and at most 1")
+    return "min_share", share
+
 
 def _redamon_fulltext_expression(query: str) -> str:
     """Build the same unprefixed OR/Lucene-operator query RedAmon sends to Neo4j."""
@@ -159,7 +173,7 @@ class KBIndex:
     def __init__(
         self, path: Path | None = None, *, read_only: bool = False,
         embedder: object | None = None, reranker: object | None = None,
-        lexical_provider: object | None = None,
+        lexical_provider: object | None = None, vector_policy: str | None = None,
     ) -> None:
         requested_path = (path if path is not None else data_root() / "kb" / "index.sqlite3").expanduser()
         if read_only and Path(os.path.abspath(requested_path)) != requested_path.resolve():
@@ -168,7 +182,9 @@ class KBIndex:
         self.read_only = bool(read_only)
         self._embedder = embedder
         self._reranker = reranker
-        self._faiss_cache: tuple[tuple[str, str, int, bool], object, tuple[str, ...]] | None = None
+        policy_value = vector_policy if vector_policy is not None else os.environ.get("KB_VECTOR_POLICY", "all")
+        self.vector_policy, self._vector_min_share = _parse_vector_policy(policy_value)
+        self._faiss_cache: tuple[tuple[str, str, int, bool, int], object, tuple[str, ...]] | None = None
         engine = os.environ.get("BB_ASSISTANT_KB_LEXICAL_ENGINE", "sqlite-fts5").strip()
         if engine not in {"sqlite-fts5", "neo4j-lucene"}:
             raise ValueError("KB lexical engine must be sqlite-fts5 or neo4j-lucene")
@@ -238,6 +254,117 @@ class KBIndex:
                 connection.execute("ALTER TABLE source_documents ADD COLUMN raw_source_sha256 TEXT")
             if "raw_source_text" not in columns:
                 connection.execute("ALTER TABLE source_documents ADD COLUMN raw_source_text TEXT")
+
+    def _vector_inventory(self, connection: sqlite3.Connection, *, persist: bool = False) -> dict[str, object]:
+        meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+        snapshot_id = meta.get("snapshot_id")
+        published = bool(meta.get("vector_model")) and meta.get("vector_snapshot_id") == snapshot_id
+        staged = bool(meta.get("vector_staging_model")) and meta.get("vector_staging_snapshot_id") == snapshot_id
+        if published:
+            model_name = meta.get("vector_model", "")
+            dimensions_value = meta.get("vector_dimensions", "0")
+        elif staged:
+            model_name = meta.get("vector_staging_model", "")
+            dimensions_value = meta.get("vector_staging_dimensions", "0")
+        else:
+            model_name = ""
+            dimensions_value = "0"
+        try:
+            dimensions = int(dimensions_value or 0)
+        except (TypeError, ValueError):
+            dimensions = 0
+
+        coverage: dict[str, dict[str, int]] = {}
+        if model_name and dimensions > 0:
+            rows = connection.execute(
+                """SELECT c.source_name,COUNT(*) AS chunks,
+                          SUM(CASE WHEN e.chunk_id IS NOT NULL THEN 1 ELSE 0 END) AS vectors
+                   FROM chunks c
+                   LEFT JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id
+                     AND e.model_name=? AND e.dimensions=? AND e.vector IS NOT NULL AND length(e.vector)>0
+                   WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
+                   GROUP BY c.source_name ORDER BY c.source_name""",
+                (model_name, dimensions),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """SELECT source_name,COUNT(*) AS chunks,0 AS vectors FROM chunks
+                   WHERE COALESCE(json_extract(metadata_json,'$.document_role'),'content')='content'
+                   GROUP BY source_name ORDER BY source_name"""
+            ).fetchall()
+        for row in rows:
+            coverage[str(row["source_name"])] = {
+                "chunks": int(row["chunks"]), "vectors": int(row["vectors"] or 0),
+            }
+        chunk_count = sum(item["chunks"] for item in coverage.values())
+        vector_count = sum(item["vectors"] for item in coverage.values())
+        complete = bool(published and chunk_count > 0 and vector_count == chunk_count)
+        partial = bool(0 < vector_count < chunk_count)
+        policy_generation_available = published or (self.vector_policy == "min_share" and staged)
+        policy_ready = bool(
+            policy_generation_available and chunk_count > 0 and vector_count > 0
+            and vector_count / chunk_count >= self._vector_min_share
+        )
+        if persist:
+            connection.executemany(
+                "INSERT INTO kb_meta(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (
+                    ("vector_coverage_by_source", json.dumps(
+                        coverage, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                    )),
+                    ("vector_partial", str(partial).lower()),
+                ),
+            )
+        return {
+            "coverage": coverage,
+            "chunks": chunk_count,
+            "vectors": vector_count,
+            "complete": complete,
+            "partial": partial,
+            "ready": policy_ready,
+            "model_name": model_name or None,
+            "dimensions": dimensions,
+            "published": published,
+            "staged": staged,
+        }
+
+    def _increment_vector_coverage(
+        self, connection: sqlite3.Connection, additions: Mapping[str, int],
+    ) -> None:
+        if not additions:
+            return
+        row = connection.execute(
+            "SELECT value FROM kb_meta WHERE key='vector_coverage_by_source'"
+        ).fetchone()
+        try:
+            coverage = json.loads(row[0]) if row is not None else None
+        except (TypeError, json.JSONDecodeError):
+            coverage = None
+        if not isinstance(coverage, dict) or any(
+            family not in coverage or not isinstance(coverage[family], dict)
+            or not isinstance(coverage[family].get("chunks"), int)
+            or not isinstance(coverage[family].get("vectors"), int)
+            for family in additions
+        ):
+            self._vector_inventory(connection, persist=True)
+            return
+        for family, added in additions.items():
+            coverage[family]["vectors"] = min(
+                coverage[family]["chunks"], coverage[family]["vectors"] + added,
+            )
+        chunk_count = sum(value["chunks"] for value in coverage.values())
+        vector_count = sum(value["vectors"] for value in coverage.values())
+        connection.executemany(
+            "INSERT INTO kb_meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (
+                ("vector_coverage_by_source", json.dumps(
+                    coverage, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                )),
+                ("vector_partial", str(0 < vector_count < chunk_count).lower()),
+            ),
+        )
 
     def replace_snapshot(
         self,
@@ -468,7 +595,7 @@ class KBIndex:
             """)
             count = len(chunk_rows)
             connection.execute(
-                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','source_manifest_sha256','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
+                "DELETE FROM kb_meta WHERE key IN ('snapshot_id','chunk_count','coverage_state','coverage_report_sha256','source_coverage','source_manifest_sha256','vector_model','vector_dimensions','vector_snapshot_id','vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions','vector_coverage_by_source','vector_partial')"
             )
             connection.executemany(
                 "INSERT INTO kb_meta(key,value) VALUES(?,?)",
@@ -487,6 +614,7 @@ class KBIndex:
                     ),
                 ),
             )
+            self._vector_inventory(connection, persist=True)
         return count
 
     def refresh_chunks(
@@ -653,6 +781,7 @@ class KBIndex:
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (retained_dimensions,),
                     )
                 connection.execute("DELETE FROM kb_meta WHERE key='rechunk_target_snapshot_id'")
+                self._vector_inventory(connection, persist=True)
                 connection.commit()
         return len(chunk_rows)
 
@@ -677,6 +806,7 @@ class KBIndex:
             chunk_count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
             vector_count = connection.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
             meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
+            vector_inventory = self._vector_inventory(connection)
         try:
             source_coverage = json.loads(meta.get("source_coverage", "[]"))
         except json.JSONDecodeError:
@@ -704,9 +834,6 @@ class KBIndex:
             if source_manifest_sha256 is not None and current_source_manifest_sha256 is not None
             else None
         )
-        vector_storage_complete = (
-            vector_count > 0 and meta.get("vector_snapshot_id") == meta.get("snapshot_id")
-        )
         try:
             vector_backend_available = importlib.util.find_spec("numpy") is not None
         except (ImportError, ValueError):
@@ -725,9 +852,11 @@ class KBIndex:
             "embedded_chunks": vector_count,
             "embedding_model": meta.get("vector_model") or None,
             "embedding_snapshot_id": meta.get("vector_snapshot_id") or None,
-            "vector_storage_complete": vector_storage_complete,
+            "vector_storage_complete": vector_inventory["complete"],
             "vector_backend_available": vector_backend_available,
-            "vector_ready": vector_storage_complete and vector_backend_available,
+            "vector_ready": bool(vector_inventory["ready"]) and vector_backend_available,
+            "vector_coverage_by_source": vector_inventory["coverage"],
+            "vector_partial": vector_inventory["partial"],
             "maintenance_state": "rechunking" if meta.get("rechunk_target_snapshot_id") else None,
         }
 
@@ -790,6 +919,7 @@ class KBIndex:
                 "SELECT count(*) FROM chunk_embeddings WHERE model_name=?", (model_name,),
             ).fetchone()[0])
             if meta.get("vector_snapshot_id") == snapshot_id and meta.get("vector_model") == model_name and existing_count == total:
+                self._vector_inventory(connection, persist=True)
                 if progress_callback is not None:
                     progress_callback(total, total)
                 return total
@@ -817,6 +947,12 @@ class KBIndex:
                 dimensions = existing_dimensions
             else:
                 dimensions = int(meta.get("vector_staging_dimensions", str(existing_dimensions)) or 0)
+            if dimensions > 0:
+                connection.execute(
+                    "INSERT INTO kb_meta(key,value) VALUES('vector_staging_dimensions',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(dimensions),),
+                )
+            self._vector_inventory(connection, persist=True)
             _commit_with_busy_retry(connection)
 
         while True:
@@ -831,7 +967,7 @@ class KBIndex:
                         or meta.get("vector_staging_model") != model_name):
                     raise ValueError("KB vector staging state changed during generation")
                 rows = connection.execute(
-                    """SELECT c.chunk_id,c.text FROM chunks c
+                    """SELECT c.chunk_id,c.text,c.source_name FROM chunks c
                        LEFT JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id AND e.model_name=?
                        WHERE COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'
                          AND e.chunk_id IS NULL
@@ -856,17 +992,20 @@ class KBIndex:
                     connection.execute(
                         "DELETE FROM kb_meta WHERE key IN ('vector_staging_snapshot_id','vector_staging_model','vector_staging_dimensions')"
                     )
+                    self._vector_inventory(connection, persist=True)
                     return embedded
-                batch = [(row["chunk_id"], row["text"]) for row in rows]
+                batch = [(row["chunk_id"], row["text"], row["source_name"]) for row in rows]
 
             if before_batch_callback is not None:
                 before_batch_callback()
-            vectors = batch_encoder([text for _, text in batch], batch_size=batch_size)
+            vectors = cast(Sequence[Iterable[float]], batch_encoder(
+                [text for _, text, _ in batch], batch_size=batch_size,
+            ))
             if len(vectors) != len(batch):
                 raise ValueError("embedder returned a different number of vectors than chunks")
             encoded_rows = []
             next_dimensions = dimensions
-            for (chunk_id, _), vector in zip(batch, vectors):
+            for (chunk_id, _, _), vector in zip(batch, vectors):
                 values = [float(value) for value in vector]
                 if not values or any(not math.isfinite(value) for value in values):
                     raise ValueError("embedder returned an empty or non-finite vector")
@@ -883,14 +1022,23 @@ class KBIndex:
                 if (meta.get("vector_staging_snapshot_id") != snapshot_id
                         or meta.get("vector_staging_model") != model_name):
                     raise ValueError("KB vector staging state changed during generation")
+                changes_before = connection.total_changes
                 connection.executemany(
                     "INSERT OR IGNORE INTO chunk_embeddings(chunk_id,model_name,dimensions,vector) VALUES(?,?,?,?)",
                     encoded_rows,
                 )
+                inserted_count = connection.total_changes - changes_before
                 connection.execute(
                     "INSERT INTO kb_meta(key,value) VALUES('vector_staging_dimensions',?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(next_dimensions,),),
                 )
+                if inserted_count == len(batch):
+                    batch_coverage: dict[str, int] = {}
+                    for _, _, source_name in batch:
+                        batch_coverage[source_name] = batch_coverage.get(source_name, 0) + 1
+                    self._increment_vector_coverage(connection, batch_coverage)
+                elif inserted_count:
+                    self._vector_inventory(connection, persist=True)
                 _commit_with_busy_retry(connection)
                 dimensions = next_dimensions
                 embedded = int(connection.execute(
@@ -904,14 +1052,16 @@ class KBIndex:
     ) -> tuple[list[str], dict[str, float]]:
         with self.connect() as connection:
             meta = dict(connection.execute("SELECT key,value FROM kb_meta").fetchall())
-            model_name = meta.get("vector_model", "")
-            dimensions = int(meta.get("vector_dimensions", "0") or 0)
+            inventory = self._vector_inventory(connection)
+            model_value = inventory["model_name"]
+            model_name = model_value if isinstance(model_value, str) else ""
+            dimensions_value = inventory["dimensions"]
+            dimensions = dimensions_value if isinstance(dimensions_value, int) else 0
             snapshot_id = meta.get("snapshot_id", "")
-            vector_count = connection.execute("SELECT COUNT(*) FROM chunk_embeddings").fetchone()[0]
-        if (
-            vector_count == 0 or not model_name or dimensions <= 0
-            or meta.get("vector_snapshot_id") != snapshot_id
-        ):
+            vector_count_value = inventory["vectors"]
+            vector_count = vector_count_value if isinstance(vector_count_value, int) else 0
+            vector_ready = bool(inventory["ready"])
+        if vector_count == 0 or not model_name or dimensions <= 0 or not vector_ready:
             if self.vector_engine == "faiss":
                 raise RuntimeError("FAISS retrieval requires a complete, published vector snapshot")
             return [], {}
@@ -942,14 +1092,14 @@ class KBIndex:
                     import faiss
                 except ImportError as exc:
                     raise RuntimeError("FAISS vector retrieval is selected but faiss-cpu is not installed") from exc
-                cache_key = (snapshot_id, model_name, dimensions, include_supplemental)
+                cache_key = (snapshot_id, model_name, dimensions, include_supplemental, vector_count)
                 cached = self._faiss_cache
                 if cached is None or cached[0] != cache_key:
                     index = faiss.IndexFlatIP(dimensions)
                     chunk_ids: list[str] = []
                     sql = """SELECT e.chunk_id,e.vector FROM chunk_embeddings e
                              JOIN chunks c ON c.chunk_id=e.chunk_id
-                             WHERE e.model_name=? AND e.dimensions=?
+                             WHERE e.model_name=? AND e.dimensions=? AND e.vector IS NOT NULL AND length(e.vector)>0
                                AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
                     if not include_supplemental:
                         sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
@@ -981,7 +1131,7 @@ class KBIndex:
                 return ranked_ids, score_map
             sql = """SELECT e.chunk_id,e.vector FROM chunk_embeddings e
                      JOIN chunks c ON c.chunk_id=e.chunk_id
-                     WHERE e.model_name=? AND e.dimensions=?
+                     WHERE e.model_name=? AND e.dimensions=? AND e.vector IS NOT NULL AND length(e.vector)>0
                        AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'"""
             if not include_supplemental:
                 sql += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
