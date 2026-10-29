@@ -108,7 +108,7 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|projection-replay|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail|caido-sync>")
+		return errors.New("usage: bb-assistant <version|coverage|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|projection-replay|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail|caido-sync>")
 	}
 	switch args[0] {
 	case "serve":
@@ -116,6 +116,8 @@ func run(args []string) error {
 	case "version":
 		fmt.Println(buildinfo.String())
 		return nil
+	case "coverage":
+		return showCoverage(args[1:])
 	case "status":
 		return runtimeStatus(args[1:])
 	case "db-check":

@@ -98,7 +98,7 @@ func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
 	}
 	wantNames := []string{
 		"bb_candidate_save", "bb_consult_compare", "bb_consult_create_session", "bb_consult_record_proposal",
-		"bb_consult_resume", "bb_consult_validate_proposal",
+		"bb_consult_resume", "bb_consult_validate_proposal", "bb_coverage_matrix",
 		"bb_get_capture", "bb_graph_neighborhood", "bb_graph_slice", "bb_kb_get_source", "bb_kb_search",
 		"bb_kb_stats", "bb_list_projects", "bb_search_captures", "bb_surface_map",
 	}
@@ -118,7 +118,7 @@ func TestServerAdvertisesBoundedConsultationToolContract(t *testing.T) {
 		annotations, ok := spec["annotations"].(map[string]any)
 		if !ok || annotations["openWorldHint"] != false {
 			t.Errorf("tool %q is missing explicit local-only annotations: %#v", name, spec["annotations"])
-		} else if name == "bb_consult_resume" || name == "bb_get_capture" || name == "bb_graph_neighborhood" || name == "bb_graph_slice" ||
+		} else if name == "bb_coverage_matrix" || name == "bb_consult_resume" || name == "bb_get_capture" || name == "bb_graph_neighborhood" || name == "bb_graph_slice" ||
 			name == "bb_kb_get_source" || name == "bb_kb_search" || name == "bb_kb_stats" || name == "bb_list_projects" ||
 			name == "bb_search_captures" || name == "bb_surface_map" {
 			if annotations["readOnlyHint"] != true {

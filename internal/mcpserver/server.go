@@ -428,6 +428,12 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (map[stri
 
 func (t *Tools) call(ctx context.Context, name string, arguments json.RawMessage) (any, error) {
 	switch name {
+	case "bb_coverage_matrix":
+		var args coverageMatrixArgs
+		if err := decodeObject(arguments, &args); err != nil {
+			return nil, err
+		}
+		return t.CoverageMatrix(ctx, args.Run)
 	case "bb_list_projects":
 		var args listProjectsArgs
 		if err := decodeObject(arguments, &args); err != nil {
@@ -1193,6 +1199,7 @@ func toolCatalog(includeRaw bool) []toolSpec {
 			"request_id":  stringSchema(512, map[string]any{"minLength": 1}),
 		}, "project_key", "request_id"), Annotations: readOnly(),
 	})
+	catalog = append(catalog, coverageMatrixToolSpec())
 	catalog = append(catalog, consultationToolCatalog()...)
 	if includeRaw {
 		catalog = append(catalog, toolSpec{
