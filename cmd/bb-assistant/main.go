@@ -90,8 +90,11 @@ func main() {
 		err = errors.Join(err, closeErr)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		var outcome *gateVerdictError
+		if !errors.As(err, &outcome) {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(commandExitCode(err))
 	}
 }
 
@@ -108,9 +111,11 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|projection-replay|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail|caido-sync>")
+		return errors.New("usage: bb-assistant <gate|version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|projection-replay|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail|caido-sync>")
 	}
 	switch args[0] {
+	case "gate":
+		return runGate(context.Background(), args[1:], os.Stdout)
 	case "serve":
 		return serveApplication(args[1:])
 	case "version":
