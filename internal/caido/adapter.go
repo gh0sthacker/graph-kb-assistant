@@ -720,9 +720,8 @@ func parseRequestPage(payload map[string]any, previous *string) (RequestMetadata
 		}
 		requests = append(requests, RequestMetadata{RequestID: id, Method: method, URL: target, StatusCode: status})
 	}
-	if hasMore && len(requests) == 0 {
-		return RequestMetadataPage{}, sanitized("Caido returned an advancing cursor without request rows")
-	}
+	// Preserve valid empty advancing pages for the consumer to interpret:
+	// live-tail treats them as end-of-history; historical backfill stays strict.
 	if !hasMore {
 		next = nil
 	}

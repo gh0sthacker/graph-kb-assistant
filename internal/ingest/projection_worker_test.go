@@ -803,7 +803,7 @@ func TestLiveTailRefreshesLateResponseAsNewRevisionAndKeepsOlderJobFenced(t *tes
 		t.Fatal(err)
 	}
 	second, err := RunLiveTail(ctx, source, liveWriter, selected, options)
-	if err != nil || second.State != "idle" || second.RequestsAdded != 0 || second.ResponsesRefreshed != 1 || second.ResponseRefreshPages != 1 || second.ResponseRefreshPending {
+	if err != nil || second.State != "complete" || second.RequestsAdded != 0 || second.ResponsesRefreshed != 1 || second.ResponseRefreshPages != 1 || second.ResponseRefreshPending {
 		t.Fatalf("late response refresh outside the moving creation window = %+v err=%v", second, err)
 	}
 	if len(source.refreshCursors) != 2 || source.refreshCursors[0] != "" || source.refreshCursors[1] != oldCursor {

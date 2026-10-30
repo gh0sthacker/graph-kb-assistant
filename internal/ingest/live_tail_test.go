@@ -58,7 +58,7 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first RunLiveTail() error = %v", err)
 	}
-	if first.State != "idle" || first.RequestsSeen != 1 || first.RequestsAdded != 1 || first.PagesCompleted != 1 || first.CursorPending || first.LimitReached || first.ResponseRefreshPending {
+	if first.State != "complete" || first.RequestsSeen != 1 || first.RequestsAdded != 1 || first.PagesCompleted != 1 || first.CursorPending || first.LimitReached || first.ResponseRefreshPending {
 		t.Fatalf("first RunLiveTail() result = %+v, want one imported request and an idle checkpoint", first)
 	}
 	if source.refreshCalls != 1 {
@@ -72,7 +72,7 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second RunLiveTail() error = %v", err)
 	}
-	if second.State != "idle" || second.RequestsSeen != 1 || second.RequestsAdded != 0 || second.PagesCompleted != 1 || second.ResponseRefreshPending {
+	if second.State != "complete" || second.RequestsSeen != 1 || second.RequestsAdded != 0 || second.PagesCompleted != 1 || second.ResponseRefreshPending {
 		t.Fatalf("second RunLiveTail() result = %+v, want an idle deduplicated page", second)
 	}
 	if source.refreshCalls != 2 {
@@ -320,7 +320,7 @@ func TestRunLiveTailReturnsPendingWithoutSynchronousProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("durable live capture acceptance failed: %v", err)
 	}
-	if result.State != "idle" || result.RequestsAdded != 1 || result.ProjectionPendingPages != 1 {
+	if result.State != "complete" || result.RequestsAdded != 1 || result.ProjectionPendingPages != 1 {
 		t.Fatalf("live result does not show accepted capture with pending projection: %+v", result)
 	}
 	var pendingJobs, graphMappings int
