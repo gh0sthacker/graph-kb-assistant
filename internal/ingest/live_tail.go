@@ -1297,7 +1297,10 @@ func persistLiveCaptures(
 			return 0, 0, nil, errors.New("live-tail graph bundle could not be encoded")
 		}
 		bundleObservationID, err := behaviorgraph.ProjectionObservationID(payload, selected.ProjectKey, item.observationID)
-		if err != nil || bundleObservationID != item.graphObservationID {
+		if err != nil {
+			return 0, 0, nil, errors.New("live-tail graph bundle failed projection validation")
+		}
+		if bundleObservationID != item.graphObservationID {
 			return 0, 0, nil, errors.New("live-tail graph observation does not match its capture revision")
 		}
 		if _, _, err := behaviorgraph.EnqueueProjectionJob(

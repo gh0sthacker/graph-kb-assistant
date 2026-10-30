@@ -17,7 +17,10 @@ import (
 	"bb-graph-assistant/internal/publicdata"
 )
 
-const maxProjectionJobPayloadBytes = 4 << 20
+// A job carries one complete graph bundle, including field occurrences and
+// provenance. Use the writer's existing bound: small HTTP messages can expand
+// beyond 4 MiB without exceeding the supported graph bundle size.
+const maxProjectionJobPayloadBytes = MaxBundleJSONBytes
 
 var (
 	ErrProjectionJobConflict      = errors.New("projection job revision conflicts with its stored payload")
