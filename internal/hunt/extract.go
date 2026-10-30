@@ -112,7 +112,7 @@ func Extract(c Capture) Observation {
 		dec := json.NewDecoder(bytes.NewReader(body))
 		dec.UseNumber()
 		if dec.Decode(&value) == nil {
-			walkJSON(value, "", func(k, v string) { inputs = append(inputs, entry{k, "body", v}) })
+			walkJSONFields(value, "", func(k, v string) { inputs = append(inputs, entry{k, "body", v}) })
 		}
 	} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
 		if v, e := url.ParseQuery(string(body)); e == nil {
@@ -276,6 +276,38 @@ func walkJSON(v any, prefix string, visit func(string, string)) {
 		visit(prefix, strconv.FormatFloat(x, 'f', -1, 64))
 	case bool:
 		visit(prefix, strconv.FormatBool(x))
+	}
+}
+
+// walkJSONFields emits the JSON leaf key as the parameter name. Parent paths
+// are useful for response inspection, but a request field such as user.role
+// must remain the attack-surface parameter "role".
+func walkJSONFields(v any, name string, visit func(string, string)) {
+	switch x := v.(type) {
+	case map[string]any:
+		for _, key := range sortedKeys(x) {
+			walkJSONFields(x[key], key, visit)
+		}
+	case []any:
+		for _, item := range x {
+			walkJSONFields(item, name, visit)
+		}
+	case string:
+		if name != "" {
+			visit(name, x)
+		}
+	case json.Number:
+		if name != "" {
+			visit(name, x.String())
+		}
+	case float64:
+		if name != "" {
+			visit(name, strconv.FormatFloat(x, 'f', -1, 64))
+		}
+	case bool:
+		if name != "" {
+			visit(name, strconv.FormatBool(x))
+		}
 	}
 }
 func reflection(value, body, ct string) string {

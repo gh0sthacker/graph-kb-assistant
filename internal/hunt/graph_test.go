@@ -48,14 +48,18 @@ func TestRanking(t *testing.T) {
 func TestIdentityUnlockRole(t *testing.T) {
 	anon := fixture("1", "/api/Users", "unauthorized", "text/plain")
 	anon.Status = 401
-	auth := Extract(Capture{ID: "2", ObservationID: "obs2", Request: []byte("POST /api/Users HTTP/1.1\r\nHost: example.test\r\nAuthorization: Bearer hidden-secret\r\nContent-Type: application/json\r\n\r\n{\"role\":\"admin\",\"password\":\"hidden-secret\"}"), Response: []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")})
+	auth := Extract(Capture{ID: "2", ObservationID: "obs2", Request: []byte("POST /api/Users HTTP/1.1\r\nHost: example.test\r\nAuthorization: Bearer hidden-secret\r\nContent-Type: application/json\r\n\r\n{\"user\":{\"role\":\"admin\",\"deluxeToken\":\"hidden-token\",\"isAdmin\":true,\"lastLoginIp\":\"127.0.0.1\",\"password\":\"hidden-secret\"}}"), Response: []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}")})
 	allowed := auth
 	allowed.Endpoint = anon.Endpoint
 	allowed.Parameters = nil
 	g := Build([]Observation{anon, auth, allowed})
 	found, unlock := false, false
+	parameterNames := map[string]bool{}
+	for _, p := range g.Parameters {
+		parameterNames[p.Name] = true
+	}
 	for _, c := range g.Result.Candidates {
-		if c.Parameter == "role" && (c.Class == "bopla" || c.Class == "bfla") {
+		if c.Endpoint == "POST /api/Users" && c.Parameter == "role" && (c.Class == "bopla" || c.Class == "bfla") {
 			found = true
 		}
 	}
@@ -69,6 +73,11 @@ func TestIdentityUnlockRole(t *testing.T) {
 	}
 	if !found || !unlock {
 		t.Fatalf("role=%v unlock=%v", found, unlock)
+	}
+	for _, name := range []string{"role", "deluxeToken", "isAdmin", "lastLoginIp"} {
+		if !parameterNames[name] {
+			t.Errorf("missing extracted parameter %q; got %v", name, parameterNames)
+		}
 	}
 	b, _ := json.Marshal(g)
 	if strings.Contains(string(b), "hidden-secret") {
