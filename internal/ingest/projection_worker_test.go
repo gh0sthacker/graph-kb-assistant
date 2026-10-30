@@ -793,7 +793,7 @@ func TestLiveTailRefreshesLateResponseAsNewRevisionAndKeepsOlderJobFenced(t *tes
 	options := LiveTailOptions{PageSize: 1, MaxPages: 1, OverlapSeconds: 90, MaxBodyBytes: 64 << 10}
 
 	first, err := RunLiveTail(ctx, source, liveWriter, selected, options)
-	if err != nil || first.State != "idle" || first.RequestsAdded != 1 || first.ResponsesRefreshed != 0 || first.ResponseRefreshPages != 1 {
+	if err != nil || first.State != "partial" || first.RequestsAdded != 1 || first.ResponsesRefreshed != 0 || first.ResponseRefreshPages != 1 || !first.CursorPending {
 		t.Fatalf("initial incomplete live capture = %+v err=%v", first, err)
 	}
 	var originalRevision string

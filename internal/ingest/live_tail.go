@@ -78,6 +78,14 @@ type LiveTailResult struct {
 	LimitReached           bool    `json:"limit_reached"`
 }
 
+// liveTailOutcome reports partial only while the result identifies unfinished work.
+func liveTailOutcome(pendingResponses int, limitReached, cursorPending bool) (string, int) {
+	if pendingResponses > 0 || limitReached || cursorPending {
+		return "partial", 2
+	}
+	return "complete", 0
+}
+
 type LivePageResult struct {
 	RequestsAdded      int
 	ResponsesRefreshed int
@@ -694,6 +702,8 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		result.State = "partial"
 		result.Watermark = checkpoint.Watermark
 		result.CursorPending = checkpoint.Cursor != nil
+		state, _ := liveTailOutcome(result.PendingResponses, result.LimitReached, result.CursorPending)
+		result.State = state
 		return result, cause
 	}
 
@@ -764,7 +774,13 @@ func finishLiveTailResponseRefresh(
 	options LiveTailOptions,
 	fetchedThisRun map[string]struct{},
 	result LiveTailResult,
-) (LiveTailResult, error) {
+) (final LiveTailResult, finalErr error) {
+	final = result
+	defer func() {
+		state, _ := liveTailOutcome(final.PendingResponses, final.LimitReached, final.CursorPending)
+		final.State = state
+	}()
+	intakeCursorPending := result.CursorPending
 	cursor, err := writer.ResponseRefreshCursor(ctx)
 	if err != nil {
 		result.State = "partial"
@@ -778,6 +794,7 @@ func finishLiveTailResponseRefresh(
 		return result, err
 	}
 	result.PendingResponses = pendingCount
+	result.CursorPending = intakeCursorPending || cursor != nil
 	result.ResponseRefreshPending = cursor != nil || pendingCount > 0
 	for result.ResponseRefreshPages < options.MaxPages {
 		if err := ctx.Err(); err != nil {
@@ -864,6 +881,7 @@ func finishLiveTailResponseRefresh(
 		return result, err
 	}
 	result.PendingResponses = pendingCount
+	result.CursorPending = intakeCursorPending || cursor != nil
 	result.ResponseRefreshPending = cursor != nil || pendingCount > 0
 	if result.State == "idle" && !result.ResponseRefreshPending {
 		// The durable checkpoint uses idle; expose explicit completion to callers.

@@ -19,6 +19,34 @@ import (
 	"bb-graph-assistant/internal/store"
 )
 
+func TestLiveTailOutcomeRequiresUnfinishedWorkForPartialAndExitTwo(t *testing.T) {
+	tests := []struct {
+		name             string
+		pendingResponses int
+		limitReached     bool
+		cursorPending    bool
+		wantState        string
+		wantExitCode     int
+	}{
+		{name: "nothing pending", wantState: "complete", wantExitCode: 0},
+		{name: "pending responses", pendingResponses: 1, wantState: "partial", wantExitCode: 2},
+		{name: "limit reached", limitReached: true, wantState: "partial", wantExitCode: 2},
+		{name: "cursor pending", cursorPending: true, wantState: "partial", wantExitCode: 2},
+		{name: "pending and limit", pendingResponses: 1, limitReached: true, wantState: "partial", wantExitCode: 2},
+		{name: "pending and cursor", pendingResponses: 1, cursorPending: true, wantState: "partial", wantExitCode: 2},
+		{name: "limit and cursor", limitReached: true, cursorPending: true, wantState: "partial", wantExitCode: 2},
+		{name: "all pending signals", pendingResponses: 1, limitReached: true, cursorPending: true, wantState: "partial", wantExitCode: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state, exitCode := liveTailOutcome(tc.pendingResponses, tc.limitReached, tc.cursorPending)
+			if state != tc.wantState || exitCode != tc.wantExitCode {
+				t.Fatalf("liveTailOutcome() = (%q, %d), want (%q, %d)", state, exitCode, tc.wantState, tc.wantExitCode)
+			}
+		})
+	}
+}
+
 func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	ctx := context.Background()
 	selected, projectStore, writer := newLiveTailFixture(t)
@@ -433,8 +461,8 @@ func TestRunLiveTailMarksCheckpointPartialWhenCaidoReadFails(t *testing.T) {
 	if !errors.Is(err, readErr) {
 		t.Fatalf("RunLiveTail() error = %v, want fixture read error", err)
 	}
-	if result.State != "partial" || result.PagesCompleted != 0 || result.RequestsAdded != 0 {
-		t.Fatalf("RunLiveTail() result = %+v, want a partial checkpoint with no imported requests", result)
+	if result.State != "complete" || result.PagesCompleted != 0 || result.RequestsAdded != 0 {
+		t.Fatalf("RunLiveTail() result = %+v, want no unfinished work after the read error", result)
 	}
 	var checkpointState string
 	if err := projectStore.Database.DB().QueryRowContext(ctx,
@@ -519,8 +547,8 @@ func TestRunLiveTailResumesFromCommittedCursorAfterStoreRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resumed RunLiveTail() error = %v", err)
 	}
-	if secondRun.State != "idle" || secondRun.RequestsSeen != 1 || secondRun.RequestsAdded != 1 || secondRun.PagesCompleted != 1 || secondRun.CursorPending {
-		t.Fatalf("resumed RunLiveTail() result = %+v, want one final page and an idle checkpoint", secondRun)
+	if secondRun.State != "partial" || secondRun.RequestsSeen != 1 || secondRun.RequestsAdded != 1 || secondRun.PagesCompleted != 1 || secondRun.PendingResponses == 0 {
+		t.Fatalf("resumed RunLiveTail() result = %+v, want pending responses", secondRun)
 	}
 	var refererKey sql.NullString
 	var secondRevisionID string
@@ -618,8 +646,8 @@ func TestRunLiveTailResumesFromCommittedCursorAfterStoreRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replayed RunLiveTail() error = %v", err)
 	}
-	if replayRun.State != "idle" || replayRun.RequestsSeen != 2 || replayRun.RequestsAdded != 0 || replayRun.PagesCompleted != 1 {
-		t.Fatalf("replayed RunLiveTail() result = %+v, want a deduplicated idle page", replayRun)
+	if replayRun.State != "partial" || replayRun.RequestsSeen != 2 || replayRun.RequestsAdded != 0 || replayRun.PagesCompleted != 1 || replayRun.PendingResponses == 0 {
+		t.Fatalf("replayed RunLiveTail() result = %+v, want deduplicated requests with pending responses", replayRun)
 	}
 	if len(replay.skippedCounts) != 1 || replay.skippedCounts[0] != 2 {
 		t.Fatalf("replay skip counts = %v, want both known request IDs skipped", replay.skippedCounts)
