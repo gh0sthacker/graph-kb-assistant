@@ -65,7 +65,7 @@ func TestRunLiveTailEmptyInvalidBoundaryStillFails(t *testing.T) {
 	result, err := RunLiveTail(context.Background(), &liveTailSourceFixture{
 		project: selected, pages: []caido.RequestMetadataPage{{HasMore: true}},
 	}, writer, selected, LiveTailOptions{})
-	if err == nil || result.State != "partial" {
-		t.Fatalf("malformed empty page must fail: result=%+v err=%v", result, err)
+	if err == nil || result.State != "complete" {
+		t.Fatalf("malformed empty page must fail without reporting unfinished work: result=%+v err=%v", result, err)
 	}
 }

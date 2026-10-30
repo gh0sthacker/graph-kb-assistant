@@ -72,8 +72,8 @@ func TestCaidoTailCLIEmptyPageExit(t *testing.T) {
 				}
 			} else {
 				exit, ok := err.(*exec.ExitError)
-				if !ok || exit.ExitCode() != 2 || result.State != "partial" {
-					t.Fatalf("%s failure: want exit 2 and partial, got result=%+v err=%v stderr=%s", mode, result, err, &stderr)
+				if !ok || exit.ExitCode() != 2 || result.State != "complete" {
+					t.Fatalf("%s failure: want exit 2 and complete when no work remains, got result=%+v err=%v stderr=%s", mode, result, err, &stderr)
 				}
 			}
 		})
