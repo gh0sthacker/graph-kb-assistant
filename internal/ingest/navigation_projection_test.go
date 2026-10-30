@@ -247,7 +247,9 @@ func TestHistoricalURLNavigationAcrossPagesRetainsEveryDuplicateMatch(t *testing
 		}
 	}
 	dataRoot := filepath.Dir(filepath.Dir(projectStore.Directory))
-	assertAbsentFromProjectFiles(t, projectStore.Directory, privateValue)
+	// The correlation value remains absent from structural graph/index files.
+	// hunt.sqlite3 is the explicit, bounded nonsecret-sample exception.
+	assertAbsentFromProjectFiles(t, projectStore.Directory, privateValue, "hunt.sqlite3")
 	if err := projectStore.Close(); err != nil {
 		t.Fatal(err)
 	}

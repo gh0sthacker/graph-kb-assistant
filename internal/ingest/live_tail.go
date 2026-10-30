@@ -502,6 +502,9 @@ func (w *LiveTailWriter) WritePage(ctx context.Context, checkpoint LiveTailCheck
 	if err := updateLiveCheckpoint(ctx, conn, checkpoint, updated, !page.HasMore, w.sourceKey); err != nil {
 		return LivePageResult{}, err
 	}
+	if err := persistLiveHunt(ctx, w.selected, accepted); err != nil {
+		return LivePageResult{}, err
+	}
 	if err := commitImmediate(ctx, conn); err != nil {
 		return LivePageResult{}, err
 	}
@@ -576,6 +579,9 @@ func (w *LiveTailWriter) WriteResponseRefreshPage(
 	rows, err := result.RowsAffected()
 	if err != nil || rows != 1 {
 		return LivePageResult{}, errors.New("pending response refresh cursor changed before it could advance")
+	}
+	if err := persistLiveHunt(ctx, w.selected, accepted); err != nil {
+		return LivePageResult{}, err
 	}
 	if err := commitImmediate(ctx, conn); err != nil {
 		return LivePageResult{}, err
