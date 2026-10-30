@@ -3,11 +3,26 @@ package hunt
 import (
 	"errors"
 	"fmt"
+	"mime"
+	"path"
 	"sort"
 	"strings"
 )
 
 var Classes = []string{"sqli", "nosql", "xss", "ssrf", "open-redirect", "ssti", "path-traversal", "idor", "bfla", "bopla", "business-logic", "eval/js", "deser", "input-validation"}
+
+func allowsXSS(o Observation) bool {
+	mediaType, _, err := mime.ParseMediaType(o.ResponseContentType)
+	if err != nil || !strings.EqualFold(mediaType, "text/html") {
+		return false
+	}
+	switch strings.ToLower(path.Ext(o.Endpoint.Route)) {
+	case ".js", ".json", ".css", ".map":
+		return false
+	default:
+		return true
+	}
+}
 
 // ClassFit is the ADR name-to-class table. Exact names and their nested JSON
 // leaf names score 1; other observed inputs score 0.5, never an invented sink.
@@ -162,6 +177,7 @@ func Build(observations []Observation) Graph {
 	for _, o := range valid {
 		ep := endpoints[o.Endpoint.ID]
 		refs := evidence(o)
+		xssAllowed := allowsXSS(o)
 		for _, p := range o.Parameters {
 			add := func(class string, s Sink, reason string) {
 				why := append([]string{}, refs...)
@@ -210,12 +226,17 @@ func Build(observations []Observation) Graph {
 				if p.ReflectionContext == "json" {
 					class = "input-validation"
 				}
-				add(class, synthetic("reflection", p.ReflectionContext, "reflected:"+p.ReflectionContext, 0.6, ep.ID), "reflection_context:"+p.ReflectionContext)
+				if class != "xss" || xssAllowed {
+					add(class, synthetic("reflection", p.ReflectionContext, "reflected:"+p.ReflectionContext, 0.6, ep.ID), "reflection_context:"+p.ReflectionContext)
+				}
 			}
 			if secretName.MatchString(p.Name) {
 				continue
 			}
 			for _, class := range Classes {
+				if class == "xss" && !xssAllowed {
+					continue
+				}
 				if ClassFit(p.Name, class) != 1 {
 					continue
 				}

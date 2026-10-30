@@ -28,7 +28,7 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	g, err := s.Load(t.Context())
-	if err != nil || g.Result.Stats.Observations != 1 || len(g.Result.Candidates) != 3 {
+	if err != nil || g.Result.Stats.Observations != 1 || len(g.Result.Candidates) != 2 {
 		t.Fatalf("roundtrip: %+v %v", g.Result, err)
 	}
 	var v int

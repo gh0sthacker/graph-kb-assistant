@@ -26,6 +26,25 @@ func TestReflectionContexts(t *testing.T) {
 		})
 	}
 }
+func TestStaticAndNonHTMLResponsesDoNotCreateXSSCandidates(t *testing.T) {
+	for _, tc := range []struct{ path, contentType, body string }{
+		{"/api-docs/client.js?q=probe", "text/html", "<p>probe</p>"},
+		{"/api-docs/schema.json?q=probe", "text/html", "<p>probe</p>"},
+		{"/api-docs/site.css?q=probe", "text/html", "<p>probe</p>"},
+		{"/api-docs/site.map?q=probe", "text/html", "<p>probe</p>"},
+		{"/search?q=probe", "application/javascript", "<script>probe</script>"},
+	} {
+		t.Run(tc.path+"|"+tc.contentType, func(t *testing.T) {
+			g := Build([]Observation{fixture("static", tc.path, tc.body, tc.contentType)})
+			for _, c := range g.Result.Candidates {
+				if c.Class == "xss" {
+					t.Fatalf("unexpected XSS candidate for %s (%s): %+v", tc.path, tc.contentType, c)
+				}
+			}
+		})
+	}
+}
+
 func TestNoEvidenceNoCandidate(t *testing.T) {
 	o := fixture("", "/search?q=probe", "SQLITE_ERROR", "text/plain")
 	o.ObservationID = ""

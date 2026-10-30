@@ -52,15 +52,16 @@ type Info struct {
 	Value    string `json:"value"`
 }
 type Observation struct {
-	CaptureID     string      `json:"capture_id"`
-	ObservationID string      `json:"observation_id"`
-	RevisionID    string      `json:"revision_id"`
-	Endpoint      Endpoint    `json:"endpoint"`
-	Parameters    []Parameter `json:"parameters"`
-	Sinks         []Sink      `json:"sinks"`
-	Identity      Identity    `json:"identity"`
-	Infos         []Info      `json:"infos"`
-	Status        int         `json:"status"`
+	CaptureID           string      `json:"capture_id"`
+	ObservationID       string      `json:"observation_id"`
+	RevisionID          string      `json:"revision_id"`
+	ResponseContentType string      `json:"response_content_type,omitempty"`
+	Endpoint            Endpoint    `json:"endpoint"`
+	Parameters          []Parameter `json:"parameters"`
+	Sinks               []Sink      `json:"sinks"`
+	Identity            Identity    `json:"identity"`
+	Infos               []Info      `json:"infos"`
+	Status              int         `json:"status"`
 }
 type Edge struct {
 	CandidateID string   `json:"candidate_id"`
