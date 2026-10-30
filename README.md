@@ -34,3 +34,16 @@ See [docs/SETUP.md](docs/SETUP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 go test ./...
 go vet ./...
 ```
+
+## Security
+
+This project accepts vulnerability reports through GitHub's private vulnerability reporting
+on this repository (the **Security** tab). [`SECURITY.md`](SECURITY.md) describes what to
+include in a report and what must not be attached; please do not open a public issue for a
+suspected vulnerability.
+
+## Contributing and license
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the development setup and review expectations, and
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) applies to every project space. The project is
+released under the MIT license — see [`LICENSE`](LICENSE).
