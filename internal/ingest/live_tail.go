@@ -700,7 +700,8 @@ func RunLiveTail(ctx context.Context, source caido.ReadSource, writer *LiveTailW
 		if err != nil {
 			return markPartial(err)
 		}
-		if err := validateMetadataPage(metadata, selected, options.PageSize, checkpoint.Cursor); err != nil {
+		metadata, err = normalizeLiveMetadataPage(metadata, selected, options.PageSize, checkpoint.Cursor)
+		if err != nil {
 			return markPartial(err)
 		}
 		scopedMetadata, excluded := filterLiveMetadataPage(metadata, writer.scope)
@@ -784,7 +785,8 @@ func finishLiveTailResponseRefresh(
 			result.ResponseRefreshPending = true
 			return result, err
 		}
-		if err := validateMetadataPage(metadata, selected, options.PageSize, cursor); err != nil {
+		metadata, err = normalizeLiveMetadataPage(metadata, selected, options.PageSize, cursor)
+		if err != nil {
 			result.State = "partial"
 			result.ResponseRefreshPending = true
 			return result, err
@@ -857,7 +859,26 @@ func finishLiveTailResponseRefresh(
 	}
 	result.PendingResponses = pendingCount
 	result.ResponseRefreshPending = cursor != nil || pendingCount > 0
+	if result.State == "idle" && !result.ResponseRefreshPending {
+		// The durable checkpoint uses idle; expose explicit completion to callers.
+		result.State = "complete"
+	}
 	return result, nil
+}
+
+// normalizeLiveMetadataPage treats an empty source page as end-of-history, even
+// when Caido advertises another cursor. Validate the original boundary first so
+// malformed responses remain errors. Do this before scope filtering: a nonempty
+// page containing only excluded rows must still advance normally.
+func normalizeLiveMetadataPage(page caido.RequestMetadataPage, selected project.CaidoProjectRef, pageSize int, cursor *string) (caido.RequestMetadataPage, error) {
+	if err := validateMetadataPageStructure(page, selected, pageSize, cursor); err != nil {
+		return caido.RequestMetadataPage{}, err
+	}
+	if len(page.Requests) == 0 {
+		page.HasMore = false
+		page.NextCursor = nil
+	}
+	return page, nil
 }
 
 func (w *LiveTailWriter) prepareLiveCaptures(exchanges []caido.HttpExchange) ([]preparedLiveCapture, error) {

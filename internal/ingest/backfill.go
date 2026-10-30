@@ -240,6 +240,16 @@ func durationMilliseconds(duration time.Duration) float64 {
 }
 
 func validateMetadataPage(page caido.RequestMetadataPage, selected project.CaidoProjectRef, pageSize int, cursor *string) error {
+	if err := validateMetadataPageStructure(page, selected, pageSize, cursor); err != nil {
+		return err
+	}
+	if page.HasMore && len(page.Requests) == 0 {
+		return errors.New("Caido returned an empty advancing history page")
+	}
+	return nil
+}
+
+func validateMetadataPageStructure(page caido.RequestMetadataPage, selected project.CaidoProjectRef, pageSize int, cursor *string) error {
 	if len(page.Requests) > pageSize || (page.HasMore && (page.NextCursor == nil || *page.NextCursor == "" || sameCursor(page.NextCursor, cursor))) ||
 		(!page.HasMore && page.NextCursor != nil) {
 		return errors.New("Caido returned an invalid history page boundary")
@@ -256,9 +266,6 @@ func validateMetadataPage(page caido.RequestMetadataPage, selected project.Caido
 			return errors.New("Caido returned duplicate history identities")
 		}
 		seen[request.RequestID] = struct{}{}
-	}
-	if page.HasMore && len(page.Requests) == 0 {
-		return errors.New("Caido returned an empty advancing history page")
 	}
 	return nil
 }

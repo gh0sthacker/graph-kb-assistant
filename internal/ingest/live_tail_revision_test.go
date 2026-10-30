@@ -68,7 +68,7 @@ func TestRunLiveTailLargeStructuralBundleReplaysWithoutDuplicates(t *testing.T) 
 		t.Fatalf("first RunLiveTail() = %+v, err=%v; want one accepted capture", first, err)
 	}
 	second, err := RunLiveTail(ctx, source, writer, selected, options)
-	if err != nil || second.RequestsAdded != 0 || second.ResponsesRefreshed != 0 || second.State != "idle" {
+	if err != nil || second.RequestsAdded != 0 || second.ResponsesRefreshed != 0 || second.State != "complete" {
 		t.Fatalf("repeated RunLiveTail() = %+v, err=%v; want a deduplicated idle window", second, err)
 	}
 	if source.httpqlFilters[0] != source.httpqlFilters[1] {
