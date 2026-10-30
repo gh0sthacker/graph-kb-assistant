@@ -267,39 +267,53 @@ func runProjectWorker(ctx context.Context, options Options, selected selectedPro
 		}
 	}
 	for ctx.Err() == nil {
-		lockCtx, cancelLock := context.WithTimeout(ctx, min(options.PollInterval, 5*time.Second))
-		maintenance, err := projectlock.Acquire(lockCtx, selected.directory)
-		cancelLock()
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, projectlock.ErrWaitTimeout) {
-				progress("project_busy", "", 0)
-				if !wait(ctx, options.PollInterval) {
+		for job := 0; job < options.MaxJobs; job++ {
+			lockCtx, cancelLock := context.WithTimeout(ctx, min(options.PollInterval, 5*time.Second))
+			maintenance, err := projectlock.Acquire(lockCtx, selected.directory)
+			cancelLock()
+			if err != nil {
+				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				continue
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, projectlock.ErrWaitTimeout) {
+					progress("project_busy", "", 0)
+					break
+				}
+				return errors.New("projection project lease is unavailable")
 			}
-			return errors.New("projection project lease is unavailable")
-		}
-		results, err := func() ([]ingest.ProjectionWorkerResult, error) {
-			defer maintenance.Close()
-			selectedStore, err := store.OpenProjectForWrite(ctx, selected.ref, options.DataRoot)
-			if err != nil {
-				return nil, errors.New("projection selected store is unavailable")
-			}
-			defer selectedStore.Close()
-			return runner.RunBatch(ctx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{LeaseDuration: options.LeaseDuration, MaxAttempts: options.MaxAttempts}, options.MaxJobs, func(result ingest.ProjectionWorkerResult) {
+			// Keep a complete delivery (claim, graph writes and acknowledgment)
+			// exclusive, not the entire drain batch. Otherwise a busy batch can
+			// exhaust the Explorer's 30-second shared-read lease wait.
+			results, err := func() ([]ingest.ProjectionWorkerResult, error) {
+				defer maintenance.Close()
+				selectedStore, err := store.OpenProjectForWrite(ctx, selected.ref, options.DataRoot)
+				if err != nil {
+					return nil, errors.New("projection selected store is unavailable")
+				}
+				defer selectedStore.Close()
+				return runner.RunBatch(ctx, selectedStore, maintenance, ingest.ProjectionWorkerOptions{LeaseDuration: options.LeaseDuration, MaxAttempts: options.MaxAttempts}, 1, nil)
+			}()
+			idle := false
+			for _, result := range results {
+				// Publish completion only after closing the store and lease so
+				// consumers can read the committed project immediately.
 				progress(result.State, result.ErrorCode, result.AttemptCount)
-			})
-		}()
-		if err != nil {
-			return err
-		}
-		for _, result := range results {
-			if result.State == "backend_disabled" {
-				return errors.New("projection backend became disabled")
+				if result.State == "backend_disabled" {
+					return errors.New("projection backend became disabled")
+				}
+				idle = result.State == "idle"
+			}
+			if err != nil {
+				return err
+			}
+			if idle {
+				break
+			}
+			// flock acquisition polls every 25ms. Leave two poll intervals for
+			// waiting readers rather than immediately reacquiring and starving
+			// them. The runner still caches its validated writer across jobs.
+			if job+1 < options.MaxJobs && !wait(ctx, 50*time.Millisecond) {
+				return ctx.Err()
 			}
 		}
 		if !wait(ctx, options.PollInterval) {
