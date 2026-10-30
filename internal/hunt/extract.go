@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -29,6 +28,39 @@ var hexPattern = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{64}|[0-9a-f]{40}|[0-9a-f]
 var jwtPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`)
 var secretName = regexp.MustCompile(`(?i)password|passwd|secret|token|authorization|cookie|api.?key|session|credential|email|csrf|xsrf|jwt|bearer|access.?key|private.?key|phone|ssn|(?:^|[._-])key(?:$|[._-])|(?:^|[._-])auth(?:$|[._-])|^sid$`)
 var stackPattern = regexp.MustCompile(`(?m)(?:^|\n)\s*(?:at .+|File ".+", line \d+|#\d+ .+)`)
+
+// transportHeaderNames are protocol/browser metadata, not application inputs.
+// Authorization and all sec-* headers are excluded separately; Authorization
+// still contributes to the request identity below.
+const transportHeaderNames = "host accept accept-encoding user-agent content-length content-type cache-control connection cookie referer"
+
+func isTransportHeader(name string) bool {
+	name = strings.ToLower(name)
+	if name == "authorization" || strings.HasPrefix(name, "sec-") {
+		return true
+	}
+	for _, excluded := range strings.Fields(transportHeaderNames) {
+		if name == excluded {
+			return true
+		}
+	}
+	return false
+}
+
+func pathTemplateName(segment string) (string, bool) {
+	if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+		name := segment[1 : len(segment)-1]
+		if i := strings.IndexByte(name, ':'); i >= 0 {
+			name = name[:i]
+		}
+		return strings.TrimSpace(name), true
+	}
+	if strings.HasPrefix(segment, ":") && len(segment) > 1 {
+		return segment[1:], true
+	}
+	return "", false
+}
+
 var rules = []struct{ kind, engine, signature string }{
 	{"sql", "sqlite", "SQLITE_ERROR"}, {"sql", "sql", "SQLSTATE"}, {"sql", "postgres", "syntax error at or near"}, {"sql", "oracle", "ORA-"}, {"sql", "mysql", "You have an error in your SQL syntax"},
 	{"template", "template", "TemplateSyntaxError"}, {"template", "jinja2", "jinja2"}, {"template", "twig", "Twig"}, {"template", "freemarker", "freemarker"}, {"template", "velocity", "velocity"},
@@ -74,15 +106,15 @@ func Extract(c Capture) Observation {
 		if s == "" {
 			continue
 		}
+		name, templated := pathTemplateName(s)
 		_, numErr := strconv.ParseInt(s, 10, 64)
-		dynamic := numErr == nil || uuidPattern.MatchString(s) || hexPattern.MatchString(s) || jwtPattern.MatchString(s) || (i > 0 && secretName.MatchString(parts[i-1])) || (i > 0 && strings.EqualFold(parts[i-1], "track-order")) || strings.ContainsAny(s, "'\"<>{}()") || len(s) > 64
+		dynamic := templated || numErr == nil || uuidPattern.MatchString(s) || hexPattern.MatchString(s) || jwtPattern.MatchString(s) || (i > 0 && secretName.MatchString(parts[i-1])) || (i > 0 && strings.EqualFold(parts[i-1], "track-order")) || strings.ContainsAny(s, "'\"<>{}()") || len(s) > 64
 		if dynamic {
-			name := "id"
-			if i > 0 && secretName.MatchString(parts[i-1]) {
-				name = "token"
-			}
-			if i < len(parts)-1 && name != "token" {
-				name = fmt.Sprintf("path%d", i)
+			if name == "" {
+				name = "id"
+				if i > 0 && secretName.MatchString(parts[i-1]) {
+					name = "token"
+				}
 			}
 			inputs = append(inputs, entry{name, "path", s})
 			parts[i] = "{" + name + "}"
@@ -120,8 +152,12 @@ func Extract(c Capture) Observation {
 		}
 	}
 	for _, k := range sortedKeys(req.Header) {
+		name := strings.ToLower(k)
+		if isTransportHeader(name) {
+			continue
+		}
 		for _, v := range req.Header.Values(k) {
-			inputs = append(inputs, entry{strings.ToLower(k), "header", v})
+			inputs = append(inputs, entry{name, "header", v})
 		}
 	}
 	responseBody := messageBody(c.Response)
@@ -130,6 +166,7 @@ func Extract(c Capture) Observation {
 	if res, e := http.ReadResponse(bufio.NewReader(bytes.NewReader(c.Response)), nil); e == nil {
 		o.Status = res.StatusCode
 		responseType = res.Header.Get("Content-Type")
+		o.ResponseContentType = responseType
 		if b, e := io.ReadAll(io.LimitReader(res.Body, 1<<20)); e == nil {
 			responseBody = b
 		}
