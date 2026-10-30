@@ -111,9 +111,13 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <gate|version|coverage|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|projection-replay|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail|caido-sync>")
+		return errors.New("usage: bb-assistant <gate|version|attack-surface|hunt-backfill|coverage|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|projection-replay|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail|caido-sync>")
 	}
 	switch args[0] {
+	case "attack-surface":
+		return showAttackSurface(args[1:])
+	case "hunt-backfill":
+		return backfillHunt(args[1:])
 	case "gate":
 		return runGate(context.Background(), args[1:], os.Stdout)
 	case "serve":

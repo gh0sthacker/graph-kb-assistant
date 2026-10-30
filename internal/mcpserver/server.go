@@ -428,6 +428,16 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (map[stri
 
 func (t *Tools) call(ctx context.Context, name string, arguments json.RawMessage) (any, error) {
 	switch name {
+	case "bb_attack_surface":
+		var args attackSurfaceArgs
+		if err := decodeObject(arguments, &args); err != nil {
+			return nil, err
+		}
+		req, err := args.request()
+		if err != nil {
+			return nil, err
+		}
+		return t.AttackSurface(ctx, req)
 	case "bb_coverage_matrix":
 		var args coverageMatrixArgs
 		if err := decodeObject(arguments, &args); err != nil {
@@ -1274,7 +1284,7 @@ func toolCatalog(includeRaw bool) []toolSpec {
 			"request_id":  stringSchema(512, map[string]any{"minLength": 1, "description": "Caido request ID from bb_search_captures hits[].request_id. Graph observation ids (observation-<hex>) and observation_id are not accepted."}),
 		}, "project_key", "request_id"), Annotations: readOnly(),
 	})
-	catalog = append(catalog, coverageMatrixToolSpec())
+	catalog = append(catalog, coverageMatrixToolSpec(), attackSurfaceToolSpec())
 	catalog = append(catalog, consultationToolCatalog()...)
 	if includeRaw {
 		catalog = append(catalog, toolSpec{

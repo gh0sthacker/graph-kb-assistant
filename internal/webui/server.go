@@ -105,6 +105,9 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	mux.HandleFunc("GET /api/projects", projectsHandler(api))
 	mux.HandleFunc("GET /api/runtime-capabilities", runtimeCapabilitiesHandler)
 	mux.HandleFunc("GET /api/surface", surfaceHandler(api))
+	if hunting, ok := api.(attackSurfaceAPI); ok {
+		mux.HandleFunc("GET /api/attack-surface", attackSurfaceHandler(hunting))
+	}
 	mux.HandleFunc("GET /api/graph", graphHandler(api))
 	mux.HandleFunc("GET /api/evidence", captureMessageRangeHandler(api))
 	mux.HandleFunc("GET /api/compare", captureComparisonHandler(api))

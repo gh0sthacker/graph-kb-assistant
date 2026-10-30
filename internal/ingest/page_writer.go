@@ -344,6 +344,9 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 		if err := enqueueProjectionJobs(ctx, conn, w.selected, prepared, bundles, graphObservationIDs); err != nil {
 			return PageResult{}, err
 		}
+		if err := persistHistoricalHunt(ctx, w.selected, prepared); err != nil {
+			return PageResult{}, err
+		}
 		if err := commitImmediate(ctx, conn); err != nil {
 			return PageResult{}, err
 		}
@@ -429,6 +432,9 @@ func (w *PageWriter) WritePage(ctx context.Context, input HistoryPageInput) (Pag
 	}
 	if rows, _ := updated.RowsAffected(); rows != 1 {
 		return PageResult{}, errors.New("sync run is no longer active")
+	}
+	if err := persistHistoricalHunt(ctx, w.selected, prepared); err != nil {
+		return PageResult{}, err
 	}
 	if err := commitImmediate(ctx, conn); err != nil {
 		return PageResult{}, err

@@ -138,7 +138,13 @@ func TestRunLiveTailImportsOnceAndDoesNotPersistRawMessages(t *testing.T) {
 	for _, marker := range []string{
 		"fixture-query-marker", "fixture-header-marker", "fixture-request-body-marker", "fixture-response-body-marker",
 	} {
-		assertAbsentFromProjectFiles(t, projectStore.Directory, marker)
+		// Only hunt's bounded nonsecret samples may retain query/header values.
+		// Credentials remain forbidden in every file, including hunt.sqlite3.
+		if marker == "fixture-query-marker" || marker == "fixture-header-marker" {
+			assertAbsentFromProjectFiles(t, projectStore.Directory, marker, "hunt.sqlite3")
+		} else {
+			assertAbsentFromProjectFiles(t, projectStore.Directory, marker)
+		}
 	}
 }
 
@@ -938,7 +944,7 @@ func allBytesZero(value []byte) bool {
 	return true
 }
 
-func assertAbsentFromProjectFiles(t *testing.T, root, marker string) {
+func assertAbsentFromProjectFiles(t *testing.T, root, marker string, allowedSampleFiles ...string) {
 	t.Helper()
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -946,6 +952,11 @@ func assertAbsentFromProjectFiles(t *testing.T, root, marker string) {
 		}
 		if entry.IsDir() {
 			return nil
+		}
+		for _, allowed := range allowedSampleFiles {
+			if filepath.Base(path) == allowed {
+				return nil
+			}
 		}
 		contents, err := os.ReadFile(path)
 		if err != nil {
