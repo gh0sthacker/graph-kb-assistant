@@ -7,6 +7,7 @@ Type=simple
 WorkingDirectory=%h/bb/graph-kb-assistant
 Environment=HOME=%h
 Environment=XDG_DATA_HOME=%h/.local/share
+Environment=BB_ASSISTANT_KB_SOURCE_MANIFEST=%h/bb/graph-kb-assistant/src/bb_assistant/kb/sources.yaml
 ExecStart=%h/bb/graph-kb-assistant/scripts/bb-assistant serve --addr 127.0.0.1:8765
 Restart=on-failure
 RestartSec=5

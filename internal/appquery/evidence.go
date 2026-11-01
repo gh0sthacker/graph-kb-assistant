@@ -53,7 +53,7 @@ func (s *Service) CaptureMessageRange(ctx context.Context, request CaptureMessag
 	if ctx == nil || validateCaptureMessageRangeRequest(request) != nil {
 		return CaptureMessageRange{}, queryError(ErrorInvalidInput, "capture evidence request is invalid", nil)
 	}
-	ref, ok := s.projects[request.ProjectKey]
+	ref, ok := s.projectRef(request.ProjectKey)
 	if !ok {
 		return CaptureMessageRange{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
 	}

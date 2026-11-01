@@ -68,15 +68,20 @@ class RedAmonGTFOBinsProvider:
             if not original_text.strip():
                 raise ValueError("GTFOBins archive contains an empty source file")
             filename = PurePosixPath(relative).name
+            # RedAmon removes only a Markdown suffix. Other suffixes can be
+            # part of a real binary name (for example ``ld.so``); pathlib's
+            # ``stem`` would silently turn that into ``ld`` and change the
+            # stable RedAmon chunk ID.
+            binary_name = filename[:-3] if filename.endswith(".md") else filename
             records.append(SourceRecord(
                 source_id=source_id,
-                title=PurePosixPath(filename).stem,
+                title=binary_name,
                 original_text=original_text,
                 source_locator=source_id,
                 source_url=base_url + quote(source_id, safe="/"),
                 source_revision=revision,
                 metadata={
-                    "binary_name": PurePosixPath(filename).stem,
+                    "binary_name": binary_name,
                     "filename": filename,
                     "source_content_sha256": hashlib.sha256(raw).hexdigest(),
                 },

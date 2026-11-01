@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,9 +27,10 @@ import (
 )
 
 const (
-	DefaultSearchTopK          = 10
+	DefaultSearchTopK          = 5
 	MaximumSearchTopK          = 100
 	maximumSourceFilters       = 32
+	maximumSeverityFilterBytes = 16
 	maximumSourceNameBytes     = 128
 	maximumSourceIDBytes       = 1024
 	maximumSourceReadIDBytes   = 512
@@ -44,32 +47,104 @@ const (
 	maximumExcerptRunes        = 1200
 	defaultSourceChars         = 12000
 	maximumSourceChars         = 30000
-	maximumSearchTerms         = 32
 	maximumSearchResultBytes   = 4 << 20
+	defaultRerankPoolSize      = 30
 )
 
 var snapshotDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var chunkIDPattern = regexp.MustCompile(`^(?:[a-f0-9]{16}|[a-f0-9]{64})$`)
 
 // Index opens an existing Python-compatible FTS index in SQLite read-only mode.
 // Snapshot construction and source fetching remain separate operations.
 type Index struct {
-	db *sql.DB
+	db                 *sql.DB
+	models             RetrievalModels
+	lucene             LuceneCandidateProvider
+	lexicalEngine      string
+	indexPath          string
+	sourceManifestPath string
+}
+
+// RetrievalModels supplies the pinned E5 query embedding and BGE cross-encoder.
+// The Go index remains usable with lexical-only search when models are absent.
+type RetrievalModels interface {
+	EmbedQuery(context.Context, string) ([]float32, error)
+	Rerank(context.Context, string, []string) ([]float64, error)
+}
+
+func (i *Index) SetRetrievalModels(models RetrievalModels) {
+	if i != nil {
+		i.models = models
+	}
+}
+
+// SetLuceneCandidateProvider selects the Neo4j Lucene lexical tier. The
+// provider is owned by Index and closed with it.
+func (i *Index) SetLuceneCandidateProvider(provider LuceneCandidateProvider) {
+	if i != nil {
+		i.lucene = provider
+		if provider != nil {
+			i.lexicalEngine = LexicalEngineNeo4j
+		}
+	}
+}
+
+// ConfigureLexicalEngine selects the lexical implementation. An empty value
+// preserves the existing SQLite default for migration compatibility.
+func (i *Index) ConfigureLexicalEngine(engine string) error {
+	if i == nil {
+		return errors.New("KB index is unavailable")
+	}
+	switch strings.TrimSpace(engine) {
+	case "", LexicalEngineSQLite:
+		if i.lucene != nil {
+			closeErr := i.lucene.Close()
+			i.lucene = nil
+			if closeErr != nil {
+				return errors.New("Neo4j KB lexical provider could not be closed")
+			}
+		}
+		i.lexicalEngine = LexicalEngineSQLite
+		return nil
+	case LexicalEngineNeo4j:
+		provider, err := NewNeo4jLuceneProvider()
+		if err != nil {
+			return err
+		}
+		if i.lucene != nil {
+			if closeErr := i.lucene.Close(); closeErr != nil {
+				_ = provider.Close()
+				return errors.New("previous Neo4j KB lexical provider could not be closed")
+			}
+		}
+		i.SetLuceneCandidateProvider(provider)
+		return nil
+	default:
+		return errors.New("KB lexical engine is unsupported")
+	}
 }
 
 // SearchOptions bounds one lexical query. SourceNames, when provided, are
 // exact source-family names and are combined with OR semantics.
 type SearchOptions struct {
-	TopK        int
-	SourceNames []string
+	TopK                int
+	SourceNames         []string
+	MinCVSS             *float64
+	Severity            string
+	IncludeSupplemental bool
 }
 
 // SearchResult includes snapshot coverage so a partial corpus is visible to
 // the caller alongside its citations.
 type SearchResult struct {
-	SnapshotID         string `json:"snapshot_id"`
-	CoverageState      string `json:"coverage_state"`
-	CoverageReportHash string `json:"coverage_report_sha256,omitempty"`
-	Hits               []Hit  `json:"hits"`
+	SnapshotID           string `json:"snapshot_id"`
+	CoverageState        string `json:"coverage_state"`
+	CoverageReportHash   string `json:"coverage_report_sha256,omitempty"`
+	MaintenanceState     string `json:"maintenance_state,omitempty"`
+	RetrievalMode        string `json:"retrieval_mode"`
+	LexicalEngine        string `json:"lexical_engine"`
+	SupplementalIncluded bool   `json:"supplemental_included"`
+	Hits                 []Hit  `json:"hits"`
 }
 
 // StatsResult reports bounded counts and source coverage for the active KB
@@ -79,9 +154,21 @@ type StatsResult struct {
 	SourceFamilies               int64            `json:"source_families"`
 	SourceDocuments              int64            `json:"source_documents"`
 	Chunks                       int64            `json:"chunks"`
+	EmbeddedChunks               int64            `json:"embedded_chunks"`
+	TotalContentChunks           int64            `json:"total_content_chunks"`
+	EmbeddedContentChunks        int64            `json:"embedded_content_chunks"`
+	EmbeddingModel               *string          `json:"embedding_model,omitempty"`
+	EmbeddingTargetModel         *string          `json:"embedding_target_model,omitempty"`
+	EmbeddingTargetSnapshotID    *string          `json:"embedding_target_snapshot_id,omitempty"`
+	EmbeddingTargetDimensions    int64            `json:"embedding_target_dimensions,omitempty"`
+	VectorReady                  bool             `json:"vector_ready"`
 	CoverageState                string           `json:"coverage_state"`
 	CoverageReportHash           *string          `json:"coverage_report_sha256"`
 	SourceCoverage               []map[string]any `json:"source_coverage"`
+	SourceManifestSHA256         *string          `json:"source_manifest_sha256"`
+	CurrentSourceManifestSHA256  *string          `json:"current_source_manifest_sha256"`
+	SourceManifestMatchesCurrent *bool            `json:"source_manifest_matches_current"`
+	MaintenanceState             *string          `json:"maintenance_state,omitempty"`
 	ReferenceMaterialIsUntrusted bool             `json:"reference_material_is_untrusted"`
 }
 
@@ -128,6 +215,9 @@ type Hit struct {
 	StartChar      int            `json:"start_char"`
 	EndChar        int            `json:"end_char"`
 	BM25           float64        `json:"bm25"`
+	RankScore      float64        `json:"rank_score"`
+	VectorScore    *float64       `json:"vector_score,omitempty"`
+	RerankScore    *float64       `json:"rerank_score,omitempty"`
 }
 
 // OpenIndex validates the path and required Python index schema without
@@ -170,7 +260,18 @@ func OpenIndex(path string) (*Index, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	index := &Index{db: db}
+	sourceManifestPath := strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_SOURCE_MANIFEST"))
+	if sourceManifestPath == "" {
+		// In a source checkout, the repository root is the service working
+		// directory. Installed deployments should set the explicit path.
+		if workingDir, err := os.Getwd(); err == nil {
+			candidate := filepath.Join(workingDir, "src", "bb_assistant", "kb", "sources.yaml")
+			if fileIsRegular(candidate) {
+				sourceManifestPath = candidate
+			}
+		}
+	}
+	index := &Index{db: db, indexPath: resolved, sourceManifestPath: sourceManifestPath}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := index.validate(ctx); err != nil {
@@ -184,7 +285,11 @@ func (i *Index) Close() error {
 	if i == nil || i.db == nil {
 		return nil
 	}
-	return i.db.Close()
+	var closeErr error
+	if i.lucene != nil {
+		closeErr = errors.Join(closeErr, i.lucene.Close())
+	}
+	return errors.Join(closeErr, i.db.Close())
 }
 
 // Stats returns counts and source coverage from one consistent, read-only
@@ -211,11 +316,75 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 		SourceCoverage:               []map[string]any{},
 		ReferenceMaterialIsUntrusted: true,
 	}
+	result.SourceManifestSHA256 = i.sourceManifestDigest(ctx, tx, info.SnapshotID)
+	result.CurrentSourceManifestSHA256 = hashConfiguredSourceManifest(i.sourceManifestPath)
+	if result.SourceManifestSHA256 != nil && result.CurrentSourceManifestSHA256 != nil {
+		matches := *result.SourceManifestSHA256 == *result.CurrentSourceManifestSHA256
+		result.SourceManifestMatchesCurrent = &matches
+	}
+	if info.MaintenanceState != "" {
+		result.MaintenanceState = optionalString(info.MaintenanceState)
+	}
 	if err := tx.QueryRowContext(ctx, "SELECT count(DISTINCT source_name), count(*) FROM source_documents").Scan(&result.SourceFamilies, &result.SourceDocuments); err != nil {
 		return StatsResult{}, errors.New("KB source counts could not be read")
 	}
 	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM chunks").Scan(&result.Chunks); err != nil {
 		return StatsResult{}, errors.New("KB chunk count could not be read")
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM chunks
+		WHERE coalesce(json_extract(metadata_json,'$.document_role'),'content')='content'`).Scan(&result.TotalContentChunks); err != nil {
+		return StatsResult{}, errors.New("KB content chunk count could not be read")
+	}
+	var embeddingTable int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunk_embeddings'").Scan(&embeddingTable); err != nil {
+		return StatsResult{}, errors.New("KB embedding table state could not be read")
+	}
+	if embeddingTable == 1 {
+		var vectorModel, vectorSnapshot, stagingModel, stagingSnapshot string
+		var dimensions, stagingDimensions int
+		if err := tx.QueryRowContext(ctx, `SELECT
+			coalesce(max(CASE WHEN key='vector_model' THEN substr(value,1,256) END),''),
+			coalesce(max(CASE WHEN key='vector_snapshot_id' THEN substr(value,1,65) END),''),
+			coalesce(max(CASE WHEN key='vector_dimensions' THEN CAST(value AS INTEGER) END),0),
+			coalesce(max(CASE WHEN key='vector_staging_model' THEN substr(value,1,256) END),''),
+			coalesce(max(CASE WHEN key='vector_staging_snapshot_id' THEN substr(value,1,65) END),''),
+			coalesce(max(CASE WHEN key='vector_staging_dimensions' THEN CAST(value AS INTEGER) END),0)
+			FROM kb_meta`).Scan(&vectorModel, &vectorSnapshot, &dimensions, &stagingModel, &stagingSnapshot, &stagingDimensions); err != nil {
+			return StatsResult{}, errors.New("KB embedding model and staging metadata could not be read")
+		}
+		// Staging metadata describes the resumable build currently being
+		// produced. Keep the published model separately so callers can display
+		// progress without treating staged vectors as retrieval-ready.
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM chunk_embeddings").Scan(&result.EmbeddedChunks); err != nil {
+			return StatsResult{}, errors.New("KB embedding count could not be read")
+		}
+		targetModel, targetSnapshot, targetDimensions := vectorModel, vectorSnapshot, dimensions
+		if stagingModel != "" || stagingSnapshot != "" {
+			targetModel, targetSnapshot, targetDimensions = stagingModel, stagingSnapshot, stagingDimensions
+		}
+		result.EmbeddingTargetModel = optionalString(targetModel)
+		result.EmbeddingTargetSnapshotID = optionalString(targetSnapshot)
+		result.EmbeddingTargetDimensions = int64(targetDimensions)
+		if targetSnapshot != "" && targetSnapshot != info.SnapshotID {
+			// Never count vectors staged for a different corpus as progress on
+			// the active snapshot.
+			result.EmbeddedContentChunks = 0
+		} else if targetModel == "" {
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM chunks c
+				JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id
+				WHERE coalesce(json_extract(c.metadata_json,'$.document_role'),'content')='content'`).Scan(&result.EmbeddedContentChunks); err != nil {
+				return StatsResult{}, errors.New("KB content embedding count could not be read")
+			}
+		} else if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM chunks c
+			JOIN chunk_embeddings e ON e.chunk_id=c.chunk_id
+			WHERE coalesce(json_extract(c.metadata_json,'$.document_role'),'content')='content'
+			AND e.model_name=? AND (?=0 OR e.dimensions=?)`, targetModel, targetDimensions, targetDimensions).Scan(&result.EmbeddedContentChunks); err != nil {
+			return StatsResult{}, errors.New("KB content embedding count could not be read")
+		}
+		result.EmbeddingModel = optionalString(vectorModel)
+		result.VectorReady = result.TotalContentChunks > 0 &&
+			result.EmbeddedContentChunks == result.TotalContentChunks &&
+			vectorSnapshot == info.SnapshotID && dimensions == 1024 && vectorModel == "intfloat/e5-large-v2"
 	}
 	var sourceCoverage []byte
 	err = tx.QueryRowContext(ctx,
@@ -256,6 +425,15 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 				return StatsResult{}, errors.New("KB source coverage contradicts its DONE state")
 			}
 		}
+		if result.CoverageState == "DONE" {
+			matches, err := coverageCountsMatch(ctx, tx)
+			if err != nil {
+				return StatsResult{}, errors.New("KB source coverage counts could not be verified")
+			}
+			if !matches {
+				result.CoverageState = "PARTIAL"
+			}
+		}
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil || len(encoded) > maximumSourceCoverageBytes+4096 {
@@ -265,6 +443,58 @@ func (i *Index) Stats(ctx context.Context) (StatsResult, error) {
 		return StatsResult{}, errors.New("KB read transaction could not finish")
 	}
 	return result, nil
+}
+
+const maximumSourceManifestBytes = 4 << 20
+
+func (i *Index) sourceManifestDigest(ctx context.Context, queryer rowQueryer, snapshotID string) *string {
+	var digest string
+	err := queryer.QueryRowContext(ctx,
+		"SELECT substr(value,1,65) FROM kb_meta WHERE key='source_manifest_sha256'").Scan(&digest)
+	if err == nil && snapshotDigestPattern.MatchString(digest) {
+		return optionalString(digest)
+	}
+	if i == nil || i.indexPath == "" || !snapshotDigestPattern.MatchString(snapshotID) {
+		return nil
+	}
+	// Older indexes predate the duplicated kb_meta value. Their immutable
+	// snapshot manifest remains the authoritative source of the pinned hash.
+	snapshotPath := filepath.Join(filepath.Dir(i.indexPath), "snapshots", snapshotID)
+	snapshot, err := OpenSnapshot(snapshotPath)
+	if err != nil || snapshot.Manifest.SnapshotID != snapshotID {
+		return nil
+	}
+	return optionalString(snapshot.Manifest.SourceManifestSHA256)
+}
+
+func hashConfiguredSourceManifest(path string) *string {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > maximumSourceManifestBytes {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Size() != info.Size() || opened.Size() > maximumSourceManifestBytes {
+		return nil
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, maximumSourceManifestBytes+1))
+	if err != nil || len(payload) > maximumSourceManifestBytes || int64(len(payload)) != opened.Size() {
+		return nil
+	}
+	digest := sha256.Sum256(payload)
+	return optionalString(hex.EncodeToString(digest[:]))
+}
+
+func fileIsRegular(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
 }
 
 // GetSource reads one exact source document and a bounded prefix of its text.
@@ -291,6 +521,9 @@ func (i *Index) GetSource(ctx context.Context, sourceName, sourceID string, maxC
 	info, err := readSnapshotInfo(ctx, tx)
 	if err != nil {
 		return SourceResult{}, err
+	}
+	if info.MaintenanceState != "" {
+		return SourceResult{}, errors.New("KB index maintenance is in progress")
 	}
 	result := SourceResult{
 		SnapshotID: info.SnapshotID, CoverageState: info.CoverageState,
@@ -381,10 +614,26 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if options.TopK < 1 || options.TopK > MaximumSearchTopK {
 		return SearchResult{}, errors.New("KB top-k must be between 1 and 100")
 	}
+	if options.MinCVSS != nil && (math.IsNaN(*options.MinCVSS) || math.IsInf(*options.MinCVSS, 0) || *options.MinCVSS < 0 || *options.MinCVSS > 10) {
+		return SearchResult{}, errors.New("KB minimum CVSS must be between 0 and 10")
+	}
+	if options.Severity != "" {
+		if len(options.Severity) > maximumSeverityFilterBytes || options.Severity != strings.TrimSpace(options.Severity) {
+			return SearchResult{}, errors.New("KB severity filter is invalid")
+		}
+		switch options.Severity {
+		case "critical", "high", "medium", "low", "none", "info", "informational", "unknown":
+		default:
+			return SearchResult{}, errors.New("KB severity filter is invalid")
+		}
+	}
 	if utf8.RuneCountInString(query) > 4096 {
 		return SearchResult{}, errors.New("KB query exceeds the 4096-character limit")
 	}
-	terms := queryTerms(query)
+	matchExpression := redAmonFullTextExpression(query)
+	if i.lucene != nil {
+		matchExpression = sanitizeRedAmonLuceneQuery(query)
+	}
 	if len(options.SourceNames) > maximumSourceFilters {
 		return SearchResult{}, errors.New("select no more than 32 KB source families")
 	}
@@ -411,42 +660,158 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if err != nil {
 		return SearchResult{}, err
 	}
+	if result.CoverageState == "DONE" {
+		matches, err := coverageCountsMatch(ctx, tx)
+		if err != nil {
+			return SearchResult{}, errors.New("KB source coverage counts could not be verified")
+		}
+		if !matches {
+			result.CoverageState = "PARTIAL"
+		}
+	}
+	if result.MaintenanceState != "" {
+		return SearchResult{}, errors.New("KB index maintenance is in progress")
+	}
 	result.Hits = []Hit{}
-	if len(terms) == 0 {
+	result.RetrievalMode = "fulltext"
+	result.LexicalEngine = i.lexicalEngine
+	if result.LexicalEngine == "" {
+		result.LexicalEngine = LexicalEngineSQLite
+	}
+	result.SupplementalIncluded = options.IncludeSupplemental
+	if matchExpression == "" {
 		if err := tx.Commit(); err != nil {
 			return SearchResult{}, errors.New("KB read transaction could not finish")
 		}
 		return result, nil
 	}
-	match := make([]string, 0, len(terms))
-	for _, term := range terms {
-		match = append(match, `"`+strings.ReplaceAll(term, `"`, `""`)+`"*`)
-	}
-	statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
+	candidateLimit := max(options.TopK*6, 30)
+	var fulltextHits []Hit
+	if i.lucene != nil {
+		candidates, searchErr := i.lucene.Search(ctx, query, result.SnapshotID, candidateLimit, sources, options.IncludeSupplemental)
+		if searchErr != nil {
+			return SearchResult{}, errors.New("KB Lucene search failed or its corpus generation is incompatible")
+		}
+		fulltextHits, err = readHitsByID(ctx, tx, luceneCandidateIDs(candidates), options.IncludeSupplemental)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if len(fulltextHits) != len(candidates) {
+			return SearchResult{}, errors.New("KB Lucene candidates do not match the active snapshot")
+		}
+		byID := make(map[string]Hit, len(fulltextHits))
+		for _, hit := range fulltextHits {
+			byID[hit.ChunkID] = hit
+		}
+		ordered := make([]Hit, 0, len(candidates))
+		for _, candidate := range candidates {
+			hit, ok := byID[candidate.ChunkID]
+			if !ok || candidate.SourceName != hit.SourceName {
+				return SearchResult{}, errors.New("KB Lucene candidate is absent from the active snapshot")
+			}
+			hit.BM25 = candidate.Score
+			ordered = append(ordered, hit)
+		}
+		fulltextHits = ordered
+	} else {
+		statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
 		substr(c.source_id,1,1025),substr(c.title,1,2049),substr(c.text,1,?),
 		substr(c.source_locator,1,2049),substr(c.source_url,1,2049),
 		substr(c.source_revision,1,257),substr(c.license_id,1,257),substr(c.attribution,1,4097),
 		substr(c.source_sha256,1,65),substr(c.chunk_sha256,1,65),
 		CASE WHEN length(CAST(c.metadata_json AS BLOB))<=? THEN c.metadata_json END,c.start_char,c.end_char,
-		bm25(chunk_search,0.0,0.0,4.0,1.0)
+		bm25(chunk_search,0.0,0.0,1.0,1.0)
 		FROM chunk_search JOIN chunks c ON c.chunk_id=chunk_search.chunk_id
-		WHERE chunk_search MATCH ?`
-	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, strings.Join(match, " OR ")}
-	if len(sources) != 0 {
-		placeholders := make([]string, len(sources))
-		for n, source := range sources {
-			placeholders[n] = "?"
-			args = append(args, source)
+		WHERE chunk_search MATCH ?
+		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
+		if !options.IncludeSupplemental {
+			statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
 		}
-		statement += " AND c.source_name IN (" + strings.Join(placeholders, ",") + ")"
+		args := []any{maximumExcerptRunes, maximumMetadataJSONBytes, matchExpression}
+		statement += " ORDER BY 16 LIMIT ?"
+		args = append(args, candidateLimit)
+		rows, err := tx.QueryContext(ctx, statement, args...)
+		if err != nil {
+			return SearchResult{}, errors.New("KB full-text search failed")
+		}
+		fulltextHits, err = scanSearchHits(rows)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if err := rows.Err(); err != nil {
+			return SearchResult{}, errors.New("KB full-text search could not finish")
+		}
+		if err := rows.Close(); err != nil {
+			return SearchResult{}, errors.New("KB full-text search could not finish")
+		}
 	}
-	statement += " ORDER BY 16 LIMIT ?"
-	args = append(args, options.TopK)
-	rows, err := tx.QueryContext(ctx, statement, args...)
-	if err != nil {
-		return SearchResult{}, errors.New("KB full-text search failed")
+	// RedAmon applies include_sources after Neo4j's global Lucene top-k query.
+	// Applying this predicate inside SQL before LIMIT would fill the pool with
+	// lower-ranked source-specific hits that RedAmon excludes.
+	fulltextHits = filterHitsBySources(fulltextHits, sources)
+	fulltextIDs := hitIDs(fulltextHits)
+	result.Hits = fulltextHits
+	vectorIDs, vectorScores, vectorMode := i.vectorCandidates(ctx, tx, query, candidateLimit, options.IncludeSupplemental)
+	if vectorMode != "" {
+		result.RetrievalMode = vectorMode
 	}
-	defer rows.Close()
+	if len(vectorIDs) > 0 {
+		seen := make(map[string]struct{}, len(result.Hits))
+		for _, hit := range result.Hits {
+			seen[hit.ChunkID] = struct{}{}
+		}
+		missingIDs := make([]string, 0, len(vectorIDs))
+		for _, id := range vectorIDs {
+			if _, exists := seen[id]; !exists {
+				missingIDs = append(missingIDs, id)
+			}
+		}
+		if len(missingIDs) > 0 {
+			vectorHits, err := readHitsByID(ctx, tx, missingIDs, options.IncludeSupplemental)
+			if err != nil {
+				return SearchResult{}, err
+			}
+			result.Hits = append(result.Hits, vectorHits...)
+		}
+	}
+	// Match RedAmon's filter_chunks stage: form the global vector candidate pool
+	// first, then filter retrieved metadata without backfilling lower-ranked
+	// source-specific candidates. Keep vector IDs intact so excluded candidates
+	// still occupy their original ranks in RRF.
+	result.Hits = filterHitsBySources(result.Hits, sources)
+	result.Hits = filterHitsByNVDMetadata(result.Hits, options.MinCVSS, options.Severity)
+	preRanked := rankHybridHits(result.Hits, vectorIDs, vectorScores, fulltextIDs, nil, candidateLimit)
+	if i.models != nil && len(preRanked) > 1 {
+		pool := preRanked[:min(len(preRanked), defaultRerankPoolSize)]
+		texts, textErr := loadRerankTexts(ctx, tx, pool)
+		if textErr == nil {
+			scores, err := i.models.Rerank(ctx, query, texts)
+			if err == nil && len(scores) == len(pool) {
+				rerankScores := make(map[string]float64, len(pool))
+				for n, hit := range pool {
+					if !math.IsNaN(scores[n]) && !math.IsInf(scores[n], 0) {
+						rerankScores[hit.ChunkID] = scores[n]
+					}
+				}
+				if len(rerankScores) > 0 {
+					preRanked = rankHybridHits(preRanked, vectorIDs, vectorScores, fulltextIDs, rerankScores, candidateLimit)
+				}
+			}
+		}
+	}
+	result.Hits = diversifyHits(preRanked, options.TopK)
+	encoded, err := json.Marshal(result)
+	if err != nil || len(encoded) > maximumSearchResultBytes {
+		return SearchResult{}, errors.New("KB search result exceeds the output limit")
+	}
+	if err := tx.Commit(); err != nil {
+		return SearchResult{}, errors.New("KB read transaction could not finish")
+	}
+	return result, nil
+}
+
+func scanSearchHits(rows *sql.Rows) ([]Hit, error) {
+	hits := make([]Hit, 0)
 	for rows.Next() {
 		var hit Hit
 		var excerpt string
@@ -456,45 +821,439 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 			&hit.SourceLocator, &hit.SourceURL, &hit.SourceRevision, &hit.LicenseID, &hit.Attribution,
 			&hit.SourceSHA256, &hit.ChunkSHA256, &metadataJSON, &hit.StartChar, &hit.EndChar, &hit.BM25,
 		); err != nil {
-			return SearchResult{}, errors.New("KB search result could not be read")
+			return nil, errors.New("KB search result could not be read")
 		}
-		if !snapshotDigestPattern.MatchString(hit.ChunkID) || !snapshotDigestPattern.MatchString(hit.SourceSHA256) || !snapshotDigestPattern.MatchString(hit.ChunkSHA256) || hit.StartChar < 0 || hit.EndChar < hit.StartChar {
-			return SearchResult{}, errors.New("KB search result has invalid provenance")
+		if !chunkIDPattern.MatchString(hit.ChunkID) || !snapshotDigestPattern.MatchString(hit.SourceSHA256) || !snapshotDigestPattern.MatchString(hit.ChunkSHA256) || hit.StartChar < 0 || hit.EndChar < hit.StartChar {
+			return nil, errors.New("KB search result has invalid provenance")
 		}
 		if len(hit.SourceName) > maximumSourceNameBytes || len(hit.SourceID) > maximumSourceIDBytes || len(hit.Title) > maximumTitleBytes ||
 			pointerTooLong(hit.SourceLocator, maximumLocatorBytes) || pointerTooLong(hit.SourceURL, maximumURLBytes) ||
 			pointerTooLong(hit.SourceRevision, maximumRevisionBytes) || pointerTooLong(hit.LicenseID, maximumLicenseBytes) ||
 			pointerTooLong(hit.Attribution, maximumAttributionBytes) {
-			return SearchResult{}, errors.New("KB search provenance exceeds a field size limit")
+			return nil, errors.New("KB search provenance exceeds a field size limit")
 		}
 		if !metadataJSON.Valid || len(metadataJSON.String) > maximumMetadataJSONBytes {
-			return SearchResult{}, errors.New("KB search result metadata exceeds the size limit")
+			return nil, errors.New("KB search result metadata exceeds the size limit")
 		}
 		decoder := json.NewDecoder(strings.NewReader(metadataJSON.String))
 		decoder.UseNumber()
 		if err := decoder.Decode(&hit.Metadata); err != nil || hit.Metadata == nil {
-			return SearchResult{}, errors.New("KB search result metadata is invalid")
+			return nil, errors.New("KB search result metadata is invalid")
 		}
 		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-			return SearchResult{}, errors.New("KB search result metadata has trailing data")
+			return nil, errors.New("KB search result metadata has trailing data")
 		}
 		hit.Excerpt = excerpt
-		result.Hits = append(result.Hits, hit)
+		hits = append(hits, hit)
+	}
+	return hits, nil
+}
+
+func readHitsByID(ctx context.Context, tx *sql.Tx, ids []string, includeSupplemental bool) ([]Hit, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	statement := `SELECT substr(c.chunk_id,1,65),substr(c.source_name,1,129),
+		substr(c.source_id,1,1025),substr(c.title,1,2049),substr(c.text,1,?),
+		substr(c.source_locator,1,2049),substr(c.source_url,1,2049),
+		substr(c.source_revision,1,257),substr(c.license_id,1,257),substr(c.attribution,1,4097),
+		substr(c.source_sha256,1,65),substr(c.chunk_sha256,1,65),
+		CASE WHEN length(CAST(c.metadata_json AS BLOB))<=? THEN c.metadata_json END,c.start_char,c.end_char,0.0
+		FROM chunks c WHERE c.chunk_id IN (` + placeholders + `)
+		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
+	if !includeSupplemental {
+		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
+	}
+	args := []any{maximumExcerptRunes, maximumMetadataJSONBytes}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := tx.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, errors.New("KB vector candidate metadata could not be read")
+	}
+	defer rows.Close()
+	hits, err := scanSearchHits(rows)
+	if err != nil {
+		return nil, err
 	}
 	if err := rows.Err(); err != nil {
-		return SearchResult{}, errors.New("KB full-text search could not finish")
+		return nil, errors.New("KB vector candidate metadata could not be read")
+	}
+	return hits, nil
+}
+
+func loadRerankTexts(ctx context.Context, tx *sql.Tx, hits []Hit) ([]string, error) {
+	ids := hitIDs(hits)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	rows, err := tx.QueryContext(ctx,
+		"SELECT chunk_id,substr(text,1,1920) FROM chunks WHERE chunk_id IN ("+placeholders+")", stringArgs(ids)...)
+	if err != nil {
+		return nil, errors.New("KB reranker candidate text could not be read")
+	}
+	textsByID := make(map[string]string, len(ids))
+	for rows.Next() {
+		var id, text string
+		if err := rows.Scan(&id, &text); err != nil {
+			_ = rows.Close()
+			return nil, errors.New("KB reranker candidate text could not be read")
+		}
+		textsByID[id] = text
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, errors.New("KB reranker candidate text could not be read")
 	}
 	if err := rows.Close(); err != nil {
-		return SearchResult{}, errors.New("KB full-text search could not finish")
+		return nil, errors.New("KB reranker candidate text could not be read")
 	}
-	encoded, err := json.Marshal(result)
-	if err != nil || len(encoded) > maximumSearchResultBytes {
-		return SearchResult{}, errors.New("KB search result exceeds the output limit")
+	texts := make([]string, len(ids))
+	for n, id := range ids {
+		text, ok := textsByID[id]
+		if !ok {
+			return nil, errors.New("KB reranker candidate text is missing")
+		}
+		texts[n] = text
 	}
-	if err := tx.Commit(); err != nil {
-		return SearchResult{}, errors.New("KB read transaction could not finish")
+	return texts, nil
+}
+
+func stringArgs(values []string) []any {
+	args := make([]any, len(values))
+	for n, value := range values {
+		args[n] = value
 	}
-	return result, nil
+	return args
+}
+
+func (i *Index) vectorCandidates(
+	ctx context.Context, tx *sql.Tx, query string, limit int, includeSupplemental bool,
+) ([]string, map[string]float64, string) {
+	if i.models == nil {
+		return nil, nil, "lexical_model_unavailable"
+	}
+	var tableExists int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunk_embeddings'").Scan(&tableExists); err != nil || tableExists != 1 {
+		return nil, nil, "lexical_only"
+	}
+	var modelName, vectorSnapshot, snapshotID string
+	var dimensions int
+	err := tx.QueryRowContext(ctx, `SELECT
+		max(CASE WHEN key='vector_model' THEN substr(value,1,256) END),
+		max(CASE WHEN key='vector_snapshot_id' THEN substr(value,1,65) END),
+		max(CASE WHEN key='snapshot_id' THEN substr(value,1,65) END),
+		max(CASE WHEN key='vector_dimensions' THEN CAST(value AS INTEGER) END) FROM kb_meta`).
+		Scan(&modelName, &vectorSnapshot, &snapshotID, &dimensions)
+	if err != nil || modelName != "intfloat/e5-large-v2" || vectorSnapshot != snapshotID || dimensions != 1024 {
+		return nil, nil, "lexical_only"
+	}
+	queryVector, err := i.models.EmbedQuery(ctx, query)
+	if err != nil || len(queryVector) != dimensions || len(queryVector) == 0 {
+		return nil, nil, "lexical_fallback"
+	}
+	queryNorm := 0.0
+	for _, value := range queryVector {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return nil, nil, "lexical_fallback"
+		}
+		queryNorm += float64(value) * float64(value)
+	}
+	queryNorm = math.Sqrt(queryNorm)
+	if queryNorm == 0 {
+		return nil, nil, "lexical_fallback"
+	}
+	statement := `SELECT e.chunk_id,e.vector FROM chunk_embeddings e
+		JOIN chunks c ON c.chunk_id=e.chunk_id
+		WHERE e.model_name=? AND e.dimensions=?
+		AND COALESCE(json_extract(c.metadata_json,'$.document_role'),'content')='content'`
+	if !includeSupplemental {
+		statement += " AND json_extract(c.metadata_json,'$.canonicalization_fallback') IS NULL AND json_extract(c.metadata_json,'$.redamon_excluded_reason') IS NULL"
+	}
+	args := []any{modelName, dimensions}
+	rows, err := tx.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, nil, "lexical_fallback"
+	}
+	type scored struct {
+		id    string
+		score float64
+	}
+	all := make([]scored, 0)
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil || len(blob) != dimensions*4 {
+			_ = rows.Close()
+			return nil, nil, "lexical_fallback"
+		}
+		// RedAmon stores normalized E5 vectors and searches them with FAISS
+		// IndexFlatIP. Match that inner-product ordering rather than recomputing
+		// cosine normalization, which can reorder non-unit or rounding-edge rows.
+		dot, norm := float32(0), 0.0
+		for n, queryValue := range queryVector {
+			value := math.Float32frombits(binary.LittleEndian.Uint32(blob[n*4 : n*4+4]))
+			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+				_ = rows.Close()
+				return nil, nil, "lexical_fallback"
+			}
+			dot += queryValue * value
+			norm += float64(value) * float64(value)
+		}
+		if norm > 0 {
+			all = append(all, scored{id: id, score: float64(dot)})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, nil, "lexical_fallback"
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, "lexical_fallback"
+	}
+	sort.SliceStable(all, func(a, b int) bool { return all[a].score > all[b].score })
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	// RedAmon asks FAISS for one global candidate pool, then applies the
+	// include_sources filter while fetching the fused candidates from Neo4j.
+	// Preserve these global IDs for RRF; Search filters metadata afterwards.
+	ids, scores := make([]string, 0, len(all)), make(map[string]float64, len(all))
+	for _, item := range all {
+		ids = append(ids, item.id)
+		scores[item.id] = item.score
+	}
+	return ids, scores, "hybrid"
+}
+
+func hitIDs(hits []Hit) []string {
+	ids := make([]string, len(hits))
+	for n, hit := range hits {
+		ids[n] = hit.ChunkID
+	}
+	return ids
+}
+
+func filterHitsBySources(hits []Hit, sources []string) []Hit {
+	if len(sources) == 0 {
+		return hits
+	}
+	allowed := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		allowed[source] = struct{}{}
+	}
+	filtered := make([]Hit, 0, len(hits))
+	for _, hit := range hits {
+		if _, ok := allowed[hit.SourceName]; ok {
+			filtered = append(filtered, hit)
+		}
+	}
+	return filtered
+}
+
+func filterHitsByNVDMetadata(hits []Hit, minCVSS *float64, severity string) []Hit {
+	if minCVSS == nil && severity == "" {
+		return hits
+	}
+	filtered := make([]Hit, 0, len(hits))
+	for _, hit := range hits {
+		if minCVSS != nil {
+			if value, present := hit.Metadata["cvss_score"]; present && value != nil {
+				score, ok := metadataNumber(value)
+				if !ok || score < *minCVSS {
+					continue
+				}
+			}
+		}
+		if severity != "" {
+			if value, present := hit.Metadata["severity"]; present && value != nil {
+				level, ok := value.(string)
+				if !ok || level != severity {
+					continue
+				}
+			}
+		}
+		filtered = append(filtered, hit)
+	}
+	return filtered
+}
+
+func metadataNumber(value any) (float64, bool) {
+	switch number := value.(type) {
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+	case float64:
+		return number, !math.IsNaN(number) && !math.IsInf(number, 0)
+	case float32:
+		parsed := float64(number)
+		return parsed, !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	default:
+		return 0, false
+	}
+}
+
+func rankHybridHits(hits []Hit, vectorIDs []string, vectorScores map[string]float64, fulltextIDs []string, rerankScores map[string]float64, limit int) []Hit {
+	if limit < 1 || len(hits) == 0 {
+		return []Hit{}
+	}
+	rrf := make(map[string]float64, len(vectorIDs)+len(fulltextIDs))
+	for _, list := range [][]string{vectorIDs, fulltextIDs} {
+		seen := make(map[string]struct{}, len(list))
+		for rank, id := range list {
+			if _, duplicate := seen[id]; duplicate {
+				continue
+			}
+			seen[id] = struct{}{}
+			rrf[id] += 1 / float64(60+rank+1)
+		}
+	}
+	for n := range hits {
+		hit := &hits[n]
+		base, exists := rrf[hit.ChunkID]
+		if !exists {
+			continue
+		}
+		if score, ok := vectorScores[hit.ChunkID]; ok {
+			value := score
+			hit.VectorScore = &value
+		}
+		boost := redAmonSourceBoosts[hit.SourceName]
+		if boost == 0 {
+			boost = 1
+		}
+		if score, ok := rerankScores[hit.ChunkID]; ok {
+			value := score
+			hit.RerankScore = &value
+			base = 1 / (1 + math.Exp(-max(-60, min(60, score))))
+		}
+		hit.RankScore = base * boost
+	}
+	// Match RedAmon: reranked top-pool items sort by sigmoid(logit)*source boost,
+	// then the untouched tail remains in its original RRF order.
+	if len(rerankScores) > 0 {
+		scored := make([]Hit, 0, len(hits))
+		tail := make([]Hit, 0, len(hits))
+		for _, hit := range hits {
+			if _, reranked := rerankScores[hit.ChunkID]; reranked {
+				scored = append(scored, hit)
+			} else {
+				tail = append(tail, hit)
+			}
+		}
+		sort.SliceStable(scored, func(a, b int) bool { return scored[a].RankScore > scored[b].RankScore })
+		sort.SliceStable(tail, func(a, b int) bool { return tail[a].RankScore > tail[b].RankScore })
+		hits = append(scored, tail...)
+	} else {
+		sort.SliceStable(hits, func(a, b int) bool { return hits[a].RankScore > hits[b].RankScore })
+	}
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits
+}
+
+func diversifyHits(hits []Hit, topK int) []Hit {
+	if topK < 1 || len(hits) == 0 {
+		return []Hit{}
+	}
+	if len(hits) <= topK {
+		return hits
+	}
+	selected := []Hit{hits[0]}
+	remaining := append([]Hit(nil), hits[1:]...)
+	for len(selected) < topK && len(remaining) > 0 {
+		bestIndex, bestScore := 0, math.Inf(-1)
+		for index, candidate := range remaining {
+			maxSimilarity := 0.0
+			for _, chosen := range selected {
+				maxSimilarity = math.Max(maxSimilarity, kbChunkSimilarity(candidate, chosen))
+			}
+			score := 0.65*candidate.RankScore - 0.35*maxSimilarity
+			if score > bestScore {
+				bestIndex, bestScore = index, score
+			}
+		}
+		selected = append(selected, remaining[bestIndex])
+		remaining = append(remaining[:bestIndex], remaining[bestIndex+1:]...)
+	}
+	return selected
+}
+
+var redAmonSourceBoosts = map[string]float64{
+	"tool_docs": 1.20, "gtfobins": 1.15, "lolbas": 1.15,
+	"owasp": 1.05, "nuclei": 1.00, "nvd": 0.90, "exploitdb": 0.85,
+}
+
+func rankFullTextHits(hits []Hit, topK int) []Hit {
+	if topK < 1 || len(hits) == 0 {
+		return []Hit{}
+	}
+	for rank := range hits {
+		boost := redAmonSourceBoosts[hits[rank].SourceName]
+		if boost == 0 {
+			boost = 1
+		}
+		hits[rank].RankScore = boost / float64(61+rank)
+	}
+	sort.SliceStable(hits, func(a, b int) bool { return hits[a].RankScore > hits[b].RankScore })
+	if len(hits) <= topK {
+		return hits
+	}
+	selected := make([]Hit, 0, topK)
+	selected = append(selected, hits[0])
+	remaining := append([]Hit(nil), hits[1:]...)
+	for len(selected) < topK && len(remaining) > 0 {
+		bestIndex := 0
+		bestScore := math.Inf(-1)
+		for index, candidate := range remaining {
+			maxSimilarity := 0.0
+			for _, chosen := range selected {
+				if similarity := kbChunkSimilarity(candidate, chosen); similarity > maxSimilarity {
+					maxSimilarity = similarity
+				}
+			}
+			mmr := 0.65*candidate.RankScore - 0.35*maxSimilarity
+			if mmr > bestScore {
+				bestIndex, bestScore = index, mmr
+			}
+		}
+		selected = append(selected, remaining[bestIndex])
+		remaining = append(remaining[:bestIndex], remaining[bestIndex+1:]...)
+	}
+	return selected
+}
+
+func kbChunkSimilarity(a, b Hit) float64 {
+	score := 0.0
+	if a.SourceName != "" && a.SourceName == b.SourceName {
+		score += 0.4
+	}
+	tokensA, tokensB := strings.Fields(strings.ToLower(a.Title)), strings.Fields(strings.ToLower(b.Title))
+	setA, setB := make(map[string]struct{}, len(tokensA)), make(map[string]struct{}, len(tokensB))
+	for _, token := range tokensA {
+		setA[token] = struct{}{}
+	}
+	for _, token := range tokensB {
+		setB[token] = struct{}{}
+	}
+	if len(setA)+len(setB) > 0 {
+		intersection := 0
+		for token := range setA {
+			if _, exists := setB[token]; exists {
+				intersection++
+			}
+		}
+		union := len(setA) + len(setB) - intersection
+		if union > 0 {
+			score += 0.6 * float64(intersection) / float64(union)
+		}
+	}
+	return math.Min(score, 1.0)
 }
 
 func (i *Index) validate(ctx context.Context) error {
@@ -527,8 +1286,8 @@ type rowQueryer interface {
 func readSnapshotInfo(ctx context.Context, queryer rowQueryer) (SearchResult, error) {
 	result := SearchResult{}
 	err := queryer.QueryRowContext(ctx,
-		"SELECT max(CASE WHEN key='snapshot_id' THEN substr(value,1,65) END), max(CASE WHEN key='coverage_state' THEN substr(value,1,257) END), max(CASE WHEN key='coverage_report_sha256' THEN substr(value,1,65) END) FROM kb_meta",
-	).Scan(&result.SnapshotID, &result.CoverageState, &result.CoverageReportHash)
+		"SELECT max(CASE WHEN key='snapshot_id' THEN substr(value,1,65) END), max(CASE WHEN key='coverage_state' THEN substr(value,1,257) END), max(CASE WHEN key='coverage_report_sha256' THEN substr(value,1,65) END), coalesce(max(CASE WHEN key='rechunk_target_snapshot_id' THEN substr(value,1,65) END),'') FROM kb_meta",
+	).Scan(&result.SnapshotID, &result.CoverageState, &result.CoverageReportHash, &result.MaintenanceState)
 	if err != nil || !snapshotDigestPattern.MatchString(result.SnapshotID) || len(result.CoverageState) > maximumCoverageStateBytes ||
 		(result.CoverageState != "DONE" && result.CoverageState != "PARTIAL" && result.CoverageState != "BLOCKED" && result.CoverageState != "unverified") {
 		return SearchResult{}, errors.New("KB snapshot metadata could not be read")
@@ -539,11 +1298,97 @@ func readSnapshotInfo(ctx context.Context, queryer rowQueryer) (SearchResult, er
 	return result, nil
 }
 
+// coverageCountsMatch checks that a DONE report describes the active tables,
+// rather than only trusting a hashed but stale coverage report.
+func coverageCountsMatch(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var raw []byte
+	err := tx.QueryRowContext(ctx,
+		"SELECT substr(CAST(value AS BLOB),1,?) FROM kb_meta WHERE key='source_coverage'",
+		maximumSourceCoverageBytes+1,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil || len(raw) > maximumSourceCoverageBytes {
+		return false, errors.New("source coverage metadata could not be read")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var coverage []map[string]any
+	if err := decoder.Decode(&coverage); err != nil || coverage == nil || len(coverage) > maximumSourceCoverageRows {
+		return false, errors.New("source coverage metadata is invalid")
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return false, errors.New("source coverage metadata has trailing data")
+	}
+	actualDocuments, err := groupedSourceCounts(ctx, tx, "source_documents")
+	if err != nil {
+		return false, err
+	}
+	actualChunks, err := groupedSourceCounts(ctx, tx, "chunks")
+	if err != nil {
+		return false, err
+	}
+	if len(coverage) != len(actualDocuments) || len(coverage) != len(actualChunks) {
+		return false, nil
+	}
+	seen := make(map[string]struct{}, len(coverage))
+	for _, row := range coverage {
+		name, ok := row["source_name"].(string)
+		if !ok || name == "" {
+			return false, nil
+		}
+		if _, exists := seen[name]; exists {
+			return false, nil
+		}
+		seen[name] = struct{}{}
+		documents, documentsOK := coverageCount(row["document_count"])
+		chunks, chunksOK := coverageCount(row["chunk_count"])
+		if !documentsOK || !chunksOK || actualDocuments[name] != documents || actualChunks[name] != chunks {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func groupedSourceCounts(ctx context.Context, tx *sql.Tx, table string) (map[string]int64, error) {
+	if table != "source_documents" && table != "chunks" {
+		return nil, errors.New("unsupported KB source-count table")
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT source_name,count(*) FROM "+table+" GROUP BY source_name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var count int64
+		if err := rows.Scan(&name, &count); err != nil {
+			return nil, err
+		}
+		counts[name] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+func coverageCount(value any) (int64, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	count, err := number.Int64()
+	return count, err == nil && count >= 0
+}
+
 func queryTerms(input string) []string {
-	terms := make([]string, 0, maximumSearchTerms)
+	terms := make([]string, 0)
 	current := make([]rune, 0, 64)
 	flush := func() {
-		if len(current) >= 2 && len(terms) < maximumSearchTerms {
+		if len(current) > 0 {
 			terms = append(terms, string(current))
 		}
 		current = current[:0]
@@ -556,15 +1401,64 @@ func queryTerms(input string) []string {
 			}
 		} else {
 			flush()
-			if len(terms) == maximumSearchTerms {
-				break
-			}
 		}
 	}
-	if len(terms) < maximumSearchTerms {
-		flush()
-	}
+	flush()
 	return terms
+}
+
+// redAmonFullTextExpression mirrors RedAmon's Lucene special-character cleanup,
+// default OR behavior, and explicit boolean operators. Terms are quoted for
+// FTS5 after the same punctuation has been removed from the input.
+func redAmonFullTextExpression(input string) string {
+	var sanitized strings.Builder
+	for _, character := range input {
+		switch character {
+		case '+', '-', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '\\', '/':
+			sanitized.WriteByte(' ')
+		default:
+			sanitized.WriteRune(character)
+		}
+	}
+	query := strings.ReplaceAll(sanitized.String(), "&&", " ")
+	query = strings.ReplaceAll(query, "||", " ")
+	items := make([]string, 0)
+	for _, word := range strings.Fields(query) {
+		if word == "AND" || word == "OR" || word == "NOT" {
+			items = append(items, word)
+			continue
+		}
+		for _, term := range queryTerms(word) {
+			items = append(items, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	var expression strings.Builder
+	previousWasTerm := false
+	for index, item := range items {
+		switch item {
+		case "AND", "OR", "NOT":
+			if !previousWasTerm || index+1 == len(items) || items[index+1] == "AND" || items[index+1] == "OR" || items[index+1] == "NOT" {
+				return ""
+			}
+			expression.WriteByte(' ')
+			expression.WriteString(item)
+			expression.WriteByte(' ')
+			previousWasTerm = false
+		default:
+			if previousWasTerm {
+				expression.WriteString(" OR ")
+			}
+			expression.WriteString(item)
+			previousWasTerm = true
+		}
+	}
+	if !previousWasTerm {
+		return ""
+	}
+	return expression.String()
 }
 
 func pointerTooLong(value *string, maximum int) bool {

@@ -79,7 +79,7 @@ func (s *Service) Surface(ctx context.Context, request SurfaceRequest) (SurfaceR
 	if !projectKeyPattern.MatchString(request.ProjectKey) || len(filter) > search.MaximumSurfaceFilterBytes || limit < 1 || limit > search.MaximumSurfaceCatalogLimit {
 		return SurfaceResult{}, queryError(ErrorInvalidInput, "surface query project, filter, or page limit is invalid", nil)
 	}
-	ref, ok := s.projects[request.ProjectKey]
+	ref, ok := s.projectRef(request.ProjectKey)
 	if !ok {
 		return SurfaceResult{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
 	}

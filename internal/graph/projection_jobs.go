@@ -221,6 +221,56 @@ func MarkReconciledDeadLetterJobApplied(
 	return markReconciledProjectionJobApplied(ctx, tx, projectKey, revisionID, payloadSHA256, "dead_letter", appliedAt)
 }
 
+// RequeueDeadLetterProjectionJob requeues one validated dead-letter payload for
+// an operator-requested, bounded replay. It preserves the cumulative attempt
+// count and prior error until the worker records the replay result.
+func RequeueDeadLetterProjectionJob(
+	ctx context.Context,
+	tx projectionJobTx,
+	projectKey string,
+	revisionID string,
+	payloadSHA256 string,
+	queuedAt time.Time,
+) error {
+	if ctx == nil || tx == nil || !graphDigestPattern.MatchString(projectKey) ||
+		!validProjectionRevisionID(revisionID) || !validProjectionRevisionID(payloadSHA256) || queuedAt.IsZero() {
+		return ErrInvalidProjectionJob
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateProjectionProjectKey(ctx, tx, projectKey); err != nil {
+		return err
+	}
+	job, err := queryProjectionJobByRevision(ctx, tx, projectKey, revisionID)
+	if err != nil {
+		return err
+	}
+	if job.State != "dead_letter" {
+		return ErrProjectionJobNotPending
+	}
+	if job.PayloadSHA256 != payloadSHA256 {
+		return ErrProjectionJobConflict
+	}
+	if job.AttemptCount < 1 || job.AttemptCount >= 100 {
+		return ErrInvalidProjectionJob
+	}
+	now := queuedAt.UTC().Format(projectionTimestampLayout)
+	result, err := tx.ExecContext(ctx,
+		`UPDATE projection_jobs SET state='pending',next_attempt_at=?,lease_token=NULL,lease_until=NULL,applied_at=NULL,updated_at=?
+		 WHERE revision_id=? AND state='dead_letter' AND payload_sha256=? AND attempt_count=?`,
+		now, now, revisionID, payloadSHA256, job.AttemptCount,
+	)
+	if err != nil {
+		return errors.New("dead-letter projection job could not be requeued")
+	}
+	updated, err := result.RowsAffected()
+	if err != nil || updated != 1 {
+		return ErrProjectionJobNotPending
+	}
+	return nil
+}
+
 func markReconciledProjectionJobApplied(
 	ctx context.Context,
 	tx projectionJobTx,

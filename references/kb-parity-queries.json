@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "queries": [
+    {
+      "id": "object-level-authorization",
+      "query": "API object-level authorization ownership tenant boundary compare actors",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "ssrf-url-validation",
+      "query": "server-side request forgery URL validation redirects DNS rebinding allowlist",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "oauth-redirect-validation",
+      "query": "OAuth redirect URI validation PKCE state authorization code flow",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "jwt-verification",
+      "query": "JWT signature verification algorithm confusion key selection claims validation",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "web-cache-poisoning",
+      "query": "web cache poisoning unkeyed input cache key response discrepancy",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "cors-credential-boundary",
+      "query": "CORS credentialed requests origin validation wildcard access control",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "file-upload-validation",
+      "query": "file upload content validation path traversal storage execution controls",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "sql-injection-prevention",
+      "query": "SQL injection parameterized queries input handling database query construction",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "race-condition-idempotency",
+      "query": "race condition concurrent requests idempotency business transaction state",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    },
+    {
+      "id": "graphql-authorization",
+      "query": "GraphQL field-level authorization object access batching resolver controls",
+      "top_k": 5,
+      "filters": {"source_names": []}
+    }
+  ]
+}

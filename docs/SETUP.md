@@ -35,6 +35,30 @@ contacting Caido, Neo4j, or a model provider. Its overall state remains
 See [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) for what the report
 measures and how to read its limits.
 
+`./scripts/bb-assistant version` prints the application version plus the
+embedded short Git revision (`.dirty` when the build included tracked or
+untracked changes). CI builds the Linux amd64 runtime binary with VCS stamping
+and checks that the reported revision equals the tested commit. Builds without
+Git metadata retain the base development version and must not be used as proof
+of which source revision is deployed. Each successful Go CI job also publishes
+the Linux amd64 binary and a `SHA256SUMS` file as a 30-day workflow artifact
+named `bb-assistant-linux-amd64-<workflow-sha>`. On a `main` push, this is the
+exact commit SHA. For pull requests GitHub builds the tested merge result, so
+the artifact SHA is the synthetic merge commit and the artifact includes the
+current base branch as well as the PR. Download it from the successful run and
+verify the revision before installing:
+
+```sh
+sha256sum --check SHA256SUMS
+./bb-assistant-linux-amd64 version
+```
+
+The artifact is a build output, not a signed release; restrict deployment to a
+trusted successful workflow run. Use a `main` push artifact for a normal
+deployment, or explicitly review the tested PR merge result before using its
+artifact. The authenticated `/api/health` response includes the same version
+string so an operator can verify which binary serves the UI.
+
 For a persistent per-user service on systemd, install the unit from the
 checkout. The user's systemd manager must be enabled at login (lingering is
 needed to keep it running after logout):
@@ -50,6 +74,85 @@ systemctl --user status graph-kb-assistant.service
 The service remains bound to loopback on port 8765. Use a reverse proxy with
 the intended network access policy for remote browser access; do not change the
 application bind address to a LAN or public interface.
+
+The managed server also exposes the same bounded MCP tool catalog at
+`/mcp` using Streamable HTTP. Remote Hermes clients should use that endpoint
+through the authenticated, source-restricted Nginx vhost; do not expose port
+8765 directly. The proxy must forward MCP request headers and the
+`Mcp-Session-Id` response header. The current LAN-only deployment uses HTTP
+Basic Auth, so keep it on a trusted private network; use TLS before extending
+access beyond that network.
+
+```yaml
+mcp_servers:
+  bb_assistant_remote:
+    url: "http://bb-graph-assistant.example.lan/mcp"
+    headers:
+      Authorization: "Basic <base64(username:password)>"
+    timeout: 300
+    connect_timeout: 15
+    tools:
+      include:
+        - bb_list_projects
+        - bb_search_captures
+        - bb_surface_map
+        - bb_graph_neighborhood
+        - bb_graph_slice
+        - bb_kb_stats
+        - bb_kb_search
+        - bb_kb_get_source
+        - bb_get_capture
+        - bb_consult_create_session
+        - bb_consult_compare
+        - bb_consult_record_proposal
+        - bb_consult_validate_proposal
+        - bb_candidate_save
+        - bb_consult_resume
+```
+
+Store the generated Hermes profile with mode `0600`. The current SSH-backed
+stdio launcher remains supported for installations that prefer a restricted
+SSH command over HTTP.
+
+For the current CT108 layout, follow the canonical [Go cutover runbook](GO-CUTOVER-RUNBOOK.md).
+The following section describes the older `bbassist`/`/opt` layout and is kept
+for compatibility deployments only. Do not install it alongside the CT108
+`max`-owned service. Build the Go binary on the build host and install it as
+`/usr/local/bin/bb-assistant`; keep the checkout and private runtime data on
+the server. Create
+`~/.local/share/bb-graph-assistant/service.env` from
+`deploy/graph-kb-assistant-system.env.example`, set the selected registered
+project's exact key, and keep the file owner-only (`0600`). The unit routes
+through the tracked launcher, which loads the same private Neo4j/vault
+configuration as the developer launcher before executing the installed binary.
+
+```sh
+go build -o /tmp/bb-assistant ./cmd/bb-assistant
+sudo install -m 0755 /tmp/bb-assistant /usr/local/bin/bb-assistant
+install -d -m 0700 ~/.local/share/bb-graph-assistant
+install -m 0600 deploy/graph-kb-assistant-system.env.example \
+  ~/.local/share/bb-graph-assistant/service.env
+# Edit service.env and set BB_ASSISTANT_PROJECT_KEY to the selected project key.
+sudo install -m 0644 deploy/graph-kb-assistant-system.service \
+  /etc/systemd/system/graph-kb-assistant.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now graph-kb-assistant.service
+sudo systemctl status graph-kb-assistant.service --no-pager
+```
+
+The example assumes the runtime account is `max` and that the checkout and
+private data directory use the paths shown in the unit. Adjust those paths and
+the `User`/`Group` together for another host; do not put Neo4j passwords or the
+vault key in `service.env` or the unit. The corresponding private files remain
+`neo4j.env` and `runtime.env` with mode `0600`.
+
+For hybrid KB retrieval, install the optional pinned model dependencies into
+the dedicated `kb-models-venv` and keep the local E5/BGE model snapshots
+available offline. The service template sets `BB_ASSISTANT_KB_PYTHON` to that
+environment's interpreter; without it, the Go service deliberately falls back
+to lexical-only search. Query and reranker models load lazily on the first KB
+search. Vector ranking is used only after every content chunk in the active
+snapshot has a published E5 vector generation.
 
 ## Connect an assistant over MCP
 

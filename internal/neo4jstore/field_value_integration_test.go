@@ -80,11 +80,11 @@ func TestNeo4jFieldValueTraversalIntegrationOnEphemeralPort(t *testing.T) {
 			})
 		})
 	}
-	if _, err := graphStore.ReplaceProjectSnapshot(ctx, projectA, snapshotA); err != nil {
-		t.Fatal("could not write synthetic same-project field-value graph")
+	if _, err := graphStore.RebuildProjectSnapshot(ctx, projectA, snapshotA); err != nil {
+		t.Fatal("could not rebuild synthetic same-project field-value graph")
 	}
-	if _, err := graphStore.ReplaceProjectSnapshot(ctx, projectB, snapshotB); err != nil {
-		t.Fatal("could not write synthetic second-project field-value graph")
+	if _, err := graphStore.RebuildProjectSnapshot(ctx, projectB, snapshotB); err != nil {
+		t.Fatal("could not rebuild synthetic second-project field-value graph")
 	}
 
 	ids, truncated, generation, err := graphStore.ReadProjectFieldValueTraversalSeeds(ctx, projectA, expectedA[0], behaviorgraph.MaxFieldValueTraversalPaths)

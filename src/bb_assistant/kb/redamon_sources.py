@@ -25,7 +25,7 @@ fields are never copied.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import Callable, Mapping, Sequence
@@ -79,6 +79,7 @@ class SourceRecord:
     source_revision: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
     document_role: str = "content"
+    search_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +156,7 @@ class RedAmonSourceAdapter:
         self.providers = providers
         self.manifest_sha256 = source_manifest_sha256
 
-    def build(self, *, max_chars: int = 6000, overlap_chars: int = 400) -> RedAmonSnapshot:
+    def build(self, *, max_chars: int = 1920, overlap_chars: int = 0) -> RedAmonSnapshot:
         specs, manifest_blockers = self._source_specs()
         profile = str(self.manifest.get("profile") or "")
         documents: list[SourceDocument] = []
@@ -200,8 +201,18 @@ class RedAmonSourceAdapter:
             try:
                 batch = provider(request)
             except Exception as exc:  # suppress provider messages that may contain secrets
+                safe_code = getattr(exc, "coverage_code", None)
+                if (
+                    family != "nvd"
+                    or type(exc).__module__ != "bb_assistant.kb.nvd"
+                    or type(exc).__name__ != "NVDProviderError"
+                    or not isinstance(safe_code, str)
+                    or not safe_code.startswith(f"{family}_")
+                    or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", safe_code)
+                ):
+                    safe_code = type(exc).__name__
                 coverage.append(self._coverage(
-                    family, "partial", blockers=(f"provider_failed:{type(exc).__name__}",),
+                    family, "partial", blockers=(f"provider_failed:{safe_code}",),
                     requested_filters=filters, source_metadata=details,
                     fetched_count=None, parsed_count=None, rejected_count=None,
                 ))
@@ -279,6 +290,21 @@ class RedAmonSourceAdapter:
 
         documents.sort(key=lambda item: (item.source_name, item.source_id))
         chunks.sort(key=lambda item: (SOURCE_FAMILIES.index(item.source_name), item.source_id, item.ordinal))
+        # RedAmon's Neo4j loader MERGEs by its 16-hex ID and SETs each row;
+        # repeated identities therefore have last-write-wins semantics. Mirror
+        # that behavior before exporting into SQLite's unique chunk_id key.
+        unique_chunks: dict[str, CanonicalChunk] = {}
+        for chunk in chunks:
+            unique_chunks[chunk.chunk_id] = chunk
+        chunks = sorted(
+            unique_chunks.values(),
+            key=lambda item: (SOURCE_FAMILIES.index(item.source_name), item.source_id, item.ordinal),
+        )
+        unique_counts: dict[str, int] = {}
+        for chunk in chunks:
+            unique_counts[chunk.source_name] = unique_counts.get(chunk.source_name, 0) + 1
+        for row in coverage:
+            row["chunk_count"] = unique_counts.get(str(row["source_name"]), 0)
         states = [str(row["state"]) for row in coverage]
         if len(coverage) == len(SOURCE_FAMILIES) and all(state == "done" for state in states) and not manifest_blockers:
             state = "DONE"
@@ -377,7 +403,10 @@ class RedAmonSourceAdapter:
         keys = (
             "id", "kind", "url", "revision", "revision_date", "revision_source", "license_id",
             "repository_license_id", "license_status", "license_evidence",
-            "dataset_terms", "content_scope", "attribution", "embedded_content_review", "filter",
+            "dataset_terms", "dataset_terms_evidence", "dataset_terms_basis",
+            "content_scope", "attribution", "embedded_content_review", "filter",
+            "embedded_content_policy", "cve_terms_evidence", "cve_terms_reviewed_at",
+            "cve_copyright_designation", "nvd_citation",
             "local_root", "include_categories", "exclude",
         )
         return {key: spec[key] for key in keys if key in spec}
@@ -453,6 +482,8 @@ class RedAmonSourceAdapter:
                     continue
             else:
                 text = record.original_text
+            if record.search_text is not None:
+                text = record.search_text
             if not text.strip():
                 rejected += 1
                 blockers.append("original_source_document_missing_or_blank")
@@ -469,6 +500,7 @@ class RedAmonSourceAdapter:
                 license_id=_string(spec.get("license_id")) or _string(spec.get("repository_license_id")),
                 attribution=_string(record.metadata.get("attribution")) or _string(spec.get("attribution")),
                 metadata=self._metadata(metadata, family, spec, batch, profile, record.document_role),
+                raw_source_text=record.original_text if record.search_text is not None else None,
             ))
 
         if spec.get("kind") in {"github_archive", "local_markdown"} and not any(
@@ -509,7 +541,17 @@ class RedAmonSourceAdapter:
             start = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
         except ValueError:
             return False
-        return end.tzinfo is not None and start.tzinfo is not None and end - timedelta(days=days) <= start <= end
+        if end.tzinfo is None:
+            return False
+        # NVD's API filters publication timestamps in UTC but some returned
+        # CVE records omit an explicit offset. Match the provider's canonical
+        # interpretation instead of rejecting every such record at import.
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        else:
+            start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        return end - timedelta(days=days) <= start <= end
 
     @staticmethod
     def _exploitdb_record(record: SourceRecord) -> tuple[str, Mapping[str, object], str | None]:

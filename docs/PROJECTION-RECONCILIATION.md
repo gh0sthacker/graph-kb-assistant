@@ -26,7 +26,7 @@ them in the same dry-run report. This does not retry or change them. With
 `--apply --include-dead-letter`, only jobs whose complete normalized payload
 is an exact subset of both parity-matched snapshots can be acknowledged as
 applied. Missing, conflicting, or invalid dead-letter jobs remain in
-`dead_letter`; they are never moved back to the worker queue automatically.
+`dead_letter`; reconciliation never moves them back to the worker queue.
 
 ```sh
 ./scripts/bb-assistant projection-reconcile \
@@ -65,3 +65,34 @@ backend must be available. Reconciliation establishes the presence of graph
 projection records at the verified snapshot; it does not prove that Caido's
 history was completely imported, nor does it change browser, JavaScript, or
 analysis coverage.
+
+## Explicitly replay selected dead letters
+
+When reconciliation reports a conflict that should be repaired by the normal
+projector, inspect and replay only the named revisions. The command validates
+the stored normalized payload and SHA-256 before changing anything; it never
+prints or reads encrypted HTTP bodies and does not contact Caido. Dry-run is
+the default:
+
+```sh
+./scripts/bb-assistant projection-replay \
+  --project-key <registered-project-sha256> \
+  --revision-id <dead-letter-revision-sha256>
+```
+
+Apply is explicit and bounded to the listed revisions:
+
+```sh
+./scripts/bb-assistant projection-replay \
+  --project-key <registered-project-sha256> \
+  --revision-id <dead-letter-revision-sha256> \
+  --apply
+```
+
+Apply holds the project's exclusive maintenance lease through requeue and
+worker delivery. It refuses the operation if any unrelated pending or leased
+job exists, requires all selected revisions to be valid dead letters with the
+same attempt count, preserves the cumulative attempt count, and gives each
+listed job exactly one additional attempt. A failed replay returns to
+`dead_letter`; a successful replay becomes `applied`. Reconcile again after a
+replay to confirm queue state and snapshot parity.

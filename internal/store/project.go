@@ -78,6 +78,32 @@ func ProjectDirectory(ref project.CaidoProjectRef, dataRoot string) (string, err
 	return directory, nil
 }
 
+// PurgeProjectFilesUnderMaintenance removes every project data file while
+// preserving the maintenance lock inode. The caller must close all SQLite
+// handles and unregister the project after this succeeds.
+func PurgeProjectFilesUnderMaintenance(ref project.CaidoProjectRef, dataRoot string, maintenance *projectlock.Lock) error {
+	directory, err := ProjectDirectory(ref, dataRoot)
+	if err != nil {
+		return err
+	}
+	if maintenance == nil || !maintenance.CoversExclusiveDirectory(directory) {
+		return errors.New("project purge requires its exclusive maintenance lease")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return errors.New("project data directory could not be read for purge")
+	}
+	for _, entry := range entries {
+		if entry.Name() == ".maintenance.lock" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(directory, entry.Name())); err != nil {
+			return errors.New("project data could not be purged")
+		}
+	}
+	return nil
+}
+
 // CreateProject creates a new project namespace and version-7 SQLite database.
 // It refuses to overwrite any existing namespace and does not touch Caido.
 func CreateProject(ctx context.Context, ref project.CaidoProjectRef, dataRoot string) (*ProjectStore, error) {

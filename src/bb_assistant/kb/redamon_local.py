@@ -97,6 +97,7 @@ class RedAmonLocalToolDocsProvider:
             if not text.strip():
                 raise ValueError("vendored tool_docs contains an empty document")
             title = _title(text, Path(filename).stem)
+            search_text = _redamon_search_text(text, category, title)
             records.append(SourceRecord(
                 source_id=rel_path,
                 title=title,
@@ -112,7 +113,12 @@ class RedAmonLocalToolDocsProvider:
                     "filename": filename,
                     "tool_name": title,
                     "source_content_sha256": actual_hash,
+                    "search_normalization": (
+                        "redamon_tooling_summary_v1" if category == "tooling"
+                        else "redamon_frontmatter_stripped_v1"
+                    ),
                 },
+                search_text=search_text,
             ))
 
         license_path = source_root / "LICENSE"
@@ -164,3 +170,55 @@ def _title(text: str, fallback: str) -> str:
         if candidate.startswith("# "):
             return candidate[2:].strip()
     return fallback.replace("_", " ")
+
+
+def _redamon_search_text(raw_content: str, category: str, tool_name: str) -> str:
+    """Reproduce RedAmon ToolDocs' indexed text while retaining raw source.
+
+    RedAmon removes YAML frontmatter for all non-tooling categories. Tooling
+    docs instead become a compact description/syntax/example card; the full
+    Markdown remains available as ``raw_source_text`` through the source API.
+    """
+    if category != "tooling":
+        return _strip_frontmatter(raw_content)
+
+    description = _frontmatter_field(raw_content, "description")
+    if not description:
+        raise ValueError(f"tooling/{tool_name}: RedAmon requires a frontmatter description")
+
+    syntax = _first_backtick_after(raw_content, ("Canonical syntax", "Syntax", "Usage"))
+    example = _first_backtick_after(raw_content, (
+        "Agent-safe baseline for automation", "Agent-safe baseline", "Common usage", "Example",
+    ))
+    parts = [f"{tool_name} — {description}"]
+    if syntax:
+        parts.append(f"Syntax: `{syntax}`")
+    if example:
+        parts.append(f"Example: `{example}`")
+    return "\n\n".join(parts)
+
+
+def _strip_frontmatter(content: str) -> str:
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end != -1:
+            return content[end + 3:].strip()
+    return content
+
+
+def _frontmatter_field(content: str, field: str) -> str:
+    if not content.startswith("---"):
+        return ""
+    end = content.find("---", 3)
+    if end == -1:
+        return ""
+    match = re.search(rf"(?m)^{re.escape(field)}:\s*(.+)$", content[3:end])
+    return match.group(1).strip() if match else ""
+
+
+def _first_backtick_after(content: str, anchors: tuple[str, ...]) -> str:
+    for anchor in anchors:
+        match = re.search(rf"{re.escape(anchor)}\s*:?\s*\n?\s*`([^`]+)`", content)
+        if match:
+            return match.group(1).strip()
+    return ""

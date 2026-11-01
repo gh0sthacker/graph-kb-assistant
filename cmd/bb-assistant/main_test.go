@@ -54,6 +54,81 @@ func TestNormalizeTailScope(t *testing.T) {
 	}
 }
 
+func TestNormalizeCaidoScopeOriginsRequiresExactOriginsAndDeduplicates(t *testing.T) {
+	scopes, err := normalizeCaidoScopeOrigins([]string{
+		"HTTPS://API.FIXTURE.INVALID",
+		"https://api.fixture.invalid:443",
+		"http://other.fixture.invalid:8080",
+	}, "", "", 0, true)
+	if err != nil || len(scopes) != 2 {
+		t.Fatalf("normalizeCaidoScopeOrigins() = %#v, %v; want two normalized unique scopes", scopes, err)
+	}
+	if scopes[0].Scheme != "http" || scopes[0].Host != "other.fixture.invalid" || scopes[0].Port != 8080 ||
+		scopes[1].Scheme != "https" || scopes[1].Host != "api.fixture.invalid" || scopes[1].Port != 443 {
+		t.Fatalf("normalized scope ordering/content = %#v", scopes)
+	}
+	if _, err := normalizeCaidoScopeOrigins([]string{"https://api.fixture.invalid/path"}, "", "", 0, true); err == nil {
+		t.Fatal("scope origin with a path was accepted")
+	}
+	if _, err := normalizeCaidoScopeOrigins([]string{"https://user@api.fixture.invalid"}, "", "", 0, true); err == nil {
+		t.Fatal("scope origin with userinfo was accepted")
+	}
+	if _, err := normalizeCaidoScopeOrigins([]string{"https://api.fixture.invalid"}, "https", "api.fixture.invalid", 443, true); err == nil {
+		t.Fatal("mixed repeated-origin and legacy scope configuration was accepted")
+	}
+	if _, err := normalizeCaidoScopeOrigins(nil, "", "", 0, true); err == nil {
+		t.Fatal("required empty scope configuration was accepted")
+	}
+}
+
+func TestCaidoSyncCycleReceiptNeverEquatesTerminalCursorWithCompleteCoverage(t *testing.T) {
+	ref := project.CaidoProjectRef{InstanceID: "receipt-fixture", ProjectID: "project-one"}
+	receipt, err := newCaidoSyncCycleReceipt(ref, time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("newCaidoSyncCycleReceipt(): %v", err)
+	}
+	receipt.CycleState = "processed"
+	receipt.Scopes = append(receipt.Scopes, caidoScopeCycleReceipt{
+		CycleState: "processed", Origin: "https://fixture.invalid:443", BackfillState: "done", BackfillCursorState: "complete",
+		BackfillCoverageReconciled: false, LiveTailState: "idle", LiveTailWindowBoundary: "2026-10-27T12:00:00Z",
+	})
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatalf("json.Marshal(receipt): %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(receipt): %v", err)
+	}
+	scopes, ok := decoded["scopes"].([]any)
+	if !ok || len(scopes) != 1 {
+		t.Fatalf("receipt scopes = %#v", decoded["scopes"])
+	}
+	if decoded["cycle_state"] != "processed" || decoded["coverage_status"] != "unreconciled" || decoded["coverage_complete"] != false ||
+		decoded["snapshot_proof"] != "unavailable_no_stable_snapshot_token_or_expected_history_total" ||
+		decoded["selection_binding"] == "" || decoded["wire_fidelity"] == "" {
+		t.Fatalf("cycle receipt overstates coverage or omits a limitation: %#v", decoded)
+	}
+	scope := scopes[0].(map[string]any)
+	if scope["cycle_state"] != "processed" || scope["backfill_state"] != "done" || scope["backfill_cursor_state"] != "complete" || scope["backfill_coverage_reconciled"] != false ||
+		scope["live_tail_window_boundary"] == "" {
+		t.Fatalf("scope receipt omits the distinction between terminal enumeration and reconciled coverage: %#v", scope)
+	}
+
+	partial, err := newCaidoSyncCycleReceipt(ref, time.Now())
+	if err != nil || partial.CycleState != "partial" || partial.CoverageComplete {
+		t.Fatalf("new partial receipt = %#v, %v", partial, err)
+	}
+	remaining := caidoScopeReceiptInventory([]*ingest.LiveTailScope{
+		{Scheme: "https", Host: "first.fixture.invalid", Port: 443},
+		{Scheme: "https", Host: "second.fixture.invalid", Port: 443},
+	})
+	if len(remaining) != 2 || remaining[0].CycleState != "not_started" || remaining[1].CycleState != "not_started" ||
+		remaining[0].Origin == remaining[1].Origin {
+		t.Fatalf("scope receipt inventory must retain unattempted configured origins: %#v", remaining)
+	}
+}
+
 func TestLiveTailScopePortDefault(t *testing.T) {
 	t.Setenv("BB_ASSISTANT_CAIDO_SCOPE_PORT", "8443")
 	port, err := liveTailScopePortDefault()
@@ -599,6 +674,79 @@ func TestProjectionWorkerCLIReportsEmptyQueueAsJSON(t *testing.T) {
 	if output.ProjectKey != key || !output.Idle || output.Processed != 0 || len(output.Jobs) != 1 || output.Jobs[0].State != "idle" {
 		t.Fatalf("unexpected projection-worker output: %+v", output)
 	}
+}
+
+func TestProjectionReplayCLIDryRunDoesNotChangeDeadLetter(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	dataRoot := filepath.Join(t.TempDir(), "private-data")
+	ref := project.CaidoProjectRef{InstanceID: "projection-replay-cli", ProjectID: "dry-run"}
+	projectStore, err := store.CreateProject(t.Context(), ref, dataRoot)
+	if err != nil {
+		t.Fatalf("CreateProject() error = %v", err)
+	}
+	key := projectStore.ProjectKey
+	revisionID := strings.Repeat("a", 64)
+	if err := enqueueReplayTestJob(t, projectStore, revisionID, "capture-replay-dry-run", "dead_letter"); err != nil {
+		_ = projectStore.Close()
+		t.Fatal(err)
+	}
+	if err := projectStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	outputBytes := captureCommandStdout(t, func() error {
+		return replayDeadLetterProjectionJobs([]string{"--project-key", key, "--revision-id", revisionID, "--data-root", dataRoot})
+	})
+	var output projectionReplayOutput
+	if err := json.Unmarshal(outputBytes, &output); err != nil {
+		t.Fatalf("projection-replay output is not JSON: %s err=%v", outputBytes, err)
+	}
+	if !output.DryRun || output.ProjectKey != key || len(output.Jobs) != 1 ||
+		output.Jobs[0].RevisionID != revisionID || output.Jobs[0].State != "dead_letter" ||
+		output.Jobs[0].AttemptCount != 8 || output.Jobs[0].LastErrorCode != "projection_unavailable" {
+		t.Fatalf("unexpected dry-run output: %+v", output)
+	}
+
+	verify, err := store.OpenProjectReadOnly(t.Context(), ref, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verify.Close()
+	job, err := behaviorgraph.ProjectionJobByRevision(t.Context(), verify.Database.DB(), key, revisionID)
+	if err != nil || job.State != "dead_letter" || job.AttemptCount != 8 {
+		t.Fatalf("dry run changed the durable job: job=%+v err=%v", job, err)
+	}
+}
+
+func enqueueReplayTestJob(t *testing.T, selected *store.ProjectStore, revisionID, captureID, state string) error {
+	t.Helper()
+	ctx := t.Context()
+	createdAt := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	observationDigest := sha256.Sum256([]byte(captureID + "\x00original"))
+	source := `{"path":"/tmp/projection-replay-fixture.jsonl","sha256":"` + strings.Repeat("b", 64) + `","record_locator":"line:1"}`
+	payload := []byte(`{"schema_version":1,"program":"` + selected.ProjectKey + `","sources":[` + source + `],"entities":[{"id":"observation-` + hex.EncodeToString(observationDigest[:]) + `","kind":"observation","data":{"capture_id":"` + captureID + `","program":"` + selected.ProjectKey + `","test_marker":"original"},"source_refs":[` + source + `]}],"assertions":[],"cards":[]}`)
+	tx, err := selected.Database.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO capture_revision_registry(revision_id,observation_id,source_kind,first_seen_at) VALUES(?,?,'historical',?)`,
+		revisionID, captureID, createdAt.UTC().Format("2006-01-02T15:04:05.000000000Z")); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, _, err := behaviorgraph.EnqueueProjectionJob(ctx, tx, selected.ProjectKey, revisionID, captureID, payload, createdAt); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if state == "dead_letter" {
+		_, err = selected.Database.DB().ExecContext(ctx,
+			`UPDATE projection_jobs SET state='dead_letter',attempt_count=8,last_error_code='projection_unavailable' WHERE revision_id=?`, revisionID)
+	}
+	return err
 }
 
 func TestProjectionWorkerCLIAccountsCompletedResultsFromInterruptedBatch(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/mcpserver"
+	"bb-graph-assistant/internal/neo4jstore"
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
@@ -171,6 +172,30 @@ func TestBrowserAcceptanceFixture(t *testing.T) {
 			if result.State != "applied" {
 				t.Fatalf("synthetic Neo4j projection did not apply: state=%s code=%s", result.State, result.ErrorCode)
 			}
+		}
+		// Exercise the same full-snapshot maintenance path used to publish a
+		// current Neo4j field-value index before checking the embedded browser UI.
+		reader, err := behaviorgraph.OpenReader(ctx, selected.BehaviorGraphPath, selected.ProjectKey, selected.BehaviorReceiptPath)
+		if err != nil {
+			t.Fatalf("open synthetic local graph for Neo4j rebuild: %v", err)
+		}
+		snapshot, snapshotErr := reader.Snapshot()
+		closeErr := reader.Close()
+		if snapshotErr != nil || closeErr != nil {
+			t.Fatalf("read synthetic local graph for Neo4j rebuild: snapshot_err=%v close_err=%v", snapshotErr, closeErr)
+		}
+		cfg, err := neo4jstore.ConfigFromEnv()
+		if err != nil {
+			t.Fatalf("read disposable Neo4j configuration: %v", err)
+		}
+		graphStore, err := neo4jstore.New(ctx, cfg)
+		if err != nil {
+			t.Fatalf("connect to disposable Neo4j for full rebuild: %v", err)
+		}
+		_, rebuildErr := graphStore.RebuildProjectSnapshot(ctx, selected.ProjectKey, snapshot)
+		graphStoreCloseErr := graphStore.Close(ctx)
+		if rebuildErr != nil || graphStoreCloseErr != nil {
+			t.Fatalf("rebuild synthetic Neo4j graph: rebuild_err=%v close_err=%v", rebuildErr, graphStoreCloseErr)
 		}
 	}
 	projectKey := selected.ProjectKey

@@ -6,8 +6,13 @@ import hashlib
 import json
 import unittest
 
-from bb_assistant.kb.nvd import RedAmonNVDProvider, _date_windows
-from bb_assistant.kb.redamon_sources import RedAmonSourceAdapter, SourceRequest
+from bb_assistant.kb.nvd import RedAmonNVDProvider, _date_windows, _redamon_search_text
+from bb_assistant.kb.redamon_sources import (
+    RedAmonSourceAdapter,
+    SourceBatch,
+    SourceRecord,
+    SourceRequest,
+)
 
 
 _API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -57,6 +62,57 @@ def _vuln(cve_id: str, published: str) -> dict[str, object]:
 
 
 class NVDProviderTests(unittest.TestCase):
+    def test_oversized_nvd_content_is_preserved_for_search_and_storage(self) -> None:
+        source = {"cve": {"descriptions": [{"lang": "en", "value": "word " * 600}]}}
+        content, _metadata = _redamon_search_text(source)
+        expected = "word " * 600
+        self.assertEqual(content, expected)
+
+    def test_nvd_search_text_matches_pinned_redamon_chunk_normalization(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        vulnerability = _vuln("CVE-2026-12345", now.isoformat().replace("+00:00", "Z"))
+        cve = vulnerability["cve"]
+        cve["descriptions"] = [
+            {"lang": "fr", "value": "Ignoré."},
+            {"lang": "en", "value": "A remote attacker can execute code."},
+        ]
+        cve["metrics"] = {
+            "cvssMetricV31": [{"cvssData": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}],
+            "cvssMetricV30": [{"cvssData": {"baseScore": 8.0, "baseSeverity": "HIGH"}}],
+        }
+        cve["configurations"] = [{"nodes": [{"cpeMatch": [
+            {"criteria": f"cpe:2.3:a:vendor:product_{index}:*:*:*:*:*:*:*:*"}
+            for index in range(12)
+        ]}]}]
+        published = datetime.fromisoformat(cve["published"].replace("Z", "+00:00"))
+
+        def fetcher(params):
+            start = datetime.fromisoformat(params["pubStartDate"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(params["pubEndDate"].replace("Z", "+00:00"))
+            if start <= published <= end:
+                return _page(start=int(params["startIndex"]), total=1, items=[vulnerability])
+            return _page(start=int(params["startIndex"]), total=0, items=[])
+
+        provider = RedAmonNVDProvider(fetcher=fetcher, sleeper=lambda _delay: None, min_interval_seconds=0)
+        batch = provider(SourceRequest("nvd", "full", _source_spec(eligible=True), None, _FILTERS))
+        record = batch.records[0]
+        expected_products = [f"cpe:2.3:a:vendor:product_{index}:*:*:*:*:*:*:*:*" for index in range(12)]
+        self.assertEqual(
+            record.search_text,
+            "A remote attacker can execute code.\nCVSS: 9.8 (critical)\nAffected: " + ", ".join(expected_products[:10]),
+        )
+        self.assertEqual(json.loads(record.original_text), vulnerability)
+        self.assertEqual(record.metadata["affected_products"], ", ".join(expected_products[:10]))
+        snapshot = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [_source_spec(eligible=True)]},
+            {"nvd": lambda _request: batch},
+            source_manifest_sha256="a" * 64,
+        ).build()
+        document = next(item for item in snapshot.documents if item.source_id == record.source_id)
+        self.assertEqual(document.text, record.search_text)
+        self.assertEqual(document.raw_source_text, record.original_text)
+        self.assertEqual(document.raw_source_sha256, hashlib.sha256(record.original_text.encode()).hexdigest())
+
     def test_date_windows_are_contiguous_non_overlapping_and_below_120_days(self) -> None:
         start = datetime(2025, 1, 1, tzinfo=timezone.utc)
         end = start + timedelta(days=730)
@@ -92,6 +148,7 @@ class NVDProviderTests(unittest.TestCase):
 
         content = [record for record in batch.records if record.document_role == "content"]
         notices = [record for record in batch.records if record.document_role == "license_notice"]
+        self.assertTrue(all(call["resultsPerPage"] == "2000" for call in calls))
         self.assertEqual(len(calls), len(_date_windows(
             datetime.fromisoformat(calls[0]["pubStartDate"].replace("Z", "+00:00")),
             datetime.fromisoformat(calls[-1]["pubEndDate"].replace("Z", "+00:00")),
@@ -140,6 +197,21 @@ class NVDProviderTests(unittest.TestCase):
         self.assertEqual(nvd_coverage["state"], "blocked")
         self.assertFalse(called)
 
+    def test_adapter_reports_safe_nvd_failure_code_without_provider_message(self) -> None:
+        provider = RedAmonNVDProvider(fetcher=lambda _params: b"not-json-private-body", min_interval_seconds=0)
+        adapter = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [_source_spec(eligible=True)]},
+            {"nvd": provider},
+            source_manifest_sha256="c" * 64,
+        )
+
+        snapshot = adapter.build()
+        nvd_coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "nvd")
+
+        self.assertEqual(nvd_coverage["state"], "partial")
+        self.assertEqual(nvd_coverage["blockers"], ["provider_failed:nvd_api_page_is_not_valid_utf_8_json"])
+        self.assertNotIn("not-json-private-body", repr(snapshot.coverage_report()))
+
     def test_public_domain_label_alone_cannot_bypass_cve_notice_gate(self) -> None:
         called = False
 
@@ -163,6 +235,46 @@ class NVDProviderTests(unittest.TestCase):
         self.assertEqual(nvd_coverage["state"], "blocked")
         self.assertIn("nvd_requires_composite_terms_and_notice_status", nvd_coverage["blockers"])
         self.assertFalse(called)
+
+    def test_adapter_accepts_naive_nvd_published_timestamps_as_utc(self) -> None:
+        fetched_at = datetime.now(timezone.utc).replace(microsecond=0)
+        # NVD's API date filters are UTC. Some returned CVE timestamps omit
+        # the offset, and the provider already normalizes those to UTC.
+        published = (fetched_at - timedelta(days=1)).replace(tzinfo=None).isoformat()
+        response_sha = "d" * 64
+        revision = f"{fetched_at.isoformat()};response_sha256={response_sha}"
+        record = SourceRecord(
+            source_id="CVE-2026-12345",
+            title="CVE-2026-12345",
+            original_text=json.dumps({"cve": {"id": "CVE-2026-12345", "published": published}}),
+            source_locator="fixture:nvd:CVE-2026-12345",
+            source_revision=revision,
+            metadata={"cve_id": "CVE-2026-12345", "published": published},
+        )
+        batch = SourceBatch(
+            source_revision=revision,
+            records=(record,),
+            expected_count=1,
+            fetched_count=1,
+            parsed_count=1,
+            rejected_count=0,
+            complete=True,
+            artifact_sha256="e" * 64,
+            fetched_at=fetched_at.isoformat(),
+            response_sha256=response_sha,
+            applied_filters=dict(_FILTERS),
+            notices_complete=True,
+        )
+        snapshot = RedAmonSourceAdapter(
+            {"profile": "full", "sources": [_source_spec(eligible=True)]},
+            {"nvd": lambda _request: batch},
+            source_manifest_sha256="f" * 64,
+        ).build()
+
+        nvd_coverage = next(row for row in snapshot.source_coverage if row["source_name"] == "nvd")
+        self.assertEqual(nvd_coverage["state"], "done")
+        self.assertEqual(nvd_coverage["document_count"], 1)
+        self.assertEqual([doc.source_id for doc in snapshot.documents], ["CVE-2026-12345"])
 
     def test_stale_or_wrong_year_cve_notice_is_rejected(self) -> None:
         spec = _source_spec(eligible=True)

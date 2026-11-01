@@ -45,9 +45,11 @@ sources:
     revision: 6a57361db10b709c4b4f339c09ee250acc2d8aac
     content_scope: descriptions_and_metadata_only
     repository_license_id: GPL-2.0-or-later
-    license_evidence: https://gitlab.com/exploit-database/exploitdb
-    dataset_terms: review_required
-    license_status: review_required
+    license_evidence: https://gitlab.com/exploit-database/exploitdb/-/raw/6a57361db10b709c4b4f339c09ee250acc2d8aac/LICENSE.md
+    dataset_terms: confirmed_at_pinned_revision
+    dataset_terms_evidence: https://gitlab.com/exploit-database/exploitdb/-/raw/6a57361db10b709c4b4f339c09ee250acc2d8aac/README.md
+    dataset_terms_basis: "The official pinned GitLab README states that this project is released under GPLv2. This self-hosted import is limited to allowlisted files_exploits.csv descriptions/metadata, retains the pinned README/LICENSE notices, and never fetches/copies PoC files. This does not claim separate licensing for PoCs or authorize redistribution of the assembled corpus."
+    license_status: confirmed_at_pinned_revision
   - id: nvd
     kind: paginated_api
     url: https://services.nvd.nist.gov/rest/json/cves/2.0
