@@ -48,3 +48,14 @@ data/
 /references/redamon/skills/
 /references/redamon/SOURCE-MANIFEST.json
 /references/redamon/LICENSE
+
+# internal hunt planning docs stay local
+docs/BB-HUNTER-*.md
+docs/QA-DEFECTS.md
+docs/PRIMITIVES-DESIGN.md
+docs/REDAMON-TECHNIQUES.md
+docs/ARCHITECTURE-REVIEW-*.md
+docs/ADR-GRAPH-AS-HUNT-ENGINE.md
+docs/KB-FULL-PLAN.md
+docs/BROWSER-INGEST-AGENT.md
+docs/TODO.md
