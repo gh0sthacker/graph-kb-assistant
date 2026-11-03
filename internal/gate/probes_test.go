@@ -78,6 +78,46 @@ func TestCaidoProbe(t *testing.T) {
 	}
 }
 
+func TestCaidoGraphQLErrorsPreserveDetails(t *testing.T) {
+	longMessage := strings.Repeat("x", 301)
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{
+			name: "invalid token code",
+			body: `{"errors":[{"message":"Invalid token","extensions":{"code":"INVALID_TOKEN"}}]}`,
+			want: "Caido GraphQL error: INVALID_TOKEN: Invalid token",
+		},
+		{
+			name: "message without extensions",
+			body: `{"errors":[{"message":"Unauthorized"}]}`,
+			want: "Caido GraphQL error: Unauthorized",
+		},
+		{
+			name: "message truncated to 300 characters",
+			body: fmt.Sprintf(`{"errors":[{"message":%q}]}`, longMessage),
+			want: "Caido GraphQL error: " + longMessage[:300],
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+
+			got := New(CaidoProbe(CaidoConfig{URL: server.URL, Token: "fixture-token", Client: server.Client()})).Check(context.Background())
+			failure, ok := got.Failures["caido"]
+			if !ok {
+				t.Fatalf("failures.caido missing: %+v", got)
+			}
+			if failure != tc.want {
+				t.Fatalf("failures.caido = %q, want %q", failure, tc.want)
+			}
+		})
+	}
+}
+
 func TestRequiredProbeConfiguration(t *testing.T) {
 	for _, p := range []Probe{TargetProbe(TargetConfig{}), CaidoProbe(CaidoConfig{})} {
 		got := New(p).Check(context.Background())

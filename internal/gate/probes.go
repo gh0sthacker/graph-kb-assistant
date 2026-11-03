@@ -88,6 +88,23 @@ func TargetProbe(config TargetConfig) Probe {
 	}}
 }
 
+type caidoGraphQLError struct {
+	Message    string `json:"message"`
+	Extensions struct {
+		Code    string          `json:"code"`
+		Details json.RawMessage `json:"details"`
+	} `json:"extensions"`
+	Path json.RawMessage `json:"path"`
+}
+
+func truncateCaidoMessage(message string) string {
+	runes := []rune(message)
+	if len(runes) > 300 {
+		return string(runes[:300])
+	}
+	return message
+}
+
 func CaidoProbe(config CaidoConfig) Probe {
 	return Probe{Name: "caido", Critical: true, Check: func(ctx context.Context) error {
 		target, err := endpoint(config.URL, "/graphql", false)
@@ -104,12 +121,24 @@ func CaidoProbe(config CaidoConfig) Probe {
 					Name string `json:"name"`
 				} `json:"projects"`
 			} `json:"data"`
-			Errors []json.RawMessage `json:"errors"`
+			Errors []caidoGraphQLError `json:"errors"`
 		}
 		if err := postJSON(ctx, config.Client, target, config.Token, map[string]string{"query": "{projects{id name}}"}, &result); err != nil {
 			return err
 		}
 		if len(result.Errors) > 0 {
+			graphqlErr := result.Errors[0]
+			message := truncateCaidoMessage(graphqlErr.Message)
+			code := strings.TrimSpace(graphqlErr.Extensions.Code)
+			if code != "" && message != "" {
+				return fmt.Errorf("Caido GraphQL error: %s: %s", code, message)
+			}
+			if code != "" {
+				return fmt.Errorf("Caido GraphQL error: %s", code)
+			}
+			if message != "" {
+				return fmt.Errorf("Caido GraphQL error: %s", message)
+			}
 			return errors.New("Caido returned GraphQL errors")
 		}
 		if len(result.Data.Projects) == 0 {
