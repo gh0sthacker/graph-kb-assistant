@@ -91,7 +91,11 @@ func TargetProbe(config TargetConfig) Probe {
 type caidoGraphQLError struct {
 	Message    string `json:"message"`
 	Extensions struct {
-		Code    string          `json:"code"`
+		Code  string `json:"code"`
+		CAIDO struct {
+			Reason string `json:"reason"`
+			Code   string `json:"code"`
+		} `json:"CAIDO"`
 		Details json.RawMessage `json:"details"`
 	} `json:"extensions"`
 	Path json.RawMessage `json:"path"`
@@ -129,7 +133,13 @@ func CaidoProbe(config CaidoConfig) Probe {
 		if len(result.Errors) > 0 {
 			graphqlErr := result.Errors[0]
 			message := truncateCaidoMessage(graphqlErr.Message)
-			code := strings.TrimSpace(graphqlErr.Extensions.Code)
+			code := strings.TrimSpace(graphqlErr.Extensions.CAIDO.Reason)
+			if code == "" {
+				code = strings.TrimSpace(graphqlErr.Extensions.CAIDO.Code)
+			}
+			if code == "" {
+				code = strings.TrimSpace(graphqlErr.Extensions.Code)
+			}
 			if code != "" && message != "" {
 				return fmt.Errorf("Caido GraphQL error: %s: %s", code, message)
 			}

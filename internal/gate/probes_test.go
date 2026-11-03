@@ -89,6 +89,16 @@ func TestCaidoGraphQLErrorsPreserveDetails(t *testing.T) {
 			want: "Caido GraphQL error: INVALID_TOKEN: Invalid token",
 		},
 		{
+			name: "nested Caido reason takes precedence",
+			body: `{"data":null,"errors":[{"message":"Operation error","path":["projects"],"extensions":{"CAIDO":{"reason":"INVALID_TOKEN","code":"AUTHORIZATION"}}}]}`,
+			want: "Caido GraphQL error: INVALID_TOKEN: Operation error",
+		},
+		{
+			name: "nested Caido code fallback",
+			body: `{"errors":[{"message":"Operation error","extensions":{"CAIDO":{"code":"AUTHORIZATION"}}}]}`,
+			want: "Caido GraphQL error: AUTHORIZATION: Operation error",
+		},
+		{
 			name: "message without extensions",
 			body: `{"errors":[{"message":"Unauthorized"}]}`,
 			want: "Caido GraphQL error: Unauthorized",
