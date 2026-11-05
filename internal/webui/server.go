@@ -23,6 +23,7 @@ import (
 	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/consultation"
 	"bb-graph-assistant/internal/ingest"
+	"bb-graph-assistant/internal/kb"
 )
 
 const (
@@ -32,6 +33,12 @@ const (
 	requestTimeout       = 30 * time.Second
 	graphTimeout         = 3 * time.Minute
 	maintenanceTimeout   = 30 * time.Minute
+	maxKBQueryRunes      = 4096
+	maxKBSearchTopK      = 20
+	defaultKBSearchTopK  = 10
+	maxKBSearchSources   = 20
+	maxKBSourceNameBytes = 128
+	kbSearchTimeout      = 90 * time.Second
 )
 
 var (
@@ -84,6 +91,13 @@ type projectCatalogRefresher interface {
 	RefreshProjectCatalog() error
 }
 
+// kbSearchProvider is an optional read-only view of the in-process KB index.
+// The HTTP route is registered only when the API also provides it, so existing
+// read-only API fakes keep compiling unchanged.
+type kbSearchProvider interface {
+	KBSearch(context.Context, string, int, []string) (kb.SearchResult, error)
+}
+
 // NewHandler constructs the local UI and its narrowly scoped API.
 func NewHandler(api readAPI) (http.Handler, error) {
 	if api == nil {
@@ -111,6 +125,9 @@ func NewHandler(api readAPI) (http.Handler, error) {
 	mux.HandleFunc("GET /api/graph", graphHandler(api))
 	mux.HandleFunc("GET /api/evidence", captureMessageRangeHandler(api))
 	mux.HandleFunc("GET /api/compare", captureComparisonHandler(api))
+	if kbSearch, ok := api.(kbSearchProvider); ok {
+		mux.HandleFunc("GET /api/kb/search", kbSearchHandler(kbSearch))
+	}
 	mux.HandleFunc("POST /api/evidence/packet-preview", evidencePacketPreviewHandler(api))
 	if consultations, ok := api.(consultationAPI); ok {
 		mux.HandleFunc("GET /api/consultation/session", consultationResumeHandler(consultations))
@@ -409,6 +426,88 @@ func captureComparisonHandler(api readAPI) http.HandlerFunc {
 			RightRequestID: rightRequestID, RightRevisionID: rightRevisionID,
 		})
 		writeComparisonResult(w, result, err)
+	}
+}
+
+// kbSearchResponse flattens the KB snapshot metadata and hits alongside the
+// request echo and timing so clients do not need a nested result object. The
+// excerpts are reference material and must remain flagged as untrusted.
+type kbSearchResponse struct {
+	Query  string `json:"query"`
+	TookMS int64  `json:"took_ms"`
+	kb.SearchResult
+	ReferenceMaterialIsUntrusted bool `json:"reference_material_is_untrusted"`
+}
+
+func kbSearchHandler(provider kbSearchProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		values := r.URL.Query()
+		query := strings.TrimSpace(values.Get("query"))
+		if query == "" || utf8.RuneCountInString(query) > maxKBQueryRunes {
+			writeError(w, http.StatusBadRequest, "query must contain 1 to 4096 characters")
+			return
+		}
+		topK := defaultKBSearchTopK
+		if rawTopK, present := values["top_k"]; present {
+			if len(rawTopK) != 1 {
+				writeError(w, http.StatusBadRequest, "top_k must be an integer between 1 and 20")
+				return
+			}
+			parsed, err := strconv.Atoi(rawTopK[0])
+			if err != nil || parsed < 1 || parsed > maxKBSearchTopK {
+				writeError(w, http.StatusBadRequest, "top_k must be an integer between 1 and 20")
+				return
+			}
+			topK = parsed
+		}
+		rawSources := values["source"]
+		if len(rawSources) > maxKBSearchSources {
+			writeError(w, http.StatusBadRequest, "select no more than 20 source families")
+			return
+		}
+		sources := make([]string, 0, len(rawSources))
+		seen := make(map[string]struct{}, len(rawSources))
+		for _, raw := range rawSources {
+			source := strings.TrimSpace(raw)
+			if source == "" || source != raw || len(source) > maxKBSourceNameBytes {
+				writeError(w, http.StatusBadRequest, "source family names must be trimmed, non-empty, and at most 128 bytes")
+				return
+			}
+			if _, duplicate := seen[source]; duplicate {
+				continue
+			}
+			seen[source] = struct{}{}
+			sources = append(sources, source)
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), kbSearchTimeout)
+		defer cancel()
+		started := time.Now()
+		result, err := provider.KBSearch(ctx, query, topK, sources)
+		tookMS := time.Since(started).Milliseconds()
+		if err != nil {
+			if errors.Is(err, kb.ErrIndexUnavailable) {
+				writeError(w, http.StatusServiceUnavailable, "local KB index is unavailable")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "KB search failed")
+			return
+		}
+		if result.Hits == nil {
+			result.Hits = []kb.Hit{}
+		}
+		encoded, marshalErr := json.Marshal(kbSearchResponse{
+			Query: query, TookMS: tookMS, SearchResult: result,
+			ReferenceMaterialIsUntrusted: true,
+		})
+		if marshalErr != nil {
+			writeError(w, http.StatusInternalServerError, "KB search failed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(encoded)
 	}
 }
 

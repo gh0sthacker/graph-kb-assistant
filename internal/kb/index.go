@@ -54,6 +54,11 @@ const (
 var snapshotDigestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var chunkIDPattern = regexp.MustCompile(`^(?:[a-f0-9]{16}|[a-f0-9]{64})$`)
 
+// ErrIndexUnavailable reports that no usable local KB index is open. It is
+// shared by every transport that exposes the in-process index so callers can
+// map unavailability to a stable status without inspecting error text.
+var ErrIndexUnavailable = errors.New("local KB index is unavailable")
+
 // Index opens an existing Python-compatible FTS index in SQLite read-only mode.
 // Snapshot construction and source fetching remain separate operations.
 type Index struct {
@@ -290,6 +295,29 @@ func (i *Index) Close() error {
 		closeErr = errors.Join(closeErr, i.lucene.Close())
 	}
 	return errors.Join(closeErr, i.db.Close())
+}
+
+// SnapshotID returns the active snapshot identity with a single primary-key
+// lookup. Stats performs count and embedding queries that are expensive on a
+// multi-gigabyte index; health reporting only needs the identity, so it must
+// not pay that cost at startup.
+func (i *Index) SnapshotID(ctx context.Context) (string, error) {
+	if i == nil || i.db == nil {
+		return "", errors.New("KB index is unavailable")
+	}
+	var snapshotID string
+	err := i.db.QueryRowContext(ctx,
+		"SELECT substr(value,1,65) FROM kb_meta WHERE key='snapshot_id'").Scan(&snapshotID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errors.New("KB snapshot metadata is missing")
+	}
+	if err != nil {
+		return "", errors.New("KB snapshot metadata could not be read")
+	}
+	if !snapshotDigestPattern.MatchString(snapshotID) {
+		return "", errors.New("KB snapshot metadata is invalid")
+	}
+	return snapshotID, nil
 }
 
 // Stats returns counts and source coverage from one consistent, read-only

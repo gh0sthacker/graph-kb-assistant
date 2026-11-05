@@ -1067,6 +1067,32 @@ func TestKBChunkSimilarityMatchesSourceAndTitleProxy(t *testing.T) {
 	}
 }
 
+func TestSnapshotIDReadsOnlyKBMeta(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.sqlite3")
+	content := "Synthetic fixture text for the snapshot identity lookup."
+	createPythonCompatibleIndex(t, indexPath, content, digestHex(content), digestHex(content))
+
+	index, err := OpenIndex(indexPath)
+	if err != nil {
+		t.Fatalf("OpenIndex() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	snapshotID, err := index.SnapshotID(ctx)
+	if err != nil {
+		t.Fatalf("SnapshotID() error = %v", err)
+	}
+	if snapshotID != strings.Repeat("1", 64) {
+		t.Fatalf("SnapshotID() = %q; want the fixture snapshot", snapshotID)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := index.SnapshotID(ctx); err == nil {
+		t.Fatal("SnapshotID() accepted a closed index")
+	}
+}
+
 func createPythonCompatibleIndex(t *testing.T, path, content, sourceHash, chunkHash string) {
 	createPythonCompatibleIndexWithChunkID(t, path, content, sourceHash, chunkHash, strings.Repeat("a", 64))
 }

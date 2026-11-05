@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/consultation"
 	"bb-graph-assistant/internal/graphaccess"
+	"bb-graph-assistant/internal/hackerone"
 	"bb-graph-assistant/internal/ingest"
 	"bb-graph-assistant/internal/kb"
 	"bb-graph-assistant/internal/project"
@@ -39,9 +41,20 @@ const (
 	maxGraphSeedIDs        = 80
 	maxGraphSeedIDBytes    = 512
 	maxMCPRequestDuration  = 3 * time.Minute
+	maxKBQueryRunes        = 4096
+	maxKBSearchTopK        = 20
+	maxKBSearchSources     = 20
+	maxKBSourceNameBytes   = 128
+	hackeroneSourceName    = "hackerone"
+	hackeroneRRFRankOffset = 60.0
 )
 
 var serverVersion = buildinfo.String()
+
+// ErrKBUnavailable reports that this process has no usable local KB index.
+// It aliases kb.ErrIndexUnavailable so the MCP tool and the read-only HTTP API
+// share one sentinel without making the HTTP layer depend on this package.
+var ErrKBUnavailable = kb.ErrIndexUnavailable
 
 var projectKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var graphNeighborhoodSeedPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*-[a-f0-9]{64}$`)
@@ -58,6 +71,7 @@ type Tools struct {
 	graphQueries   *appquery.Service
 	consultations  *consultation.Service
 	kbIndex        *kb.Index
+	hackeroneIndex *hackerone.Index
 	kbModels       *kb.PythonRetrievalModels
 	kbBackend      string
 	allowRawReads  bool
@@ -217,6 +231,14 @@ func NewTools(dataRoot, kbIndexPath string) (*Tools, error) {
 			return nil, errors.New("selected Neo4j Lucene mode requires the active local KB snapshot")
 		}
 	}
+	// The HackerOne index is optional supplemental reference material. A
+	// missing, unreadable, or incompatible file must not affect KB startup or
+	// any other tool, so every failure here silently leaves the index nil.
+	if indexPath := strings.TrimSpace(os.Getenv("BB_ASSISTANT_HACKERONE_INDEX")); indexPath != "" {
+		if index, openErr := hackerone.Open(indexPath); openErr == nil && index != nil {
+			tools.hackeroneIndex = index
+		}
+	}
 	return tools, nil
 }
 
@@ -236,6 +258,9 @@ func (t *Tools) Close() error {
 	}
 	if t.kbIndex != nil {
 		closeErr = errors.Join(closeErr, t.kbIndex.Close())
+	}
+	if t.hackeroneIndex != nil {
+		closeErr = errors.Join(closeErr, t.hackeroneIndex.Close())
 	}
 	return closeErr
 }
@@ -933,15 +958,234 @@ type kbSearchArgs struct {
 	IncludeSupplemental bool     `json:"include_supplemental,omitempty"`
 }
 
+// KBSearch performs one bounded read-only search against the in-process local
+// KB index. It is the shared entry point for callers outside the MCP tool
+// surface, such as the local HTTP API. A missing index is reported as
+// ErrKBUnavailable so every transport can map it to a stable status.
+//
+// The "hackerone" name is a pseudo-source that selects the optional local
+// HackerOne FTS index. It is stripped before source names reach the KB index,
+// and its hits are fused with the KB ranking through reciprocal rank fusion.
+func (t *Tools) KBSearch(ctx context.Context, query string, topK int, sources []string) (kb.SearchResult, error) {
+	if strings.TrimSpace(query) == "" || utf8.RuneCountInString(query) > maxKBQueryRunes {
+		return kb.SearchResult{}, errors.New("KB query must contain 1 to 4096 characters")
+	}
+	if topK < 1 || topK > maxKBSearchTopK {
+		return kb.SearchResult{}, errors.New("KB top-k must be between 1 and 20")
+	}
+	if len(sources) > maxKBSearchSources {
+		return kb.SearchResult{}, errors.New("select no more than 20 KB source families")
+	}
+	for _, name := range sources {
+		if name == "" || name != strings.TrimSpace(name) || len(name) > maxKBSourceNameBytes {
+			return kb.SearchResult{}, errors.New("KB source family name must be trimmed, non-empty, and at most 128 bytes")
+		}
+	}
+	if t == nil {
+		return kb.SearchResult{}, ErrKBUnavailable
+	}
+	includeHackerOne, kbSources := splitKBSources(sources)
+	hackeroneOnly := len(sources) > 0 && len(kbSources) == 0 && includeHackerOne
+
+	var kbResult kb.SearchResult
+	kbAvailable := false
+	if !hackeroneOnly {
+		result, err := t.searchLocalKB(ctx, query, kb.SearchOptions{TopK: topK, SourceNames: kbSources})
+		switch {
+		case err == nil:
+			kbResult, kbAvailable = result, true
+		case !errors.Is(err, ErrKBUnavailable):
+			return kb.SearchResult{}, err
+		}
+	}
+	if !kbAvailable {
+		// A usable HackerOne index still answers a degraded query when the
+		// primary KB index is absent or the caller asked for it alone.
+		if includeHackerOne {
+			if result, ok := t.searchHackerOneOnly(ctx, query, topK); ok {
+				return result, nil
+			}
+		}
+		return kb.SearchResult{}, ErrKBUnavailable
+	}
+	if !includeHackerOne || t.hackeroneIndex == nil {
+		return kbResult, nil
+	}
+	hits, err := t.hackeroneIndex.Search(ctx, query, hackeroneCandidateLimit(topK))
+	if err != nil {
+		// Supplemental reference material must never hide a usable KB result.
+		return kbResult, nil
+	}
+	return mergeKBSearchResult(kbResult, hits, t.hackeroneIndex.Meta(), topK), nil
+}
+
+// splitKBSources separates the HackerOne pseudo-source from real KB source
+// families. An empty filter selects every source, including HackerOne.
+func splitKBSources(sources []string) (bool, []string) {
+	if len(sources) == 0 {
+		return true, nil
+	}
+	includeHackerOne := false
+	families := make([]string, 0, len(sources))
+	for _, name := range sources {
+		if name == hackeroneSourceName {
+			includeHackerOne = true
+			continue
+		}
+		families = append(families, name)
+	}
+	return includeHackerOne, families
+}
+
+func hackeroneCandidateLimit(topK int) int {
+	if doubled := 2 * topK; doubled > topK {
+		return doubled
+	}
+	return topK
+}
+
+func reciprocalRank(rank int) float64 {
+	return 1.0 / (hackeroneRRFRankOffset + float64(rank))
+}
+
+// searchHackerOneOnly builds the synthetic result used when the request asks
+// for the supplemental index alone or the primary KB index is unavailable.
+func (t *Tools) searchHackerOneOnly(ctx context.Context, query string, topK int) (kb.SearchResult, bool) {
+	if t == nil || t.hackeroneIndex == nil {
+		return kb.SearchResult{}, false
+	}
+	meta := t.hackeroneIndex.Meta()
+	hits, err := t.hackeroneIndex.Search(ctx, query, topK)
+	if err != nil {
+		return kb.SearchResult{}, false
+	}
+	mapped := make([]kb.Hit, 0, len(hits))
+	for rank, hit := range hits {
+		mappedHit := mapHackerOneHit(hit, meta)
+		mappedHit.RankScore = reciprocalRank(rank + 1)
+		mapped = append(mapped, mappedHit)
+	}
+	return kb.SearchResult{
+		SnapshotID:           meta.SnapshotID,
+		CoverageState:        "PARTIAL",
+		RetrievalMode:        "hackerone_fts",
+		LexicalEngine:        "sqlite-fts5",
+		SupplementalIncluded: true,
+		Hits:                 mapped,
+	}, true
+}
+
+type fusedKBSearchHit struct {
+	hit   kb.Hit
+	score float64
+}
+
+// mergeKBSearchResult fuses the KB and HackerOne rankings using reciprocal
+// rank fusion. Both lists are already ordered best-first, so the rank alone is
+// enough; a hit that appears in both lists (by chunk identity) accumulates
+// both contributions.
+func mergeKBSearchResult(result kb.SearchResult, hackeroneHits []hackerone.Hit, meta hackerone.Meta, topK int) kb.SearchResult {
+	entries := make([]fusedKBSearchHit, 0, len(result.Hits)+len(hackeroneHits))
+	positions := make(map[string]int, cap(entries))
+	add := func(hit kb.Hit, rank int) {
+		score := reciprocalRank(rank)
+		if position, ok := positions[hit.ChunkID]; ok {
+			entries[position].score += score
+			return
+		}
+		positions[hit.ChunkID] = len(entries)
+		entries = append(entries, fusedKBSearchHit{hit: hit, score: score})
+	}
+	for rank, hit := range result.Hits {
+		add(hit, rank+1)
+	}
+	for rank, hit := range hackeroneHits {
+		add(mapHackerOneHit(hit, meta), rank+1)
+	}
+	sort.SliceStable(entries, func(left, right int) bool {
+		return entries[left].score > entries[right].score
+	})
+	if len(entries) > topK {
+		entries = entries[:topK]
+	}
+	hits := make([]kb.Hit, 0, len(entries))
+	supplemental := false
+	for _, entry := range entries {
+		entry.hit.RankScore = entry.score
+		if entry.hit.SourceName == hackeroneSourceName {
+			supplemental = true
+		}
+		hits = append(hits, entry.hit)
+	}
+	result.Hits = hits
+	result.SupplementalIncluded = result.SupplementalIncluded || supplemental
+	return result
+}
+
+const hackeroneAttribution = "HackerOne disclosed report; local reference only"
+
+// mapHackerOneHit projects a supplemental hit into the shared KB citation
+// shape. HackerOne reports have no per-chunk hash, so content hashes stay
+// empty rather than being fabricated.
+func mapHackerOneHit(hit hackerone.Hit, meta hackerone.Meta) kb.Hit {
+	locator := "reports/" + hit.ReportID + ".md"
+	url := hit.URL
+	revision := meta.DatasetCommit
+	attribution := hackeroneAttribution
+	var bounty any
+	if hit.Bounty != nil {
+		bounty = *hit.Bounty
+	}
+	var upvotes any
+	if hit.Upvotes != nil {
+		upvotes = *hit.Upvotes
+	}
+	return kb.Hit{
+		ChunkID:        hackeroneSourceName + ":" + hit.ReportID,
+		SourceName:     hackeroneSourceName,
+		SourceID:       hit.ReportID,
+		Title:          hit.Title,
+		Excerpt:        hit.Excerpt,
+		SourceLocator:  &locator,
+		SourceURL:      &url,
+		SourceRevision: &revision,
+		Attribution:    &attribution,
+		Metadata: map[string]any{
+			"program":      hit.Program,
+			"vuln_type":    hit.VulnType,
+			"severity":     hit.Severity,
+			"weakness":     hit.Weakness,
+			"bounty":       bounty,
+			"upvotes":      upvotes,
+			"disclosed_at": hit.DisclosedAt,
+			"has_body":     hit.HasBody,
+		},
+		BM25: hit.BM25,
+	}
+}
+
+// searchLocalKB is the single local-index search path shared by the MCP tool
+// and the read-only HTTP API. Metadata filters stay available to MCP callers.
+func (t *Tools) searchLocalKB(ctx context.Context, query string, options kb.SearchOptions) (kb.SearchResult, error) {
+	if t == nil || t.kbIndex == nil {
+		return kb.SearchResult{}, ErrKBUnavailable
+	}
+	result, err := t.kbIndex.Search(ctx, query, options)
+	if err != nil {
+		return kb.SearchResult{}, errors.New("KB search failed or its arguments are invalid")
+	}
+	return result, nil
+}
+
 func (t *Tools) searchKB(ctx context.Context, args kbSearchArgs) (map[string]any, error) {
-	if strings.TrimSpace(args.Query) == "" || utf8.RuneCountInString(args.Query) > 4096 {
+	if strings.TrimSpace(args.Query) == "" || utf8.RuneCountInString(args.Query) > maxKBQueryRunes {
 		return nil, errors.New("KB query must contain 1 to 4096 characters")
 	}
 	topK := kb.DefaultSearchTopK
 	if args.TopK != nil {
 		topK = *args.TopK
 	}
-	if topK < 1 || topK > 20 || len(args.SourceNames) > 20 {
+	if topK < 1 || topK > maxKBSearchTopK || len(args.SourceNames) > maxKBSearchSources {
 		return nil, errors.New("KB search limits are outside the supported range")
 	}
 	if args.MinCVSS != nil && (math.IsNaN(*args.MinCVSS) || math.IsInf(*args.MinCVSS, 0) || *args.MinCVSS < 0 || *args.MinCVSS > 10) {
@@ -995,13 +1239,13 @@ func (t *Tools) searchKB(ctx context.Context, args kbSearchArgs) (map[string]any
 		}
 		return output, nil
 	}
-	if t.kbIndex == nil {
-		return nil, errors.New("local KB index is unavailable; configure BB_ASSISTANT_KB_INDEX")
-	}
-	result, err := t.kbIndex.Search(ctx, args.Query, kb.SearchOptions{
+	result, err := t.searchLocalKB(ctx, args.Query, kb.SearchOptions{
 		TopK: topK, SourceNames: args.SourceNames, MinCVSS: args.MinCVSS, Severity: args.Severity,
 		IncludeSupplemental: args.IncludeSupplemental,
 	})
+	if errors.Is(err, ErrKBUnavailable) {
+		return nil, errors.New("local KB index is unavailable; configure BB_ASSISTANT_KB_INDEX")
+	}
 	if err != nil {
 		return nil, errors.New("KB search failed or its arguments are invalid")
 	}
