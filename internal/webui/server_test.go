@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/consultation"
 	"bb-graph-assistant/internal/graphaccess"
 	"bb-graph-assistant/internal/project"
@@ -249,6 +250,29 @@ func TestRuntimeCapabilitiesReportVaultKeyStateWithoutExposingKey(t *testing.T) 
 	}
 	if strings.Contains(response.Body.String(), encoded) {
 		t.Fatal("runtime capabilities response exposed the configured key")
+	}
+}
+
+func TestHealthHandlerReportsLivenessWithoutReadingApplicationData(t *testing.T) {
+	api := &explorerAPIFixture{}
+	handler, err := NewHandler(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/health", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("health response status=%d cache=%q body=%s", response.Code, response.Header().Get("Cache-Control"), response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if payload["status"] != "ok" || payload["version"] != buildinfo.String() {
+		t.Fatalf("health payload=%#v", payload)
+	}
+	if api.direct != 0 || api.full != 0 {
+		t.Fatalf("liveness handler queried graph data: direct=%d full=%d", api.direct, api.full)
 	}
 }
 
@@ -781,7 +805,7 @@ func TestOperationAliasAPIIsProjectScopedAndRequiresAnExistingOperationNode(t *t
 		t.Fatalf("list response status=%d calls=%d body=%s", get.Code, api.operationAliasGetCalls, get.Body.String())
 	}
 
-	body := `{"project_key":"` + projectKey + `","operation_id":"` + operationID + `","expected_version":1,"idempotency_key":"operation-alias-0123456789","alias":"Profile update"}`
+	body := `{"project_key":"` + projectKey + `","operation_id":"` + operationID + `","expected_version":1,"idempotency_key":"test-idem","alias":"Profile update"}`
 	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/consultation/operation-alias", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", "http://127.0.0.1")

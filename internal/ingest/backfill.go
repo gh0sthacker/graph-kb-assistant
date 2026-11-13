@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,7 @@ type BackfillOptions struct {
 	MaxPages     int
 	MaxBodyBytes int
 	Delay        time.Duration
+	Scope        *LiveTailScope
 	OnProgress   func(BackfillProgress)
 }
 
@@ -34,6 +36,7 @@ type BackfillProgress struct {
 	PagesThisRun              int     `json:"pages_this_run"`
 	PageCount                 int64   `json:"page_count"`
 	Stored                    int     `json:"stored"`
+	RequestsExcludedByScope   int     `json:"requests_excluded_by_scope"`
 	Replayed                  int     `json:"replayed"`
 	Revised                   int     `json:"revised"`
 	ProjectionPendingPages    int     `json:"projection_pending_pages"`
@@ -53,6 +56,7 @@ type BackfillResult struct {
 	PagesThisRun              int     `json:"pages_this_run"`
 	PageCount                 int64   `json:"page_count"`
 	Stored                    int     `json:"stored"`
+	RequestsExcludedByScope   int     `json:"requests_excluded_by_scope"`
 	Replayed                  int     `json:"replayed"`
 	Revised                   int     `json:"revised"`
 	ProjectionPendingPages    int     `json:"projection_pending_pages"`
@@ -112,6 +116,10 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		CoverageNote: "Caido provided no stable snapshot token or expected history total to reconcile completeness; the cursor reports enumeration progress only.",
 	}
 	cursor := checkpoint.Cursor
+	seenCursors := make(map[[32]byte]struct{})
+	if cursor != nil {
+		seenCursors[sha256.Sum256([]byte(*cursor))] = struct{}{}
+	}
 	var metadataDuration, detailDuration, pageProcessingDuration time.Duration
 
 	markPartial := func(cause error) (BackfillResult, error) {
@@ -139,6 +147,15 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		if err := validateMetadataPage(metadata, selected, options.PageSize, cursor); err != nil {
 			return markPartial(err)
 		}
+		if metadata.HasMore && metadata.NextCursor != nil {
+			cursorDigest := sha256.Sum256([]byte(*metadata.NextCursor))
+			if _, repeated := seenCursors[cursorDigest]; repeated {
+				return markPartial(errors.New("Caido history pagination repeated a prior cursor"))
+			}
+			seenCursors[cursorDigest] = struct{}{}
+		}
+		scopedMetadata, excluded := filterLiveMetadataPage(metadata, options.Scope)
+		result.RequestsExcludedByScope += excluded
 		if len(metadata.Requests) == 0 {
 			if metadata.HasMore {
 				return markPartial(errors.New("Caido returned an empty advancing history page"))
@@ -154,13 +171,13 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		}
 
 		detailsStarted := time.Now()
-		page, err := source.FetchHistoryPage(selected, metadata, nil, options.MaxBodyBytes)
+		page, err := source.FetchHistoryPage(selected, scopedMetadata, nil, options.MaxBodyBytes)
 		detailDuration += time.Since(detailsStarted)
 		result.DetailDurationMS = durationMilliseconds(detailDuration)
 		if err != nil {
 			return markPartial(err)
 		}
-		if err := validateFetchedPage(page, metadata, selected); err != nil {
+		if err := validateFetchedPage(page, scopedMetadata, selected); err != nil {
 			return markPartial(err)
 		}
 		pageWriteStarted := time.Now()
@@ -183,7 +200,8 @@ func RunBackfill(ctx context.Context, source caido.ReadSource, writer *PageWrite
 		if options.OnProgress != nil {
 			options.OnProgress(BackfillProgress{
 				PagesThisRun: result.PagesThisRun, PageCount: result.PageCount,
-				Stored: result.Stored, Replayed: result.Replayed, Revised: result.Revised,
+				Stored: result.Stored, RequestsExcludedByScope: result.RequestsExcludedByScope,
+				Replayed: result.Replayed, Revised: result.Revised,
 				ProjectionPendingPages: result.ProjectionPendingPages, State: result.State,
 				CursorState: result.CursorState, MetadataDurationMS: result.MetadataDurationMS,
 				DetailDurationMS: result.DetailDurationMS, PageProcessingDurationMS: result.PageProcessingDurationMS,

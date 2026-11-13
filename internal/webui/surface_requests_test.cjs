@@ -1038,7 +1038,7 @@ test("candidate workflow validates selected session citations before saving an e
   assert.equal(candidateRequest.receipt_id, "receipt-1");
   assert.ok(candidateRequest.idempotency_key);
   app.requests[4].resolve({
-    candidate_id: "candidate-1", version: 1, session_version: 6, state: "candidate",
+    candidate_id: "candidate-1", candidate_version: 1, session_version: 6, state: "candidate",
     proposal_id: "proposal-1", receipt_id: "receipt-1",
     citations: [{ evidence_reference_id: verifiedRef }], comparison_ids: [comparisonID],
   });
@@ -1047,6 +1047,7 @@ test("candidate workflow validates selected session citations before saving an e
   assert.match(app.elements.candidateStatus.textContent, /state candidate/);
   const listedCandidate = app.elements.candidateList.children[0].children.map(item => item.textContent).join(" ");
   assert.match(listedCandidate, /State: candidate/);
+  assert.match(listedCandidate, /version 1/);
   assert.match(listedCandidate, new RegExp(verifiedRef));
   assert.match(listedCandidate, new RegExp(comparisonID));
   assert.doesNotMatch(listedCandidate, /verified|finding/i);
@@ -1123,7 +1124,7 @@ test("resuming after an interrupted proposal validates the saved proposal instea
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.requests[2].url.pathname, "/api/consultation/candidate");
   assert.equal(JSON.parse(app.requests[2].body).expected_version, 6);
-  app.requests[2].resolve({ candidate_id: "h".repeat(43), version: 1, session_version: 7, state: "candidate",
+  app.requests[2].resolve({ candidate_id: "h".repeat(43), candidate_version: 1, session_version: 7, state: "candidate",
     proposal_id: proposalID, receipt_id: "g".repeat(43), citations: [{ evidence_reference_id: referenceID }], comparison_ids: [comparisonID] });
   await continuation;
   assert.equal(app.requests.filter(request => request.url.pathname === "/api/consultation/proposal").length, 0);
@@ -1158,7 +1159,7 @@ test("resuming with a matching valid receipt saves its candidate without validat
   assert.equal(candidateRequest.expected_version, 6);
   assert.equal(candidateRequest.proposal_id, proposalID);
   assert.equal(candidateRequest.receipt_id, receiptID);
-  app.requests[1].resolve({ candidate_id: "g".repeat(43), version: 1, session_version: 7, state: "candidate",
+  app.requests[1].resolve({ candidate_id: "g".repeat(43), candidate_version: 1, session_version: 7, state: "candidate",
     proposal_id: proposalID, receipt_id: receiptID, citations: [{ evidence_reference_id: referenceID }], comparison_ids: [] });
   await continuation;
   assert.equal(app.requests.some(request => request.url.pathname === "/api/consultation/validate"), false);

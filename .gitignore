@@ -25,6 +25,8 @@ data/
 /PROJECT-OVERVIEW*.md
 /deploy/*
 !/deploy/graph-kb-assistant.service
+!/deploy/graph-kb-assistant-system.service
+!/deploy/graph-kb-assistant-system.env.example
 !/deploy/neo4j/
 !/deploy/neo4j/compose.yaml
 !/deploy/neo4j/README.md

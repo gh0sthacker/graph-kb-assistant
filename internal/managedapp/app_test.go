@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +18,43 @@ import (
 	"bb-graph-assistant/internal/project"
 	"bb-graph-assistant/internal/projectlock"
 	"bb-graph-assistant/internal/store"
+	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func TestManagedApplicationServesRemoteMCPOnItsHTTPHandler(t *testing.T) {
+	t.Setenv("BB_ASSISTANT_GRAPH_BACKEND", "sqlite")
+	t.Setenv("BB_ASSISTANT_KB_MODELS", "0")
+	options := DefaultOptions()
+	options.DataRoot = t.TempDir()
+	options.KBIndex = filepath.Join(options.DataRoot, "missing-kb.sqlite3")
+
+	handler, closeServices, err := newApplicationHandler(options)
+	if err != nil {
+		t.Fatalf("newApplicationHandler() error = %v", err)
+	}
+	defer closeServices()
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "managed-fixture", Version: "1"}, nil)
+	session, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{
+		Endpoint: httpServer.URL + "/mcp", DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect managed HTTP MCP client: %v", err)
+	}
+	defer session.Close()
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("list managed HTTP MCP tools: %v", err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name == "bb_list_projects" {
+			return
+		}
+	}
+	t.Fatal("managed HTTP handler omitted the MCP endpoint or tool catalog")
+}
 
 type eventRecorder struct {
 	mu     sync.Mutex

@@ -158,6 +158,16 @@ route meaning where policy permits, expose ambiguous grouping, and let the
 analyst assign readable project-local names. An unfamiliar segment must not be
 displayed as a proven dynamic parameter merely because it was masked.
 
+New Go operation records use `route-family-v2`: only known static route words
+and strong identifier shapes (numeric IDs, UUIDs, ObjectIDs, long hex IDs and
+ULIDs) participate in automatic grouping. An unfamiliar or encoded-ambiguous
+segment is left as an endpoint without an operation group and is reported as a
+coverage gap. `route-family-v1` remains readable for stored graph compatibility
+but is not used for new grouping. Even v2 is a heuristic candidate, not proof
+that two routes have the same business semantics; the UI must preserve that
+label. Dynamic slugs outside the strong patterns are intentionally under-grouped
+until an API specification or analyst annotation supplies a verified template.
+
 ### Neo4j representation and query API
 
 Retain assertion nodes for independent provenance, contradiction and proposal
@@ -293,8 +303,9 @@ capabilities.
 
 The operator approved the architecture and this sequence on 2026-10-23.
 Routine implementation, local verification and Git commits follow this plan.
-ChatGPT/Codex Subscription with `gpt-6-luna` was selected on 2026-10-25; KB
-remains deferred.
+ChatGPT/Codex Subscription with `gpt-6-luna` was selected on 2026-10-25.
+The original approval deferred KB expansion; the user's later exact RedAmon KB
+parity request adds that requirement to overall delivery (see Section 11).
 
 | Stage | Deliverable | Acceptance criteria |
 | --- | --- | --- |
@@ -322,6 +333,148 @@ Keep existing evidence recoverable throughout migration. Schema upgrades and
 new grouping projections must have explicit versions, replay rules and a
 rollback path. The approved architecture is being implemented incrementally;
 this document is not a claim that the above services already exist.
+
+### 2026-10-27 implementation note
+
+The Go sync manager now emits a per-project/per-origin cycle receipt and has
+an operator `--once` mode for a bounded preflight. These improve observability
+and operational control but do not create a source snapshot proof: the Caido
+MCP adapter still cannot bind a read to an immutable project snapshot or
+provide an expected history total. The production sync unit remains uninstalled
+on CT108 pending private exact-origin configuration and a real bounded smoke.
+Route grouping has advanced to `route-family-v3`, which preserves static path
+case and declines percent-encoded/unknown segments. It remains a heuristic
+candidate; actor, session, tenant, ownership and causality still require
+evidence-linked analyst context.
+
+## 11. Post-approval scope extension — RedAmon KB parity (2026-10-25)
+
+The user explicitly added exact RedAmon KB parity to this delivery. This
+supersedes the original Section 1/9 statement that KB expansion is deferred for
+the current delivery; it does not change the six core application stages.
+
+The current Graph Assistant manifest targets RedAmon's `full` profile. The
+checked-out RedAmon configuration defaults to `lite`; its active deployed
+profile and exact snapshot are not available in this workspace. Treat `full`
+as the working target, and do not claim parity against the deployed RedAmon
+instance until its active profile and snapshot are identified.
+
+KB parity acceptance requires all of the following:
+
+- The same selected profile, source families, pinned revisions, filters,
+  source records, metadata, normalized content, chunk order, IDs, titles, and
+  text as the identified active RedAmon snapshot. Record per-source counts and
+  content digests; keep generated corpus/index files outside Git.
+- The same embedding input/preprocessing, pinned E5 and BGE model revisions,
+  dimensions, and complete vector coverage. Vector readiness is bound to the
+  exact selected corpus snapshot.
+- A fixed query fixture from that same RedAmon snapshot must return identical
+  ordered chunk IDs and compatible score components within a documented
+  numeric tolerance. Matching model/config constants alone is insufficient;
+  if the current FTS/vector backends diverge, replace or adapt them until the
+  fixture passes rather than weakening the parity criterion.
+- Every source has recorded license/terms evidence and required attribution.
+  ExploitDB is limited to the pinned repository's allowlisted descriptions and
+  metadata CSV; the upstream pinned README and GPLv2 license notice are retained,
+  and PoC/source files are never fetched or copied. This feed is for private
+  self-hosted use only; do not redistribute the assembled corpus without a
+  separate rights review. Both the Go service and Python KB interface must
+  expose the same eligible local snapshot records.
+- A live retrieval check confirms the running application uses that completed
+  snapshot. The result stays `PARTIAL` while any source, vector, runtime, or
+  query-parity item remains incomplete or unverified.
+
+Historical verification (2026-10-25 21:36 EDT): the corrected chunker matched RedAmon's
+`ChunkStrategy` over the original 161,240 source documents. The installed pinned
+`full` snapshot is `ac9d1d2ac0fe0a3e80654180c81ac43f46a77f1e4481a7dc593fdfaed16ee049`:
+seven source families report `done`, with 207,878 documents and 209,036 chunks.
+The active Graph Assistant service selects this index through
+`BB_ASSISTANT_KB_INDEX`; SQLite `quick_check` previously returned `ok`. The
+the latest provided deployment stats on 2026-10-26 report 38,888 of 209,026
+content vectors; `vector_ready` is false. The E5 embed service is currently
+inactive/disabled, and no worker is active on Kali. All seven configured source
+families, including the metadata-only ExploitDB feed, are installed, but their
+counts and hashes have not been compared with the active RedAmon deployment.
+The RedAmon deployment profile, exact corpus snapshot, and same-query reference
+fixture are still unavailable in this workspace. Retrieval currently uses
+SQLite FTS5/BM25 and a SQLite vector store, while RedAmon uses Neo4j Lucene and
+FAISS. Same-snapshot content equality and ordered result/score parity therefore
+remain unverified; delivery is `PARTIAL`, not identical.
+The `bb-assistant-kb rechunk` command is implemented to refresh the installed
+index from already stored source documents, with no source fetch. It uses
+bounded, resumable transactions and a durable maintenance marker; Python and
+Go readers refuse to serve a partially refreshed index. Unchanged
+content-bound chunk identities keep their vectors, obsolete vectors are
+removed, and changed chunks remain pending in the resumable embedding process.
+Synthetic tests cover interruption-state reporting, reader fail-closed behavior,
+source-span validation, FTS title replacement, vector reuse, and readiness. The
+rechunk was applied to the installed private index; its current partial vector
+state and remaining parity gaps are recorded in the verification immediately
+above and in `docs/PROJECT-STATUS.md`.
+
+### Candidate KB update — 2026-10-26 21:13 UTC
+
+The preceding counts describe the active index and earlier checks. Commits
+`2c86ced` through `5eb90f4` are now pushed, CI-passed, and the latest tested
+Nuclei canonicalizer is deployed to CT108. A separate full-profile candidate
+was re-chunked to 207,878 source documents and 215,382 content chunks. It has
+38,775 E5 vectors and 176,607 chunks without vectors; `vector_ready=false`.
+The active index remains unchanged at 209,036 stored chunks, 209,026 content
+chunks, and 38,888 vectors. Candidate source-manifest freshness and candidate
+`quick_check` are still unresolved, so no promotion or exact RedAmon parity is
+claimed.
+
+The manifest-hash difference was traced to one change between stored-manifest
+revision `274c622` and current `sources.yaml`: a stricter clarification of the
+ExploitDB terms-basis wording. Source families, URLs, revisions, and filters
+are unchanged in that diff. The candidate retains the historical hash; it is
+not rewritten manually.
+
+The CT108 candidate-only embedding service is active and enabled, but its
+thermal gate is holding work: at the latest CT-visible reading the sensor was
+82 C and the process was sleeping at 0.0% CPU. It must observe the configured
+continuous ten-minute interval below 70 C before loading the model/resuming.
+VM112 remains paused. This current candidate state supersedes earlier notes
+that described the candidate worker as inactive or disabled.
+
+A CT-visible sample at 2026-10-26 21:16 UTC read 93 C; the candidate process
+remained sleeping at 0.0% CPU and the thermal gate continued to hold.
+
+At a later PVE check, VM112 was found running; its KVM process's `ps` value
+was 58.2% lifetime-average CPU, not an instantaneous measurement. Following
+the user's existing instruction to pause VM112 temporarily, it was suspended
+and `qm status 112` confirmed `paused`. Subsequent CT-visible temperatures
+were 87 C and 82 C. Cooling below 70 C for ten continuous minutes is still
+required before vector work resumes.
+
+At 21:22 UTC the CT sensor read 84 C while VM112 remained paused. PVE `top`
+showed 93.2% CPU idle, 940 MiB free RAM, and 8,182/8,192 MiB swap used, so
+the separate Neo4j parity clone was deferred.
+
+At 21:28 UTC the CT-visible sensor read 85 C with VM112 still paused; the
+ten-minute cool dwell remains unestablished.
+
+### Embedding unit destination correction — 2026-10-26 21:36 UTC
+
+The latest direct CT108 inspection supersedes the earlier claim that the
+installed embedding unit was candidate-only and active. It is currently
+inactive and disabled (`MainPID=0`), and its expanded `ExecStart` explicitly
+targets the live `kb/index.sqlite3`. The full-profile candidate path exists,
+but this unit must not be started as installed. The local CLI now rejects
+embedding any path outside an existing `kb/candidates/<id>/index.sqlite3`,
+and the deployment unit reads the destination from a protected environment
+file. That correction still needs deployment; no embedding was running during
+the 21:36 UTC check. The CT108 package sensor read 75 C, above the 70 C stop
+limit, and VM112 was confirmed paused.
+
+The `a1eff94` correction was subsequently deployed to CT108 with matching file
+hashes. A root-owned environment file points the unit at the isolated full
+candidate. Its runtime guard rejected the live-index path before opening it.
+The candidate worker was then started manually and enabled for boot to resume
+the gated job after a CT restart; at 21:41 UTC it remained active at 0.2% CPU
+and 0.4% memory while the temperature
+read 77 C. Candidate SQLite counts were unchanged at 215,382 chunks and 38,775
+vectors, so the thermal gate had not begun embedding. VM112 remains paused.
 
 ## Review scope and limits
 

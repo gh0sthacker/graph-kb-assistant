@@ -24,7 +24,7 @@ from .redamon_sources import SourceBatch, SourceRecord, SourceRequest
 
 
 _API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-_PAGE_SIZE = 500
+_PAGE_SIZE = 2000
 _MAX_DATE_SPAN = timedelta(days=120) - timedelta(milliseconds=1)
 _MAX_PAGE_BYTES = 64 * 1024 * 1024
 _MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
@@ -38,6 +38,17 @@ _CVE_TERMS_URL = "https://www.cve.org/legal/termsofuse"
 PageFetcher = Callable[[Mapping[str, str]], bytes]
 Sleeper = Callable[[float], None]
 MonotonicClock = Callable[[], float]
+
+
+class NVDProviderError(ValueError):
+    """A fixed, non-sensitive NVD failure with a reportable coverage code."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        code = "_".join(re.findall(r"[a-z0-9]+", message.casefold()))
+        if code.startswith("nvd_"):
+            code = code[4:]
+        self.coverage_code = f"nvd_{code[:70]}"
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -61,32 +72,32 @@ def _fetch_page(params: Mapping[str, str]) -> bytes:
             with response:
                 final_url = response.geturl()
                 if final_url != url or response.headers.get_content_type().casefold() != "application/json":
-                    raise ValueError("NVD API returned an unexpected URL or content type")
+                    raise NVDProviderError("NVD API returned an unexpected URL or content type")
                 body = response.read(_MAX_PAGE_BYTES + 1)
             if len(body) > _MAX_PAGE_BYTES:
-                raise ValueError("NVD API page exceeds the configured byte limit")
+                raise NVDProviderError("NVD API page exceeds the configured byte limit")
             return body
         except HTTPError as exc:
             if exc.code in {301, 302, 303, 307, 308}:
-                raise ValueError("NVD API attempted an unexpected redirect") from None
+                raise NVDProviderError("NVD API attempted an unexpected redirect") from None
             if exc.code not in retryable_statuses or attempt + 1 >= _FETCH_ATTEMPTS:
-                raise ValueError(f"NVD API returned HTTP {exc.code}") from None
+                raise NVDProviderError(f"NVD API returned HTTP {exc.code}") from None
             last_transient_error = f"HTTP {exc.code}"
         except (TimeoutError, OSError):
             if attempt + 1 >= _FETCH_ATTEMPTS:
-                raise ValueError("NVD API response timed out or the connection failed") from None
+                raise NVDProviderError("NVD API response timed out or the connection failed") from None
             last_transient_error = "timeout_or_connection_error"
 
         time.sleep(_NO_KEY_MIN_INTERVAL_SECONDS * (attempt + 1))
 
-    raise ValueError(f"NVD API retries exhausted ({last_transient_error or 'unknown'})")
+    raise NVDProviderError(f"NVD API retries exhausted ({last_transient_error or 'unknown'})")
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("NVD JSON contains a duplicate object key")
+            raise NVDProviderError("NVD JSON contains a duplicate object key")
         result[key] = value
     return result
 
@@ -95,32 +106,32 @@ def _parse_page(raw: bytes, *, expected_start: int) -> tuple[dict[str, Any], lis
     try:
         payload = json.loads(raw.decode("utf-8", errors="strict"), object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("NVD API page is not valid UTF-8 JSON") from exc
+        raise NVDProviderError("NVD API page is not valid UTF-8 JSON") from exc
     if not isinstance(payload, dict):
-        raise ValueError("NVD API response is not a JSON object")
+        raise NVDProviderError("NVD API response is not a JSON object")
     if payload.get("format") != "NVD_CVE":
-        raise ValueError("NVD API response format is not NVD_CVE")
+        raise NVDProviderError("NVD API response format is not NVD_CVE")
     if payload.get("version") not in {None, "2.0"}:
-        raise ValueError("NVD API response version is unsupported")
+        raise NVDProviderError("NVD API response version is unsupported")
 
     total = payload.get("totalResults")
     start = payload.get("startIndex")
     count = payload.get("resultsPerPage")
     vulnerabilities = payload.get("vulnerabilities")
     if type(total) is not int or total < 0:
-        raise ValueError("NVD API totalResults is missing or invalid")
+        raise NVDProviderError("NVD API totalResults is missing or invalid")
     if type(start) is not int or start != expected_start:
-        raise ValueError("NVD API startIndex does not match the requested page")
+        raise NVDProviderError("NVD API startIndex does not match the requested page")
     if type(count) is not int or count < 0:
-        raise ValueError("NVD API resultsPerPage is missing or invalid")
+        raise NVDProviderError("NVD API resultsPerPage is missing or invalid")
     if not isinstance(vulnerabilities, list) or len(vulnerabilities) != count:
-        raise ValueError("NVD API page count does not match vulnerabilities")
+        raise NVDProviderError("NVD API page count does not match vulnerabilities")
     if start + count > total:
-        raise ValueError("NVD API page extends beyond totalResults")
+        raise NVDProviderError("NVD API page extends beyond totalResults")
     if total and not count:
-        raise ValueError("NVD API returned an empty page before totalResults")
+        raise NVDProviderError("NVD API returned an empty page before totalResults")
     if not all(isinstance(item, Mapping) for item in vulnerabilities):
-        raise ValueError("NVD API vulnerabilities contains a non-object record")
+        raise NVDProviderError("NVD API vulnerabilities contains a non-object record")
     return payload, vulnerabilities
 
 
@@ -128,10 +139,70 @@ def _millisecond_iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _redamon_search_text(vulnerability: Mapping[str, Any]) -> tuple[str, dict[str, object]]:
+    """Match the pinned RedAmon NVD normalization and ``to_chunks`` text."""
+    cve = vulnerability.get("cve")
+    if not isinstance(cve, Mapping):
+        raise NVDProviderError("NVD vulnerability record has no cve object")
+    descriptions = cve.get("descriptions", [])
+    description = ""
+    if isinstance(descriptions, list):
+        for item in descriptions:
+            if isinstance(item, Mapping) and item.get("lang") == "en":
+                description = item.get("value", "") if isinstance(item.get("value", ""), str) else ""
+                break
+
+    cvss_score: object = None
+    severity = ""
+    metrics = cve.get("metrics", {})
+    if isinstance(metrics, Mapping):
+        for metric_name in ("cvssMetricV31", "cvssMetricV30"):
+            rows = metrics.get(metric_name, [])
+            if rows:
+                first = rows[0] if isinstance(rows, list) else None
+                cvss = first.get("cvssData", {}) if isinstance(first, Mapping) else {}
+                if isinstance(cvss, Mapping):
+                    cvss_score = cvss.get("baseScore")
+                    raw_severity = cvss.get("baseSeverity", "")
+                    severity = raw_severity.lower() if isinstance(raw_severity, str) else ""
+                break
+
+    products: list[str] = []
+    configurations = cve.get("configurations", [])
+    if isinstance(configurations, list):
+        for config in configurations:
+            nodes = config.get("nodes", []) if isinstance(config, Mapping) else []
+            if not isinstance(nodes, list):
+                continue
+            for node in nodes:
+                matches = node.get("cpeMatch", []) if isinstance(node, Mapping) else []
+                if not isinstance(matches, list):
+                    continue
+                for match in matches:
+                    criteria = match.get("criteria", "") if isinstance(match, Mapping) else ""
+                    if isinstance(criteria, str) and criteria:
+                        products.append(criteria)
+
+    content = description
+    if cvss_score is not None:
+        content += f"\nCVSS: {cvss_score} ({severity})"
+    if products:
+        content += f"\nAffected: {', '.join(products[:10])}"
+    published = cve.get("published", "")
+    published_date = published[:10] if isinstance(published, str) and published else None
+    metadata: dict[str, object] = {
+        "cvss_score": cvss_score,
+        "severity": severity,
+        "affected_products": ", ".join(products[:10]),
+        "published_date": published_date,
+    }
+    return content, metadata
+
+
 def _date_windows(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
     """Return non-overlapping millisecond windows below NVD's 120-day limit."""
     if start.tzinfo is None or end.tzinfo is None or start > end:
-        raise ValueError("NVD date window must be ordered and timezone-aware")
+        raise NVDProviderError("NVD date window must be ordered and timezone-aware")
     windows: list[tuple[datetime, datetime]] = []
     current = start
     while current <= end:
@@ -167,7 +238,7 @@ class RedAmonNVDProvider:
             or not math.isfinite(min_interval_seconds)
             or min_interval_seconds < 0
         ):
-            raise ValueError("min_interval_seconds must be a non-negative number")
+            raise NVDProviderError("min_interval_seconds must be a non-negative number")
         self._fetcher = fetcher
         self._sleeper = sleeper
         self._monotonic = monotonic
@@ -175,11 +246,11 @@ class RedAmonNVDProvider:
 
     def __call__(self, request: SourceRequest) -> SourceBatch:
         if request.source_name != "nvd":
-            raise ValueError("provider only supports the nvd source")
+            raise NVDProviderError("provider only supports the nvd source")
         if request.source_spec.get("url") != _API_BASE:
-            raise ValueError("NVD endpoint differs from the audited source")
+            raise NVDProviderError("NVD endpoint differs from the audited source")
         if request.source_spec.get("kind") != "paginated_api":
-            raise ValueError("NVD source is not declared as a paginated API")
+            raise NVDProviderError("NVD source is not declared as a paginated API")
         self._require_resolved_source_terms(request.source_spec)
 
         filters = dict(request.filters)
@@ -187,11 +258,11 @@ class RedAmonNVDProvider:
         min_cvss = filters.get("nvd_min_cvss")
         lookback_days = filters.get("nvd_lookback_days")
         if profile != "full":
-            raise ValueError("NVD provider requires the full RedAmon profile")
+            raise NVDProviderError("NVD provider requires the full RedAmon profile")
         if isinstance(min_cvss, bool) or not isinstance(min_cvss, (int, float)) or float(min_cvss) != 0.0:
-            raise ValueError("NVD full profile must not apply a positive CVSS cutoff")
+            raise NVDProviderError("NVD full profile must not apply a positive CVSS cutoff")
         if type(lookback_days) is not int or lookback_days < 1:
-            raise ValueError("NVD lookback window must be a positive integer")
+            raise NVDProviderError("NVD lookback window must be a positive integer")
 
         fetched_at = datetime.now(timezone.utc)
         fetched_at = fetched_at.replace(microsecond=(fetched_at.microsecond // 1000) * 1000)
@@ -215,12 +286,12 @@ class RedAmonNVDProvider:
             raw = self._fetcher(params)
             last_call_at = self._monotonic()
             if not isinstance(raw, bytes) or not raw:
-                raise ValueError("NVD API returned an empty or non-byte page")
+                raise NVDProviderError("NVD API returned an empty or non-byte page")
             if len(raw) > _MAX_PAGE_BYTES:
-                raise ValueError("NVD API page exceeds the configured byte limit")
+                raise NVDProviderError("NVD API page exceeds the configured byte limit")
             artifacts_size += len(raw)
             if artifacts_size > _MAX_TOTAL_BYTES:
-                raise ValueError("NVD response set exceeds the configured total byte limit")
+                raise NVDProviderError("NVD response set exceeds the configured total byte limit")
             encoded_params = json.dumps(dict(params), sort_keys=True, separators=(",", ":")).encode()
             response_digest.update(len(raw).to_bytes(8, "big"))
             response_digest.update(raw)
@@ -249,27 +320,27 @@ class RedAmonNVDProvider:
                     window_total = total
                     expected_count += total
                 elif window_total != total:
-                    raise ValueError("NVD totalResults changed while paging a date window")
+                    raise NVDProviderError("NVD totalResults changed while paging a date window")
                 if payload["resultsPerPage"] > _PAGE_SIZE:
-                    raise ValueError("NVD API returned more records than the requested page size")
+                    raise NVDProviderError("NVD API returned more records than the requested page size")
 
                 page_sha256 = hashlib.sha256(raw).hexdigest()
                 for position, vulnerability in enumerate(vulnerabilities):
                     cve = vulnerability.get("cve")
                     if not isinstance(cve, Mapping):
-                        raise ValueError("NVD vulnerability record has no cve object")
+                        raise NVDProviderError("NVD vulnerability record has no cve object")
                     cve_id = cve.get("id")
                     published = cve.get("published")
                     if not isinstance(cve_id, str) or not _CVE_ID.fullmatch(cve_id):
-                        raise ValueError("NVD vulnerability record has an invalid CVE ID")
+                        raise NVDProviderError("NVD vulnerability record has an invalid CVE ID")
                     if cve_id in seen_ids:
-                        raise ValueError("NVD pagination returned a duplicate CVE ID")
+                        raise NVDProviderError("NVD pagination returned a duplicate CVE ID")
                     if not isinstance(published, str):
-                        raise ValueError("NVD CVE record has no publication timestamp")
+                        raise NVDProviderError("NVD CVE record has no publication timestamp")
                     try:
                         published_at = datetime.fromisoformat(published.replace("Z", "+00:00"))
                     except ValueError as exc:
-                        raise ValueError("NVD CVE publication timestamp is invalid") from exc
+                        raise NVDProviderError("NVD CVE publication timestamp is invalid") from exc
                     # NVD's live JSON currently emits some ISO date-time fields
                     # without an explicit offset. Its publication-date API
                     # filters are UTC, so interpret those naive values as UTC;
@@ -279,7 +350,7 @@ class RedAmonNVDProvider:
                     else:
                         published_at = published_at.astimezone(timezone.utc)
                     if not range_start <= published_at <= fetched_at:
-                        raise ValueError("NVD CVE publication timestamp is outside the requested window")
+                        raise NVDProviderError("NVD CVE publication timestamp is outside the requested window")
                     seen_ids.add(cve_id)
                     pending_records.append((
                         vulnerability,
@@ -294,10 +365,10 @@ class RedAmonNVDProvider:
                 if start_index >= window_total:
                     break
                 if not vulnerabilities:
-                    raise ValueError("NVD pagination stopped before the advertised total")
+                    raise NVDProviderError("NVD pagination stopped before the advertised total")
 
         if fetched_count != expected_count or len(seen_ids) != expected_count:
-            raise ValueError("NVD fetched CVE count does not match reconciled API totals")
+            raise NVDProviderError("NVD fetched CVE count does not match reconciled API totals")
 
         response_sha256 = response_digest.hexdigest()
         artifact_sha256 = artifact_digest.hexdigest()
@@ -307,6 +378,7 @@ class RedAmonNVDProvider:
         for vulnerability, win_start, win_end, page_start, position, page_hash in pending_records:
             cve = vulnerability["cve"]
             cve_id = str(cve["id"])
+            search_text, normalized_metadata = _redamon_search_text(vulnerability)
             records.append(SourceRecord(
                 source_id=cve_id,
                 title=cve_id,
@@ -329,7 +401,9 @@ class RedAmonNVDProvider:
                     "page_start_index": page_start,
                     "page_record_index": position,
                     "page_sha256": page_hash,
+                    **normalized_metadata,
                 },
+                search_text=search_text,
             ))
 
         attribution = str(request.source_spec.get("attribution") or "NIST National Vulnerability Database")
@@ -411,26 +485,26 @@ class RedAmonNVDProvider:
     def _require_resolved_source_terms(spec: Mapping[str, object]) -> None:
         status = spec.get("license_status")
         if status not in _ELIGIBLE_LICENSE_STATUSES:
-            raise ValueError("NVD license and attribution review is not complete")
+            raise NVDProviderError("NVD license and attribution review is not complete")
         if spec.get("embedded_content_review") != "complete":
-            raise ValueError("NVD embedded-content review is not complete")
+            raise NVDProviderError("NVD embedded-content review is not complete")
         if status == "terms_confirmed_with_required_notices":
             if spec.get("cve_terms_evidence") != _CVE_TERMS_URL:
-                raise ValueError("NVD CVE Program terms evidence is missing or unexpected")
+                raise NVDProviderError("NVD CVE Program terms evidence is missing or unexpected")
             designation = spec.get("cve_copyright_designation")
             if not isinstance(designation, str) or "The MITRE Corporation" not in designation:
-                raise ValueError("NVD CVE copyright designation is missing")
+                raise NVDProviderError("NVD CVE copyright designation is missing")
             reviewed_at = spec.get("cve_terms_reviewed_at")
             try:
                 reviewed_date = datetime.fromisoformat(str(reviewed_at)).date()
             except ValueError:
-                raise ValueError("NVD CVE terms review date is invalid") from None
+                raise NVDProviderError("NVD CVE terms review date is invalid") from None
             current_date = datetime.now(timezone.utc).date()
             if reviewed_date > current_date or (current_date - reviewed_date).days > 365:
-                raise ValueError("NVD CVE terms review is stale")
+                raise NVDProviderError("NVD CVE terms review is stale")
             if str(current_date.year) not in designation or reviewed_date.year != current_date.year:
-                raise ValueError("NVD CVE copyright designation must be rechecked for the current year")
+                raise NVDProviderError("NVD CVE copyright designation must be rechecked for the current year")
             if not isinstance(spec.get("nvd_citation"), str) or "10.18434/M3436" not in spec["nvd_citation"]:
-                raise ValueError("NVD dataset citation is missing")
+                raise NVDProviderError("NVD dataset citation is missing")
         if not spec.get("license_id") or not spec.get("license_evidence") or not spec.get("attribution"):
-            raise ValueError("NVD license evidence or attribution is incomplete")
+            raise NVDProviderError("NVD license evidence or attribution is incomplete")

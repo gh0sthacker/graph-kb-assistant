@@ -401,6 +401,35 @@ func TestConsultationOperatorReviewUsesRealHTTPAndEncryptedEvidence(t *testing.T
 		strings.Contains(resumeResponse.Body.String(), "operator-review-secret") {
 		t.Fatalf("accepted session did not resume with redacted exact evidence: %#v", resumed)
 	}
+
+	// The browser permits saving a candidate without attaching a consultation
+	// comparison. Its empty comparison list must survive SQLite storage and a
+	// session reload so citation validation can proceed.
+	withoutComparison := consultation.CandidateProposal{
+		Title: "Unconfirmed synthetic observation", Summary: "The selected synthetic captures differ.",
+		Rationale: "This record has evidence citations but no attached comparison.",
+		Impact:    "Unknown; no security impact was demonstrated.", Alternatives: []string{"Expected application behavior."},
+		NextChecks: []string{"Repeat only within an authorized test scope."}, Limitations: []string{"Synthetic fixture only."},
+	}
+	noComparisonProposal, err := consultations.RecordProposal(ctx, consultation.RecordProposalRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: resumed.Version,
+		IdempotencyKey: "operator_http_proposal_no_compare_0001", Proposal: withoutComparison,
+		EvidenceReferenceIDs: []string{created.References[0].ID}, ComparisonIDs: []string{},
+	})
+	if err != nil || len(noComparisonProposal.ComparisonIDs) != 0 {
+		t.Fatalf("record proposal without comparison: %#v err=%v", noComparisonProposal, err)
+	}
+	noComparisonResume, err := consultations.Resume(ctx, projectKey, created.ID)
+	if err != nil || noComparisonResume.Version != noComparisonProposal.SessionVersion || len(noComparisonResume.Proposals) != 3 {
+		t.Fatalf("resume proposal without comparison: version=%d proposals=%d err=%v", noComparisonResume.Version, len(noComparisonResume.Proposals), err)
+	}
+	noComparisonReceipt, err := consultations.ValidateProposal(ctx, consultation.ValidateProposalRequest{
+		ProjectKey: projectKey, SessionID: created.ID, ExpectedVersion: noComparisonResume.Version,
+		IdempotencyKey: "operator_http_validate_no_compare_0001", ProposalID: noComparisonProposal.ID,
+	})
+	if err != nil || noComparisonReceipt.Status != consultation.ValidationReferencesValid || len(noComparisonReceipt.ComparisonIDs) != 0 {
+		t.Fatalf("validate proposal without comparison: %#v err=%v", noComparisonReceipt, err)
+	}
 }
 
 func serveLocalJSON(handler http.Handler, method, target string, body []byte) *httptest.ResponseRecorder {

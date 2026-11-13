@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/buildinfo"
 	"bb-graph-assistant/internal/caido"
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
@@ -33,8 +34,6 @@ import (
 	"bb-graph-assistant/internal/store"
 	"bb-graph-assistant/internal/webui"
 )
-
-const version = "0.1.0-go-dev"
 
 const (
 	maxCaidoReconcilePages    = 10000
@@ -109,13 +108,13 @@ func writeCaidoImportProgress(output io.Writer, progress ingest.BackfillProgress
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail>")
+		return errors.New("usage: bb-assistant <version|status|db-check|project-audit|project-backup|project-restore|neo4j-check|neo4j-backfill|neo4j-sync|projection-worker|projection-reconcile|projection-replay|graph-operation-backfill-preview|graph-operation-backfill-apply|graph-navigation-backfill-preview|graph-navigation-backfill-apply|caido-reconcile|kb-validate|kb-search|mcp-server|mcp-tools|web-ui|serve|projects|caido-register|search|graph-slice|graph-import|caido-import|caido-tail|caido-sync>")
 	}
 	switch args[0] {
 	case "serve":
 		return serveApplication(args[1:])
 	case "version":
-		fmt.Println(version)
+		fmt.Println(buildinfo.String())
 		return nil
 	case "status":
 		return runtimeStatus(args[1:])
@@ -137,6 +136,8 @@ func run(args []string) error {
 		return runProjectionWorker(args[1:])
 	case "projection-reconcile":
 		return reconcileProjectionQueue(args[1:])
+	case "projection-replay":
+		return replayDeadLetterProjectionJobs(args[1:])
 	case "graph-operation-backfill-preview":
 		return previewOperationBackfill(args[1:])
 	case "graph-operation-backfill-apply":
@@ -171,6 +172,8 @@ func run(args []string) error {
 		return importCaidoHistory(args[1:])
 	case "caido-tail":
 		return tailCaidoHistory(args[1:])
+	case "caido-sync":
+		return syncCaidoProjects(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -712,6 +715,175 @@ func reconcileProjectionQueue(args []string) error {
 	}
 	if storeCloseErr != nil {
 		return errors.New("project store could not be closed after reconciliation")
+	}
+	return nil
+}
+
+type projectionReplayJob struct {
+	JobID         string `json:"job_id"`
+	RevisionID    string `json:"revision_id"`
+	State         string `json:"state"`
+	AttemptCount  int    `json:"attempt_count"`
+	LastErrorCode string `json:"last_error_code,omitempty"`
+	PayloadSHA256 string `json:"payload_sha256"`
+}
+
+type projectionReplayOutput struct {
+	ProjectKey    string                          `json:"project_key"`
+	DryRun        bool                            `json:"dry_run"`
+	PendingBefore int                             `json:"pending_before"`
+	LeasedBefore  int                             `json:"leased_before"`
+	Jobs          []projectionReplayJob           `json:"jobs"`
+	WorkerResults []ingest.ProjectionWorkerResult `json:"worker_results,omitempty"`
+}
+
+// replayDeadLetterProjectionJobs replays only explicitly named, validated
+// dead-letter jobs. A dry run is the default. Apply holds the project
+// maintenance lease across queue reactivation and one bounded worker pass.
+func replayDeadLetterProjectionJobs(args []string) error {
+	flags := flag.NewFlagSet("projection-replay", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	var selectedKeys, revisionIDs stringListFlag
+	flags.Var(&selectedKeys, "project-key", "registered project key (exactly one required)")
+	flags.Var(&revisionIDs, "revision-id", "dead-letter revision ID to replay (repeatable; 1-10 required)")
+	root := flags.String("data-root", "", "private assistant data root")
+	apply := flags.Bool("apply", false, "requeue the named dead letters and run one bounded projection attempt")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || len(selectedKeys) != 1 || !validProjectKey(selectedKeys[0]) || len(revisionIDs) < 1 || len(revisionIDs) > 10 {
+		return errors.New("usage: bb-assistant projection-replay --project-key <sha256> --revision-id <sha256> [--revision-id <sha256> ...] [--apply] [--data-root path]")
+	}
+	seen := make(map[string]struct{}, len(revisionIDs))
+	for _, revisionID := range revisionIDs {
+		if !validProjectKey(revisionID) {
+			return errors.New("projection replay revision ID is invalid")
+		}
+		if _, duplicate := seen[revisionID]; duplicate {
+			return errors.New("projection replay revision IDs must be unique")
+		}
+		seen[revisionID] = struct{}{}
+	}
+	if *apply && graphaccess.ConfiguredBackend() != "neo4j" {
+		return errors.New("projection replay apply requires the Neo4j graph backend")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	refs, err := project.LoadProjectRefsReadOnly(*root)
+	if err != nil {
+		return err
+	}
+	var selected *project.CaidoProjectRef
+	for _, ref := range refs {
+		key, keyErr := ref.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if key == selectedKeys[0] {
+			copyRef := ref
+			selected = &copyRef
+			break
+		}
+	}
+	if selected == nil {
+		return errors.New("selected project is not in the local project registry")
+	}
+	projectDirectory, err := store.ProjectDirectory(*selected, *root)
+	if err != nil {
+		return err
+	}
+	maintenance, err := projectlock.Acquire(ctx, projectDirectory)
+	if err != nil {
+		return err
+	}
+	defer maintenance.Close()
+	selectedStore, err := store.OpenProjectReadOnlyUnderMaintenance(ctx, *selected, *root, maintenance)
+	if err != nil {
+		return err
+	}
+	output := projectionReplayOutput{
+		ProjectKey: selectedKeys[0], DryRun: !*apply,
+		Jobs: make([]projectionReplayJob, 0, len(revisionIDs)),
+	}
+	attemptCount := -1
+	for _, revisionID := range revisionIDs {
+		job, jobErr := behaviorgraph.ProjectionJobByRevision(ctx, selectedStore.Database.DB(), selectedStore.ProjectKey, revisionID)
+		if jobErr != nil {
+			_ = selectedStore.Close()
+			return errors.New("named projection job could not be validated")
+		}
+		if job.State != "dead_letter" || job.AttemptCount < 1 || job.AttemptCount >= 100 {
+			_ = selectedStore.Close()
+			return errors.New("every named projection job must be a replayable dead letter")
+		}
+		if attemptCount >= 0 && attemptCount != job.AttemptCount {
+			_ = selectedStore.Close()
+			return errors.New("named dead-letter jobs must have the same attempt count for a single bounded replay")
+		}
+		attemptCount = job.AttemptCount
+		entry := projectionReplayJob{
+			JobID: job.JobID, RevisionID: job.RevisionID, State: job.State,
+			AttemptCount: job.AttemptCount, PayloadSHA256: job.PayloadSHA256,
+		}
+		if job.LastErrorCode.Valid {
+			entry.LastErrorCode = job.LastErrorCode.String
+		}
+		output.Jobs = append(output.Jobs, entry)
+	}
+	if err := selectedStore.Database.DB().QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END),0)
+		FROM projection_jobs`).Scan(&output.PendingBefore, &output.LeasedBefore); err != nil {
+		_ = selectedStore.Close()
+		return errors.New("projection queue state could not be inspected")
+	}
+	if err := selectedStore.Close(); err != nil {
+		return errors.New("read-only project store could not be closed")
+	}
+	if *apply {
+		if output.PendingBefore != 0 || output.LeasedBefore != 0 {
+			return errors.New("projection replay apply requires no unrelated pending or leased jobs")
+		}
+		selectedStore, err = store.OpenProjectForWrite(ctx, *selected, *root)
+		if err != nil {
+			return err
+		}
+		tx, txErr := selectedStore.Database.DB().BeginTx(ctx, nil)
+		if txErr != nil {
+			_ = selectedStore.Close()
+			return errors.New("projection replay transaction could not be started")
+		}
+		queuedAt := time.Now().UTC()
+		for _, job := range output.Jobs {
+			if txErr = behaviorgraph.RequeueDeadLetterProjectionJob(ctx, tx, selectedStore.ProjectKey,
+				job.RevisionID, job.PayloadSHA256, queuedAt); txErr != nil {
+				break
+			}
+		}
+		if txErr != nil {
+			_ = tx.Rollback()
+			_ = selectedStore.Close()
+			return errors.New("named dead-letter jobs could not be requeued atomically")
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			_ = selectedStore.Close()
+			return errors.New("projection replay queue update could not be committed")
+		}
+		results, workerErr := ingest.NewProjectionWorkerRunner().RunBatch(ctx, selectedStore, maintenance,
+			ingest.ProjectionWorkerOptions{LeaseDuration: 10 * time.Minute, MaxAttempts: attemptCount + 1},
+			len(revisionIDs), nil)
+		closeErr := selectedStore.Close()
+		if workerErr != nil {
+			return errors.Join(errors.New("bounded projection replay worker failed"), workerErr, closeErr)
+		}
+		if closeErr != nil {
+			return errors.New("project store could not be closed after projection replay")
+		}
+		output.DryRun = false
+		output.WorkerResults = results
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(output); err != nil {
+		return errors.New("projection replay result could not be written")
 	}
 	return nil
 }
@@ -1754,6 +1926,9 @@ func searchKB(args []string) error {
 		return err
 	}
 	defer index.Close()
+	if err := index.ConfigureLexicalEngine(strings.TrimSpace(os.Getenv("BB_ASSISTANT_KB_LEXICAL_ENGINE"))); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	result, err := index.Search(ctx, *query, kb.SearchOptions{TopK: *topK, SourceNames: sourceNames})

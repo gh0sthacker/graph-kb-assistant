@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	behaviorgraph "bb-graph-assistant/internal/graph"
 	"bb-graph-assistant/internal/graphaccess"
@@ -141,10 +142,38 @@ func (e *QueryError) Unwrap() error { return e.Err }
 
 type Service struct {
 	dataRoot    string
+	projectsMu  sync.RWMutex
 	projects    map[string]project.CaidoProjectRef
 	graph       *graphaccess.Service
 	fullCursors *fullCursorStore
 	surfaceKey  []byte
+}
+
+// SetProjectRefs replaces the catalog snapshot used to authorize project reads.
+// Long-running web/MCP processes call it after the filesystem registry changes.
+func (s *Service) SetProjectRefs(refs []project.CaidoProjectRef) error {
+	projects := make(map[string]project.CaidoProjectRef, len(refs))
+	for _, ref := range refs {
+		key, err := ref.StorageKey()
+		if err != nil {
+			return errors.New("project catalog contains an invalid identity")
+		}
+		if _, exists := projects[key]; exists {
+			return errors.New("project catalog contains duplicate identities")
+		}
+		projects[key] = ref
+	}
+	s.projectsMu.Lock()
+	s.projects = projects
+	s.projectsMu.Unlock()
+	return nil
+}
+
+func (s *Service) projectRef(key string) (project.CaidoProjectRef, bool) {
+	s.projectsMu.RLock()
+	ref, ok := s.projects[key]
+	s.projectsMu.RUnlock()
+	return ref, ok
 }
 
 var (
@@ -221,7 +250,7 @@ func (s *Service) Graph(ctx context.Context, request GraphRequest) (GraphResult,
 	if err != nil {
 		return GraphResult{}, queryError(ErrorInvalidInput, "graph context is invalid or exceeds its limit", err)
 	}
-	ref, ok := s.projects[request.ProjectKey]
+	ref, ok := s.projectRef(request.ProjectKey)
 	if !ok {
 		return GraphResult{}, queryError(ErrorProjectNotRegistered, "selected project is not in the local project catalog", nil)
 	}

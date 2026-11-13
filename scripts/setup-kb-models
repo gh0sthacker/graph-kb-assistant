@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+data_home="${XDG_DATA_HOME:-${HOME:?HOME must be set}/.local/share}"
+runtime_home="${BB_ASSISTANT_DATA_HOME:-$data_home/bb-graph-assistant}"
+venv="$runtime_home/kb-models-venv"
+python_bin="${BB_ASSISTANT_KB_BASE_PYTHON:-}"
+
+if [[ -z "$python_bin" ]]; then
+  for candidate in python3.11 python3.12 python3.13 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      python_bin="$(command -v "$candidate")"
+      break
+    fi
+  done
+fi
+if [[ -z "$python_bin" ]]; then
+  printf 'Python 3.11 or newer is required for the private KB model worker.\n' >&2
+  exit 1
+fi
+"$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || {
+  printf 'Python 3.11 or newer is required for the private KB model worker.\n' >&2
+  exit 1
+}
+
+mkdir -p "$runtime_home"
+"$python_bin" -m venv "$venv"
+"$venv/bin/python" -m pip install --upgrade pip
+# Install the CPU wheel first so the following PyPI package resolution keeps
+# the local worker CPU-only instead of selecting large CUDA dependencies.
+"$venv/bin/python" -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+"$venv/bin/python" -m pip install 'numpy>=1.26' 'sentence-transformers>=5,<6'
+PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}" "$venv/bin/python" - <<'PY'
+from bb_assistant.kb.embeddings import RedAmonEmbedder, RedAmonReranker
+
+vector = RedAmonEmbedder(local_files_only=False).embed_query("local model setup check")
+if len(vector) != 1024:
+    raise SystemExit("Pinned E5 model returned an unexpected vector dimension")
+scores = RedAmonReranker(local_files_only=False).score(
+    "local model setup check", ["synthetic local setup fixture"]
+)
+if len(scores) != 1:
+    raise SystemExit("Pinned BGE model returned an invalid score list")
+print("Pinned E5 and BGE weights downloaded and verified locally.")
+PY
+
+printf 'Model runtime installed at %s\n' "$venv"
+printf 'To smoke-test the Go model bridge, run:\n'
+printf '  BB_ASSISTANT_KB_MODEL_SMOKE_PYTHON=%q go test ./internal/kb -run ^TestPythonRetrievalModelsSmoke$ -count=1 -v\n' "$venv/bin/python"
+printf 'Then start the app with ./scripts/bb-assistant; model access stays local and offline.\n'

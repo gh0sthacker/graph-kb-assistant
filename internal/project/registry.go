@@ -153,6 +153,51 @@ func RegisterProject(ref CaidoProjectRef, root string) error {
 	return writeRegistry(root, refs)
 }
 
+// UnregisterProject atomically removes one project from the local catalog.
+// Callers must first stop that project's workers and purge its graph/store.
+func UnregisterProject(ctx context.Context, ref CaidoProjectRef, root string) error {
+	if ctx == nil {
+		return errors.New("project catalog context is required")
+	}
+	key, err := ref.StorageKey()
+	if err != nil {
+		return errors.New("project identity is invalid")
+	}
+	path, err := RegistryPath(root)
+	if err != nil {
+		return err
+	}
+	catalogLease, err := projectlock.Acquire(ctx, filepath.Dir(path))
+	if err != nil {
+		return errors.New("project catalog maintenance lease could not be acquired")
+	}
+	defer catalogLease.Close()
+	refs, err := LoadProjectRefs(root)
+	if err != nil {
+		return err
+	}
+	remaining := make([]CaidoProjectRef, 0, len(refs))
+	for _, current := range refs {
+		currentKey, keyErr := current.StorageKey()
+		if keyErr != nil {
+			return errors.New("project registry contains an invalid identity")
+		}
+		if currentKey != key {
+			remaining = append(remaining, current)
+		}
+	}
+	if err := writeRegistry(root, remaining); err != nil {
+		return err
+	}
+	statePath := filepath.Join(filepath.Dir(path), "inventory-state.json")
+	state, err := readInventoryState(statePath)
+	if err != nil {
+		return err
+	}
+	delete(state.Missing, key)
+	return writeInventoryState(statePath, state)
+}
+
 func writeRegistry(root string, refs []CaidoProjectRef) error {
 	path, err := RegistryPath(root)
 	if err != nil {

@@ -21,6 +21,23 @@ Restrict the file and data directory to the local owner (`0600` and `0700`).
 Do not put the file under the repository. The Compose file binds Bolt and the
 browser UI to loopback only and mounts the data directory for persistence.
 
+The variables above configure the application's BehaviorGraph database only.
+If KB Lucene is enabled, keep its connection in a separate private file
+`$BB_ASSISTANT_DATA_HOME/kb-neo4j.env` (or set
+`BB_ASSISTANT_KB_NEO4J_ENV_FILE` to another private path):
+
+```text
+BB_ASSISTANT_KB_NEO4J_URI=bolt+s://<private-kb-host>:7687
+BB_ASSISTANT_KB_NEO4J_USERNAME=<kb-only-user>
+BB_ASSISTANT_KB_NEO4J_PASSWORD=<private-random-password>
+BB_ASSISTANT_KB_NEO4J_DATABASE=neo4j
+```
+
+The KB endpoint must be an independently provisioned Neo4j instance; it must
+not point back to this BehaviorGraph database. The launcher loads the optional
+KB environment file and fails closed if `BB_ASSISTANT_KB_LEXICAL_ENGINE` is
+`neo4j-lucene` but that file is absent or incomplete.
+
 Start and inspect the local service:
 
 ```sh

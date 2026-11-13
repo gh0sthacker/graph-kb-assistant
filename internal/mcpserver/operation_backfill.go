@@ -139,7 +139,7 @@ func (t *Tools) operationBackfillProject(projectKey string) (project.CaidoProjec
 	if t == nil || !projectKeyPattern.MatchString(projectKey) {
 		return project.CaidoProjectRef{}, errors.New("selected project key is invalid")
 	}
-	selected, ok := t.projectsByKey[projectKey]
+	selected, ok := t.projectRef(projectKey)
 	if !ok {
 		return project.CaidoProjectRef{}, errors.New("selected project is not registered")
 	}
