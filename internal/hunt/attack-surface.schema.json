@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evidence-backed attack surface v1",
+  "type": "object",
+  "required": [
+    "candidates",
+    "uncovered",
+    "stats",
+    "coverage_gaps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "class",
+          "endpoint",
+          "endpoint_id",
+          "parameter",
+          "location",
+          "sink",
+          "why",
+          "auth",
+          "novelty",
+          "playbook",
+          "suggested_check",
+          "score"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "class": {
+            "type": "string",
+            "minLength": 1
+          },
+          "endpoint": {
+            "type": "string",
+            "minLength": 1
+          },
+          "endpoint_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "parameter": {
+            "type": "string",
+            "minLength": 1
+          },
+          "location": {
+            "type": "string",
+            "minLength": 1
+          },
+          "playbook": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suggested_check": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sink": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "engine",
+              "evidence_kind",
+              "confidence",
+              "signature"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "engine": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence_kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "signature": {
+                "type": "string",
+                "minLength": 1
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "why": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contains": {
+              "type": "string",
+              "pattern": "^capture:.+"
+            }
+          },
+          "auth": {
+            "type": "object",
+            "required": [
+              "required"
+            ],
+            "properties": {
+              "required": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "novelty": {
+            "enum": [
+              "untested",
+              "tested"
+            ]
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "uncovered": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "class",
+          "reason"
+        ],
+        "properties": {
+          "class": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": [
+        "endpoints",
+        "parameters",
+        "sinks",
+        "identities",
+        "infos",
+        "observations",
+        "candidates"
+      ],
+      "properties": {
+        "endpoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parameters": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sinks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "identities": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "infos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidates": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "coverage_gaps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

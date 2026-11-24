@@ -1,0 +1,45 @@
+{
+  "contract": "../graph-explorer-navigation-contract.md",
+  "targetViewports": ["1280x720"],
+  "accessibility": {
+    "status": "pass",
+    "evidence": "The focus control exposes an accessible label and aria-pressed state. Zoom buttons are labeled; the zoom-in button becomes disabled at 1000%. Escape exits focus mode and restores the hidden panels."
+  },
+  "responsive": {
+    "status": "pass",
+    "evidence": "At 1280x720, controls remained within the toolbar in both normal and focus modes. Normal mode retained the inspector; focus mode gave the canvas the available width without horizontal overflow."
+  },
+  "contentStates": {
+    "loading": {
+      "status": "not-applicable",
+      "reason": "This review changes graph navigation controls, not loading behavior."
+    },
+    "empty": {
+      "status": "not-applicable",
+      "reason": "This review used a loaded graph and does not change empty-state behavior."
+    },
+    "error": {
+      "status": "not-applicable",
+      "reason": "This review does not change graph or API error handling."
+    },
+    "partial": {
+      "status": "pass",
+      "evidence": "Partial graph coverage remained labeled while the route graph was zoomed, panned, and expanded."
+    },
+    "success": {
+      "status": "pass",
+      "evidence": "The selected route's graph loaded with 80 nodes and 92 relations; the inspector kept its selected Caido observation while zoom and focus controls were used."
+    },
+    "permission": {
+      "status": "not-applicable",
+      "reason": "The navigation controls do not change listener, origin, or data-access permissions."
+    }
+  },
+  "renderedEvidence": [
+    {
+      "viewport": "1280x720",
+      "artifact": "graph-explorer-navigation-review.txt",
+      "observation": "Sanitized live-browser observation of the dense graph, selected request explanation, 1000% zoom limit, focus mode, pan, and Escape return."
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "contract": "../graph-explorer-contract.md",
+  "targetViewports": ["1440x900", "390x844"],
+  "accessibility": {
+    "status": "pass",
+    "evidence": "Search and project controls have accessible labels; graph nodes expose button roles, accessible names and keyboard activation; the / shortcut focuses the search field with a visible focus ring. Search, refresh and zoom touch targets measured 44 px on mobile. Reduced-motion preference is honored. Secondary label colors were reviewed and low-emphasis labels were brightened."
+  },
+  "responsive": {
+    "status": "pass",
+    "evidence": "Rendered at 1440x900 and 390x844; additionally checked 320x740. Document scroll height matched each viewport, there was no horizontal overflow, and the status bar remained visible at the viewport bottom."
+  },
+  "contentStates": {
+    "loading": {
+      "status": "pass",
+      "evidence": "A delayed local project-list response showed the loading label, status and stable empty graph layout before completion."
+    },
+    "empty": {
+      "status": "pass",
+      "evidence": "An empty project list cleared the graph, inspector provenance, endpoint count and pagination control."
+    },
+    "error": {
+      "status": "pass",
+      "evidence": "A simulated local API failure displayed the recovery message and cleared the previously selected graph and request reference."
+    },
+    "partial": {
+      "status": "pass",
+      "evidence": "The synthetic Go project returned partial surface coverage and an incomplete graph; the UI kept the partial coverage label visible."
+    },
+    "success": {
+      "status": "pass",
+      "evidence": "The actual Go APIs loaded one endpoint, seven typed entities, six assertions and a local Caido request reference from a synthetic private project."
+    },
+    "permission": {
+      "status": "pass",
+      "evidence": "Non-local Host requests received HTTP 421, mismatched Origin requests received HTTP 403, write methods received HTTP 405, and a wildcard listener was rejected."
+    }
+  },
+  "renderedEvidence": [
+    {
+      "viewport": "1440x900",
+      "artifact": "graph-explorer-desktop.png",
+      "observation": "Three-pane graph view with the selected endpoint, seven nodes, six labeled relations, partial-coverage state and provenance inspector."
+    },
+    {
+      "viewport": "390x844",
+      "artifact": "graph-explorer-mobile.png",
+      "observation": "Responsive stacked endpoint list, graph canvas and inspector; no horizontal overflow and the bottom status bar remains visible."
+    },
+    {
+      "viewport": "1440x900",
+      "artifact": "graph-explorer-empty-desktop.png",
+      "observation": "Empty project state clears the previous selection and provenance while keeping the empty graph guidance visible."
+    }
+  ]
+}

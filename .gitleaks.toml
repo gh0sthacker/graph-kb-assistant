@@ -1,0 +1,8 @@
+title = "Graph KB Assistant secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated Python bytecode is not source-controlled credential material."
+paths = ['''(^|/)__pycache__/''']

@@ -1,0 +1,15 @@
+Browser interaction observation — 1280x720
+
+Rendered the local Graph Explorer with route /{параметр} selected. The route
+caption described requests matching the template; the graph count showed 80
+nodes and 92 relations in this route's slice, and partial coverage stayed
+visible.
+
+At 500%, graph labels and the selected-node inspector were visible together.
+Focus mode hid the endpoint and inspector panels while expanding the canvas.
+The zoom controls reached 1000%, then disabled further zoom-in. Dragging blank
+canvas space moved the graph without selecting node text. Escape restored the
+side panels. The inspector described “Захват · HTTP 200” as one historical
+Caido request, clarified that 200 is only the response status, and showed the
+parse state as incomplete. No request values or Caido identifiers are recorded
+in this artifact.

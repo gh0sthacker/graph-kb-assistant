@@ -1,0 +1,35 @@
+[Unit]
+Description=Bug bounty assistant Caido HTTP live graph tail
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=4
+
+[Service]
+Type=simple
+User=bbassist
+Group=bbassist
+WorkingDirectory=/opt/bb-graph-assistant
+Environment=HOME=/var/lib/bb-graph-assistant
+Environment=BB_ASSISTANT_DATA_HOME=/var/lib/bb-graph-assistant/data
+Environment=BB_ASSISTANT_CAIDO_INSTANCE_KEY=caido-primary
+Environment=BB_ASSISTANT_CAIDO_TOKEN_FILE=/var/lib/bb-graph-assistant/.caido-mcp/token.json
+Environment=BB_ASSISTANT_CAIDO_MCP_COMMAND=/usr/local/bin/caido-mcp-server
+Environment=BB_ASSISTANT_CAIDO_MCP_SHA256=5236620c693f973d5725133c660ca0ac852796dd75e02ce1993bd66202d0b04c
+Environment=CAIDO_URL=http://caido.example.invalid:8080
+EnvironmentFile=/var/lib/bb-graph-assistant/import.env
+ExecStart=/opt/bb-graph-assistant/.venv/bin/bb-assistant-caido-tail --poll-interval-seconds 10 --overlap-seconds 90 --page-size 50 --max-pages-per-cycle 1 --max-body-bytes 262144
+Restart=on-failure
+RestartSec=15
+UMask=0077
+MemoryMax=768M
+CPUQuota=150%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/bb-graph-assistant/data
+ReadOnlyPaths=/var/lib/bb-graph-assistant/.caido-mcp
+
+[Install]
+WantedBy=multi-user.target

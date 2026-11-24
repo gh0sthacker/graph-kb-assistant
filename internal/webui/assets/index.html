@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Graph Explorer — BB Graph Assistant</title>
+    <link rel="stylesheet" href="/assets/style.css">
+    <script defer src="/assets/graph-focus.js"></script>
+    <script defer src="/assets/runtime-capabilities.js"></script>
+    <script defer src="/assets/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="BB Graph Assistant, home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32"><path d="M7 16 16 7l9 9-9 9-9-9Z"/><path d="M7 16h18M16 7v18"/><circle cx="7" cy="16" r="2"/><circle cx="16" cy="7" r="2"/><circle cx="25" cy="16" r="2"/><circle cx="16" cy="25" r="2"/></svg>
+          </span>
+          <span class="brand-copy"><strong>BB GRAPH</strong><span>ASSISTANT</span></span>
+        </a>
+        <div class="topbar-title"><span class="eyebrow">LOCAL DATA</span><h1>Request Graph</h1></div>
+        <div class="topbar-controls">
+          <label class="project-control" for="project-select"><span>Project</span><select id="project-select" aria-label="Select a local project"><option value="">Loading…</option></select></label>
+          <span class="local-badge"><i></i>Local only</span>
+          <button class="icon-button" id="consultation-open" type="button" aria-label="Resume a saved consultation" title="Resume a saved consultation" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h10v13l-5-3-5 3zM7.5 7h5M7.5 9.5h5"/></svg></button>
+          <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh data" title="Refresh data">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 9a6.2 6.2 0 0 0-10.7-3L4 7.4M4 4v3.5h3.5M4 11a6.2 6.2 0 0 0 10.7 3l1.3-1.4M16 16v-3.5h-3.5"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="surface-panel" aria-label="Operation catalog">
+          <div class="panel-heading">
+            <div><span class="eyebrow">SURFACE</span><h2>Operations</h2></div>
+            <span class="count-pill" id="endpoint-count">—</span>
+          </div>
+          <label class="searchbox" for="endpoint-filter">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
+            <input id="endpoint-filter" type="search" aria-label="Search operations by host, method, route, or field name" placeholder="Host, method, route, or field" autocomplete="off">
+            <kbd>/</kbd>
+          </label>
+          <div class="surface-caption"><span>Method</span><span>Host · route</span></div>
+          <div class="endpoint-list" id="endpoint-list" aria-live="polite"></div>
+          <button class="load-more" id="load-more" type="button" hidden>Load more <span>↓</span></button>
+          <div class="surface-foot"><span class="coverage-dot"></span><span id="surface-foot-text">Local index</span></div>
+          <button class="maintenance-button" id="operation-backfill-open" type="button" disabled>Repair operation graph</button>
+        </aside>
+
+        <section class="graph-panel" aria-label="Relationship graph">
+          <div class="graph-heading">
+            <div class="graph-title"><span class="eyebrow" id="graph-project-label">SELECT A PROJECT</span><h2 id="graph-title">Observed behavior relationships</h2><p id="graph-subtitle">Select an endpoint to open its graph neighborhood.</p></div>
+            <div class="graph-counts" id="graph-counts"><span>0 <small>nodes</small></span><b></b><span>0 <small>edges</small></span></div>
+          </div>
+          <div class="graph-toolbar">
+            <div class="graph-state" id="graph-state"><span class="state-dot"></span><span>Waiting for selection</span></div>
+            <div class="field-value-status" id="field-value-status" role="status" aria-live="polite" hidden></div>
+            <div class="canvas-controls">
+              <select id="capture-select" class="capture-select" aria-label="Select a sampled capture" hidden></select>
+              <button class="tool-button fit-button" id="graph-back" type="button" disabled title="Return to the previous graph">← Back</button>
+              <button class="tool-button fit-button" id="graph-more" type="button" disabled hidden title="Continue with the next generation-pinned neighbor page">More neighbors</button>
+              <button class="tool-button fit-button" id="graph-deeper" type="button" disabled title="Load a deeper bounded slice, including analysis cards. This can take longer.">Deeper slice</button>
+              <span class="toolbar-divider"></span>
+              <button class="tool-button" id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button>
+              <span class="zoom-readout" id="zoom-readout">100%</span>
+              <button class="tool-button" id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+              <span class="toolbar-divider"></span>
+              <button class="tool-button fit-button labels-button" id="toggle-edge-labels" type="button" aria-label="Hide edge labels" aria-pressed="true" title="Hide edge labels">Labels</button>
+              <button class="tool-button fit-button" id="fit-graph" type="button" aria-label="Fit graph" title="Fit graph"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4M7 7l-4-4m10 4 4-4M7 13l-4 4m10-4 4 4"/></svg><span>Fit</span></button>
+              <button class="tool-button fit-button focus-button" id="focus-graph" type="button" aria-label="Expand graph to full screen" aria-pressed="false" title="Expand graph to full screen"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4m10-4h4v4M17 13v4h-4M3 13v4h4"/></svg><span>Expand</span></button>
+            </div>
+          </div>
+          <div class="graph-viewport" id="graph-viewport">
+            <svg id="graph-canvas" role="group" aria-label="Interactive request and entity graph" tabindex="0">
+              <defs><marker id="edge-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="#53616a"/></marker></defs>
+              <g id="graph-scene"></g>
+            </svg>
+            <div class="canvas-empty" id="canvas-empty" aria-live="polite"><span class="empty-orbit"><i></i><i></i><i></i></span><strong id="canvas-empty-title">Your graph will appear here</strong><span id="canvas-empty-copy">Data stays on this device.</span></div>
+          </div>
+          <div class="graph-filterbar" aria-label="Node type filters">
+            <div class="graph-view-modes" role="group" aria-label="Graph view mode">
+              <button class="view-mode-button" id="graph-overview" type="button" aria-pressed="true" title="Hide individual captures and request/response shapes">Overview</button>
+              <button class="view-mode-button" id="graph-show-all" type="button" aria-pressed="false" title="Show all nodes and edges">All nodes</button>
+            </div>
+            <span class="filterbar-divider" aria-hidden="true"></span>
+            <div class="graph-filters" id="graph-filters" role="group" aria-label="Show or hide node types"></div>
+            <span class="graph-filter-summary" id="graph-filter-summary">Node types and counts will appear here.</span>
+          </div>
+        </section>
+
+        <aside class="inspector-panel" aria-label="Selected node details">
+          <div class="panel-heading inspector-heading"><div><span class="eyebrow">INSPECTOR</span><h2>Selected node</h2></div><span class="inspect-index" id="inspect-index">—</span></div>
+          <div class="inspector-content" id="inspector-content"><div class="inspector-empty"><span class="inspect-target" aria-hidden="true">⌖</span><strong>Nothing selected</strong><span>Select a graph node to view its properties and sources.</span></div></div>
+          <div class="inspector-foot"><span class="read-lock" aria-hidden="true">▣</span><span>Open a stored capture to read its HTTP bytes</span></div>
+        </aside>
+      </main>
+
+      <dialog class="evidence-dialog" id="evidence-dialog" aria-labelledby="evidence-title">
+        <header class="evidence-heading">
+          <div><span class="eyebrow">LOCAL ENCRYPTED HISTORY</span><h2 id="evidence-title">Captured HTTP message</h2><p id="evidence-capture-label">No capture selected</p></div>
+          <button class="icon-button evidence-close" id="evidence-close" type="button" aria-label="Close HTTP evidence">×</button>
+        </header>
+        <div class="evidence-warning" role="note"><strong>Sensitive values may be present.</strong><span>This view reads only the selected local historical revision. Live-tail bytes remain in Caido and are not sent to a model.</span></div>
+        <div class="evidence-controls">
+          <div class="evidence-sides" role="group" aria-label="Select HTTP message side">
+            <button class="evidence-side active" id="evidence-request" type="button" aria-pressed="true">Request</button>
+            <button class="evidence-side" id="evidence-response" type="button" aria-pressed="false">Response</button>
+          </div>
+          <button class="tool-button" id="evidence-more" type="button" hidden>Load next range</button>
+        </div>
+        <section class="evidence-packet-controls" id="evidence-packet-controls" aria-label="Redacted model packet preview" hidden>
+          <label class="evidence-question-label" for="evidence-packet-question">Analyst question
+            <textarea id="evidence-packet-question" maxlength="2048" rows="2" placeholder="What should the assistant compare or explain?"></textarea>
+          </label>
+          <div class="evidence-packet-fields">
+            <label for="evidence-packet-offset">Start byte<input id="evidence-packet-offset" type="number" min="0" value="0"></label>
+            <label for="evidence-packet-length">Span bytes<input id="evidence-packet-length" type="number" min="1" max="4096"></label>
+            <button class="tool-button" id="evidence-packet-add" type="button" disabled>Add current span</button>
+          </div>
+          <p class="evidence-packet-selection-count" id="evidence-packet-selection-count" aria-live="polite">0 selected spans · 0/8192 bytes</p>
+          <div class="evidence-packet-selection-list" id="evidence-packet-selection-list" aria-label="Selected evidence spans"></div>
+          <div class="evidence-packet-actions">
+            <button class="tool-button" id="evidence-packet-clear" type="button" disabled>Clear packet</button>
+            <button class="tool-button" id="evidence-packet-preview" type="button" disabled>Preview redacted packet</button>
+          </div>
+          <p class="evidence-packet-note">Add up to 4 spans from captures in this project, with a 4 KiB limit per span and 8 KiB total. Local preview only; nothing is sent to a model. Review every excerpt because heuristic redaction can miss sensitive values.</p>
+          <pre class="evidence-packet-content" id="evidence-packet-content" tabindex="0" aria-label="Redacted evidence packet preview" hidden></pre>
+          <div class="consultation-actions">
+            <button class="tool-button" id="consultation-create" type="button" disabled>Save session for review</button>
+            <button class="tool-button" id="consultation-copy-id" type="button" hidden>Copy assistant resume arguments</button>
+            <p id="consultation-status" role="status" aria-live="polite">Preview the selected evidence before creating a consultation.</p>
+          </div>
+        </section>
+        <div class="evidence-meta" id="evidence-meta" aria-live="polite">Select an exact historical capture to inspect its stored message.</div>
+        <pre class="evidence-content" id="evidence-content" tabindex="0" aria-label="Stored HTTP message bytes"></pre>
+        <pre class="evidence-compare-content" id="evidence-compare-content" tabindex="0" aria-label="Deterministic capture comparison" hidden></pre>
+        <div class="consultation-resume">
+          <label for="consultation-resume-id">Resume a saved consultation on this project</label>
+          <div><input id="consultation-resume-id" type="text" maxlength="512" autocomplete="off" spellcheck="false" placeholder="Paste consultation ID or copied assistant resume details"><button class="tool-button" id="consultation-resume" type="button" disabled>Resume</button></div>
+        </div>
+        <section class="consultation-review" id="consultation-review" aria-label="Operator review before assistant access" hidden>
+          <p><strong>Operator review required.</strong> Check the saved redacted question, excerpts, and analyst context below. The assistant cannot read them until you accept this exact session.</p>
+          <pre id="consultation-review-content" tabindex="0" aria-label="Saved redacted packet for operator review"></pre>
+          <section class="consultation-context" id="consultation-context" aria-label="Analyst context labels" hidden>
+            <strong>Analyst context</strong>
+            <p>Attach pseudonymous labels to selected evidence, such as actor-a or object-1. The suffix must be one lowercase letter or a 1–3 digit ordinal. Do not enter actual IDs, usernames, or secrets. These labels are analyst-provided context, not proof of ownership, equality, or causality; the assistant sees them only after you accept this session.</p>
+            <p>Expanded labels show the exact selected byte span and its redacted packet excerpt. Unavailable excerpts stay marked as unavailable.</p>
+            <div class="context-fields">
+              <label for="consultation-context-kind">Context type
+                <select id="consultation-context-kind">
+                  <option value="actor">Actor</option><option value="session">Session</option><option value="tenant">Tenant</option>
+                  <option value="role">Role</option><option value="object">Object</option><option value="flow">Flow</option>
+                  <option value="scenario">Scenario</option><option value="scenario_step">Scenario step</option>
+                </select>
+              </label>
+              <label for="consultation-context-label">Pseudonymous label
+                <input id="consultation-context-label" maxlength="64" placeholder="actor-a" autocomplete="off">
+              </label>
+            </div>
+            <div id="consultation-context-evidence" class="context-evidence" aria-label="Select evidence references"></div>
+            <button class="tool-button" id="consultation-context-save" type="button" disabled>Add analyst label</button>
+            <div id="consultation-context-list" class="context-label-list" aria-live="polite"></div>
+          </section>
+          <button class="tool-button" id="consultation-accept" type="button" disabled>I reviewed this packet — allow assistant access</button>
+          <section class="consultation-context candidate-workflow" id="consultation-candidate" aria-label="Save an evidence-linked candidate" hidden>
+            <strong>Save an analysis candidate</strong>
+            <p>This is an unconfirmed candidate, not a finding or verification. Choose only verified evidence from this accepted session. The application validates the references before saving.</p>
+            <div id="candidate-recovery-list" class="context-label-list" aria-live="polite"></div>
+            <div class="candidate-fields">
+              <label for="candidate-title">Title<input id="candidate-title" maxlength="160" autocomplete="off"></label>
+              <label for="candidate-impact">Potential impact<input id="candidate-impact" maxlength="1024" autocomplete="off"></label>
+              <label for="candidate-summary">Summary<textarea id="candidate-summary" maxlength="2048" rows="2"></textarea></label>
+              <label for="candidate-rationale">Rationale<textarea id="candidate-rationale" maxlength="4096" rows="3"></textarea></label>
+              <label for="candidate-alternatives">Alternative explanations, one per line<textarea id="candidate-alternatives" maxlength="5120" rows="2"></textarea></label>
+              <label for="candidate-next-checks">Next checks, one per line<textarea id="candidate-next-checks" maxlength="4096" rows="2"></textarea></label>
+              <label for="candidate-limitations">Limitations, one per line<textarea id="candidate-limitations" maxlength="4096" rows="2"></textarea></label>
+            </div>
+            <div class="candidate-selections">
+              <fieldset><legend>Verified evidence references</legend><div id="candidate-evidence" class="candidate-options"></div></fieldset>
+              <fieldset><legend>Comparisons in this consultation</legend><div id="candidate-comparisons" class="candidate-options"></div></fieldset>
+            </div>
+            <button class="tool-button" id="candidate-save" type="button" disabled>Validate and save candidate</button>
+            <p id="candidate-status" role="status" aria-live="polite">Accept the operator review before creating a candidate.</p>
+            <div id="candidate-list" class="context-label-list" aria-live="polite"></div>
+          </section>
+        </section>
+        <section class="consultation-actions comparison-consultation" id="consultation-comparison-link" aria-label="Add capture comparison to consultation" hidden>
+          <button class="tool-button" id="consultation-comparison-attach" type="button" disabled>Attach comparison to assistant session</button>
+          <p id="consultation-comparison-status" role="status" aria-live="polite"></p>
+        </section>
+        <div class="evidence-foot" id="evidence-foot" role="status" aria-live="polite"></div>
+      </dialog>
+
+      <dialog class="maintenance-dialog" id="operation-backfill-dialog" aria-labelledby="operation-backfill-title">
+        <header class="evidence-heading">
+          <div><span class="eyebrow">BOUNDED LOCAL MAINTENANCE</span><h2 id="operation-backfill-title">Repair operation graph</h2></div>
+          <button class="icon-button" id="operation-backfill-close" type="button" aria-label="Close operation graph repair">×</button>
+        </header>
+        <p class="maintenance-note">Preview reads and decrypts bounded historical request bytes locally to build missing operation links. It does not read responses, contact Caido, or send data to the assistant. Applying a ready preview writes graph bundles, then advances the selected project's ordered Neo4j outbox through those bundles. Earlier queued graph events in this project may be applied first. If Neo4j is unavailable, the local graph stays committed and the outbox remains retryable.</p>
+        <div class="maintenance-fields">
+          <label for="operation-backfill-max-captures">Captures per page<input id="operation-backfill-max-captures" type="number" min="1" max="200" value="100"></label>
+          <label for="operation-backfill-max-bytes">Maximum request bytes<input id="operation-backfill-max-bytes" type="number" min="1048576" max="1073741824" value="536870912"></label>
+        </div>
+        <div class="maintenance-actions">
+          <button class="tool-button" id="operation-backfill-preview" type="button" disabled>Preview first page</button>
+          <button class="tool-button" id="operation-backfill-next" type="button" hidden disabled>Continue preview</button>
+          <button class="tool-button" id="operation-backfill-apply" type="button" disabled>Apply exact preview</button>
+        </div>
+        <p class="maintenance-status" id="operation-backfill-status" role="status" aria-live="polite">Select a project, then request an explicit preview.</p>
+        <div class="maintenance-result" id="operation-backfill-result" hidden></div>
+      </dialog>
+
+      <footer class="statusbar">
+        <div class="status-left"><span class="status-led"></span><span id="status-text">Waiting for data</span><span class="status-separator">/</span><span>127.0.0.1</span></div>
+        <div class="status-right"><span id="coverage-status">Coverage: unknown</span><span class="status-separator">·</span><span id="evidence-vault-status" class="evidence-vault-status" role="status" aria-live="polite">Evidence: checking</span><span class="status-separator">·</span><span id="last-updated">—</span></div>
+      </footer>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+  </body>
+</html>

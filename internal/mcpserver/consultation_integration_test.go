@@ -1,0 +1,404 @@
+package mcpserver
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"bb-graph-assistant/internal/appquery"
+	"bb-graph-assistant/internal/consultation"
+	"bb-graph-assistant/internal/project"
+	"bb-graph-assistant/internal/publicdata"
+	"bb-graph-assistant/internal/store"
+)
+
+type mcpCycleEvidence struct{}
+
+func (mcpCycleEvidence) BuildEvidencePacket(_ context.Context, request appquery.EvidencePacketRequest) (appquery.EvidencePacket, error) {
+	question, questionRedactions, err := publicdata.RedactText(request.Question)
+	if err != nil {
+		return appquery.EvidencePacket{}, err
+	}
+	packet := appquery.EvidencePacket{
+		Version: "1", PolicyVersion: appquery.EvidencePacketPolicyVersion,
+		ProjectKey: request.ProjectKey, Question: question, QuestionRedactions: questionRedactions,
+		PreviewOnly: true, OperatorReviewNeeded: true, OmittedBytesKnown: true,
+		CoverageNote: "Synthetic evidence only; no model call.",
+		Evidence:     make([]appquery.EvidencePacketEvidence, 0, len(request.Selections)),
+	}
+	for _, selected := range request.Selections {
+		packet.Evidence = append(packet.Evidence, appquery.EvidencePacketEvidence{
+			Available: true, RequestID: selected.RequestID, RevisionID: selected.RevisionID,
+			Side: selected.Side, SpanStart: selected.Offset,
+			SpanEnd: selected.Offset + int64(selected.Length), SelectedBytes: selected.Length,
+			IncludedBytes: selected.Length, SHA256: strings.Repeat("a", 64),
+			SourceIntegrityStatus: "verified", ParseState: "complete", WireFidelity: "exact",
+			Excerpt: "fixture response excerpt", Redactions: []publicdata.TextRedactionSpan{},
+		})
+		packet.SelectedBytes += selected.Length
+	}
+	return packet, nil
+}
+
+type mcpCycleComparison struct{}
+
+func (mcpCycleComparison) CompareCaptureMessages(_ context.Context, request appquery.CaptureComparisonRequest) (appquery.CaptureComparison, error) {
+	left := appquery.CaptureRevisionSummary{
+		RequestID: request.LeftRequestID, RevisionID: request.LeftRevisionID,
+		Size: 16, SHA256: strings.Repeat("b", 64), ParseState: "complete", WireFidelity: "exact",
+	}
+	right := appquery.CaptureRevisionSummary{
+		RequestID: request.RightRequestID, RevisionID: request.RightRevisionID,
+		Size: 16, SHA256: strings.Repeat("b", 64), ParseState: "complete", WireFidelity: "exact",
+	}
+	return appquery.CaptureComparison{
+		ProjectKey: request.ProjectKey, LeftRequestID: request.LeftRequestID, LeftRevisionID: request.LeftRevisionID,
+		RightRequestID: request.RightRequestID, RightRevisionID: request.RightRevisionID,
+		Request: appquery.CaptureSideComparison{
+			Available: true, Equal: true, ComparedBytes: 16, Left: left, Right: right,
+			LeftExcerpt: "Authorization: Bearer body-secret", RightExcerpt: "cookie=body-secret",
+		},
+		Response:     appquery.CaptureSideComparison{Available: true, Equal: true, ComparedBytes: 16, Left: left, Right: right},
+		CoverageNote: "Synthetic comparison only.",
+	}, nil
+}
+
+type consultationModelAdapter interface {
+	DraftProposal(context.Context, map[string]any, map[string]any) (consultation.CandidateProposal, []string, []string, error)
+}
+
+// fixtureConsultationModel stands in for the model behind the assistant client. It receives
+// only the accepted MCP resume packet and comparison result, never source
+// request/response bodies or the test's raw comparison excerpts.
+type fixtureConsultationModel struct{}
+
+func (fixtureConsultationModel) DraftProposal(_ context.Context, resumed, comparison map[string]any) (consultation.CandidateProposal, []string, []string, error) {
+	if resumed["review_accepted"] != true {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("model received an unreviewed session")
+	}
+	encodedInput, err := json.Marshal([]any{resumed, comparison})
+	if err != nil {
+		return consultation.CandidateProposal{}, nil, nil, err
+	}
+	if strings.Contains(string(encodedInput), "body-secret") {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("model input contained a raw comparison excerpt")
+	}
+	evidence, ok := resumed["evidence"].(map[string]any)
+	if !ok || evidence["question"] == "" {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("accepted evidence packet was not available")
+	}
+	refs, ok := resumed["evidence_references"].([]any)
+	if !ok || len(refs) != 2 {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("model received %d evidence references; want 2", len(refs))
+	}
+	comparisonID, ok := comparison["comparison_id"].(string)
+	if !ok || comparisonID == "" {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("deterministic comparison ID is missing")
+	}
+	result, ok := comparison["result"].(map[string]any)
+	if !ok {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("deterministic comparison result is missing")
+	}
+	requestResult, requestOK := result["request"].(map[string]any)
+	responseResult, responseOK := result["response"].(map[string]any)
+	if !requestOK || !responseOK || requestResult["available"] != true || responseResult["available"] != true {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("exact comparison sides are unavailable")
+	}
+	if requestResult["equal"] != true || responseResult["equal"] != true {
+		return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("fixture model expected identical request and response bytes")
+	}
+	evidenceIDs := make([]string, 0, len(refs))
+	for _, value := range refs {
+		ref, ok := value.(map[string]any)
+		if !ok {
+			return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("evidence reference has an unexpected shape")
+		}
+		id, ok := ref["evidence_reference_id"].(string)
+		if !ok || id == "" {
+			return consultation.CandidateProposal{}, nil, nil, fmt.Errorf("evidence reference ID is missing")
+		}
+		evidenceIDs = append(evidenceIDs, id)
+	}
+	return consultation.CandidateProposal{
+		Title:        "Synthetic response comparison",
+		Summary:      "The selected synthetic request and response bytes compare equal; no target impact is established.",
+		Rationale:    "This proposal follows the available exact comparison result and cites both selected fixture responses.",
+		Impact:       "No vulnerability or target impact is established by synthetic data.",
+		Alternatives: []string{"The matching response behavior may be expected."},
+		NextChecks:   []string{"Repeat the comparison with an independently selected synthetic actor."},
+		Limitations:  []string{"This model adapter is a fixture and does not assess real captured data."},
+	}, evidenceIDs, []string{comparisonID}, nil
+}
+
+func TestMCPConsultationCycleSurvivesTransportAndRestart(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "runtime")
+	ref := project.CaidoProjectRef{InstanceID: "mcp-cycle-fixture", ProjectID: "consultation-cycle"}
+	projectStore, err := store.CreateProject(ctx, ref, root)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if err := projectStore.Close(); err != nil {
+		t.Fatalf("close fixture project: %v", err)
+	}
+	projectKey, err := ref.StorageKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newFixtureTools := func() *Tools {
+		t.Helper()
+		service, serviceErr := consultation.NewService(root, []project.CaidoProjectRef{ref}, mcpCycleEvidence{}, mcpCycleComparison{})
+		if serviceErr != nil {
+			t.Fatalf("NewService: %v", serviceErr)
+		}
+		return &Tools{
+			root: root, projects: []project.CaidoProjectRef{ref},
+			projectsByKey: map[string]project.CaidoProjectRef{projectKey: ref},
+			consultations: service,
+		}
+	}
+	tools := newFixtureTools()
+	server, err := NewServer(tools)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	initializeFixtureServer(t, server)
+
+	leftRevision := strings.Repeat("c", 64)
+	rightRevision := strings.Repeat("d", 64)
+	created := callMCPFixtureTool(t, server, 2, "bb_consult_create_session", map[string]any{
+		"project_key": projectKey, "question": "Compare these two synthetic responses.",
+		"selections": []map[string]any{
+			{"request_id": "request-a", "revision_id": leftRevision, "side": "response", "offset": 0, "length": 8},
+			{"request_id": "request-b", "revision_id": rightRevision, "side": "response", "offset": 0, "length": 8},
+		},
+		"idempotency_key": "mcp_create_session_0001",
+	})
+	sessionID := fixtureString(t, created, "consultation_id")
+	if fixtureString(t, created, "session_id") != sessionID {
+		t.Fatalf("created session aliases differ: %#v", created)
+	}
+	if created["content_withheld"] != true {
+		t.Fatalf("MCP create response does not mark hidden content: %#v", created)
+	}
+	createdWithheld, ok := created["withheld_fields"].([]any)
+	if !ok || len(createdWithheld) == 0 {
+		t.Fatalf("MCP create response omits hidden field names: %#v", created["withheld_fields"])
+	}
+	references := created["evidence_references"].([]any)
+	if len(references) != 2 {
+		t.Fatalf("created session evidence references = %d; want 2", len(references))
+	}
+	firstReference := references[0].(map[string]any)
+	secondReference := references[1].(map[string]any)
+	leftReferenceID := fixtureString(t, firstReference, "evidence_reference_id")
+	rightReferenceID := fixtureString(t, secondReference, "evidence_reference_id")
+	if created["question"] != "" {
+		t.Fatalf("MCP create response exposed an unreviewed question: %#v", created["question"])
+	}
+	createdEvidence := created["evidence"].(map[string]any)["evidence"].([]any)
+	if excerpt, _ := createdEvidence[0].(map[string]any)["excerpt"].(string); excerpt != "" {
+		t.Fatal("MCP create response exposed an unreviewed evidence excerpt")
+	}
+	preReview := callMCPFixtureTool(t, server, 3, "bb_consult_resume", map[string]any{
+		"project_key": projectKey, "session_id": sessionID,
+	})
+	if preReview["consultation_id"] != sessionID || preReview["session_id"] != sessionID {
+		t.Fatalf("resumed session aliases differ: %#v", preReview)
+	}
+	preReviewEvidence := preReview["evidence"].(map[string]any)["evidence"].([]any)
+	if preReview["question"] != "" {
+		t.Fatal("MCP resume exposed an unreviewed question")
+	}
+	if preReview["content_withheld"] != true {
+		t.Fatalf("MCP resume does not mark hidden content: %#v", preReview)
+	}
+	preReviewWithheld, ok := preReview["withheld_fields"].([]any)
+	if !ok || len(preReviewWithheld) == 0 {
+		t.Fatalf("MCP resume omits hidden field names: %#v", preReview["withheld_fields"])
+	}
+	if excerpt, _ := preReviewEvidence[0].(map[string]any)["excerpt"].(string); excerpt != "" {
+		t.Fatal("MCP resume exposed an unreviewed evidence excerpt")
+	}
+	conflictResponses := serveFixtureRequests(t, server, map[string]any{
+		"jsonrpc": "2.0", "id": 30, "method": "tools/call",
+		"params": map[string]any{"name": "bb_consult_resume", "arguments": map[string]any{
+			"project_key": projectKey, "session_id": sessionID, "consultation_id": strings.Repeat("x", 43),
+		}},
+	})
+	conflictResult, ok := responseForID(t, conflictResponses, "30").Result.(map[string]any)
+	conflictContent, contentOK := conflictResult["content"].([]any)
+	if !ok || !contentOK || conflictResult["isError"] != true || len(conflictContent) != 1 {
+		t.Fatalf("conflicting session ID aliases were not rejected by MCP: %#v", conflictResult)
+	}
+	conflictMessage, _ := conflictContent[0].(map[string]any)["text"].(string)
+	if !strings.Contains(conflictMessage, "session_id and consultation_id must match") {
+		t.Fatalf("MCP conflict error is unclear: %q", conflictMessage)
+	}
+
+	if _, err := tools.AcceptReview(ctx, projectKey, sessionID, 1, "mcp_operator_accept_0001"); err != nil {
+		t.Fatalf("operator review acceptance: %v", err)
+	}
+	resumed := callMCPFixtureTool(t, server, 4, "bb_consult_resume", map[string]any{
+		"project_key": projectKey, "consultation_id": sessionID,
+	})
+	if resumed["review_accepted"] != true || resumed["question"] == "" {
+		t.Fatalf("accepted session was not made available to the assistant client: %#v", resumed)
+	}
+	resumedWithheld, ok := resumed["withheld_fields"].([]any)
+	if resumed["content_withheld"] != false || !ok || len(resumedWithheld) != 0 {
+		t.Fatalf("accepted session still marks content as hidden: %#v", resumed)
+	}
+
+	comparison := callMCPFixtureTool(t, server, 5, "bb_consult_compare", map[string]any{
+		"project_key": projectKey, "session_id": sessionID, "expected_version": 2,
+		"idempotency_key": "mcp_compare_captures_0001",
+		"left_request_id": "request-a", "left_revision_id": leftRevision,
+		"right_request_id": "request-b", "right_revision_id": rightRevision,
+	})
+	if strings.Contains(marshalFixture(t, comparison), "body-secret") {
+		t.Fatal("MCP comparison exposed a raw fixture excerpt")
+	}
+	comparisonID := fixtureString(t, comparison, "comparison_id")
+	var model consultationModelAdapter = fixtureConsultationModel{}
+	modelProposal, modelEvidenceIDs, modelComparisonIDs, err := model.DraftProposal(ctx, resumed, comparison)
+	if err != nil {
+		t.Fatalf("synthetic model adapter: %v", err)
+	}
+	if len(modelEvidenceIDs) != 2 || modelEvidenceIDs[0] != leftReferenceID || modelEvidenceIDs[1] != rightReferenceID ||
+		len(modelComparisonIDs) != 1 || modelComparisonIDs[0] != comparisonID {
+		t.Fatalf("synthetic model citations do not match its input: evidence=%v comparisons=%v", modelEvidenceIDs, modelComparisonIDs)
+	}
+	proposal := callMCPFixtureTool(t, server, 6, "bb_consult_record_proposal", map[string]any{
+		"project_key": projectKey, "session_id": sessionID, "expected_version": 3,
+		"idempotency_key":        "mcp_record_proposal_0001",
+		"proposal":               modelProposal,
+		"evidence_reference_ids": modelEvidenceIDs,
+		"comparison_ids":         modelComparisonIDs,
+	})
+	proposalID := fixtureString(t, proposal, "proposal_id")
+	receipt := callMCPFixtureTool(t, server, 7, "bb_consult_validate_proposal", map[string]any{
+		"project_key": projectKey, "session_id": sessionID, "expected_version": 4,
+		"idempotency_key": "mcp_validate_proposal_0001", "proposal_id": proposalID,
+	})
+	if fixtureString(t, receipt, "status") != consultation.ValidationReferencesValid {
+		t.Fatalf("proposal receipt did not validate exact references: %#v", receipt)
+	}
+	candidate := callMCPFixtureTool(t, server, 8, "bb_candidate_save", map[string]any{
+		"project_key": projectKey, "session_id": sessionID, "expected_version": 5,
+		"idempotency_key": "mcp_save_candidate_0001", "proposal_id": proposalID,
+		"receipt_id": fixtureString(t, receipt, "receipt_id"),
+	})
+	if fixtureString(t, candidate, "state") != consultation.CandidateStateCandidate {
+		t.Fatalf("saved candidate was promoted beyond candidate state: %#v", candidate)
+	}
+	if err := tools.Close(); err != nil {
+		t.Fatalf("close first MCP tools: %v", err)
+	}
+
+	tools = newFixtureTools()
+	defer tools.Close()
+	restarted, err := NewServer(tools)
+	if err != nil {
+		t.Fatalf("NewServer after restart: %v", err)
+	}
+	initializeFixtureServer(t, restarted)
+	final := callMCPFixtureTool(t, restarted, 2, "bb_consult_resume", map[string]any{
+		"project_key": projectKey, "session_id": sessionID,
+	})
+	if final["version"] != float64(6) || final["review_accepted"] != true || len(final["comparisons"].([]any)) != 1 ||
+		len(final["proposals"].([]any)) != 1 || len(final["validation_receipts"].([]any)) != 1 || len(final["candidates"].([]any)) != 1 {
+		t.Fatalf("MCP session did not resume its completed synthetic cycle after restart: %#v", final)
+	}
+}
+
+func TestConsultationToolCatalogDocumentsSessionAliases(t *testing.T) {
+	want := map[string]bool{
+		"bb_consult_compare": true, "bb_consult_record_proposal": true,
+		"bb_consult_validate_proposal": true, "bb_candidate_save": true, "bb_consult_resume": true,
+	}
+	for _, spec := range consultationToolCatalog() {
+		if !want[spec.Name] {
+			continue
+		}
+		schema := spec.InputSchema
+		properties, _ := schema["properties"].(map[string]any)
+		if _, ok := properties["session_id"]; !ok {
+			t.Errorf("tool %q schema omits session_id", spec.Name)
+		}
+		if _, ok := properties["consultation_id"]; !ok {
+			t.Errorf("tool %q schema omits consultation_id", spec.Name)
+		}
+		alternatives, ok := schema["anyOf"].([]any)
+		if !ok || len(alternatives) != 2 {
+			t.Errorf("tool %q schema does not require one session identifier alias: %#v", spec.Name, schema["anyOf"])
+		} else {
+			for index, alias := range []string{"session_id", "consultation_id"} {
+				clause, ok := alternatives[index].(map[string]any)
+				required, requiredOK := clause["required"].([]string)
+				if !ok || !requiredOK || len(required) != 1 || required[0] != alias {
+					t.Errorf("tool %q schema alias alternative %d = %#v; want required %q", spec.Name, index, alternatives[index], alias)
+				}
+			}
+		}
+		if !strings.Contains(spec.Description, "session_id") || !strings.Contains(spec.Description, "consultation_id") {
+			t.Errorf("tool %q description does not explain both session identifier names: %q", spec.Name, spec.Description)
+		}
+		delete(want, spec.Name)
+	}
+	if len(want) != 0 {
+		t.Errorf("consultation tools missing from the catalog: %v", want)
+	}
+}
+
+func initializeFixtureServer(t *testing.T, server *Server) {
+	t.Helper()
+	serveFixtureRequests(t, server,
+		map[string]any{
+			"jsonrpc": "2.0", "id": 1, "method": "initialize",
+			"params": map[string]any{
+				"protocolVersion": "2025-06-18", "capabilities": map[string]any{},
+				"clientInfo": map[string]any{"name": "synthetic-assistant-client", "version": "fixture"},
+			},
+		},
+		map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized", "params": map[string]any{}},
+	)
+}
+
+func callMCPFixtureTool(t *testing.T, server *Server, id int, name string, args map[string]any) map[string]any {
+	t.Helper()
+	responses := serveFixtureRequests(t, server, map[string]any{
+		"jsonrpc": "2.0", "id": id, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": args},
+	})
+	result, ok := responseForID(t, responses, fmt.Sprint(id)).Result.(map[string]any)
+	if !ok || result["isError"] == true {
+		t.Fatalf("MCP tool %q failed: %#v", name, result)
+	}
+	structured, ok := result["structuredContent"].(map[string]any)
+	if !ok {
+		t.Fatalf("MCP tool %q omitted structured content: %#v", name, result)
+	}
+	return structured
+}
+
+func fixtureString(t *testing.T, object map[string]any, key string) string {
+	t.Helper()
+	value, ok := object[key].(string)
+	if !ok || value == "" {
+		t.Fatalf("fixture result field %q is missing: %#v", key, object)
+	}
+	return value
+}
+
+func marshalFixture(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal fixture result: %v", err)
+	}
+	return string(encoded)
+}
