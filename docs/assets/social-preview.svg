@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="BB Graph Assistant">
+  <rect width="1280" height="640" fill="#0b1424"/>
+  <g stroke="#22344e" stroke-width="3">
+    <line x1="560" y1="140" x2="640" y2="200"/>
+    <line x1="720" y1="140" x2="640" y2="200"/>
+    <line x1="640" y1="200" x2="590" y2="270"/>
+    <line x1="640" y1="200" x2="700" y2="265"/>
+    <line x1="560" y1="140" x2="720" y2="140"/>
+  </g>
+  <circle cx="560" cy="140" r="16" fill="#38bdf8"/>
+  <circle cx="720" cy="140" r="13" fill="#818cf8"/>
+  <circle cx="640" cy="200" r="22" fill="none" stroke="#38bdf8" stroke-width="3" opacity="0.35"/>
+  <circle cx="640" cy="200" r="11" fill="#34d399"/>
+  <circle cx="590" cy="270" r="10" fill="#f59e0b"/>
+  <circle cx="700" cy="265" r="9" fill="#93a4b8"/>
+  <text x="640" y="370" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="64" font-weight="700" fill="#e8eff8">BB Graph Assistant</text>
+  <text x="640" y="422" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="22" letter-spacing="6" fill="#8ba0b8">LOCAL-FIRST BUG BOUNTY GRAPH ANALYSIS</text>
+  <line x1="440" y1="470" x2="840" y2="470" stroke="#22344e" stroke-width="2"/>
+  <text x="640" y="515" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="19" fill="#5c7292">github.com/gh0sthacker/graph-kb-assistant</text>
+</svg>

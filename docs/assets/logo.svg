@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="190" viewBox="0 0 760 190" role="img" aria-label="BB Graph Assistant">
+  <rect x="1" y="1" width="758" height="188" rx="20" fill="#0b1424" stroke="#1f2f47" stroke-width="1.5"/>
+  <g stroke="#2c4160" stroke-width="2.5">
+    <line x1="85" y1="60" x2="55" y2="118"/>
+    <line x1="85" y1="60" x2="150" y2="85"/>
+    <line x1="55" y1="118" x2="125" y2="135"/>
+    <line x1="125" y1="135" x2="150" y2="85"/>
+  </g>
+  <circle cx="85" cy="60" r="14" fill="none" stroke="#38bdf8" stroke-width="2" opacity="0.35"/>
+  <circle cx="85" cy="60" r="8" fill="#38bdf8"/>
+  <circle cx="55" cy="118" r="7" fill="#818cf8"/>
+  <circle cx="125" cy="135" r="8" fill="#34d399"/>
+  <circle cx="150" cy="85" r="6" fill="#f59e0b"/>
+  <text x="205" y="98" font-family="Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#e8eff8">BB Graph Assistant</text>
+  <text x="208" y="134" font-family="Segoe UI, Roboto, Helvetica, Arial, sans-serif" font-size="13" letter-spacing="3" fill="#7d92ad">LOCAL-FIRST BUG BOUNTY GRAPH ANALYSIS</text>
+</svg>

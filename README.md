@@ -1,14 +1,42 @@
-# BB Graph Assistant
+<div align="center">
+  <img src="docs/assets/logo.svg" width="500" alt="BB Graph Assistant" />
+</div>
+
+<div align="center">
+
+**Local-first graph analysis for captured HTTP behavior — built for bug bounty research.**
 
 [![CI](https://github.com/gh0sthacker/graph-kb-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/gh0sthacker/graph-kb-assistant/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-v0.2.0--alpha-orange)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-`Go 1.27+`
+![Go 1.27+](https://img.shields.io/badge/go-1.27%2B-00ADD8)
 
-BB Graph Assistant is a local-first analysis companion for captured application behavior. It reads an explicitly selected Caido project through Caido's MCP interface, writes a project-scoped behavior graph to Neo4j while keeping capture metadata, sync checkpoints and the projection outbox in SQLite, and keeps historical request/response bytes in an encrypted local vault. A loopback web explorer, a standalone search service and a bounded MCP tool catalog let an analyst follow endpoint, parameter, variant and actor relationships, open the exact evidence behind a node, ground a hypothesis in pinned knowledge sources, and record a candidate with alternatives and missing evidence. The graph is a navigation layer over observed behavior: it is not a vulnerability verdict, and the analysis workflow does not send requests to the target.
+[Quick start](#quick-start) &nbsp;·&nbsp; [Screenshots](#screenshots) &nbsp;·&nbsp; [Features](#features) &nbsp;·&nbsp; [Architecture](#how-it-fits-together) &nbsp;·&nbsp; [Security](#security-and-privacy-posture) &nbsp;·&nbsp; [Documentation](#documentation) &nbsp;·&nbsp; [Roadmap](ROADMAP.md)
 
-> **Project status: alpha.** This is an early source snapshot. Coverage is reported as `partial` wherever the local index cannot prove a complete Caido history snapshot or browser/JavaScript coverage, and the supported workflow is report-only. Use it on projects you are authorized to test, and expect interfaces to change between alpha releases.
+*Project status: alpha — coverage is reported as `partial` wherever the local index cannot prove a complete Caido history snapshot or browser/JavaScript coverage, and the supported workflow is report-only.*
 
-## What it does
+</div>
+
+---
+
+BB Graph Assistant is a local-first analysis companion for captured application behavior. It reads an explicitly selected Caido project through Caido's MCP interface, writes a project-scoped behavior graph to Neo4j while keeping capture metadata, sync checkpoints and the projection outbox in SQLite, and keeps historical request/response bytes in an encrypted local vault. A loopback web explorer, a standalone search service and a bounded MCP tool catalog let an analyst follow endpoint, parameter, variant and actor relationships, open the exact evidence behind a node, ground a hypothesis in pinned knowledge sources, and record a candidate with alternatives and missing evidence.
+
+> The graph is a navigation layer over observed behavior: it is not a vulnerability verdict, and the analysis workflow does not send requests to the target.
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/ui/evidence/graph-explorer-desktop.png" width="880" alt="Graph explorer on a desktop viewport" />
+</p>
+
+<p align="center">
+  <img src="docs/ui/evidence/graph-explorer-mobile.png" width="270" alt="Graph explorer on a mobile viewport" />
+  <img src="docs/ui/evidence/graph-explorer-empty-desktop.png" width="380" alt="Graph explorer empty state" />
+</p>
+
+*The screenshots run on the browser acceptance fixtures (`ui-fixture-project`, host `api.example.test`) — synthetic data only. The explorer binds to loopback; a fresh install starts with an empty project list.*
+
+## Features
 
 - **Project-scoped capture graph.** Caido intake registers each project under a SHA-256 project key derived from the configured instance key and Caido project ID. Every graph node and relationship carries that `project_key`, and queries and writes stay inside the namespace. There is no implicit multi-project search.
 - **Read-only web graph explorer.** `serve` binds to `127.0.0.1:8765` and rejects wildcard or non-loopback listeners. The explorer returns bounded graph slices with match basis, parse completeness and coverage alongside each result, exposes linked evidence ranges and request/response comparisons, and offers a *Focus on direct relationships* view that narrows the already-loaded slice without rereading Caido (`internal/webui`).
@@ -17,36 +45,6 @@ BB Graph Assistant is a local-first analysis companion for captured application 
 - **Bounded MCP server.** `./scripts/bb-assistant-mcp` launches the stdio MCP server over the same runtime configuration as the CLI. Its catalog covers project listing, capture search, surface map, bounded graph slices and neighborhoods, coverage, KB stats/search/source reads, and redacted capture and stored-message reads, plus the consultation tools described below. The managed `serve` process also exposes the same catalog at `/mcp` over Streamable HTTP for deployments that put it behind the authenticated reverse proxy described in [docs/SETUP.md](docs/SETUP.md).
 - **Consultation packets gated by explicit local acceptance.** A consultation session is created from the web UI as a bounded, redacted packet. Until the operator inspects it and accepts it in the local UI, MCP session JSON reports `content_withheld: true` with the hidden field paths listed, and comparison, proposal, validation and candidate operations are rejected. Acceptance is a local-only transition, not an MCP tool; after it, an assistant client can resume the session and see the saved redacted packet (`internal/consultation`, `internal/webui`).
 - **Encrypted vault for raw exchanges.** Historical message bytes are encrypted with AES-256-GCM before they are written to the vault, with the additional authenticated data binding each object to its observation ID and side. The key comes from `BB_ASSISTANT_VAULT_KEY` and is never persisted by the application, so it has to be backed up separately. Raw bodies stay out of the repository, the graph and the sync receipts, which carry hashes, byte counts, truncation state and wire-fidelity labels only. Live tail parses messages in memory and retains only redacted structure and keyed signatures.
-
-## How it fits together
-
-```text
- capture pipeline
-
-   Caido project --MCP API--> ingest / adapter --+--> encrypted vault
-                                                 |    (AES-256-GCM, raw exchanges)
-                                                 |
-                                                 +--> SQLite capture store
-                                                      (metadata, sync checkpoints,
-                                                       graph copy, outbox)
-                                                            |
-                                                            v
-                                                      projection worker
-                                                            |
-                                                            v
-                                                      Neo4j behavior graph
-                                                      (project_key namespace)
-
- read-only surfaces
-
-   Neo4j behavior graph --+--> web UI           http://127.0.0.1:8765
-                          +--> MCP server        stdio (scripts/bb-assistant-mcp), /mcp
-   KB index ----------------+--> kb-search-api   http://127.0.0.1:18766
-   (pinned sources)        |
-                           +--> local assistant client (web UI, HTTP search, or MCP)
-```
-
-A graph import commits normalized records and an outbox event together in SQLite, then applies the event idempotently to Neo4j; if Neo4j is unavailable the event stays retryable and graph sync reports `partial`. See [docs/DATA-MODEL.md](docs/DATA-MODEL.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow and boundary rules.
 
 ## Quick start
 
@@ -86,6 +84,14 @@ pip install -e ".[kb]"
 
 `build`, `stats`, `rechunk`, `import`, `embed`, `search`, `models`, `publish-lucene`, `parity-check` and `parity-export` are the subcommands. Vector retrieval needs the `kb-ml` extra (`sentence-transformers`, `faiss-cpu`); `scripts/setup-kb-models` prepares the pinned retrieval models.
 
+## How it fits together
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="860" alt="Capture pipeline and read-only surfaces" />
+</p>
+
+A graph import commits normalized records and an outbox event together in SQLite, then applies the event idempotently to Neo4j; if Neo4j is unavailable the event stays retryable and graph sync reports `partial`. See [docs/DATA-MODEL.md](docs/DATA-MODEL.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full data flow and boundary rules.
+
 ## Security and privacy posture
 
 - **Loopback only.** The web UI validates its listen address and refuses wildcard or non-loopback hosts; the Neo4j compose file publishes `127.0.0.1:7474` and `127.0.0.1:7687` only. Remote browser or MCP access is a deliberate reverse-proxy deployment, documented in [docs/SETUP.md](docs/SETUP.md), not a bind-address change.
@@ -94,21 +100,6 @@ pip install -e ".[kb]"
 - **Consultation gating.** A packet's question and excerpts stay hidden from assistant clients until an operator accepts the session locally. Raw captured messages are never copied into the consultation database or MCP results, and redaction is heuristic, so each question and excerpt is meant to be inspected before acceptance.
 - **Explicit project selection.** Import and reconciliation operations require named projects; the MCP facade exposes only projects present in the local registry.
 - **Secrets and findings.** CI runs Gitleaks over the checkout; see [docs/SECRET-SCANNING.md](docs/SECRET-SCANNING.md) and [SECURITY.md](SECURITY.md) for reporting a vulnerability with synthetic data only.
-
-## Repository layout
-
-```text
-cmd/bb-assistant/        CLI, web UI host, projection worker, MCP stdio entry
-cmd/kb-search-api/       standalone read-only KB search service
-internal/                caido, ingest, graph, neo4jstore, store, webui,
-                         mcpserver, consultation, kb, hackerone, gate, coverage
-src/bb_assistant/        Python KB tooling, CLI and compatibility path
-scripts/                 launchers plus KB build, model and parity scripts
-deploy/                  Neo4j compose, systemd units, nginx vhost, env templates
-docs/                    architecture, setup, API, data model, operating notes
-references/              vendored RedAmon reference documents and parity fixtures
-tests/                   Python test suite
-```
 
 ## Documentation
 
@@ -126,6 +117,21 @@ tests/                   Python test suite
 | [KB-PARITY.md](docs/KB-PARITY.md) | Offline parity gate against the pinned reference corpus |
 | [PROJECT-BACKUP-RESTORE.md](docs/PROJECT-BACKUP-RESTORE.md) | Offline bounded backup and restore of one project |
 | [SECRET-SCANNING.md](docs/SECRET-SCANNING.md) | CI secret scanning and the exception policy |
+
+## Repository layout
+
+```text
+cmd/bb-assistant/        CLI, web UI host, projection worker, MCP stdio entry
+cmd/kb-search-api/       standalone read-only KB search service
+internal/                caido, ingest, graph, neo4jstore, store, webui,
+                         mcpserver, consultation, kb, hackerone, gate, coverage
+src/bb_assistant/        Python KB tooling, CLI and compatibility path
+scripts/                 launchers plus KB build, model and parity scripts
+deploy/                  Neo4j compose, systemd units, nginx vhost, env templates
+docs/                    architecture, setup, API, data model, operating notes
+references/              vendored RedAmon reference documents and parity fixtures
+tests/                   Python test suite
+```
 
 ## Third-party notices
 

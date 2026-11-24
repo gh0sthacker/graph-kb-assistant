@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="470" viewBox="0 0 1000 470" role="img" aria-label="BB Graph Assistant architecture">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#43608a"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="998" height="468" rx="18" fill="#0b1424" stroke="#1f2f47" stroke-width="1.5"/>
+
+  <text x="30" y="52" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" letter-spacing="3" fill="#5c7292">CAPTURE PIPELINE</text>
+
+  <rect x="30" y="75" width="150" height="70" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="105" y="103" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">Caido project</text>
+  <text x="105" y="123" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">MCP API</text>
+
+  <rect x="245" y="75" width="120" height="70" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="305" y="103" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">ingest</text>
+  <text x="305" y="123" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">adapter</text>
+
+  <rect x="425" y="35" width="200" height="70" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="525" y="63" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">encrypted vault</text>
+  <text x="525" y="83" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">AES-256-GCM &#183; raw bytes</text>
+
+  <rect x="425" y="130" width="200" height="70" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="525" y="158" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">SQLite capture store</text>
+  <text x="525" y="178" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">metadata &#183; checkpoints &#183; outbox</text>
+
+  <rect x="680" y="75" width="120" height="70" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="740" y="103" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">projection</text>
+  <text x="740" y="123" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">worker</text>
+
+  <rect x="845" y="75" width="125" height="70" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="907" y="103" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">Neo4j</text>
+  <text x="907" y="123" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">behavior graph</text>
+
+  <g fill="none" stroke="#43608a" stroke-width="2" marker-end="url(#arrow)">
+    <line x1="182" y1="110" x2="241" y2="110"/>
+    <line x1="367" y1="95" x2="421" y2="72"/>
+    <line x1="367" y1="125" x2="421" y2="163"/>
+    <line x1="627" y1="70" x2="676" y2="97"/>
+    <line x1="627" y1="165" x2="676" y2="123"/>
+    <line x1="802" y1="110" x2="841" y2="110"/>
+  </g>
+
+  <text x="30" y="252" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="12" letter-spacing="3" fill="#5c7292">READ-ONLY SURFACES</text>
+
+  <rect x="30" y="280" width="160" height="64" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="110" y="308" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">web UI</text>
+  <text x="110" y="328" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">127.0.0.1:8765</text>
+
+  <rect x="245" y="280" width="160" height="64" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="325" y="308" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">KB index</text>
+  <text x="325" y="328" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">pinned sources</text>
+
+  <rect x="470" y="280" width="170" height="64" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="555" y="308" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">kb-search-api</text>
+  <text x="555" y="328" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">127.0.0.1:18766</text>
+
+  <rect x="690" y="280" width="150" height="64" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="765" y="308" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="14" font-weight="600" fill="#dce7f5">read-only MCP</text>
+  <text x="765" y="328" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10.5" fill="#7d92ad">stdio &#183; /mcp</text>
+
+  <rect x="430" y="390" width="190" height="56" rx="10" fill="#101c30" stroke="#2c4160"/>
+  <text x="525" y="415" text-anchor="middle" font-family="Segoe UI, Roboto, Arial, sans-serif" font-size="13" font-weight="600" fill="#dce7f5">local assistant client</text>
+  <text x="525" y="433" text-anchor="middle" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="10" fill="#7d92ad">web UI &#183; search API &#183; MCP</text>
+
+  <g fill="none" stroke="#43608a" stroke-width="2" marker-end="url(#arrow)">
+    <line x1="407" y1="312" x2="466" y2="312"/>
+    <polyline points="110,344 110,418 426,418"/>
+    <line x1="555" y1="344" x2="555" y2="388"/>
+    <polyline points="765,344 765,418 624,418"/>
+  </g>
+  <g fill="none" stroke="#43608a" stroke-width="2" stroke-dasharray="6 6" opacity="0.9" marker-end="url(#arrow)">
+    <polyline points="907,145 907,238 110,238 110,276"/>
+    <polyline points="940,145 940,254 765,254 765,276"/>
+  </g>
+</svg>
