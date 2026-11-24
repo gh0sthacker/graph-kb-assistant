@@ -21,11 +21,18 @@ if [[ -z "${BB_ASSISTANT_KB_PYTHON:-}" ]]; then
   kb_python="$data_root/kb-models-venv/bin/python"
   if [[ -x "$kb_python" ]]; then
     export BB_ASSISTANT_KB_PYTHON="$kb_python"
-  elif command -v python3.11 >/dev/null 2>&1; then
-    export BB_ASSISTANT_KB_PYTHON="$(command -v python3.11)"
   else
-    export BB_ASSISTANT_KB_PYTHON="$(command -v python3)"
+    export BB_ASSISTANT_KB_PYTHON="$(command -v python3 || command -v python3.11)"
   fi
+fi
+
+if [[ -z "$BB_ASSISTANT_KB_PYTHON" ]]; then
+  printf 'bb-assistant-kb: no python3 interpreter found on PATH.\n' >&2
+  exit 1
+fi
+
+if ! "$BB_ASSISTANT_KB_PYTHON" -c "import yaml" >/dev/null 2>&1; then
+  printf 'bb-assistant-kb: %s cannot import PyYAML. Run `pip install -e ".[kb]"` with that interpreter, or set BB_ASSISTANT_KB_PYTHON to one that has it.\n' "$BB_ASSISTANT_KB_PYTHON" >&2
 fi
 
 export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
